@@ -11,12 +11,12 @@ import GhosttyVt
 // MARK: - Plain data the view layer supplies
 
 /// What the pointer did. Mirrors `GhosttyMouseAction`.
-enum MouseAction: Sendable, Equatable {
+package enum MouseAction: Sendable, Equatable {
     case press, release, motion
 }
 
 /// Which button. Mirrors `GhosttyMouseButton` (the wheel is buttons four/five).
-enum MouseButton: Sendable, Equatable {
+package enum MouseButton: Sendable, Equatable {
     case left, right, middle, four, five, six, seven, eight, nine, ten, eleven
 
     var ghostty: GhosttyMouseButton {
@@ -37,17 +37,17 @@ enum MouseButton: Sendable, Equatable {
 }
 
 /// Keyboard modifiers held during a pointer event. Mirrors the `GHOSTTY_MODS_*` bits.
-struct TerminalModifiers: OptionSet, Sendable, Equatable {
-    let rawValue: UInt16
-    init(rawValue: UInt16) { self.rawValue = rawValue }
+package struct TerminalModifiers: OptionSet, Sendable, Equatable {
+    package let rawValue: UInt16
+    package init(rawValue: UInt16) { self.rawValue = rawValue }
 
-    static let shift = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_SHIFT))
-    static let control = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_CTRL))
+    package static let shift = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_SHIFT))
+    package static let control = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_CTRL))
     /// macOS Option / Alt.
-    static let option = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_ALT))
+    package static let option = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_ALT))
     /// macOS Command / Super.
-    static let command = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_SUPER))
-    static let capsLock = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_CAPS_LOCK))
+    package static let command = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_SUPER))
+    package static let capsLock = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_CAPS_LOCK))
     static let numLock = TerminalModifiers(rawValue: UInt16(GHOSTTY_MODS_NUM_LOCK))
 
     var ghostty: GhosttyMods { rawValue }
@@ -56,10 +56,10 @@ struct TerminalModifiers: OptionSet, Sendable, Equatable {
 /// A pointer position in *surface* pixels — (0, 0) at the top-left of the terminal view,
 /// **before** any padding is subtracted. The encoder does the pixel → cell conversion itself
 /// from `MouseEncoder.geometry`, so the view must not pre-divide by the cell size.
-struct SurfacePoint: Sendable, Equatable {
-    var x: Double
-    var y: Double
-    init(x: Double, y: Double) {
+package struct SurfacePoint: Sendable, Equatable {
+    package var x: Double
+    package var y: Double
+    package init(x: Double, y: Double) {
         self.x = x
         self.y = y
     }
@@ -67,7 +67,7 @@ struct SurfacePoint: Sendable, Equatable {
 
 /// One normalised pointer event. Despite the name it covers press, release *and* motion —
 /// `action` says which. Everything the AppKit layer must fill in is here and nowhere else.
-struct MousePress: Sendable, Equatable {
+package struct MousePress: Sendable, Equatable {
     var action: MouseAction
     /// For press/release, the button that changed. For **motion**, the button currently held —
     /// button-event tracking (mode 1002) encodes it into the drag report, so `mouseDragged` must
@@ -78,7 +78,7 @@ struct MousePress: Sendable, Equatable {
     /// conversion happens at the boundary, so callers keep AppKit's `CGFloat` precision here.
     var position: SurfacePoint
 
-    init(
+    package init(
         action: MouseAction,
         button: MouseButton?,
         mods: TerminalModifiers = [],
@@ -93,17 +93,17 @@ struct MousePress: Sendable, Equatable {
 
 /// The rendered geometry the encoder needs to turn surface pixels into 1-based cell coordinates.
 /// Mirrors `GhosttyMouseEncoderSize`; push it on every resize / backing-scale change.
-struct TerminalPixelGeometry: Sendable, Equatable {
-    var screenWidth: UInt32
-    var screenHeight: UInt32
-    var cellWidth: UInt32
-    var cellHeight: UInt32
-    var paddingTop: UInt32
-    var paddingBottom: UInt32
-    var paddingLeft: UInt32
-    var paddingRight: UInt32
+package struct TerminalPixelGeometry: Sendable, Equatable {
+    package var screenWidth: UInt32
+    package var screenHeight: UInt32
+    package var cellWidth: UInt32
+    package var cellHeight: UInt32
+    package var paddingTop: UInt32
+    package var paddingBottom: UInt32
+    package var paddingLeft: UInt32
+    package var paddingRight: UInt32
 
-    init(
+    package init(
         screenWidth: UInt32,
         screenHeight: UInt32,
         cellWidth: UInt32,
@@ -145,11 +145,11 @@ struct TerminalPixelGeometry: Sendable, Equatable {
 ///
 /// A value type on purpose: the policy is unit-testable without a terminal, and the view layer
 /// keeps one per view (`var accumulator = ScrollAccumulator()`).
-struct ScrollAccumulator: Sendable, Equatable {
+package struct ScrollAccumulator: Sendable, Equatable {
     /// Unconsumed fraction of a row. Positive = downward.
-    private(set) var remainder: Double = 0
+    package private(set) var remainder: Double = 0
 
-    init() {}
+    package init() {}
 
     /// Add `pixels` of vertical scroll (positive = content scrolls *down*, i.e. `NSEvent`'s
     /// `-scrollingDeltaY`) and return the whole rows now due. The fraction is carried over.
@@ -159,7 +159,7 @@ struct ScrollAccumulator: Sendable, Equatable {
     }
 
     /// Add `rows` (may be fractional) and return the whole rows now due.
-    mutating func consume(rows: Double) -> Int {
+    package mutating func consume(rows: Double) -> Int {
         guard rows.isFinite else { return 0 }
         remainder += rows
         let whole = remainder < 0 ? remainder.rounded(.up) : remainder.rounded(.down)
@@ -169,11 +169,11 @@ struct ScrollAccumulator: Sendable, Equatable {
 
     /// Drop the carried fraction — call when a new gesture begins or the direction reverses, so a
     /// stale fraction never joins motion it did not belong to.
-    mutating func reset() { remainder = 0 }
+    package mutating func reset() { remainder = 0 }
 }
 
 /// What a wheel event should do, decided by `MouseEncoder.wheel(rows:…)`.
-enum WheelOutcome: Sendable, Equatable {
+package enum WheelOutcome: Sendable, Equatable {
     /// Nothing to do (zero rows, or the terminal wanted no report).
     case none
     /// Write `press`, the report of one wheel press for button four (up) or five (down), to the
@@ -189,7 +189,7 @@ enum WheelOutcome: Sendable, Equatable {
 }
 
 /// Where wheel rows go under the terminal's modes as they stand, as `MouseEncoder.wheel` decides.
-enum WheelRoute: Sendable, Equatable {
+package enum WheelRoute: Sendable, Equatable {
     /// To the program as mouse reports: libghostty reports the mouse.
     case reports
     /// To the program as arrow keys under `?1007`, or nowhere without it: the alternate screen,

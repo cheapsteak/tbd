@@ -1,5 +1,7 @@
 import AppKit
 import SwiftTerm
+// `GhosttyAppearance.RGB`, extended below, is the core's `GhosttyRGB`.
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 
 /// The libghostty appearance that matches what `TBDTerminalView` draws from the same settings:

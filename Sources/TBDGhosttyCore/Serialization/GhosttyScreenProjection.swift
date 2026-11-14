@@ -4,8 +4,8 @@
 // `TerminalScreenProjection.project` and `TerminalCellWalk.styledCapture`, so a reader cannot tell
 // which engine replied. Each walk below follows its SwiftTerm twin step by step, and the comments
 // name the step. `ProjectionParityTests` holds the two to each other across the handover corpus.
-import TBDTerminalSerialization
 // Scoped, as `TerminalScreenProjection` does: only the screen model is needed from TBDShared.
+import struct TBDShared.ProjectedScreen
 import struct TBDShared.TerminalScreen
 
 public enum GhosttyScreenProjection {

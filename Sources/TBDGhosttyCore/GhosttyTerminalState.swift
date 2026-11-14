@@ -16,8 +16,9 @@ public struct GhosttyTerminalState {
     private let validity: StateValidity?
     #endif
 
-    /// The C terminal, or nil once closed. Internal: the projection and the snapshot writer read it.
-    var raw: VtTerminal? {
+    /// The C terminal, or nil once closed. Not public: the projection and the snapshot writer read
+    /// it, and so does the view's text input.
+    package var raw: VtTerminal? {
         #if DEBUG
         assert(validity?.isValid ?? true, "GhosttyTerminalState was used after withLocked returned")
         #endif
@@ -93,24 +94,24 @@ public struct GhosttyTerminalState {
 
     /// The 256-colour palette in force: the appearance's palette with any OSC 4 changes a program
     /// made on top. Empty when closed.
-    public var palette: [GhosttyAppearance.RGB] {
+    public var palette: [GhosttyRGB] {
         guard let raw else { return [] }
         var colors = [GhosttyColorRgb](repeating: GhosttyColorRgb(), count: 256)
         let result = colors.withUnsafeMutableBufferPointer { buffer in
             ghostty_terminal_get(raw, GHOSTTY_TERMINAL_DATA_COLOR_PALETTE, buffer.baseAddress)
         }
         guard result == GHOSTTY_SUCCESS else { return [] }
-        return colors.map { GhosttyAppearance.RGB($0) }
+        return colors.map { GhosttyRGB($0) }
     }
 
     /// The foreground colour in force (OSC 10, else the appearance's). nil when closed or unset.
-    public var foregroundColor: GhosttyAppearance.RGB? { color(GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND) }
+    public var foregroundColor: GhosttyRGB? { color(GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND) }
 
     /// The background colour in force (OSC 11, else the appearance's). nil when closed or unset.
-    public var backgroundColor: GhosttyAppearance.RGB? { color(GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND) }
+    public var backgroundColor: GhosttyRGB? { color(GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND) }
 
     /// The cursor colour in force (OSC 12, else the appearance's). nil when closed or unset.
-    public var cursorColor: GhosttyAppearance.RGB? { color(GHOSTTY_TERMINAL_DATA_COLOR_CURSOR) }
+    public var cursorColor: GhosttyRGB? { color(GHOSTTY_TERMINAL_DATA_COLOR_CURSOR) }
 
     /// The title a program set with OSC 0 or OSC 2.
     public var title: String {
@@ -244,11 +245,11 @@ public struct GhosttyTerminalState {
     }
 
     /// One colour reading. `GHOSTTY_NO_VALUE` (no colour set) reads nil, like any other failure.
-    private func color(_ data: GhosttyTerminalData) -> GhosttyAppearance.RGB? {
+    private func color(_ data: GhosttyTerminalData) -> GhosttyRGB? {
         guard let raw else { return nil }
         var value = GhosttyColorRgb()
         guard ghostty_terminal_get(raw, data, &value) == GHOSTTY_SUCCESS else { return nil }
-        return GhosttyAppearance.RGB(value)
+        return GhosttyRGB(value)
     }
 
     private func gridRef(_ raw: VtTerminal, column: Int, row: Int) -> GhosttyGridRef? {

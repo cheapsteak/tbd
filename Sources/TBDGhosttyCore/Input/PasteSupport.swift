@@ -30,7 +30,7 @@
 import GhosttyVt
 
 /// Why a paste is happening. Mirrors `GhosttyPasteSource`.
-enum PasteSource: Sendable, Equatable {
+package enum PasteSource: Sendable, Equatable {
     /// A real user paste (⌘V, menu, middle click). May become a Kitty paste event.
     case clipboard
     /// Text inserted some other way — IME commit, emoji picker, dictation, drag & drop.
@@ -46,7 +46,7 @@ enum PasteSource: Sendable, Equatable {
 }
 
 /// What `PasteSupport.paste` did.
-enum PasteOutcome: Sendable, Equatable {
+package enum PasteOutcome: Sendable, Equatable {
     /// Bytes (the framed text, or a paste event) went to the pty.
     case written
     /// There was nothing to paste.

@@ -3,18 +3,19 @@ import Combine
 import Foundation
 import os
 import SwiftTerm
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 import TBDShared
-import TBDTerminalSerialization
 
 private let ghosttyEngineLog = Logger(subsystem: "com.tbd.app", category: "terminalEngine")
 
-/// The libghostty terminal engine: one `TBDGhosttyTerminal.GhosttyTerminal`, the
+/// The libghostty terminal engine: one `TBDGhosttyCore.GhosttyTerminal`, the
 /// `GhosttyTerminalView` that draws it, and the adapter between them and the
 /// coordinators' `TerminalEngine` seam.
 ///
-/// `TBDGhosttyTerminal` knows nothing of the seam. This class is where its API
-/// meets TBD's rules, and four of those rules are facts about this emulator:
+/// `TBDGhosttyCore` and `TBDGhosttyTerminal` know nothing of the seam. This class
+/// is where their API meets TBD's rules, and four of those rules are facts about
+/// this emulator:
 ///
 /// - **Callbacks fire inside the parse.** libghostty runs every effect callback
 ///   on the feeding thread, before `feed` returns, so the snapshot mute is a
@@ -31,10 +32,9 @@ private let ghosttyEngineLog = Logger(subsystem: "com.tbd.app", category: "termi
 /// - **Reports arrive parsed.** The engine writes each one back into the wire
 ///   form TBD forwards (`ProgramStatusPayloadBuilder`), so the daemon parses
 ///   both engines' reports with the one `ProgramStatusParser`.
-/// - **Device attributes are SwiftTerm's.** DA1, DA2 and XTVERSION are answered
-///   with the bytes SwiftTerm in this build answers with
-///   (`SwiftTermDeviceIdentity`), so a program sees one terminal whichever
-///   engine draws it.
+/// - **Device attributes are TBD's.** DA1, DA2 and XTVERSION are answered
+///   with the frozen bytes in `TerminalDeviceIdentity`, the ones SwiftTerm
+///   answers with, so a program sees one terminal whichever engine draws it.
 ///
 /// Only `feed(_:)` runs off main; see `TerminalEngine` for the threading rule.
 /// Design: `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
@@ -43,7 +43,7 @@ final class GhosttyEngine: TerminalEngine {
     let kind: TerminalEngineKind = .ghostty
 
     /// The emulator. `Sendable`, and called from the IO thread through `feed`.
-    nonisolated let terminal: TBDGhosttyTerminal.GhosttyTerminal
+    nonisolated let terminal: TBDGhosttyCore.GhosttyTerminal
     /// The view this engine owns, typed for tests.
     let terminalView: GhosttyTerminalView
 
@@ -76,7 +76,7 @@ final class GhosttyEngine: TerminalEngine {
         configuration: TerminalEngineConfiguration
     ) throws(GhosttyError) {
         let relay = GhosttyEngineRelay()
-        let terminal = try TBDGhosttyTerminal.GhosttyTerminal(
+        let terminal = try TBDGhosttyCore.GhosttyTerminal(
             cols: 80, rows: 24, scrollbackLines: Self.scrollbackLines,
             callbacks: Self.callbacks(relay: relay))
         var settings = GhosttyAppearance(settings: appearance)
@@ -116,18 +116,7 @@ final class GhosttyEngine: TerminalEngine {
     /// anything reaches the delegate. Static, so no callback can capture the
     /// engine before it exists.
     nonisolated private static func callbacks(relay: GhosttyEngineRelay) -> GhosttyTerminalCallbacks {
-        let identity = SwiftTermDeviceIdentity.answers
         let probeReply = Array(ProgramStatusProtocol.probeReply.utf8)
-        // Left nil when SwiftTerm's answer did not parse, so libghostty answers
-        // with its own rather than with nothing.
-        var deviceAttributes: (@Sendable () -> GhosttyTerminalCallbacks.DeviceAttributes)?
-        if let attributes = identity.deviceAttributes {
-            deviceAttributes = { attributes }
-        }
-        var xtversion: (@Sendable () -> String)?
-        if let version = identity.xtversion {
-            xtversion = { version }
-        }
         return GhosttyTerminalCallbacks(
             writePty: { bytes in
                 // Decided here, in parse order, as SwiftTerm decides inside its
@@ -163,8 +152,8 @@ final class GhosttyEngine: TerminalEngine {
                     }
                 }
             },
-            deviceAttributes: deviceAttributes,
-            xtversion: xtversion)
+            deviceAttributes: { TerminalDeviceIdentity.deviceAttributes },
+            xtversion: { TerminalDeviceIdentity.xtversion })
     }
 
     private func deliverReply(_ bytes: [UInt8]) {
@@ -608,128 +597,13 @@ private struct GhosttyScreenReader: TerminalScreenReader {
     }
 }
 
-// MARK: - OSC 7501
-
-/// libghostty's answer to the OSC 7501 probe, found in the reply bytes and
-/// swapped for TBD's.
-///
-/// The reply bytes carry only what the terminal writes back to the program:
-/// a paste is captured apart from them, and keys never pass through them. So
-/// anything there that starts `ESC ] 7501 ; ?` is libghostty answering the
-/// probe, and it runs to the string terminator, BEL or `ESC \`. libghostty
-/// writes a whole answer inside one parse, so an answer never straddles two
-/// deliveries.
-enum ProgramStatusProbeAnswer {
-    static let introducer: [UInt8] = Array("\u{1b}]\(ProgramStatusProtocol.oscCode);?".utf8)
-
-    /// `bytes` with every probe answer replaced by `replacement`, or removed
-    /// when it is nil. Everything else is kept, in order.
-    static func replacingLibghosttyAnswers(in bytes: [UInt8], with replacement: [UInt8]?) -> [UInt8] {
-        guard bytes.count >= introducer.count, let first = introducerIndex(in: bytes, from: 0) else {
-            return bytes
-        }
-        var out: [UInt8] = []
-        out.reserveCapacity(bytes.count)
-        var cursor = 0
-        var start: Int? = first
-        while let answerStart = start {
-            out.append(contentsOf: bytes[cursor..<answerStart])
-            guard let end = terminatorEnd(in: bytes, from: answerStart + introducer.count) else {
-                // No terminator: not an answer libghostty finished, so it is
-                // left as it is.
-                cursor = answerStart
-                break
-            }
-            if let replacement { out.append(contentsOf: replacement) }
-            cursor = end
-            start = introducerIndex(in: bytes, from: end)
-        }
-        out.append(contentsOf: bytes[cursor...])
-        return out
-    }
-
-    private static func introducerIndex(in bytes: [UInt8], from index: Int) -> Int? {
-        var position = index
-        while position + introducer.count <= bytes.count {
-            if bytes[position] == 0x1B, bytes[position..<(position + introducer.count)].elementsEqual(introducer) {
-                return position
-            }
-            position += 1
-        }
-        return nil
-    }
-
-    /// The index just past the BEL or `ESC \` that ends the string at `index`.
-    private static func terminatorEnd(in bytes: [UInt8], from index: Int) -> Int? {
-        var position = index
-        while position < bytes.count {
-            switch bytes[position] {
-            case 0x07:
-                return position + 1
-            case 0x1B where position + 1 < bytes.count && bytes[position + 1] == UInt8(ascii: "\\"):
-                return position + 2
-            default:
-                position += 1
-            }
-        }
-        return nil
-    }
-}
-
-/// A parsed OSC 7501 report written back in the wire form TBD forwards: the
-/// data after `7501;`, fields joined with `:`, `title` and `msg` in base64,
-/// as the protocol sends them. `ProgramStatusParser` reads it as it reads the
-/// raw bytes.
-enum ProgramStatusPayloadBuilder {
-    static func payload(for status: GhosttyTerminalCallbacks.ProgramStatus) -> [UInt8] {
-        var fields = ["state=\(stateValue(status.state))"]
-        if !status.app.isEmpty { fields.append("app=\(status.app)") }
-        if !status.id.isEmpty { fields.append("id=\(status.id)") }
-        if let kind = kindValue(status.kind) { fields.append("kind=\(kind)") }
-        if let progress = status.progress { fields.append("progress=\(progress)") }
-        if !status.title.isEmpty { fields.append("title=\(Data(status.title.utf8).base64EncodedString())") }
-        if !status.message.isEmpty { fields.append("msg=\(Data(status.message.utf8).base64EncodedString())") }
-        return Array(fields.joined(separator: ":").utf8)
-    }
-
-    private static func stateValue(_ state: GhosttyTerminalCallbacks.ProgramStatus.State) -> String {
-        switch state {
-        case .idle: return ProgramStatusState.idle.rawValue
-        case .working: return ProgramStatusState.working.rawValue
-        case .done: return ProgramStatusState.done.rawValue
-        case .blocked: return ProgramStatusState.blocked.rawValue
-        case .error: return ProgramStatusState.error.rawValue
-        case .clear: return ProgramStatusState.clear.rawValue
-        }
-    }
-
-    private static func kindValue(_ kind: GhosttyTerminalCallbacks.ProgramStatus.Kind) -> String? {
-        switch kind {
-        case .none: return nil
-        case .permission: return ProgramStatusBlockKind.permission.rawValue
-        case .question: return ProgramStatusBlockKind.question.rawValue
-        case .auth: return ProgramStatusBlockKind.auth.rawValue
-        }
-    }
-}
-
 // MARK: - Device attributes
 
-/// The DA1, DA2 and XTVERSION answers SwiftTerm gives in this build, read once
-/// from a headless SwiftTerm terminal and handed to libghostty in its terms.
-///
-/// Read rather than written down, because SwiftTerm's XTVERSION carries its
-/// build's tag and version, and a copy would drift from it on the next
-/// SwiftTerm update. An answer that does not parse is left to libghostty's
-/// default, and logged.
+/// SwiftTerm's own DA1, DA2 and XTVERSION answers, read from a headless
+/// SwiftTerm terminal. The libghostty engine does not answer from these: it
+/// answers with `TerminalDeviceIdentity`'s frozen bytes, and the identity
+/// tests hold those to these while SwiftTerm is still linked.
 enum SwiftTermDeviceIdentity {
-    struct Answers: Sendable {
-        let deviceAttributes: GhosttyTerminalCallbacks.DeviceAttributes?
-        let xtversion: String?
-    }
-
-    static let answers: Answers = read()
-
     /// SwiftTerm's raw answers, for the identity tests.
     static func rawAnswers() -> (da1: [UInt8], da2: [UInt8], xtversion: [UInt8]) {
         let collector = ReplyCollector()
@@ -740,45 +614,6 @@ enum SwiftTermDeviceIdentity {
             return collector.bytes
         }
         return (ask("\u{1b}[c"), ask("\u{1b}[>c"), ask("\u{1b}[>0q"))
-    }
-
-    private static func read() -> Answers {
-        let raw = rawAnswers()
-        let primary = parameters(of: raw.da1, introducer: "\u{1b}[?", final: "c")
-        let secondary = parameters(of: raw.da2, introducer: "\u{1b}[>", final: "c")
-        var attributes: GhosttyTerminalCallbacks.DeviceAttributes?
-        if let primary, let level = primary.first, let secondary, secondary.count >= 3 {
-            attributes = GhosttyTerminalCallbacks.DeviceAttributes(
-                conformanceLevel: level,
-                features: Array(primary.dropFirst()),
-                deviceType: secondary[0],
-                firmwareVersion: secondary[1],
-                romCartridge: secondary[2],
-                unitID: 0)
-        } else {
-            ghosttyEngineLog.error(
-                "SwiftTerm's device attributes did not parse; libghostty answers with its own")
-        }
-        let xtversion = text(of: raw.xtversion, introducer: "\u{1b}P>|", terminator: "\u{1b}\\")
-        if xtversion == nil {
-            ghosttyEngineLog.error("SwiftTerm's XTVERSION did not parse; libghostty answers with its own")
-        }
-        return Answers(deviceAttributes: attributes, xtversion: xtversion)
-    }
-
-    /// The numbers of `CSI <introducer> n ; n ; … <final>`.
-    private static func parameters(of bytes: [UInt8], introducer: String, final: String) -> [UInt16]? {
-        guard let body = text(of: bytes, introducer: introducer, terminator: final) else { return nil }
-        let numbers = body.split(separator: ";", omittingEmptySubsequences: false).map { UInt16($0) }
-        guard !numbers.isEmpty, numbers.allSatisfy({ $0 != nil }) else { return nil }
-        return numbers.compactMap { $0 }
-    }
-
-    private static func text(of bytes: [UInt8], introducer: String, terminator: String) -> String? {
-        guard let reply = String(bytes: bytes, encoding: .utf8),
-              reply.hasPrefix(introducer), reply.hasSuffix(terminator),
-              reply.count >= introducer.count + terminator.count else { return nil }
-        return String(reply.dropFirst(introducer.count).dropLast(terminator.count))
     }
 
     /// Holds a headless terminal's replies. `Terminal` keeps its delegate

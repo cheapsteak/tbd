@@ -32,6 +32,7 @@
 
 import Foundation
 import GhosttyVt
+import TBDGhosttyCore
 import TBDGhosttyShaderTypes
 
 // MARK: - Result

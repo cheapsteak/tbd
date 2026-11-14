@@ -5,6 +5,7 @@ import Testing
 // Scoped, for the reason `TerminalScreenProjection` itself imports this way:
 // `TBDShared.Terminal` is the DB row model and `SwiftTerm.Terminal` is the
 // emulator, and every bare `Terminal` below is the emulator.
+import struct TBDShared.ProjectedScreen
 import struct TBDShared.TerminalScreen
 
 @testable import TBDTerminalSerialization

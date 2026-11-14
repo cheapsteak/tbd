@@ -39,6 +39,7 @@ import CoreGraphics
 import Foundation
 import Metal
 import QuartzCore
+import TBDGhosttyCore
 import TBDGhosttyShaderTypes
 
 // MARK: - Stats

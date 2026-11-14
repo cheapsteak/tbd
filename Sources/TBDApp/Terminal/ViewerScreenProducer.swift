@@ -1,6 +1,5 @@
 import Foundation
 import TBDShared
-import TBDTerminalSerialization
 
 /// Turns a viewer's live terminal into the answer the daemon asked for.
 ///

@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Testing
 @testable import TBDApp
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 import TBDShared
 import TestSupport

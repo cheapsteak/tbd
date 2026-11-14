@@ -22,8 +22,10 @@
 # Downstream files compile happily against the new module interface and then the
 # linker cannot resolve the new symbol — an "Undefined symbols" flake that
 # disappears on retry. `.github/workflows/test.yml` defends against it by
-# removing the build artifacts of TBDKernel, TBDShared, TBDDaemonLib and
-# TBDTerminalSerialization before any compile, forcing SPM to re-emit them.
+# removing the build artifacts of TBDKernel, TBDShared, TBDDaemonLib,
+# TBDTerminalSerialization and the libghostty engine's three libraries —
+# TBDGhosttyCore, TBDGhosttyTerminal and TBDGhosttyShaderTypes — before any
+# compile, forcing SPM to re-emit them.
 #
 # That defence is not free. Measured on a run whose commit touched only
 # `Sources/TBDDaemon` and one test file, the wipe cost about three of the 278
@@ -131,6 +133,16 @@ set -uo pipefail
 # TBDDaemonLib's one first-party dependency beyond TBDShared and TBDKernel, so a
 # commit touching only that target recompiles TBDDaemonLib as well.
 #
+# `Sources/TBDGhosttyCore` and `Sources/TBDGhosttyTerminal` are the libghostty
+# engine's two Swift libraries, which the wipe step removes in their own right:
+# TBDApp imports both and TBDGhosttyTerminal imports TBDGhosttyCore, so a symbol
+# added to either is the change #7715 breaks on. `Sources/TBDGhosttyShaderTypes`
+# is the C target TBDGhosttyTerminal depends on, so a change to its header
+# recompiles TBDGhosttyTerminal; being on this list makes it a wiped module as
+# well. Their one other first-party dependency, TBDShared (and TBDKernel below
+# it), is already here. GhosttyVt is a binary target with no sources in this
+# repository, pinned by URL and checksum in `Package.swift`.
+#
 # `Package.swift` and `Package.resolved` are here because a manifest or
 # dependency change can move a library's module boundary without touching a
 # single file under `Sources/`.
@@ -145,6 +157,9 @@ WIPE_PATHS=(
   Sources/TBDShared
   Sources/TBDDaemon
   Sources/TBDTerminalSerialization
+  Sources/TBDGhosttyCore
+  Sources/TBDGhosttyTerminal
+  Sources/TBDGhosttyShaderTypes
   Package.swift
   Package.resolved
 )

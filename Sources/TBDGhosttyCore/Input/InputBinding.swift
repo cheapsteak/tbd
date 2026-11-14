@@ -36,7 +36,7 @@ import GhosttyVt
 ///
 /// Time is a `Duration` since any fixed origin. The view passes the display link's timestamp, so
 /// the policy compares the moments frames were due and never reads a clock itself.
-struct SyncOutputWatchdog: Sendable, Equatable {
+package struct SyncOutputWatchdog: Sendable, Equatable {
     /// The DEC private mode number of synchronized output.
     static let mode: UInt16 = 2026
 
@@ -54,7 +54,7 @@ struct SyncOutputWatchdog: Sendable, Equatable {
         self.activeSince = nil
     }
 
-    enum Decision: Sendable, Equatable {
+    package enum Decision: Sendable, Equatable {
         /// No hold is open: render normally.
         case render
         /// Ticks have seen a hold for less than `timeout`: skip this frame, keep the link running.
@@ -64,7 +64,7 @@ struct SyncOutputWatchdog: Sendable, Equatable {
     }
 
     /// What a force-off logs: how long ticks saw the hold, and how many frames they skipped.
-    struct ForceOff: Sendable, Equatable {
+    package struct ForceOff: Sendable, Equatable {
         /// From the first tick that saw the hold to the tick that forced it off.
         var heldFor: Duration
         /// The ticks in that run that skipped their frame. The tick that forces off renders. The
@@ -79,7 +79,7 @@ struct SyncOutputWatchdog: Sendable, Equatable {
     }
 
     /// Logs a force-off at `.notice`, so A/B logs show runs of skipped frames that ended in one.
-    static func logForceOff(_ forceOff: ForceOff) {
+    package static func logForceOff(_ forceOff: ForceOff) {
         terminalEngineLog.notice("\(forceOff.notice, privacy: .public)")
     }
 
@@ -186,7 +186,7 @@ extension GhosttyTerminal {
     /// Encodes one key press against the terminal's current modes. Returns the bytes for the caller
     /// to send; **nothing is sent here**. Empty is the normal result for a bare modifier, a release
     /// in legacy mode, or a composing key.
-    func encodeKey(_ press: KeyPress, optionAsAlt: OptionAsAlt) -> [UInt8] {
+    package func encodeKey(_ press: KeyPress, optionAsAlt: OptionAsAlt) -> [UInt8] {
         input("encoding a key", fallback: []) { raw, binding in
             try binding.keyEncoder.encode(press, terminal: raw, optionAsAlt: optionAsAlt)
         }
@@ -197,7 +197,7 @@ extension GhosttyTerminal {
     /// Moves the viewport down to the active area, as typing does in every terminal. Returns true
     /// when it moved, so the caller asks for a frame only then.
     @discardableResult
-    func scrollViewportToBottom() -> Bool {
+    package func scrollViewportToBottom() -> Bool {
         withRaw { raw -> Bool in
             let metrics = TerminalScrollMetrics.read(raw)
             guard metrics.offset + metrics.visible < metrics.total else { return false }
@@ -216,7 +216,7 @@ extension GhosttyTerminal {
     ///
     /// `ignoringApplicationCursorKeys` leaves DECCKM out of that test. SwiftTerm does that for a
     /// page key with Option held while Option is not Meta, which it pages through `pageUp()`.
-    func scrollViewportByPage(up: Bool, ignoringApplicationCursorKeys: Bool = false) -> Bool {
+    package func scrollViewportByPage(up: Bool, ignoringApplicationCursorKeys: Bool = false) -> Bool {
         withRaw { raw -> Bool in
             let state = GhosttyTerminalState(raw: raw)
             let claimedByCursorKeys = !ignoringApplicationCursorKeys
@@ -236,7 +236,7 @@ extension GhosttyTerminal {
     /// Kitty paste event all happen inside libghostty. Returns what happened and the bytes to send.
     ///
     /// `.rejectedUnsafe` means no bytes: confirm with the user, then call again with `allowUnsafe`.
-    func pasteText(
+    package func pasteText(
         _ text: String, source: PasteSource, allowUnsafe: Bool
     ) -> (outcome: PasteOutcome, bytes: [UInt8]) {
         do {
@@ -254,7 +254,7 @@ extension GhosttyTerminal {
     // MARK: Mouse
 
     /// Pushes rendered geometry to the mouse encoder and the selection controller.
-    func setMousePixelGeometry(_ geometry: TerminalPixelGeometry) {
+    package func setMousePixelGeometry(_ geometry: TerminalPixelGeometry) {
         input("setting the mouse geometry", fallback: ()) { _, binding in
             binding.mouseEncoder.geometry = geometry
             binding.selection.geometry = geometry
@@ -263,7 +263,7 @@ extension GhosttyTerminal {
 
     /// Encodes one pointer event. Returns the report for the caller to send, or nil when the
     /// terminal wants none (tracking off, or a motion inside the same cell).
-    func encodeMouse(_ press: MousePress) -> [UInt8]? {
+    package func encodeMouse(_ press: MousePress) -> [UInt8]? {
         input("encoding a mouse event", fallback: nil) { raw, binding in
             try binding.mouseEncoder.encode(press, terminal: raw)
         }
@@ -273,7 +273,7 @@ extension GhosttyTerminal {
     /// now. The view routes clicks, hovers and the wheel by it. Not the same as a mode bit being
     /// set: after `?1000h ?1003h ?1003l` the 1000 bit is still set and nothing is reported. See
     /// `MouseEncoder`. False once the terminal is closed.
-    var isMouseReporting: Bool {
+    package var isMouseReporting: Bool {
         input("reading the mouse modes", fallback: false) { raw, binding in
             binding.mouseEncoder.isReporting(terminal: raw)
         }
@@ -282,7 +282,7 @@ extension GhosttyTerminal {
     /// Where wheel rows would go, under one lock, as `MouseEncoder.wheel` decides: reports, arrow
     /// keys or the viewport. Read from what libghostty reports, like `isMouseReporting`, not from
     /// the mode bits. The viewport once the terminal is closed, when the wheel does nothing anyway.
-    var wheelRoute: WheelRoute {
+    package var wheelRoute: WheelRoute {
         input("reading where the wheel goes", fallback: .viewport) { raw, binding in
             binding.mouseEncoder.wheelRoute(terminal: raw)
         }
@@ -292,54 +292,54 @@ extension GhosttyTerminal {
     /// in `.report`. With tracking off, on the alternate screen under `?1007`, the arrow key and
     /// how many of it are returned in `.cursorKeys`; elsewhere the viewport is scrolled under the
     /// lock and the caller should ask for a frame.
-    func mouseWheel(rows: Int, at position: SurfacePoint, mods: TerminalModifiers) -> WheelOutcome {
+    package func mouseWheel(rows: Int, at position: SurfacePoint, mods: TerminalModifiers) -> WheelOutcome {
         input("encoding the wheel", fallback: .none) { raw, binding in
             try binding.mouseEncoder.wheel(rows: rows, at: position, mods: mods, terminal: raw)
         }
     }
 
     /// Forgets held buttons and motion de-duplication. Call on focus loss.
-    func resetMouseEncoder() {
+    package func resetMouseEncoder() {
         input("resetting the mouse encoder", fallback: ()) { _, binding in binding.mouseEncoder.reset() }
     }
 
     // MARK: Selection
 
     /// `NSEvent.doubleClickInterval`, in seconds. Without it libghostty only ever sees single clicks.
-    func setSelectionDoubleClickInterval(_ seconds: Double) {
+    package func setSelectionDoubleClickInterval(_ seconds: Double) {
         input("setting the double-click interval", fallback: ()) { _, binding in
             binding.selection.doubleClickInterval = seconds
         }
     }
 
     @discardableResult
-    func selectionPress(at position: SurfacePoint, timestamp: Double) -> Bool {
+    package func selectionPress(at position: SurfacePoint, timestamp: Double) -> Bool {
         input("starting a selection", fallback: false) { _, binding in
             try binding.selection.press(at: position, timestamp: timestamp)
         }
     }
 
     @discardableResult
-    func selectionDrag(to position: SurfacePoint, rectangle: Bool) -> Bool {
+    package func selectionDrag(to position: SurfacePoint, rectangle: Bool) -> Bool {
         input("extending a selection", fallback: false) { _, binding in
             try binding.selection.drag(to: position, rectangle: rectangle)
         }
     }
 
-    func selectionRelease(at position: SurfacePoint?) {
+    package func selectionRelease(at position: SurfacePoint?) {
         input("ending a selection", fallback: ()) { _, binding in try binding.selection.release(at: position) }
     }
 
     /// One tick of the view's autoscroll timer. Returns the rows scrolled; 0 means none was due.
     @discardableResult
-    func selectionAutoscrollTick(at position: SurfacePoint, rectangle: Bool) -> Int {
+    package func selectionAutoscrollTick(at position: SurfacePoint, rectangle: Bool) -> Int {
         input("autoscrolling a selection", fallback: 0) { _, binding in
             try binding.selection.autoscrollTick(at: position, rectangle: rectangle)
         }
     }
 
     /// What the last drag is asking the view to autoscroll.
-    var selectionAutoscrollDirection: SelectionAutoscroll {
+    package var selectionAutoscrollDirection: SelectionAutoscroll {
         input("reading the autoscroll", fallback: .none) { _, binding in binding.selection.autoscrollDirection }
     }
 
@@ -354,19 +354,19 @@ extension GhosttyTerminal {
     /// Selects the whole screen, scrollback included, and ends the click sequence. Returns false
     /// when there is nothing to select or the terminal is closed.
     @discardableResult
-    func selectAll() -> Bool {
+    package func selectAll() -> Bool {
         input("selecting everything", fallback: false) { _, binding in try binding.selection.selectAll() }
     }
 
     /// The selected text, formatted the way a terminal copy does it. nil with no selection.
-    func copySelectionText() -> String? {
+    package func copySelectionText() -> String? {
         input("copying the selection", fallback: nil) { _, binding in binding.selection.copySelection() }
     }
 
     /// The OSC 8 URI under `position` plus the run of cells sharing it, for the hover underline.
     /// Grid refs are only valid until the next change to the terminal, so the whole lookup, and the
     /// row walk that widens it, runs inside one lock hold.
-    func hyperlinkRun(at position: SurfacePoint) -> (uri: String, columns: ClosedRange<UInt16>, row: UInt32)? {
+    package func hyperlinkRun(at position: SurfacePoint) -> (uri: String, columns: ClosedRange<UInt16>, row: UInt32)? {
         input("reading a link", fallback: nil) { raw, binding in
             guard let point = binding.selection.gridPoint(at: position) else { return nil }
             var columns: UInt16 = 0
@@ -380,7 +380,7 @@ extension GhosttyTerminal {
     /// none and `readsText` is true, the text on view and the rows its lines run on into, with the
     /// cell pressed (`GhosttyClickedText.init(viewportOf:column:row:)`). One lock hold, so
     /// the link and the text are read from the same screen.
-    func commandClickTarget(at position: SurfacePoint, readsText: Bool) -> CommandClickTarget? {
+    package func commandClickTarget(at position: SurfacePoint, readsText: Bool) -> CommandClickTarget? {
         input("reading a ⌘-click", fallback: nil) { raw, binding in
             guard let point = binding.selection.gridPoint(at: position) else { return nil }
             if let uri = HyperlinkLookup.uri(at: point, in: raw) { return .link(uri) }
@@ -403,7 +403,7 @@ extension GhosttyTerminal {
     /// view was attached is no news to the view: its first frame after the attach is a full
     /// rebuild. Kept, the end would let the first chunk after the attach draw at once whatever its
     /// size, as if it finished a hold.
-    func resetSyncOutputWatchdog() {
+    package func resetSyncOutputWatchdog() {
         inputWithContext("resetting the synchronized-output watchdog", fallback: ()) { raw, binding, context in
             binding.watchdog.reset()
             context.holdOpen = GhosttyTerminalState(raw: raw).mode(SyncOutputWatchdog.mode)
@@ -416,7 +416,7 @@ extension GhosttyTerminal {
     ///
     /// - Parameter onForceOff: hears each force-off, after the lock drops. It logs the notice;
     ///   tests replace it.
-    func syncOutputDecision(
+    package func syncOutputDecision(
         now: Duration,
         onForceOff: (SyncOutputWatchdog.ForceOff) -> Void = SyncOutputWatchdog.logForceOff
     ) -> SyncOutputWatchdog.Decision {

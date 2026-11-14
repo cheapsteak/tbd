@@ -1,5 +1,6 @@
 import Foundation
 import SwiftTerm
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 
 /// SwiftTerm's own link detection, for the libghostty engine, which has none: the URL or path the

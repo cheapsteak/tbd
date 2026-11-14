@@ -7,6 +7,7 @@
 // those bits too.
 import Foundation
 import SwiftTerm
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 
 enum HandoverColor: Equatable, CustomStringConvertible {

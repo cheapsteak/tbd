@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Metal
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TestSupport
 import Testing

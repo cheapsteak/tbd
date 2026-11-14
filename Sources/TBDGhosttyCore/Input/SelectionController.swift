@@ -96,7 +96,7 @@ struct SelectionBehaviors: Sendable, Equatable {
 }
 
 /// Whether a drag has left the viewport, and in which direction.
-enum SelectionAutoscroll: Sendable, Equatable {
+package enum SelectionAutoscroll: Sendable, Equatable {
     case none, up, down
 }
 

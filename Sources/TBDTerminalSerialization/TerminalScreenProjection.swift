@@ -2,57 +2,10 @@ import Foundation
 import SwiftTerm
 // Scoped, not a whole-module import: `TBDShared.Terminal` is the DB row model
 // and `SwiftTerm.Terminal` is the emulator, and this file is about the second.
-// Naming the one type it needs keeps every bare `Terminal` here meaning the
+// Naming the types it needs keeps every bare `Terminal` here meaning the
 // emulator — the same rule `HolderReader` follows for the same collision.
+import struct TBDShared.ProjectedScreen
 import struct TBDShared.TerminalScreen
-
-/// Everything a `TerminalScreen` needs that can be read from a grid, and
-/// nothing that cannot.
-///
-/// The split is the point. A screen's lines, its viewport offset, its cursor
-/// *position*, its size and the three child modes are all properties of a
-/// `Terminal`, so one walk can produce them for either store. A screen's
-/// `source`, `ageMilliseconds`, `modesObserved`, `contentObserved` and its
-/// cursor's *visibility* are not: they are facts about which emulator answered,
-/// how it came to exist and what it was told, and only the daemon knows them.
-/// So this type carries the first set and the daemon stamps the second —
-/// which is also why nothing here throws. `TerminalScreen`'s construction is
-/// the one place the whitelist is enforced, and it is enforced where the throw
-/// can be handled.
-public struct ProjectedScreen: Sendable, Equatable {
-    /// The requested tail of scrollback plus the viewport, one entry per row,
-    /// right-trimmed, with trailing blank rows dropped.
-    public let lines: [String]
-    /// The index in `lines` of the viewport's first row — `TerminalScreen`'s
-    /// field of the same name, with the same two documented out-of-range
-    /// cases, derived here so the two stores cannot disagree about the
-    /// arithmetic.
-    public let viewportStart: Int
-    /// The cursor in viewport coordinates. **Position only**: visibility is
-    /// `DECTCEM`, which no public SwiftTerm property exposes and which a
-    /// `DECRQM` probe must not be used to read (see `project`), so whoever
-    /// tracks the child's notifications supplies it.
-    public let cursorRow: Int
-    public let cursorColumn: Int
-    public let size: TerminalScreen.Size
-    public let modes: TerminalScreen.ChildModes
-
-    public init(
-        lines: [String],
-        viewportStart: Int,
-        cursorRow: Int,
-        cursorColumn: Int,
-        size: TerminalScreen.Size,
-        modes: TerminalScreen.ChildModes
-    ) {
-        self.lines = lines
-        self.viewportStart = viewportStart
-        self.cursorRow = cursorRow
-        self.cursorColumn = cursorColumn
-        self.size = size
-        self.modes = modes
-    }
-}
 
 /// The one cell walk behind every typed screen, on either side of the
 /// transport.

@@ -73,12 +73,16 @@ mkrepo() {
   echo "$d" >> "$FIXTURE_LIST"
   mkdir -p "$d/Sources/TBDKernel" "$d/Sources/TBDShared" \
            "$d/Sources/TBDDaemon/Server" \
-           "$d/Sources/TBDTerminalSerialization" "$d/Sources/TBDApp" \
-           "$d/Tests/TBDDaemonTests"
+           "$d/Sources/TBDTerminalSerialization" "$d/Sources/TBDGhosttyCore" \
+           "$d/Sources/TBDGhosttyTerminal" "$d/Sources/TBDGhosttyShaderTypes/include" \
+           "$d/Sources/TBDApp" "$d/Tests/TBDDaemonTests"
   echo "public enum Kernel {}"        > "$d/Sources/TBDKernel/Kernel.swift"
   echo "public struct Shared {}"      > "$d/Sources/TBDShared/Shared.swift"
   echo "struct Router {}"             > "$d/Sources/TBDDaemon/Server/Router.swift"
   echo "struct Frame {}"              > "$d/Sources/TBDTerminalSerialization/Frame.swift"
+  echo "final class Terminal {}"      > "$d/Sources/TBDGhosttyCore/Terminal.swift"
+  echo "final class TerminalView {}"  > "$d/Sources/TBDGhosttyTerminal/TerminalView.swift"
+  echo "struct Uniforms { int x; };"  > "$d/Sources/TBDGhosttyShaderTypes/include/ShaderTypes.h"
   echo "// entry point"               > "$d/Sources/TBDDaemon/main.swift"
   echo "struct App {}"                > "$d/Sources/TBDApp/App.swift"
   echo "import Testing"               > "$d/Tests/TBDDaemonTests/DaemonTests.swift"
@@ -239,6 +243,36 @@ test_tbdterminalserialization_change_wipes() {
   assert_contains "the reason names the changed path" "$RUN_ERR" "Sources/TBDTerminalSerialization"
 }
 
+# The libghostty engine's libraries are wiped in their own right: TBDApp imports
+# TBDGhosttyCore and TBDGhosttyTerminal, and TBDGhosttyTerminal imports
+# TBDGhosttyCore and the C target TBDGhosttyShaderTypes.
+test_tbdghosttycore_change_wipes() {
+  local repo; repo="$(mkrepo)"
+  record_marker "$repo"
+  commit_change "$repo" "Sources/TBDGhosttyCore/Terminal.swift"
+  run_decider "$repo"
+  assert_eq "a TBDGhosttyCore change wipes" "wipe" "$RUN_OUT"
+  assert_contains "the reason names the changed path" "$RUN_ERR" "Sources/TBDGhosttyCore"
+}
+
+test_tbdghosttyterminal_change_wipes() {
+  local repo; repo="$(mkrepo)"
+  record_marker "$repo"
+  commit_change "$repo" "Sources/TBDGhosttyTerminal/TerminalView.swift"
+  run_decider "$repo"
+  assert_eq "a TBDGhosttyTerminal change wipes" "wipe" "$RUN_OUT"
+  assert_contains "the reason names the changed path" "$RUN_ERR" "Sources/TBDGhosttyTerminal"
+}
+
+test_tbdghosttyshadertypes_change_wipes() {
+  local repo; repo="$(mkrepo)"
+  record_marker "$repo"
+  commit_change "$repo" "Sources/TBDGhosttyShaderTypes/include/ShaderTypes.h"
+  run_decider "$repo"
+  assert_eq "a TBDGhosttyShaderTypes change wipes" "wipe" "$RUN_OUT"
+  assert_contains "the reason names the changed path" "$RUN_ERR" "Sources/TBDGhosttyShaderTypes"
+}
+
 # A manifest change can move a library's module boundary without touching a
 # single file under `Sources/`, so the manifest and the resolved file are part
 # of the comparison.
@@ -343,7 +377,7 @@ test_record_writes_every_compared_path() {
   local repo lines; repo="$(mkrepo)"
   record_marker "$repo"
   lines="$(grep -c -v '^#' "$repo/marker" | tr -d ' ')"
-  assert_eq "the marker carries one line per compared path" "6" "$lines"
+  assert_eq "the marker carries one line per compared path" "9" "$lines"
   assert_contains "the marker names TBDDaemonLib's source directory" \
     "$(cat "$repo/marker")" "Sources/TBDDaemon "
 }
@@ -395,6 +429,9 @@ test_compared_paths_resolve_in_this_repository() {
   assert_contains "TBDKernel resolves here" "$out" "Sources/TBDKernel "
   assert_contains "TBDShared resolves here" "$out" "Sources/TBDShared "
   assert_contains "TBDDaemonLib's source directory resolves here" "$out" "Sources/TBDDaemon "
+  assert_contains "TBDGhosttyCore resolves here" "$out" "Sources/TBDGhosttyCore "
+  assert_contains "TBDGhosttyTerminal resolves here" "$out" "Sources/TBDGhosttyTerminal "
+  assert_contains "TBDGhosttyShaderTypes resolves here" "$out" "Sources/TBDGhosttyShaderTypes "
 }
 
 # ---------------------------------------------------------------------------
@@ -574,7 +611,7 @@ test_the_wipe_step_removes_exactly_the_compared_libraries() {
   echo "$d" >> "$FIXTURE_LIST"
   # MUTATION: TBDTerminalSerialization dropped from the loop, its sources still
   # compared.
-  sed '/for module in /s/ TBDTerminalSerialization;/;/' "$WORKFLOW" > "$d/unwiped.yml"
+  sed '/for module in /s/ TBDTerminalSerialization\([ ;]\)/\1/' "$WORKFLOW" > "$d/unwiped.yml"
   assert_eq "mutation: a compared library the loop does not remove is caught" \
     "unwiped TBDTerminalSerialization" "$(wipe_loop_drift "$d/unwiped.yml")"
   # MUTATION: a library added to the loop whose sources are not compared.

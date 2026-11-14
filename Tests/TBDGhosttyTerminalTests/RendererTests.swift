@@ -3,6 +3,7 @@ import CoreText
 import Foundation
 import Metal
 import TBDGhosttyShaderTypes
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TestSupport
 import Testing

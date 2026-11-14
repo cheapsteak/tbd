@@ -82,7 +82,7 @@ extension GhosttyClickedText {
 
 extension GhosttyClickedText.Row {
     /// `gridRow` as SwiftTerm reads a row, or an empty row when it could not be read.
-    init(_ gridRow: GhosttyGridRow?) {
+    package init(_ gridRow: GhosttyGridRow?) {
         guard let gridRow else {
             self.init(text: "", isWrapContinuation: false)
             return
@@ -107,7 +107,7 @@ extension GhosttyClickedText.Row {
 }
 
 /// What a left ⌘-press lands on.
-enum CommandClickTarget: Sendable, Equatable {
+package enum CommandClickTarget: Sendable, Equatable {
     /// An OSC 8 link: its URI.
     case link(String)
     /// No link: the text around the press, for the host to look in.

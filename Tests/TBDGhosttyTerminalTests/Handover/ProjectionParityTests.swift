@@ -1,5 +1,6 @@
 import Foundation
 import SwiftTerm
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 // Scoped, so a bare `Terminal` cannot mean TBDShared's row model.
 import struct TBDShared.TerminalScreen

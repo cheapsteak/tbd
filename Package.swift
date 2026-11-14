@@ -173,17 +173,39 @@ let package = Package(
             path: "Sources/TBDGhosttyShaderTypes",
             publicHeadersPath: "include"
         ),
-        // A terminal engine over libghostty-vt: the locked terminal wrapper,
-        // a Metal renderer and an AppKit view. Standalone on purpose: it knows
-        // nothing of TBDApp and exposes its own API. Adapted in part from
-        // tkzmux and termio, whose MIT licences ship in the target directory.
+        // The headless half of the libghostty engine: the locked terminal
+        // wrapper, its screen walks and snapshot writer, and the key, mouse,
+        // selection and paste encoders. It imports no AppKit, Metal,
+        // QuartzCore or CoreText, and must never import one: it is the half
+        // the daemon can link, and the daemon must not link AppKit or Metal.
+        // Adapted in part from tkzmux and termio, whose MIT licences ship in
+        // the target directory.
+        .target(
+            name: "TBDGhosttyCore",
+            dependencies: [
+                "GhosttyVt",
+                // `ProjectedScreen` and `TerminalScreen`, for the screen projection.
+                "TBDShared",
+            ],
+            path: "Sources/TBDGhosttyCore",
+            exclude: ["LICENSE-termio.txt", "LICENSE-tkzmux.txt"],
+            // libghostty-vt is a static library with C++ inside.
+            linkerSettings: [.linkedLibrary("c++")]
+        ),
+        // A terminal engine over libghostty-vt: a Metal renderer and an
+        // AppKit view over `TBDGhosttyCore`'s terminal. Standalone on purpose:
+        // it knows nothing of TBDApp and exposes its own API. Adapted in part
+        // from tkzmux and termio, whose MIT licences ship in the target
+        // directory.
         .target(
             name: "TBDGhosttyTerminal",
             dependencies: [
+                // The terminal the view draws and feeds input to.
+                "TBDGhosttyCore",
+                // libghostty's C API directly: the render state the renderer
+                // reads, and the key codes and colour types.
                 "GhosttyVt",
                 "TBDGhosttyShaderTypes",
-                // `ProjectedScreen`, for the screen projection.
-                "TBDTerminalSerialization",
             ],
             path: "Sources/TBDGhosttyTerminal",
             exclude: ["LICENSE-termio.txt", "LICENSE-tkzmux.txt"],
@@ -316,6 +338,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "Markdown", package: "swift-markdown"),
                 "TBDTerminalSerialization",
+                "TBDGhosttyCore",
                 "TBDGhosttyTerminal",
             ],
             path: "Sources/TBDApp",
@@ -477,6 +500,7 @@ let package = Package(
                 "TBDTerminalSerialization",
                 // The engine suites build a headless libghostty terminal to
                 // check what the engine does with its callbacks.
+                "TBDGhosttyCore",
                 "TBDGhosttyTerminal",
                 .product(name: "Clocks", package: "swift-clocks"),
             ],
@@ -485,14 +509,16 @@ let package = Package(
             ]
         ),
         // The libghostty engine's own suites. They need only the engine
-        // target, its shader-types header (the renderer tests check the
-        // struct sizes the shaders rely on), libghostty-vt itself (the
-        // continuation tests ask it for a snapshot directly), and the
-        // generic test helpers (`TestSupport`, for the fast-pass time
-        // limit), so they compile against nothing in the app or the daemon.
+        // targets (the headless core and the view over it), the view's
+        // shader-types header (the renderer tests check the struct sizes the
+        // shaders rely on), libghostty-vt itself (the continuation tests ask it for a
+        // snapshot directly), and the generic test helpers (`TestSupport`,
+        // for the fast-pass time limit), so they compile against nothing in
+        // the app or the daemon.
         .testTarget(
             name: "TBDGhosttyTerminalTests",
             dependencies: [
+                "TBDGhosttyCore",
                 "TBDGhosttyTerminal",
                 "TBDGhosttyShaderTypes",
                 "GhosttyVt",

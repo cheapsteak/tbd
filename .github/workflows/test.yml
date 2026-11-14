@@ -705,12 +705,18 @@ jobs:
           # dependency beyond TBDShared and TBDKernel, so a change confined to it
           # re-emits its own module, recompiles TBDDaemonLib and cascades
           # downstream.
+          # `Sources/TBDGhosttyCore`, `Sources/TBDGhosttyTerminal` and
+          # `Sources/TBDGhosttyShaderTypes` are the libghostty engine's
+          # libraries, all three wiped in their own right — the last is the C
+          # target TBDGhosttyTerminal depends on — so a change confined to any
+          # of them re-emits that library and recompiles everything above it,
+          # TBDApp included.
           #
           # Three-dot: what this PR changed since it forked, not everything that
           # has landed on the base since.
           status=0
           git diff --quiet "origin/$BASE_REF...HEAD" -- \
-            Sources/TBDKernel Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved || status=$?
+            Sources/TBDKernel Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Sources/TBDGhosttyCore Sources/TBDGhosttyTerminal Sources/TBDGhosttyShaderTypes Package.swift Package.resolved || status=$?
           case "$status" in
             0) decide false "no first-party library or package-manifest change" ;;
             1) decide true "touched a first-party library or the package manifest" ;;
@@ -844,14 +850,18 @@ jobs:
       # library build artifacts forces SPM to re-emit them while keeping the
       # rest of `.build/` warm.
       #
-      # The libraries wiped are TBDKernel, TBDShared, TBDDaemonLib and
-      # TBDTerminalSerialization: every first-party library target whose
-      # sources the decision below compares. TBDTerminalSerialization is
-      # exposed in its own right, not only as something TBDDaemonLib imports —
-      # TBDDaemonLib and TBDApp both import it, so a symbol added to it is the
-      # same shape of change. Comparing a library's sources without removing
-      # its artifacts would answer `wipe` on exactly the run that needs it and
-      # still leave that library's stale objects in place.
+      # The libraries wiped are TBDKernel, TBDShared, TBDDaemonLib,
+      # TBDTerminalSerialization, TBDGhosttyCore, TBDGhosttyTerminal and
+      # TBDGhosttyShaderTypes: every first-party library target whose sources
+      # the decision below compares. TBDTerminalSerialization is exposed in its
+      # own right, not only as something TBDDaemonLib imports — TBDDaemonLib
+      # and TBDApp both import it, so a symbol added to it is the same shape of
+      # change. So are the libghostty engine's libraries: TBDApp imports
+      # TBDGhosttyCore and TBDGhosttyTerminal, and TBDGhosttyTerminal imports
+      # TBDGhosttyCore and the C target TBDGhosttyShaderTypes. Comparing a
+      # library's sources without removing its artifacts would answer `wipe`
+      # on exactly the run that needs it and still leave that library's stale
+      # objects in place.
       #
       # The wipe is not free: measured on a run whose commit touched only
       # `Sources/TBDDaemon` and one test file, it cost about three of the 278
@@ -865,7 +875,12 @@ jobs:
       # and the few downstream files that import it but not TBDShared or
       # TBDDaemonLib. TBDKernel is ten files, and the modules that import it
       # without TBDShared are the two helpers, their tests and TBDKernelTests,
-      # so its wipe can add those to a run's rebuild.
+      # so its wipe can add those to a run's rebuild. TBDGhosttyCore and
+      # TBDGhosttyTerminal are 43 Swift files between them and
+      # TBDGhosttyShaderTypes is one C file and its header; TBDGhosttyCore
+      # depends on TBDShared, so every module above the three already sits
+      # above TBDShared, and their wipe brings no new module into the rebuild —
+      # only their own files.
       #
       # The bug's precondition is that a library's SOURCES differ from the
       # sources its cached artifacts were built from, so the wipe is conditional
@@ -908,7 +923,9 @@ jobs:
           # that every source directory on the list is one library target's.
           # It does not check dependencies: that a module's first-party
           # dependencies are on the list is for review to hold.
-          for module in TBDKernel TBDShared TBDDaemonLib TBDTerminalSerialization; do
+          # TBDGhosttyShaderTypes is a C target, so it has no `.swiftmodule`
+          # and its second listing reads "(absent)" on every run.
+          for module in TBDKernel TBDShared TBDDaemonLib TBDTerminalSerialization TBDGhosttyCore TBDGhosttyTerminal TBDGhosttyShaderTypes; do
             echo "=== $module artifacts before wipe ==="
             ls -la .build/*/debug/"$module".build 2>/dev/null || echo "(absent)"
             ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
@@ -1158,13 +1175,15 @@ jobs:
       #    TBDDaemonLib or TBDTerminalSerialization is exactly that case — an
       #    interface change cascades into every downstream module, and this job
       #    wipes and re-emits the libraries on such a run regardless. Touching
-      #    Package.resolved moves the dependency set the restore-keys prefix is
-      #    scoped to, which leaves main's entry no longer a fallback this PR can
-      #    use at all; touching Package.swift re-plans the build graph, which
-      #    cascades the way a library change does. A PR that touches
-      #    neither rebuilds a small delta on top of main's entry for about what
-      #    restoring its own would have cost, so it keeps main's entry alive for
-      #    everyone instead of evicting it.
+      #    one of the libghostty engine's libraries cascades into TBDApp, the
+      #    package's largest module, and the tests above it, and is wiped the
+      #    same way. Touching Package.resolved moves the dependency set the
+      #    restore-keys prefix is scoped to, which leaves main's entry no longer
+      #    a fallback this PR can use at all; touching Package.swift re-plans
+      #    the build graph, which cascades the way a library change does. A PR
+      #    that touches neither rebuilds a small delta on top of main's entry
+      #    for about what restoring its own would have cost, so it keeps main's
+      #    entry alive for everyone instead of evicting it.
       #
       # A pull request's save happens here too, for one policy in one step and
       # because the PR runs it adds are the ones a next push wants most. A

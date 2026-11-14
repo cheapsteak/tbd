@@ -9,7 +9,7 @@ import GhosttyVt
 
 /// The C terminal handle. `GhosttyTerminal` is this module's Swift class, which shadows the C
 /// typedef of the same name, so the C one is always spelled through this alias.
-typealias VtTerminal = GhosttyVt.GhosttyTerminal
+package typealias VtTerminal = GhosttyVt.GhosttyTerminal
 
 /// A libghostty-vt call returned something other than `GHOSTTY_SUCCESS`. Internal: the public
 /// surface reports `GhosttyError`, and this is what goes in the log line.
@@ -29,7 +29,7 @@ struct GhosttyCallError: Error, LocalizedError, Equatable, Sendable, CustomStrin
 }
 
 @inline(__always)
-func ghosttyCheck(_ result: GhosttyResult, _ operation: String) throws {
+package func ghosttyCheck(_ result: GhosttyResult, _ operation: String) throws {
     guard result == GHOSTTY_SUCCESS else { throw GhosttyCallError(result: result, operation: operation) }
 }
 
@@ -83,10 +83,10 @@ func formatTerminal(
 /// Owns a `GhosttyRenderState`: the incremental, dirty-row view of a terminal the frame builder
 /// reads. A render state copies what it needs out of the terminal in `begin_update`, so it does
 /// not depend on the terminal staying alive.
-final class GhosttyRenderStateHandle {
-    let raw: GhosttyRenderState
+package final class GhosttyRenderStateHandle {
+    package let raw: GhosttyRenderState
 
-    init() throws {
+    package init() throws {
         var state: GhosttyRenderState?
         try ghosttyCheck(ghostty_render_state_new(nil, &state), "ghostty_render_state_new")
         guard let state else {

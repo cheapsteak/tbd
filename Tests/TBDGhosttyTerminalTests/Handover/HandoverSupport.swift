@@ -3,6 +3,7 @@
 // spike/libghostty-vt-poc), which drives SwiftTerm the way the daemon's emulator does.
 import Foundation
 import SwiftTerm
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 import TBDTerminalSerialization
 
