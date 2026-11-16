@@ -110,7 +110,13 @@ struct ActuationLogSweepWiringTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        // The worktree stays active, so the per-terminal pass that follows
+        // the archive arm sees its tmux row too, and would delete a row with
+        // no session whose server is gone. A server that may still be running
+        // keeps the row there, so the count below answers only for the
+        // archive arm.
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .running }
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let worktree = try await db.worktrees.create(
