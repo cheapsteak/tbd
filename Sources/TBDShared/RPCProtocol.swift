@@ -152,9 +152,10 @@ public enum RPCErrorCode: String, Sendable {
     ///
     /// - **The row's session may still be running in tmux** – a tmux server
     ///   an earlier build started can outlive `tbd update`. Any request that
-    ///   would reach the session (a view, a send, a wake, a recreate, a move)
-    ///   is refused with `tmux -L <server> kill-server`, which ends it,
-    ///   followed by `tbd terminal migrate <id>`.
+    ///   would reach the session is refused with `tmux -L <server>
+    ///   kill-server`, which ends it, followed by `tbd terminal migrate <id>`:
+    ///   a view, a send, a wake, a park (`terminal.hibernate` or
+    ///   `terminal.suspend`), a recreate or a move.
     /// - **Nothing of the row runs in tmux any more** – a parked row, or one
     ///   whose window is gone. A request that would start or replace its
     ///   process (a wake, a window recreate, an in-place account switch, a
