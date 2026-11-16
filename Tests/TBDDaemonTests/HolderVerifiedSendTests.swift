@@ -9,17 +9,9 @@ import TBDShared
 ///
 /// **The observation is transport-blind.** It reads the child's transcript
 /// JSONL for the dispatch envelope the send delivered — never the rendered
-/// screen, which this codebase forbids reading for state — so nothing about it
-/// depends on there being a tmux pane to re-read. What the holder arm owed was
-/// the two ends of that: arming the observation after a successful write, and
-/// giving the verifier a way to re-deliver through the courier rather than
-/// through `tmux.pasteText`.
-///
-/// Every test here that asserts a delivery or a holder-specific classification
-/// discriminates against `origin/main`, where a `--verify` send to a holder row
-/// was refused outright by `holderVerifyRefusal` and `redeliverVerifiedPayload`
-/// had no holder branch at all — it fell through to the tmux body and pasted at
-/// the empty pane id a holder row carries by construction.
+/// screen, which this codebase forbids reading for state. What the holder owes
+/// it is the two ends of that: arming the observation after a successful
+/// write, and a way for the verifier to re-deliver through the courier.
 @Suite("holder verified sends and the verifier's re-delivery")
 struct HolderVerifiedSendTests {
 
@@ -93,8 +85,7 @@ struct HolderVerifiedSendTests {
 
     /// The off branch of the same conditional: a send that did not ask for
     /// verification arms nothing, even with the flag on and a verifier wired.
-    /// `--verify` is the only input that arms — every caller opts in per send,
-    /// on this transport as on tmux.
+    /// `--verify` is the only input that arms — every caller opts in per send.
     @Test("a verify-less send to a holder row arms nothing")
     func aVerifylessHolderSendArmsNothing() async throws {
         let writes = HolderVerifyWriteRecorder()
@@ -218,9 +209,8 @@ struct HolderVerifiedSendTests {
     // MARK: - The three states in which no observation could be produced
 
     /// A shell keeps no transcript, so there is nothing an observation could
-    /// read. Refused by KIND, in the same words the tmux arm uses — the holder
-    /// gate mirrors it rather than naming the transport.
-    @Test("a verified send to a holder shell row is refused as unobservable, as on tmux")
+    /// read. Refused by KIND, naming the kind rather than the transport.
+    @Test("a verified send to a holder shell row is refused as unobservable")
     func aVerifiedHolderShellSendIsRefusedByKind() async throws {
         let writes = HolderVerifyWriteRecorder()
         let holder = try await SendHarness.make(
@@ -233,32 +223,18 @@ struct HolderVerifiedSendTests {
                 terminalID: holder.terminal.id, text: "hi", submit: true, verify: true),
             actor: .app)
 
-        let tmux = try await SendHarness.make(transport: .tmux, kind: .shell)
-        try await tmux.db.config.setDeliveryVerification(enabled: true)
-        tmux.router.deliveryVerifier = ArmingRecorder()
-        let tmuxResponse = try await tmux.send(
-            TerminalSendParams(
-                terminalID: tmux.terminal.id, text: "hi", submit: true, verify: true),
-            actor: .app)
-
         #expect(!holderResponse.success)
-        #expect(!tmuxResponse.success)
         let message = try #require(holderResponse.error)
         #expect(message.contains("is a shell session"))
         #expect(message.contains("only be observed for a Claude session"))
-        // The same refusal on both transports, differing only in the id it names.
-        let holderNormalized = message.replacingOccurrences(
-            of: holder.terminal.id.uuidString, with: "<id>")
-        let tmuxNormalized = try #require(tmuxResponse.error).replacingOccurrences(
-            of: tmux.terminal.id.uuidString, with: "<id>")
-        #expect(holderNormalized == tmuxNormalized)
+        #expect(!message.contains("pty-holder"))
         #expect(writes.writes.isEmpty, "nothing may be written")
     }
 
     /// The flag is the second precondition, and it is refused rather than
     /// silently downgraded to an unverified send: a caller that asked for
     /// evidence is never answered with a silence that reads like confirmation.
-    @Test("a verified send to a holder row is refused while the flag is off, as on tmux")
+    @Test("a verified send to a holder row is refused while the flag is off")
     func aVerifiedHolderSendIsRefusedWithTheFlagOff() async throws {
         let writes = HolderVerifyWriteRecorder()
         let holder = try await SendHarness.make(
@@ -269,25 +245,17 @@ struct HolderVerifiedSendTests {
                 terminalID: holder.terminal.id, text: "status?", submit: true, verify: true),
             actor: .app)
 
-        let tmux = try await SendHarness.make(transport: .tmux)
-        let tmuxResponse = try await tmux.send(
-            TerminalSendParams(
-                terminalID: tmux.terminal.id, text: "status?", submit: true, verify: true),
-            actor: .app)
-
         #expect(!holderResponse.success)
         let message = try #require(holderResponse.error)
         #expect(message.contains("delivery verification is disabled"))
         #expect(message.contains("config.delivery_verification_enabled is off"))
-        // On `origin/main` this named the transport instead.
         #expect(!message.contains("pty-holder"))
-        #expect(message == (try #require(tmuxResponse.error)))
         #expect(writes.writes.isEmpty, "nothing may be written")
     }
 
     /// The flag and the machinery it enables are read at different times — the
     /// column per call, the verifier once at daemon start — so the window where
-    /// the column says yes and nothing is wired refuses too, on both transports.
+    /// the column says yes and nothing is wired refuses too.
     @Test("a verified holder send is refused when the flag is on but no verifier is wired")
     func aVerifiedHolderSendIsRefusedWithoutAWiredVerifier() async throws {
         let writes = HolderVerifyWriteRecorder()
@@ -300,17 +268,9 @@ struct HolderVerifiedSendTests {
                 terminalID: holder.terminal.id, text: "status?", submit: true, verify: true),
             actor: .app)
 
-        let tmux = try await SendHarness.make(transport: .tmux)
-        try await tmux.db.config.setDeliveryVerification(enabled: true)
-        let tmuxResponse = try await tmux.send(
-            TerminalSendParams(
-                terminalID: tmux.terminal.id, text: "status?", submit: true, verify: true),
-            actor: .app)
-
         #expect(!holderResponse.success)
         let message = try #require(holderResponse.error)
         #expect(message.contains("Restart the daemon"))
-        #expect(message == (try #require(tmuxResponse.error)))
         #expect(writes.writes.isEmpty, "nothing may be written")
     }
 
@@ -338,9 +298,6 @@ struct HolderVerifiedSendTests {
 
         #expect(outcome == .dispatched)
         #expect(writes.writes == [Self.expected(body: payload, wrapped: true, submit: true)])
-        // Nothing reached tmux: the holder branch returns before that body.
-        #expect(harness.tmux.pastedBodies.isEmpty)
-        #expect(harness.tmux.sentKeys.isEmpty)
     }
 
     /// A child whose bracketing is off gets the same body bare — which is the
@@ -383,18 +340,16 @@ struct HolderVerifiedSendTests {
     /// `.notEligible`. The retry classifies it the same way rather than as a
     /// transport failure it never attempted.
     ///
-    /// Discriminates: on `origin/main` this fell through to the tmux body and
-    /// answered `.dispatched` after pasting at the empty pane id.
     @Test("a holder retry with no courier is not eligible, and pastes nothing")
     func aHolderRetryWithNoCourierIsNotEligible() async throws {
-        let harness = try await SendHarness.make(transport: .holder)
+        let harness = try await SendHarness.make(transport: .holder, installsCourier: false)
         #expect(harness.router.holderInjectionCourier == nil)
 
         let outcome = await harness.router.redeliverVerifiedPayload(
             terminalID: harness.terminal.id, sessionID: "sess-1", payload: "hi", submit: true)
 
         #expect(outcome == .refused(.notEligible))
-        #expect(harness.tmux.pastedBodies.isEmpty)
+        #expect(harness.delivered.pastedBodies.isEmpty)
     }
 
     /// A write the courier could not make is the transport, not a decision.
@@ -413,9 +368,7 @@ struct HolderVerifiedSendTests {
     }
 
     /// A session id that no longer matches is a stranger, and the retry is the
-    /// one send that must never reach one. Asserted on a holder row because the
-    /// holder branch returns before the tmux body that used to be the only thing
-    /// after this check.
+    /// one send that must never reach one.
     @Test("a holder retry to a rebound conversation is a target mismatch")
     func aHolderRetryToAReboundConversationIsRefused() async throws {
         let writes = HolderVerifyWriteRecorder()
@@ -594,7 +547,7 @@ struct HolderVerifiedSendTests {
 
     /// **Two payloads spliced into one composer is a transport bug**, and the
     /// retry is a second writer to the same pty. It queues in the terminal's own
-    /// lane exactly as the tmux retry does — proven by holding the lane from
+    /// lane exactly as a first send does — proven by holding the lane from
     /// outside and watching the retry write nothing until it is released.
     @Test("a holder retry queues behind the terminal's send lane")
     func aHolderRetryQueuesBehindTheLane() async throws {
@@ -627,18 +580,17 @@ struct HolderVerifiedSendTests {
         #expect(writes.writes.count == 1)
     }
 
-    /// The tmux retry is untouched: it still consults the pane and pastes
-    /// through tmux, then presses Enter as a separate act.
-    @Test("a tmux retry still pastes through tmux")
-    func aTmuxRetryStillPastesThroughTmux() async throws {
+    /// TBD no longer types into tmux, so a retry addressed to a tmux row is
+    /// not eligible, and nothing is written anywhere.
+    @Test("a tmux retry is not eligible, and writes nothing")
+    func aTmuxRetryIsNotEligible() async throws {
         let harness = try await SendHarness.make(transport: .tmux)
 
         let outcome = await harness.router.redeliverVerifiedPayload(
             terminalID: harness.terminal.id, sessionID: "sess-1", payload: "hi", submit: true)
 
-        #expect(outcome == .dispatched)
-        #expect(harness.tmux.pastedBodies == ["hi"])
-        #expect(harness.tmux.sentKeys == ["Enter"])
+        #expect(outcome == .refused(.notEligible))
+        #expect(harness.delivered.writes.isEmpty)
     }
 }
 

@@ -10,7 +10,6 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    var childrenByServer: [Int32: [Int32]] = [:]
     var cmdlines: [Int32: String] = [:]
     var behaviors: [Int32: Behavior] = [:]
     /// Scriptable `ps -o stat=` result per pid; a missing entry means the
@@ -49,7 +48,6 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
         onTerminate?(pid)
     }
     func forceKill(_ pid: Int32) { lock.withLock { killed.append(pid); killedSet.insert(pid) } }
-    func children(ofServerPID serverPID: Int32) -> [Int32] { lock.withLock { childrenByServer[serverPID] ?? [] } }
     func commandLine(_ pid: Int32) -> String? { lock.withLock { cmdlines[pid] } }
     func stat(_ pid: Int32) -> String? { lock.withLock { stats[pid] } }
     func startTime(_ pid: Int32) -> Date? { lock.withLock { startTimes[pid] } }
@@ -63,11 +61,4 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
         lock.withLock { killedProcessOnly.append(pid) }
         forceKill(pid)
     }
-}
-
-final class FakeTmuxQuerier: TmuxProcessQuerying, @unchecked Sendable {
-    var serverPIDs: [String: Int32] = [:]
-    var panePIDs: [String: Set<Int32>] = [:]
-    func serverPID(server: String) async -> Int32? { serverPIDs[server] }
-    func livePanePIDs(server: String) async -> Set<Int32> { panePIDs[server] ?? [] }
 }

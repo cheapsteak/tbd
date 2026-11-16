@@ -1,22 +1,23 @@
 import Foundation
 
-/// Sends a sequence of named tmux keys one at a time, with a fixed pause
-/// between them.
+/// Sends a sequence of named keys (tmux's `send-keys` spellings, which
+/// `HolderNamedKeys` maps to bytes) one at a time, with a fixed pause between
+/// them.
 ///
-/// **Why paced at all.** `LimitResumeActuator.sendContinueSequence` established
-/// the reason and the number: an agent TUI redraws between keystrokes, and keys
-/// delivered back-to-back through the pty during a redraw get dropped or
-/// reordered — the failure that produced `"ontinue"` in a composer. 150 ms
-/// between keys is what that rail settled on, and a `--keys` payload types into
-/// the same TUIs under the same conditions, so it takes the same pacing rather
-/// than inventing a second number.
+/// **Why paced at all.** The limit-resume rail established the reason and the
+/// number: an agent TUI redraws between keystrokes, and keys delivered
+/// back-to-back through the pty during a redraw get dropped or reordered — the
+/// failure that produced `"ontinue"` in a composer. 150 ms between keys is what
+/// that rail settled on (`LimitResumeActuator.interKeyPause`), and a `--keys`
+/// payload types into the same TUIs under the same conditions, so it takes the
+/// same pacing rather than inventing a second number.
 ///
-/// **Why the send is a closure.** The type is deliberately ignorant of tmux:
-/// the actual `sendKey` call stays inside `RPCRouter+TerminalHandlers.swift`,
+/// **Why the send is a closure.** The type is deliberately ignorant of the
+/// transport: the actual write stays inside `RPCRouter+TerminalHandlers.swift`,
 /// the file the actuation audit already covers, so a paced sequence cannot
 /// become a new unrecorded actuation site (`.swiftlint.yml`'s
 /// `actuation_primitive_allowlist`). It also makes the pacing a tier-1 test
-/// with no tmux and no daemon.
+/// with no session and no daemon.
 struct PacedKeySender: Sendable {
     /// The pause between consecutive keys. Same value, same reason, as
     /// `LimitResumeActuator.interKeyPause`.
@@ -37,7 +38,7 @@ struct PacedKeySender: Sendable {
         self.clock = clock
     }
 
-    /// Split a `--keys` value into tmux key names.
+    /// Split a `--keys` value into key names.
     ///
     /// Returns `nil` when the value names no coherent key sequence: no tokens
     /// at all (empty or all-whitespace), or more than `maxKeys` of them. Empty

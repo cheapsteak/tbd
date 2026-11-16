@@ -82,9 +82,9 @@ import TBDShared
 /// job that emulator's TERM — a terminfo the holder's reader may not implement —
 /// and a daemon the app launched itself has no TERM at all. Two sibling helpers
 /// pin the same value: `TerminalPanelView.makeViewerEnvironment` strips
-/// `TMUX`/`TMUX_PANE` and pins TERM for the grouped-session viewer, and
-/// `BoundedProcessClaudeSpawner.invocationEnvironment` pins it when it runs a
-/// child under a pseudo-terminal.
+/// `TMUX`/`TMUX_PANE` and pins TERM for the processes the app runs in its own
+/// terminals, and `BoundedProcessClaudeSpawner.invocationEnvironment` pins it
+/// when it runs a child under a pseudo-terminal.
 ///
 /// **The scrub applies to the inherited base only.** Values the spawn itself
 /// decided — `sensitiveEnv`: profile env overrides, auth and routing — are

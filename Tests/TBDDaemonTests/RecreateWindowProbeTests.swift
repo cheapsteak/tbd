@@ -5,21 +5,21 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// `terminal.recreateWindow` and the window probe it decides on.
+/// `terminal.recreateWindow` — the app's Check Again — and the leftover-tmux
+/// server probe it decides on.
 ///
-/// For a tmux agent row — Claude, or Codex with a recorded thread — the handler
-/// opens no window: it parks the row and then `killWindow`s it the moment it
-/// believes the window is gone, keeping the identity a wake resumes from once
-/// the row has been migrated to the pty holder. Believing that on a `false`
-/// meant believing it on a timeout, so a recreate arriving while the machine was
-/// busy parked and killed a session that was alive and working — on a user's own
-/// gesture, which makes it worse than the startup sweep's version of the same
-/// bug. Ignorance is now reported back to the caller and nothing is touched.
+/// TBD no longer drives tmux, so for a live tmux agent row — Claude, or Codex
+/// with a recorded thread — the handler asks only whether the row's tmux server
+/// is still listening. While it is, the session may still be running there and
+/// the row is left alone, with the advice that ends it. Once the server is
+/// positively gone the row is parked, keeping the identity a wake resumes from
+/// once the row has been migrated to the pty holder. Nothing reaches tmux
+/// either way.
 ///
 /// Every test fingerprints the row rather than only reading the response: a
 /// refusal that still parked or re-identified the row is precisely the failure
 /// under test, and the return value cannot see it.
-@Suite("recreateWindow and the window probe")
+@Suite("recreateWindow and the leftover-tmux probe")
 struct RecreateWindowProbeTests {
 
     private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
@@ -68,11 +68,15 @@ struct RecreateWindowProbeTests {
         return try #require(try await db.terminals.get(id: terminal.id))
     }
 
-    private func router(_ db: TBDDatabase, tmux: TmuxManager) -> RPCRouter {
-        RPCRouter(
+    private func router(
+        _ db: TBDDatabase, tmux: TmuxManager, server: LeftoverTmuxServerState
+    ) -> RPCRouter {
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in server }
+        return RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
@@ -106,21 +110,18 @@ struct RecreateWindowProbeTests {
     }
 
     private func run(
-        windowPresence: TmuxPresence, agent: Agent = .claude
+        server: LeftoverTmuxServerState, agent: Agent = .claude
     ) async throws -> (response: RPCResponse, before: RowFingerprint,
                        after: RowFingerprint, tmuxCalls: [[String]], terminalID: UUID) {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
-            dryRunWindowPresence: { _, _ in windowPresence })
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
         let terminal = try await seedTerminal(db, worktreeID: wt.id, agent: agent)
         let before = RowFingerprint(terminal)
 
-        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+        let response = await router(db, tmux: tmux, server: server).handle(try RPCRequest(
             method: RPCMethod.terminalRecreateWindow,
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
@@ -128,37 +129,37 @@ struct RecreateWindowProbeTests {
         return (response, before, RowFingerprint(after), recorded.snapshot(), terminal.id)
     }
 
-    /// The regression. A probe that never answered must not become a park and a
-    /// kill; the caller is told to retry instead.
-    @Test("an unanswered probe parks nothing, kills nothing, and says so", arguments: Agent.allCases)
-    func unknownProbeRefusesAndLeavesTheRowAlone(agent: Agent) async throws {
-        let run = try await run(windowPresence: .unknown, agent: agent)
+    /// A server still listening means the session may still be running in
+    /// tmux. The row is left as it is, and the person is told how to end the
+    /// session and then move it; the code tells the app to keep its notice.
+    @Test("a tmux server still running refuses, and leaves the row live", arguments: Agent.allCases)
+    func runningServerRefusesAndLeavesTheRowAlone(agent: Agent) async throws {
+        let run = try await run(server: .running, agent: agent)
 
         #expect(!run.response.success)
-        #expect(run.response.error == RPCRouter.unansweredWindowProbeRefusal(
-            terminalID: run.terminalID))
+        #expect(run.response.knownErrorCode == .terminalOnTmux)
+        #expect(run.response.error == LeftoverTmuxSession.stillRunningRefusal(
+            terminalID: run.terminalID, server: "tbd-recreate"))
         #expect(run.after == run.before,
-                "an unanswered probe mutated the row it was supposed to leave alone")
-        #expect(!run.tmuxCalls.contains { $0.contains("kill-window") },
-                "an unanswered probe killed a window: \(run.tmuxCalls)")
+                "a refused recreate mutated the row it was supposed to leave alone")
+        #expect(run.after.hibernatedAt == nil, "a row still running in tmux was parked")
+        #expect(run.tmuxCalls.isEmpty, "recreateWindow reached tmux: \(run.tmuxCalls)")
     }
 
-    /// Positive evidence parks. Without this the tri-state could be satisfied
-    /// by a handler that never acts.
-    ///
-    /// The row stays on tmux and keeps everything a wake resumes from — the
-    /// Claude session id, or the Codex thread id and launch options — so a
-    /// migration followed by a wake brings the session back on the holder.
-    /// No window is opened: TBD starts nothing on tmux.
-    @Test("a window tmux says is gone is parked with its identity kept", arguments: Agent.allCases)
-    func absentProbeParks(agent: Agent) async throws {
-        let run = try await run(windowPresence: .absent, agent: agent)
+    /// A server positively gone parks. The row stays on tmux and keeps
+    /// everything a wake resumes from — the Claude session id, or the Codex
+    /// thread id and launch options — so a migration followed by a wake brings
+    /// the session back on the holder. Nothing reaches tmux.
+    @Test("a tmux server that is gone parks the row with its identity kept", arguments: Agent.allCases)
+    func absentServerParks(agent: Agent) async throws {
+        let run = try await run(server: .absent, agent: agent)
 
-        #expect(run.response.success, "the re-park was refused: \(run.response.error ?? "")")
+        #expect(run.response.success, "the park was refused: \(run.response.error ?? "")")
         let returned = try run.response.decodeResult(TBDShared.Terminal.self)
         #expect(returned.isParked, "the response did not carry the parked row")
-        #expect(run.after.hibernatedAt != nil,
-                "the tri-state probe stopped recreateWindow acting on positive evidence")
+        #expect(returned.id == run.terminalID)
+        #expect(run.after.hibernatedAt != nil, "the row was not parked")
+        #expect(run.after.hibernateReason == .recovery)
         #expect(run.after.claudeSessionID == run.before.claudeSessionID,
                 "the park discarded the session identity it exists to preserve")
         #expect(run.after.kind == run.before.kind, "the park changed the tab's kind")
@@ -166,22 +167,41 @@ struct RecreateWindowProbeTests {
                 "the park discarded the recorded Codex launch options")
         #expect(run.after.transport == .tmux,
                 "the park moved the row off tmux without a migration")
-        #expect(run.tmuxCalls.contains { $0.contains("kill-window") },
-                "the park did not eliminate the dead pane: \(run.tmuxCalls)")
-        #expect(!run.tmuxCalls.contains { $0.contains("new-window") || $0.contains("respawn-window") },
-                "recreateWindow started something on tmux: \(run.tmuxCalls)")
+        #expect(run.tmuxCalls.isEmpty, "recreateWindow reached tmux: \(run.tmuxCalls)")
     }
 
-    /// A live window means the request was stale. Unchanged behaviour: succeed,
-    /// touch nothing.
-    @Test("a live window is a stale request and is ignored", arguments: Agent.allCases)
-    func aliveProbeIgnoresTheRequest(agent: Agent) async throws {
-        let run = try await run(windowPresence: .alive, agent: agent)
+    /// A row already parked has nothing running to look for: the request is
+    /// answered with the row as it is, and the probe is not asked.
+    @Test("a parked tmux row is returned unchanged without asking the probe")
+    func parkedRowIsReturnedUnchanged() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let seeded = try await seedTerminal(db, worktreeID: wt.id, agent: .claude)
+        try await db.terminals.setHibernated(id: seeded.id, sessionID: "sess-recreate")
+        let terminal = try #require(try await db.terminals.get(id: seeded.id))
+        let before = RowFingerprint(terminal)
 
-        #expect(run.response.success)
-        #expect(run.after == run.before,
-                "a stale recreate request mutated a row whose window is alive")
-        #expect(!run.tmuxCalls.contains { $0.contains("kill-window") },
-                "a stale recreate request killed a live window: \(run.tmuxCalls)")
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in
+            Issue.record("a parked row must not be probed")
+            return .running
+        }
+        let router = RPCRouter(
+            db: db, lifecycle: lifecycle, tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
+
+        #expect(response.success, "error: \(response.error ?? "")")
+        #expect(try response.decodeResult(TBDShared.Terminal.self).id == terminal.id)
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+        #expect(recorded.snapshot().isEmpty)
     }
 }

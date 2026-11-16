@@ -70,12 +70,6 @@ extension RPCRouter {
             return RPCResponse(
                 error: RPCRouter.unparkedWakeMessage(paneID: paneID, detail: detail),
                 code: RPCErrorCode.terminalSessionGone.rawValue)
-        case .paneUnreadable(let paneID, let server):
-            // The read failed; nothing is known about the session. Same honest
-            // answer as `terminal.wake`, and the same refusal to claim it is
-            // gone.
-            return RPCResponse(
-                error: RPCRouter.unreadablePaneWakeMessage(paneID: paneID, server: server))
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         case .noSessionID:
@@ -83,7 +77,8 @@ extension RPCRouter {
         case .notAClaudeTab(let kind):
             return RPCResponse(error: ClaudeResumeDecision.notAClaudeTabReason(kind))
         case .respawnFailed(let reason):
-            // The terminal row exists — the tmux respawn/recreate failed.
+            // The terminal row exists — the wake could not start the session
+            // (a holder that failed to spawn, or a row still on tmux).
             // Surface the real failure, never "Terminal not found".
             return RPCResponse(error: reason)
         case .worktreeMissing(let path):
@@ -92,8 +87,6 @@ extension RPCRouter {
             return RPCResponse(
                 error: "This session was pinned to an account profile (\(profileID.uuidString)) that no longer exists. It stays parked and resumable — wake it on your default account, or restore the profile and retry.",
                 code: RPCErrorCode.profileMissing.rawValue)
-        case .paneBusy(let pid):
-            return RPCResponse(error: HibernationCoordinator.paneBusyRefusal(pid: pid))
         case .conditionNotMet:
             // Unreachable: this wake names no condition. Listed so a new
             // WakeResult case is classified here deliberately, and an error

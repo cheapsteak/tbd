@@ -469,7 +469,6 @@ struct PeerBridgeWiringTests {
             terminalID: UUID(),
             displayName: "useful-swallow",
             worktreePath: "/tmp/tbd-peer-bridge-fixture/useful-swallow",
-            tmuxPaneID: "%3541",
             claudeSessionID: fixtureSessionID)
     }
 

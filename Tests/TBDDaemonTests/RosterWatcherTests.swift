@@ -58,7 +58,6 @@ private func spawnedSession(
     repoID: UUID = repoA,
     displayName: String = "useful-swallow",
     worktreePath: String = "/tmp/tbd-roster-fixture/useful-swallow",
-    pane: String = "%3541",
     claudeSessionID: String? = "4E12DD65-92B8-4D8E-9920-214C6553FC63",
     terminalID: UUID = fixtureTerminalID,
     permissionClass: ShadowPeerPermissionClass? = .bypass
@@ -69,7 +68,6 @@ private func spawnedSession(
         terminalID: terminalID,
         displayName: displayName,
         worktreePath: worktreePath,
-        tmuxPaneID: pane,
         claudeSessionID: claudeSessionID,
         permissionClass: permissionClass)
 }
@@ -380,7 +378,7 @@ struct RosterWatcherScopingTests {
     /// Only TBD-spawned sessions are mirrored — never a plain-terminal
     /// `claude`, never another profile's. The record here is a perfectly valid
     /// live session that TBD's own bookkeeping does not know: no captured
-    /// session id matches it, and neither its `cwd` nor its pane joins.
+    /// session id matches it.
     @Test func aSessionTBDDidNotSpawnIsNeverAnnounced() async throws {
         try await withRegistry { directory in
             try write(
@@ -420,7 +418,6 @@ struct RosterWatcherScopingTests {
                     repoID: repoB,
                     displayName: "other-repo-worktree",
                     worktreePath: "/tmp/tbd-roster-fixture/other-repo-worktree",
-                    pane: "%99",
                     claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000",
                     terminalID: UUID()),
             ])
@@ -450,28 +447,14 @@ struct RosterWatcherScopingTests {
         }
     }
 
-    /// The second join: a session whose `SessionStart` hook never gave TBD a
-    /// session id is still recognisable from its worktree directory **and** its
-    /// pane. Both halves are required — the pane alone is unique only within
-    /// one tmux server, and TBD runs one per repository beside whatever servers
-    /// the user runs.
-    @Test func theCWDAndPaneJoinAdmitsASessionWithNoCapturedSessionID() async throws {
+    /// The session id is the only join. A session whose `SessionStart` hook
+    /// never gave TBD a session id is not announced, even when the record's
+    /// `cwd` is that terminal's worktree and its `tmux` names that terminal's
+    /// pane: a directory holds TBD's sessions and the user's alike, and TBD no
+    /// longer reads tmux coordinates.
+    @Test func aSessionWithNoCapturedSessionIDIsNotAnnounced() async throws {
         try await withRegistry { directory in
-            try write(registryRecord(), pid: 4242, in: directory)
-            let sessions = FakeSessionDirectory([spawnedSession(claudeSessionID: nil)])
-            let sink = FrameSink()
-            let subject = watcher(directory: directory, sessions: sessions)
-            await subject.addLink(link(sink: sink))
-
-            #expect(peers(await sink.drain()).map(\.name) == ["laptop:useful-swallow 5A1B2C3D"])
-        }
-    }
-
-    /// The same worktree, a different pane: the record describes a session in a
-    /// directory TBD manages that is not one of TBD's terminals. Not announced.
-    @Test func aMatchingCWDWithAForeignPaneIsNotAnnounced() async throws {
-        try await withRegistry { directory in
-            try write(registryRecord(tmux: "main:@8888.%8888"), pid: 4242, in: directory)
+            try write(registryRecord(tmux: "main:@3541.%3541"), pid: 4242, in: directory)
             let sessions = FakeSessionDirectory([spawnedSession(claudeSessionID: nil)])
             let sink = FrameSink()
             let subject = watcher(directory: directory, sessions: sessions)
@@ -479,6 +462,7 @@ struct RosterWatcherScopingTests {
 
             #expect(await sink.drain().isEmpty)
             #expect(await subject.lastScanReport().skippedNotTBDSpawned == 1)
+            #expect(await subject.lastScanReport().admitted == 0)
         }
     }
 }
@@ -1009,7 +993,6 @@ struct RosterWatcherReconnectTests {
             let second = spawnedSession(
                 displayName: "zesty-otter",
                 worktreePath: "/tmp/tbd-roster-fixture/zesty-otter",
-                pane: "%3542",
                 claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000",
                 terminalID: UUID())
             try write(registryRecord(), pid: 4242, in: directory)
@@ -1060,13 +1043,11 @@ struct RosterWatcherReconnectTests {
             let brisk = spawnedSession(
                 displayName: "brisk-otter",
                 worktreePath: "/tmp/tbd-roster-fixture/brisk-otter",
-                pane: "%3542",
                 claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000",
                 terminalID: UUID())
             let cheerful = spawnedSession(
                 displayName: "cheerful-moth",
                 worktreePath: "/tmp/tbd-roster-fixture/cheerful-moth",
-                pane: "%3543",
                 claudeSessionID: "CCCCCCCC-0000-0000-0000-000000000000",
                 terminalID: UUID())
             try write(registryRecord(), pid: 4242, in: directory)
@@ -1211,7 +1192,6 @@ struct DatabaseLocalSessionDirectoryTests {
         #expect(session.terminalID == made.terminal.id)
         #expect(session.displayName == "useful-swallow")
         #expect(session.worktreePath == made.worktree.localPath)
-        #expect(session.tmuxPaneID == "%3541")
         #expect(session.claudeSessionID == "4E12DD65-92B8-4D8E-9920-214C6553FC63")
         // Every Claude terminal TBD spawns is launched with
         // `--dangerously-skip-permissions`, so the directory vouches `bypass`.
@@ -1219,8 +1199,8 @@ struct DatabaseLocalSessionDirectoryTests {
     }
 
     /// A session whose hook never fired carries no Claude session id, and is
-    /// still returned: the roster falls back to the cwd-plus-pane join, and a
-    /// directory that dropped these rows would take that whole join with it.
+    /// still returned: the directory reports TBD's bookkeeping as it stands, and
+    /// whether a record joins the row is the roster's decision, not this one's.
     @Test func aClaudeSessionWithNoCapturedSessionIDIsStillReturned() async throws {
         let db = try makeDB()
         let repo = try await makeRepo(db)
@@ -1345,9 +1325,8 @@ struct DatabaseLocalSessionDirectoryTests {
 /// a transport coordinate.
 ///
 /// A holder-backed terminal has no tmux pane — its row carries an empty
-/// `tmuxPaneID` — so a pane discriminator gave every holder tab in a worktree
-/// the same name (`… %`), and a tmux terminal woken from a park, which gets a
-/// new pane, came back under a different name. Every fixture here goes through the
+/// `tmuxPaneID` — so a pane discriminator would give every holder tab in a
+/// worktree the same name (`… %`). Every fixture here goes through the
 /// stores' creation paths and the production `DatabaseLocalSessionDirectory`,
 /// so the terminal ids and the empty pane are the ones a real row carries.
 @Suite("Roster watcher — the announced name")
@@ -1428,27 +1407,26 @@ struct RosterWatcherAnnouncedNameTests {
         }
     }
 
-    /// A wake resumes a parked tmux terminal as a new process, on a new socket,
-    /// in a new pane. The roster withdraws the old handle and announces a new
-    /// one — that is unavoidable — but the terminal row is the same, so the
-    /// re-announced peer carries the name its peers already knew. A
-    /// pane-derived name would come back as `… %4100`.
+    /// A wake resumes a parked terminal as a new process, on a new socket. The
+    /// roster withdraws the old handle and announces a new one — that is
+    /// unavoidable — but the terminal row is the same, so the re-announced
+    /// peer carries the name its peers already knew.
     @Test func aWokenTerminalComesBackUnderTheSameName() async throws {
         try await withRegistry { directory in
             try write(registryRecord(), pid: 4242, in: directory)
             let sink = FrameSink()
-            let sessions = FakeSessionDirectory([spawnedSession(pane: "%3541")])
+            let sessions = FakeSessionDirectory([spawnedSession()])
             let subject = watcher(directory: directory, sessions: sessions)
             await subject.addLink(link(sink: sink))
             let first = try #require(peers(await sink.drain()).first)
             #expect(first.name == "laptop:useful-swallow 5A1B2C3D")
 
             // Park then wake: the old process and its record are gone, and
-            // the resumed one registers under a new pid, socket and pane.
+            // the resumed one registers under a new pid and socket.
             try remove(pid: 4242, in: directory)
-            await sessions.replace([spawnedSession(pane: "%4100")])
+            await sessions.replace([spawnedSession()])
             try write(
-                registryRecord(socket: "/tmp/cc-socks/4343.sock", tmux: "main:@4100.%4100"),
+                registryRecord(socket: "/tmp/cc-socks/4343.sock", tmux: nil),
                 pid: 4343, in: directory)
             await subject.refresh()
 

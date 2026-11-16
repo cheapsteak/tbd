@@ -903,7 +903,6 @@ private struct AlwaysAliveSignaller: ProcessSignaller {
     func isAlive(_ pid: Int32) -> Bool { true }
     func terminate(_ pid: Int32) {}
     func forceKill(_ pid: Int32) {}
-    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
     func commandLine(_ pid: Int32) -> String? { "/bin/sh" }
     func stat(_ pid: Int32) -> String? { "S" }
     func startTime(_ pid: Int32) -> Date? { Date() }
@@ -933,7 +932,6 @@ private final class StrangerSignaller: ProcessSignaller, @unchecked Sendable {
     func forceKillProcessOnly(_ pid: Int32) {
         lock.withLock { calls.append("forceKillProcessOnly(\(pid))") }
     }
-    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
     func commandLine(_ pid: Int32) -> String? { "/bin/sh" }
     func stat(_ pid: Int32) -> String? { "S" }
     /// Two hours before any row in this suite was written — far outside
@@ -1185,9 +1183,7 @@ private final class HibernationFixture {
             // there would fail this test for scheduling rather than for
             // behaviour. A caller that has arranged for a poll to fail every
             // time overrides its budget, since there the generosity is pure
-            // wall time. `exitPollAttempts` paces only the tmux park, which no
-            // holder row reaches.
-            exitPollAttempts: 2,
+            // wall time.
             exitPollInterval: .milliseconds(100),
             holderTerminateAttempts: holderTerminateAttempts,
             holderEscalationAttempts: holderEscalationAttempts,

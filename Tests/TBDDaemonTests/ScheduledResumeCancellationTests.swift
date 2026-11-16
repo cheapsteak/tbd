@@ -120,9 +120,18 @@ import TestSupport
         // the cancel here is wired inside HibernationCoordinator itself, at
         // the point of the real state transition — not unconditionally
         // upfront — so the hibernate must actually succeed to observe it).
+        //
+        // It is a holder row whose holder and job are both gone, so the park
+        // finishes without a live holder. Its pids are above macOS's pid
+        // range, so the real process table the router's coordinator asks
+        // finds nothing at either; the holder's liveness is the seam.
         let hibTerminal = try await db.terminals.create(
-            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2",
-            claudeSessionID: "sess-hib", kind: .claude)
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            claudeSessionID: "sess-hib", kind: .claude, transport: .holder,
+            holderPID: 1_900_000_401, childPID: 1_900_000_402, holderChildStartedAt: Date())
+        await router.hibernationCoordinator.setHolderRegistry(
+            makeHolderRegistryDouble(launch: FakeHolderLaunch()))
+        await router.hibernationCoordinator.setHolderProcessIsLive { _ in false }
         try await db.terminals.setActivityState(id: hibTerminal.id, activityState: .idle, source: .derived)
         _ = try await db.scheduledResumes.insertPending(ScheduledResume(
             terminalID: hibTerminal.id, worktreeID: worktreeID,

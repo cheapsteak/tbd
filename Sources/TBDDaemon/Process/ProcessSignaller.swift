@@ -23,9 +23,6 @@ public protocol ProcessSignaller: Sendable {
     func terminateProcessOnly(_ pid: Int32)
     /// Send SIGKILL to exactly this pid, never to its process group.
     func forceKillProcessOnly(_ pid: Int32)
-    /// Pids whose parent pid == `serverPID` (one generation; tmux panes are
-    /// direct children of the server process).
-    func children(ofServerPID serverPID: Int32) -> [Int32]
     /// Full command line of the pid (for the TBD ownership fingerprint), or nil.
     func commandLine(_ pid: Int32) -> String?
     /// `ps -o stat=` for the pid (e.g. "S+", "Ss"), or nil when the pid is
@@ -93,17 +90,6 @@ public struct ProductionProcessSignaller: ProcessSignaller {
         } else {
             _ = Foundation.kill(pid, sig)
         }
-    }
-
-    public func children(ofServerPID serverPID: Int32) -> [Int32] {
-        guard let out = runPS(["-axo", "pid=,ppid="]) else { return [] }
-        var result: [Int32] = []
-        for line in out.split(separator: "\n") {
-            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
-            guard parts.count == 2, let p = Int32(parts[0]), let pp = Int32(parts[1]) else { continue }
-            if pp == serverPID { result.append(p) }
-        }
-        return result
     }
 
     public func commandLine(_ pid: Int32) -> String? {

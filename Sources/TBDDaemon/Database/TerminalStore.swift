@@ -1873,12 +1873,12 @@ public struct TerminalStore: Sendable {
     /// legacy semantics (the row is still eligible for wake-on-focus).
     ///
     /// Park sites whose process is already replaced use this complete
-    /// transition. `HibernationCoordinator.performHibernate` instead uses the
-    /// staged begin/finalize pair below so a failed first tmux replacement can
-    /// retain a still-running agent's token. Both paths cancel any scheduled
-    /// auto-resume atomically with their park intent: while a row is parked, a
-    /// resume must not type into either the outgoing agent or its replacement
-    /// shell. Wake (`clearHibernated`) deliberately does not resurrect the
+    /// transition. The holder park (`HibernationCoordinator.performHibernate`)
+    /// instead uses the staged begin/finalize pair below, so a park that fails
+    /// before its agent has ended keeps that agent's token. Both paths cancel
+    /// any scheduled auto-resume atomically with their park intent: while a
+    /// row is parked, a resume must not type into either the outgoing agent or
+    /// its replacement shell. Wake (`clearHibernated`) deliberately does not resurrect the
     /// cancelled row.
     public func setHibernated(id: UUID, sessionID: String, snapshot: String? = nil, reason: HibernateReason? = nil, at date: Date = Date()) async throws {
         _ = try await persistHibernatedState(
@@ -1890,13 +1890,13 @@ public struct TerminalStore: Sendable {
             at: date)
     }
 
-    /// Record the hibernation intent before replacing the live agent. The
-    /// current process token remains intact until tmux has replaced that
-    /// process with an inert pane, so startup reconciliation can safely unpark
-    /// a still-running agent after a crash or failed respawn. A pending token
-    /// makes process-bound hook writes inert during this interval; finalize
-    /// promotes it once replacement is confirmed. A process-incarnation
-    /// mismatch rejects without writing and returns nil.
+    /// Record the hibernation intent before ending the live agent. The
+    /// current process token remains intact until the agent is confirmed
+    /// ended, so startup reconciliation can safely unpark a still-running
+    /// agent after a crash or a failed park. A pending token makes
+    /// process-bound hook writes inert during this interval; finalize promotes
+    /// it once the agent is confirmed ended. A process-incarnation mismatch
+    /// rejects without writing and returns nil.
     func beginHibernatedShellRespawn(
         id: UUID,
         expectedState: TerminalHibernationSnapshot,
@@ -1927,9 +1927,10 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Fence the process that tmux has already replaced with an inert pane.
-    /// The returned token belongs to the hibernated shell launched next; all
-    /// ordering and activity evidence from the former agent clears atomically.
+    /// Fence the agent process the park has confirmed ended (or, for a
+    /// leftover tmux row, the one that ended with its tmux server). The
+    /// returned token belongs to whatever the row runs next; all ordering and
+    /// activity evidence from the former agent clears atomically.
     /// A process-incarnation mismatch rejects without writing and returns nil.
     func finalizeHibernatedShellRespawn(
         id: UUID,

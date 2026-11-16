@@ -18,7 +18,7 @@ import TBDShared
 // Two layers write, and only two: the **RPC handler** for anything a caller
 // asked for, and a **rail's own entry point** for anything the daemon started
 // by itself. The shared lifecycle internals in between — `captureThenKillWindow`,
-// `killWindowAndReap`, `performHibernate`, `closeScratchTerminals` — stay
+// `tearDownWindow`, `performHibernate`, `closeScratchTerminals` — stay
 // silent, because both `worktree.archive` and the boot-time reconcile sweep
 // reach them and a row down there would double-count every archive. Reconcile
 // is an entry point in its own right (boot is what invoked it), so its rows are

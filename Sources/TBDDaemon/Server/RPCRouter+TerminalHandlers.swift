@@ -81,46 +81,6 @@ actor TranscriptParseCache {
     }
 }
 
-// MARK: - The pane consultation's verdict
-
-/// A pane consultation that came back "do not type here", with the outcome the
-/// record gets and the message the caller sees.
-///
-/// One type for both typing paths — the send handler and the verifier's
-/// retry — so a decline cannot be classified two ways depending on which one
-/// asked.
-///
-/// `outcome` is the full `ActuationOutcome` rather than a `RefusedReason`
-/// because not every "do not type here" is a refusal: a consultation that could
-/// not reach the server declined nothing about the target, and carries
-/// `.transportFailed` instead. Collapsing that into a refusal reason would make
-/// the record claim the daemon decided something it never learned.
-struct PaneSendRefusal: Sendable {
-    let outcome: ActuationOutcome
-    let message: String
-}
-
-/// What the locked re-park closure in `handleTerminalRecreateWindow` concluded.
-///
-/// Three outcomes rather than a `didPark` flag, because the window probe is
-/// tri-state and each answer means something different to the caller: the row
-/// was parked, the window turned out to be alive so the request was stale, or
-/// tmux never answered and nothing was touched. Collapsing the last two would
-/// report a transport that could not be reached as a healthy window, which is
-/// the direction that loses a session.
-enum RecreateReparkOutcome: Sendable {
-    case parked(Terminal?)
-    case windowAlive(Terminal?)
-    case probeUnanswered(Terminal?)
-
-    var terminal: Terminal? {
-        switch self {
-        case let .parked(terminal), let .windowAlive(terminal), let .probeUnanswered(terminal):
-            return terminal
-        }
-    }
-}
-
 extension RPCRouter {
 
     // MARK: - Terminal Handlers
@@ -377,8 +337,7 @@ extension RPCRouter {
             // TBD_TEST_CODEX_HOME test-isolation override flow through.
             codexEnv["CODEX_HOME"] = codexPreparation.codexHome.path
             // COLORFGBG isn't Claude-specific — Codex shells benefit from it too,
-            // so include it at spawn time. (Live updates also reach Codex via
-            // `tmux setenv -g COLORFGBG` fanned out by handleAppearanceUpdateColorFgBg.)
+            // so include it at spawn time.
             if let colorFgBg = params.colorFgBg {
                 codexEnv["COLORFGBG"] = colorFgBg
             }
@@ -1473,17 +1432,6 @@ extension RPCRouter {
         "This tab's window is gone, and nothing that ran in it can move to the pty holder; "
         + "close the tab and open a new one, which starts on the pty holder."
 
-    /// A sibling of `holderRecreateRefusal` for the same reason: one named
-    /// factory per refusal, so the app, the CLI and the tests assert the same
-    /// text. This one is not about a transport that has no window — it is
-    /// about a window whose state could not be established, which is a retry
-    /// rather than a category error.
-    static func unansweredWindowProbeRefusal(terminalID: UUID) -> String {
-        "tmux did not answer whether terminal \(terminalID)'s window is still "
-            + "there within \(TmuxManager.commandTimeout). The window was left "
-            + "alone and the session is unchanged — retry once tmux responds."
-    }
-
     /// The refusal `terminal.swapProfile` returns for an in-place switch of a
     /// running row still on the tmux transport: the switch replaces the
     /// session's process, which TBD no longer does on tmux.
@@ -1492,23 +1440,32 @@ extension RPCRouter {
             terminalID: terminalID, retry: "switch its account again")
     }
 
-    /// `terminal.recreateWindow` never opens a window. TBD starts sessions only
-    /// on the pty holder, so for a tmux row whose window has gone it does the
-    /// one thing that still makes sense, and refuses everything else:
+    /// `terminal.recreateWindow` is the app's Check Again for a tmux row. TBD
+    /// starts sessions only on the pty holder and no longer drives tmux, so
+    /// this never opens a window. What it does depends on the row:
     ///
-    /// - **A tmux agent row with a session to resume** — Claude, or Codex with
-    ///   a recorded thread — is parked in place with its identity kept, and the
-    ///   parked row is returned. Nothing is spawned. The parked row is what
-    ///   tells the person what happened: a wake of a row parked on tmux
-    ///   refuses and names `tbd terminal migrate`, and the app's parked notice
-    ///   says the same, so the session comes back through a migration followed
-    ///   by a wake.
-    /// - **Any other tmux row** — a shell, an agent tab whose session never
-    ///   began, a hook tab — has nothing a park could keep, so it is refused
-    ///   and left exactly as it was. The refusal says what to do: migrate a
-    ///   shell, close and reopen a tab the migration cannot move
-    ///   (`tmuxRecreateRefusal(for:)`).
     /// - **A holder row** has no tmux window to recreate and is refused.
+    /// - **A parked tmux row** is already where a migration moves it from, so
+    ///   it is returned unchanged.
+    /// - **A live tmux row** gets the socket probe's answer about the tmux
+    ///   server its worktree names (`LeftoverTmuxServerProbe`):
+    ///   - **Running** – its agent may still be working there, so the row
+    ///     stays live and the request is refused with the command that ends
+    ///     the server (`LeftoverTmuxSession.stillRunningRefusal`).
+    ///   - **Gone, with a session to resume** – Claude, or Codex with a
+    ///     recorded thread – the row is parked with its identity kept, and the
+    ///     parked row is returned. Nothing is spawned. A wake of a row parked
+    ///     on tmux refuses and names `tbd terminal migrate`, and the app's
+    ///     parked notice says the same, so the session comes back through a
+    ///     migration followed by a wake.
+    ///   - **Gone, with nothing to resume** – a shell, an agent tab whose
+    ///     session never began, a hook tab – nothing a park could keep, so it
+    ///     is refused and left exactly as it was. The refusal says what to do:
+    ///     migrate a shell, close and reopen a tab the migration cannot move
+    ///     (`tmuxRecreateRefusal(for:)`).
+    ///
+    /// Every tmux refusal carries `RPCErrorCode.terminalOnTmux`, which the app
+    /// reads, rather than the text, to hide its Retry.
     func handleTerminalRecreateWindow(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -1517,14 +1474,26 @@ extension RPCRouter {
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
-        // Taken BEFORE the worktree lookup: everything downstream exists only
-        // to name a tmux server and window this row does not have. The guard is
-        // the only thing standing between a holder row and the re-park below,
-        // whose probe can only ever answer "gone" for `tmuxWindowID == ""` —
-        // which would park a resumable row whose holder and child are still
-        // running.
+        // Taken before the probe: a holder row names no tmux server, and the
+        // park below is built for a row whose server is gone. Reaching it with
+        // a holder row would park a session whose holder and child still run.
         guard terminal.transport != .holder else {
             return RPCResponse(error: Self.holderRecreateRefusal(terminalID: terminal.id))
+        }
+        guard !terminal.isParked else {
+            return try RPCResponse(result: terminal)
+        }
+        guard let sighting = await lifecycle.leftoverTmuxServerSighting(for: terminal) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+        // Parked only on positive evidence that the server is gone: parking a
+        // row whose agent still runs would let a later wake start a second
+        // agent on the same session id.
+        guard sighting.state == .absent else {
+            return RPCResponse(
+                error: LeftoverTmuxSession.stillRunningRefusal(
+                    terminalID: terminal.id, server: sighting.server),
+                code: RPCErrorCode.terminalOnTmux.rawValue)
         }
         // A row with no agent session to keep would be recreated as a shell,
         // which TBD no longer does on tmux.
@@ -1533,113 +1502,21 @@ extension RPCRouter {
                 error: Self.tmuxRecreateRefusal(for: terminal),
                 code: RPCErrorCode.terminalOnTmux.rawValue)
         }
-        guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
-            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
-        }
-        return try await reparkTmuxAgentRow(
-            terminal, plan: plan, worktree: worktree, actor: actor)
-    }
-
-    /// Park a tmux agent row whose window has gone, preserving the identity a
-    /// wake resumes from — the Claude session id and transcript, or the Codex
-    /// thread id and launch options — so the session is not lost with its
-    /// window. Mirrors what startup reconcile does for the same row.
-    ///
-    /// A resumable terminal whose window died must never be recreated as a
-    /// plain shell: that silently turns the tab into a shell and discards the
-    /// session identity, so nothing could resume it any more.
-    private func reparkTmuxAgentRow(
-        _ terminal: Terminal, plan: AgentResumePlan,
-        worktree: LocalWorktree, actor: ActuationActor?
-    ) async throws -> RPCResponse {
-        let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
-        // Record the request before waiting on the shared server lock. The row
-        // is not mutated until the post-lock snapshot check below.
         let reparkID = try await beginActuation(
             .recreateWindowRepark, actor: actor,
-            target: .local(worktree: worktree.id, terminal: terminal.id))
-        let repark = try await actuating(reparkID) {
-            try await tmux.withWorktreeServerLock(
-                db: db, worktreeID: worktree.id,
-                allowedStatuses: [worktree.status]
-            ) { currentWorktree -> RecreateReparkOutcome in
-                guard let currentTerminal = try await self.db.terminals.get(
-                    id: terminal.id),
-                      expectedReplacementState.matches(currentTerminal),
-                      currentTerminal.transport != .holder,
-                      currentTerminal.recoveryResumePlan?.identity == plan.identity else {
-                    throw StaleTerminalReplacementError()
-                }
-
-                // Tri-state, because both arms below act: a `false` here would
-                // park a resumable row and then `killWindow` it. The `Bool`
-                // probe answers `false` on a timeout, so a recreate arriving
-                // while the machine is busy would park and kill a session that
-                // is alive and working. Ignorance is reported back to the
-                // caller instead, and nothing is touched.
-                switch await self.tmux.probeWindow(
-                    server: currentWorktree.tmuxServer,
-                    windowID: currentTerminal.tmuxWindowID
-                ) {
-                case .alive:
-                    logger.info("recreateWindow: window \(currentTerminal.tmuxWindowID, privacy: .public) for terminal \(currentTerminal.id, privacy: .public) is alive — ignoring stale recreate request")
-                    return .windowAlive(currentTerminal)
-                case .unknown:
-                    logger.warning("recreateWindow: tmux gave no usable answer about window \(currentTerminal.tmuxWindowID, privacy: .public) for terminal \(currentTerminal.id, privacy: .public) — refusing rather than parking and killing on ignorance")
-                    return .probeUnanswered(currentTerminal)
-                case .absent:
-                    break
-                }
-
-                let currentState = TerminalHibernationSnapshot(terminal: currentTerminal)
-                guard let inertIncarnation = try await self.db.terminals
-                    .beginHibernatedShellRespawn(
-                        id: currentTerminal.id,
-                        expectedState: currentState,
-                        at: self.now()) else {
-                    throw StaleTerminalReplacementError()
-                }
-
-                // No `paneOwnership` check needed: the probe above already
-                // returned `.absent` — tmux's own definitive "no such window"
-                // answer — so there is no live occupant for a pane-identity
-                // probe to protect. And this closure runs inside
-                // `withWorktreeServerLock`, so nothing can race a fresh window
-                // into this coordinate between the probe and this kill.
-                try? await self.tmux.killWindow(
-                    server: currentWorktree.tmuxServer,
-                    windowID: currentTerminal.tmuxWindowID)
-                guard try await self.db.terminals.finalizeHibernatedShellRespawn(
-                    id: currentTerminal.id,
-                    expectedIncarnation: inertIncarnation,
-                    at: self.now()) != nil else {
-                    throw StaleTerminalReplacementError()
-                }
-                await self.pendingQuestions.clear(terminalID: currentTerminal.id)
-                await self.broadcastPendingPrompts(terminalID: currentTerminal.id)
-                return .parked(try await self.db.terminals.get(id: currentTerminal.id))
-            }
+            target: .local(worktree: terminal.worktreeID, terminal: terminal.id))
+        let parked = try await actuating(reparkID) {
+            try await lifecycle.parkLeftoverTmuxRow(terminal)
         }
-        if case .probeUnanswered = repark {
-            let refusal = Self.unansweredWindowProbeRefusal(terminalID: terminal.id)
-            // `transportFailed`, not a refusal: the daemon did not decline this
-            // act, it could not reach the transport to perform it.
-            await finishActuation(reparkID, .transportFailed, error: refusal)
+        guard let parked else {
+            let refusal = "Terminal \(terminal.id) changed before TBD could park it, "
+                + "and was left as it is. Check again to look at it afresh."
+            await finishActuation(reparkID, .refused(.notEligible), error: refusal)
             return RPCResponse(error: refusal)
         }
-        guard let updated = repark.terminal else {
-            await finishActuation(
-                reparkID, .refused(.notFound), error: "Terminal not found after suspend")
-            return RPCResponse(error: "Terminal not found after suspend")
-        }
-        guard case .parked = repark else {
-            await finishActuation(
-                reparkID, .refused(.notEligible), error: "Terminal window is alive")
-            return try RPCResponse(result: updated)
-        }
         await finishActuation(reparkID, .dispatched)
-        logger.notice("recreateWindow: parked \(plan.identity.agentKind.rawValue, privacy: .public) terminal \(terminal.id, privacy: .public) on tmux — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(plan.identity.sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
-        return try RPCResponse(result: updated)
+        logger.notice("recreateWindow: parked \(plan.identity.agentKind.rawValue, privacy: .public) terminal \(terminal.id, privacy: .public) on tmux — its server \(sighting.server, privacy: .public) is gone, session \(plan.identity.sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
+        return try RPCResponse(result: parked)
     }
 
     func handleTerminalOutput(_ paramsData: Data) async throws -> RPCResponse {
@@ -1649,29 +1526,43 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
 
-        // A holder-backed session has no tmux coordinate to capture — its
-        // `tmuxPaneID` is empty and the repo's server may never have been
-        // started — so the branch is taken BEFORE the worktree lookup that only
-        // exists to name that server. The daemon's own emulator, fed by the
-        // reader that drains this session's pty, is the screen.
-        if terminal.transport == .holder {
-            return try await holderTerminalOutput(terminal: terminal, params: params)
+        // The daemon's own emulator, fed by the reader that drains this
+        // session's pty, is the screen. A tmux row has none, and TBD no longer
+        // reads tmux panes.
+        guard terminal.transport == .holder else {
+            guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
+                return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+            }
+            return RPCResponse(
+                error: Self.tmuxRowRefusal(
+                    for: terminal, server: worktree.tmuxServer,
+                    retry: "wake it and read its output again"),
+                code: RPCErrorCode.terminalOnTmux.rawValue)
         }
+        return try await holderTerminalOutput(terminal: terminal, params: params)
+    }
 
-        guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
-            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+    /// The refusal for a request that would have to reach a tmux row's
+    /// session: `terminal.output`, and `terminal.send` in every form. TBD no
+    /// longer reads or types into tmux panes, so each of them refuses with
+    /// `RPCErrorCode.terminalOnTmux`, and the words depend on the row:
+    ///
+    /// - **Parked** – nothing runs, so the migration can move the row, and the
+    ///   refusal names it (`TerminalTransportMigrator.migrateFirstRefusal`).
+    ///   `retry` finishes that sentence: what to do once the row is on the pty
+    ///   holder, where it is still parked.
+    /// - **Live** – its session may still be running in a tmux server an
+    ///   earlier build started, so the refusal names the command that ends the
+    ///   server (`LeftoverTmuxSession.stillRunningRefusal`). No probe runs
+    ///   here: reconcile and Check Again park the row once the server is gone,
+    ///   and until then these are the right words.
+    ///
+    /// `server` is the tmux server the row's worktree names.
+    static func tmuxRowRefusal(for terminal: Terminal, server: String, retry: String) -> String {
+        guard terminal.isParked else {
+            return LeftoverTmuxSession.stillRunningRefusal(terminalID: terminal.id, server: server)
         }
-
-        let rawOutput = try await tmux.capturePaneOutput(
-            server: worktree.tmuxServer,
-            paneID: terminal.tmuxPaneID
-        )
-
-        let lines = params.lines ?? 50
-        let outputLines = rawOutput.split(separator: "\n", omittingEmptySubsequences: false)
-        let trimmed = outputLines.suffix(lines).joined(separator: "\n")
-
-        return try RPCResponse(result: TerminalOutputResult(output: trimmed))
+        return TerminalTransportMigrator.migrateFirstRefusal(terminalID: terminal.id, retry: retry)
     }
 
     /// The holder half of `terminal.output`: the typed screen, from whichever
@@ -1711,10 +1602,8 @@ extension RPCRouter {
                 error: "Holder transport is not wired in this daemon: \(terminal.id)")
         }
         let lines = params.lines ?? 50
-        // Rendered to the requested depth directly. The tmux path asks for a
-        // whole pane and trims afterwards because `capture-pane` has no such
-        // knob; the emulator does, and going through it means the scrollback
-        // above the viewport is available rather than discarded.
+        // Rendered to the requested depth directly, so the scrollback above
+        // the viewport is available rather than discarded.
         //
         // The two arms differ only in which store may answer, so the "no
         // reader" and "refused projection" errors below are shared: a resolver
@@ -2032,7 +1921,8 @@ extension RPCRouter {
         let params = try decoder.decode(TerminalMigrateTransportParams.self, from: paramsData)
 
         let operations = transportMigratorOperationsOverride ?? .production(
-            hibernation: hibernationCoordinator, holderRegistry: holderRegistry)
+            hibernation: hibernationCoordinator, holderRegistry: holderRegistry,
+            lifecycle: lifecycle)
         let migrator = TerminalTransportMigrator(db: db, operations: operations)
 
         let terminalIDs: [UUID]
@@ -3053,8 +2943,6 @@ extension RPCRouter {
             return "this session moved to the new account, but TBD no longer saw it as paused and did not resume it; focus the tab to start it there"
         case .sessionGone:
             return "this session moved to the new account, but the paused session could not be found to resume; focus the tab to start it there"
-        case .paneUnreadable(_, let server):
-            return "this session moved to the new account, but TBD could not reach its tmux server (\(server)) to check it, so it was not resumed; focus the tab to start it there"
         case .notFound:
             return "this session moved to the new account, but its row could not be read back, so nothing was resumed"
         case .noSessionID:
@@ -3065,8 +2953,6 @@ extension RPCRouter {
             return "this session moved to the new account, but its worktree directory is missing (\(path)), so nothing was resumed"
         case .profileMissing(let profileID):
             return "this session moved to the new account, but that account could not be resolved (profile \(profileID.uuidString)), so it was not resumed"
-        case .paneBusy(let pid):
-            return "this session moved to the new account, but another process (pid \(pid)) still holds its terminal, so it was not resumed"
         case .conditionNotMet:
             return "this session moved to the new account, but it no longer met the condition on this wake, so it was not resumed; focus the tab to start it there"
         }
@@ -3225,52 +3111,15 @@ extension RPCRouter {
     /// paste when the child's mode calls for it, so the submitting carriage
     /// return lands outside the paste. What this refuses is a message that is
     /// more than one body — several parts, or a lone image whose write would
-    /// also have to carry the dispatch envelope that attributes the turn. The
-    /// tmux arm frames those as separate pastes; this transport has only the one
-    /// write, and how a single write could frame a multi-body message — image
-    /// and envelope included — is deliberately out of scope until a spec settles
-    /// it. Refused rather than guessing at a framing, because a wrong guess
-    /// submits an unintended turn.
+    /// also have to carry the dispatch envelope that attributes the turn. How a
+    /// single write could frame a multi-body message — image and envelope
+    /// included — is deliberately out of scope until a spec settles it.
+    /// Refused rather than guessing at a framing, because a wrong guess submits
+    /// an unintended turn.
     static func holderCompositeRefusal(terminalID: UUID, cause: String) -> String {
         "terminal.send was refused: terminal \(terminalID) runs on the pty-holder transport, "
             + "which delivers a message in a single write — and \(cause) cannot be carried in "
-            + "that one write. Nothing was typed. Send the message as a single body of text, "
-            + "or move the session to tmux."
-    }
-
-    /// The refusal a text `terminal.send` gets for a terminal whose Claude
-    /// process is gone.
-    ///
-    /// Named separately from the transport refusals because the caller's remedy
-    /// is different and specific: wake the terminal, which delivers the message
-    /// atomically with the respawn. Without this rail the send finds a live pane
-    /// with a shell prompt in it, pastes the message, presses Enter, and runs the
-    /// message as a shell command while reporting success.
-    static func parkedSendRefusal(terminalID: UUID, exited: Bool) -> String {
-        let cause = exited
-            ? "its Claude session exited"
-            : "it is hibernated"
-        return "terminal.send was refused: terminal \(terminalID) is not running — \(cause), so "
-            + "nothing was typed. Wake it instead (`tbd terminal wake --terminal \(terminalID) "
-            + "--prompt \"…\"`), which delivers the message as the resumed session's first prompt."
-    }
-
-    /// The refusal a text `terminal.send` gets when the pane is alive but the
-    /// process table says the session's agent does not own its foreground
-    /// process group.
-    ///
-    /// The second of two independent rails, and the one that covers a MISSED
-    /// hook: a crashed session emits no `SessionEnd`, so nothing stamped the row.
-    /// It is the only rail a Codex row has, because Codex ships no `SessionEnd`
-    /// hook to stamp with — see `foregroundAgentName(kind:claudeSessionID:)`.
-    /// It asks the same inspector the limit-resume path has always asked, which
-    /// reads `ps` — a process-table fact, never the rendered screen.
-    static func agentNotForegroundRefusal(
-        terminalID: UUID, paneID: String, agentName: String
-    ) -> String {
-        "terminal.send was refused: the session's agent (\(agentName)) is not the foreground "
-            + "process of pane \(paneID) for terminal \(terminalID) — a shell is, so the message "
-            + "would have run as a command line. Nothing was typed."
+            + "that one write. Nothing was typed. Send the message as a single body of text."
     }
 
     /// The kind the send core reads a terminal row as: its recorded kind, or
@@ -3280,38 +3129,13 @@ extension RPCRouter {
     /// reading migration `v22_terminal_kind`'s backfill gave every such row
     /// when the column was introduced — Claude when it carries a Claude
     /// session id, shell otherwise — which is also what `Terminal
-    /// .isClaudeResumable` already requires of a kindless row. Reading every
-    /// kindless row as Claude regardless of session id would run the
-    /// foreground rail, expecting a "claude" process, against a plain shell
-    /// pane that never had one.
+    /// .isClaudeResumable` already requires of a kindless row.
     ///
-    /// The foreground rail (`foregroundAgentName(kind:claudeSessionID:)`) and
-    /// the phone's shell refusal (`sendFromPairedPhone`) both read a row
-    /// through this, so the two cannot disagree about which rows are shells.
+    /// The phone's shell refusal (`sendFromPairedPhone`) and the phone's
+    /// session list (`session.states`) both read a row through this, so the
+    /// two cannot disagree about which rows are shells.
     static func effectiveKind(kind: TerminalKind?, claudeSessionID: String?) -> TerminalKind {
         kind ?? (claudeSessionID == nil ? .shell : .claude)
-    }
-
-    /// The process name the foreground rail looks for in a pane, per terminal
-    /// kind — and `nil` for a kind the rail must not run for at all.
-    ///
-    /// A shell's pane pid IS the shell, with no agent under it, so asking the
-    /// inspector about one refuses every healthy shell send there is. Both
-    /// agent-bearing kinds do have a process to find, and each names itself on
-    /// its command line, so the kind picks the name and the same `ps` question
-    /// answers for both.
-    ///
-    /// The kind is the row's effective kind (`effectiveKind(kind:claudeSessionID:)`),
-    /// so a row with no recorded kind and no Claude session id is a shell here.
-    ///
-    /// Pure and static so the mapping is testable without a database, a pane, or
-    /// a process table.
-    static func foregroundAgentName(kind: TerminalKind?, claudeSessionID: String?) -> String? {
-        switch effectiveKind(kind: kind, claudeSessionID: claudeSessionID) {
-        case .shell: return nil
-        case .claude: return "claude"
-        case .codex: return "codex"
-        }
     }
 
     func handleTerminalSend(
@@ -3363,9 +3187,10 @@ extension RPCRouter {
     /// envelope — the queued-prompt paste path, one of the two internal rails
     /// that send `.suppressed` (see `sendOnInternalRail`).
     ///
-    /// Reuses the send core rather than reaching for tmux directly, so the pane
-    /// consultation, the per-terminal serializer lane and the actuation row all
-    /// apply unchanged. Answers whether the bytes reached the pane.
+    /// Reuses the send core rather than reaching for the courier directly, so
+    /// the per-terminal serializer lane, the transport's refusals and the
+    /// actuation row all apply unchanged. Answers whether the bytes reached the
+    /// session.
     func sendQueuedPromptVerbatim(
         terminalID: UUID, text: String, submit: Bool
     ) async -> Bool {
@@ -3402,8 +3227,7 @@ extension RPCRouter {
     ///   would commit one of its options, bypassing the `prompt.answer` core
     ///   and the setting it obeys, so the send core's existing gate does the
     ///   refusing.
-    /// - `keys` is dropped. Keys skip the park and foreground rails, and they
-    ///   are not part of a message. A send that carried only keys then has no
+    /// - `keys` is dropped. Keys are not part of a message. A send that carried only keys then has no
     ///   payload, and the shape check refuses it before any row exists.
     /// - `verify` is dropped: a suppressed send carries no dispatch id, so
     ///   delivery verification could never confirm it, and the shape check
@@ -3425,13 +3249,11 @@ extension RPCRouter {
     ///
     /// **A shell is refused before anything is typed.** Shells are hidden from
     /// the phone (spec section 6), and a shell runs what is typed into it. The
-    /// row is judged by its effective kind (`effectiveKind(kind:claudeSessionID:)`),
-    /// the reading the send core's foreground rail uses: a row with no recorded
-    /// kind is a shell when it carries no Claude session id, and is refused
-    /// like one, because the foreground rail would skip it and nothing else
-    /// would stop the paste. `session.states` reports kindless rows, so the
-    /// phone can name one. A kindless row with a session id is Claude's and is
-    /// sent.
+    /// row is judged by its effective kind (`effectiveKind(kind:claudeSessionID:)`):
+    /// a row with no recorded kind is a shell when it carries no Claude session
+    /// id, and is refused like one. `session.states` reports kindless rows, so
+    /// the phone can name one. A kindless row with a session id is Claude's and
+    /// is sent.
     ///
     /// **A blank message is refused before anything is typed.** A message is
     /// blank (`PhoneMessageText.isBlank`) when every scalar of its `text`, or
@@ -3451,10 +3273,10 @@ extension RPCRouter {
     /// (neither `text` nor `parts`), each with no row.
     ///
     /// **A control character is refused before anything is typed.** The rail
-    /// drops `keys`, but text can carry a key's byte. When the pane's child
-    /// has bracketed paste off, the body reaches it bare: tmux's
-    /// `paste-buffer -p` adds the paste markers only when the child asked for
-    /// them, and so does the holder's `HolderSendComposition`. The child then
+    /// drops `keys`, but text can carry a key's byte. When the child has
+    /// bracketed paste off, the body reaches it bare: the holder's
+    /// `HolderSendComposition` adds the paste markers only when the child
+    /// asked for them, or when it cannot tell for an agent session. The child then
     /// reads ESC as Escape, ETX as Ctrl-C and a CR as an Enter partway through
     /// the message. So text or a text part holding a scalar below U+0020 other
     /// than LF and tab, or DEL (U+007F), or a C1 control (U+0080–U+009F), is
@@ -3466,13 +3288,11 @@ extension RPCRouter {
     /// Every other path that carries a phone's text applies the same rule, so
     /// the phone hears the same words for the same text on any of them.
     ///
-    /// **A multi-line message submits line by line when bracketed paste is
-    /// off.** On the tmux transport the paste is `paste-buffer -p` without
-    /// `-r`, so tmux turns each LF into a CR, which a child with bracketed
-    /// paste off reads as Enter, submitting each line on its own; a tab
-    /// likewise arrives as the Tab key. The laptop composer's sends reach the
-    /// pane the same way, so this is parity with the laptop, not a hole only
-    /// a phone opens.
+    /// **A multi-line message can submit line by line when it goes bare.** A
+    /// shell with bracketed paste off reads each line as its own command line,
+    /// and a tab as the Tab key. The laptop composer's sends reach the session
+    /// the same way, so this is parity with the laptop, not a hole only a
+    /// phone opens.
     ///
     /// **These refusals are recorded as the send core records its own.** A
     /// well-formed act the daemon declined gets a `terminal.send` row naming
@@ -3485,11 +3305,10 @@ extension RPCRouter {
     /// inside the terminal's send lane, right after its own shape check and
     /// its own terminal and local-worktree lookup, and before any other rail
     /// runs or anything is typed. So they judge the very row the core then
-    /// pastes into, read once this send's turn in the lane has come. A check
-    /// that read the row for itself would not be enough: the lane orders
-    /// sends only, and `terminal.recreateWindow` runs outside it, under the
-    /// worktree's server lock, where its shell branch can turn a Claude row
-    /// into a shell with a new pane between the two reads.
+    /// writes to, read once this send's turn in the lane has come. A check
+    /// that read the row for itself would not be enough: the lane orders sends
+    /// only, and every other writer of the row runs outside it, so the row can
+    /// change between the two reads.
     ///
     /// **So the order is the core's shape check, the core's lookup, the
     /// phone's refusals, then the rest of the send core.** A malformed
@@ -3597,9 +3416,10 @@ extension RPCRouter {
         // there is no send to record, only a caller that asked for nothing, or
         // for two contradictory things at once.
         //
-        // The second line is below, at the flag: `--verify` while delivery
-        // verification is off IS a coherent act, one the daemon declined, so it
-        // gets a row and a refusal outcome. See there.
+        // The second line is in `performHolderSend`'s `--verify` gate:
+        // `--verify` while delivery verification is off IS a coherent act, one
+        // the daemon declined, so it gets a row and a refusal outcome. See
+        // there.
         //
         // The CLI validates these same shapes so a human gets a clean message
         // before a socket is opened; the daemon enforces them independently
@@ -3614,7 +3434,8 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
 
-        // Look up the worktree to get the tmux server name
+        // A send reaches only a terminal in a local worktree, and a tmux row's
+        // refusal names the tmux server that worktree names.
         guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
@@ -3622,15 +3443,15 @@ extension RPCRouter {
         // ─── The paired phone's own refusals ───
         //
         // Judged on THIS `terminal`, the row every rail below reads and the
-        // pane is addressed through, never on a row the phone rail read for
-        // itself: the send lane orders sends only, and `terminal.recreateWindow`
-        // can turn a Claude row into a shell outside it. Recorded below, once
-        // the request row exists, as a declined well-formed act.
+        // bytes are addressed through, never on a row the phone rail read for
+        // itself: the send lane orders sends only, and every other writer of
+        // the row runs outside it. Recorded below, once the request row exists,
+        // as a declined well-formed act.
         let phoneRefusal = phoneCheck?(terminal, payload)
 
         // Request row first: the target is resolved and the payload is known,
-        // and nothing has touched the pane yet. The paste and the Enter are
-        // sub-steps of one send, so they share this one row.
+        // and nothing has touched the session yet. The body and the Enter are
+        // parts of one send, so they share this one row.
         //
         // The row records the caller's payload VERBATIM and without the
         // envelope (§3, "the log records the message verbatim"). The envelope is
@@ -3649,144 +3470,51 @@ extension RPCRouter {
             return response
         }
 
-        // ─── The transport's own declining rail ───
+        // ─── A tmux row ───
         //
-        // A holder-backed session has no tmux pane: its `tmuxPaneID` is the
-        // empty string by construction, so every tmux mechanic below — the
-        // pane consultation, the paste, the Enter — is addressed to a
-        // coordinate that names nothing. It gets its own delivery path
-        // instead, which writes to the session's pty rather than to a pane
-        // (see `performHolderSend`).
+        // TBD no longer types into tmux panes, so a tmux row is refused here,
+        // after `beginActuation` for the reason the first refusal line above
+        // gives: a well-formed act the daemon declined gets a row and a refusal
+        // outcome, unlike a malformed payload that names no act.
+        guard terminal.transport == .holder else {
+            let retry: String
+            if case .keys = payload {
+                retry = "wake it and send the keys again"
+            } else {
+                retry = "wake it with the message as its first prompt "
+                    + "(`tbd terminal wake --terminal \(terminal.id.uuidString) --prompt \"…\"`)"
+            }
+            let message = Self.tmuxRowRefusal(
+                for: terminal, server: worktree.tmuxServer, retry: retry)
+            await finishActuation(actuationID, .refused(.notEligible), error: message)
+            return RPCResponse(error: message, code: RPCErrorCode.terminalOnTmux.rawValue)
+        }
+
+        // ─── What the holder cannot frame in one write ───
         //
-        // The transport decides WHICH rails apply, and dispatch happens below
-        // the awaiting-input gate rather than here, so both transports pass
-        // through that gate — the spec applies it before dispatching to
-        // either, and a holder row that skipped it would answer a permission
-        // dialog by committing whichever option is highlighted. Each rule
-        // therefore has exactly one code path: the tmux rails in the `else`
-        // arm, what the holder write cannot frame in this one, and one gate
-        // below covering both.
+        // Computed ahead of the call to `performHolderSend` below so that
+        // function sees only payloads it can deliver. A single body of text —
+        // one line or many — composes into the holder's one write cleanly,
+        // wrapped in bracketed paste when the child's mode calls for it. What
+        // has no single-write framing yet is a message that is more than one
+        // body: several parts, or a lone image whose write would also have to
+        // carry the dispatch envelope. See `holderCompositeRefusal`.
         //
-        // This arm sits AFTER `beginActuation` for the reason the first
-        // refusal line above gives: a well-formed act the daemon declined gets
-        // a row and a refusal outcome, unlike a malformed payload that names
-        // no act.
-        if terminal.transport == .holder {
-            // ─── What the holder arm cannot frame in one write ───
-            //
-            // Computed ahead of the call to `performHolderSend` below so that
-            // function sees only payloads it can deliver. A single body of
-            // text — one line or many — composes into the holder's one write
-            // cleanly, wrapped in bracketed paste when the child's mode calls
-            // for it. What has no single-write framing yet is a message that is
-            // more than one body: several parts, or a lone image whose write
-            // would also have to carry the dispatch envelope. See
-            // `holderCompositeRefusal`.
-            let compositeCause: String?
-            switch payload {
-            case .parts(let parts, _) where parts.count > 1:
-                compositeCause = "a message in more than one part"
-            case .parts, .text, .keys:
-                compositeCause = nil
-            }
-            if let compositeCause {
-                let message = Self.holderCompositeRefusal(
-                    terminalID: terminal.id, cause: compositeCause)
-                await finishActuation(actuationID, .refused(.notEligible), error: message)
-                return RPCResponse(error: message)
-            }
-        } else {
-            // ─── Is Claude actually running here? ───
-            //
-            // Text and parts, never keys. `--keys` exists to answer a dialog and to
-            // interrupt, and a key sequence into a shell is not the failure this
-            // rail exists to stop. A parts payload is subject to both rails exactly
-            // as a non-empty text payload is: it is pasted into the pane the same
-            // way, and a validated parts payload always has content — Task 2's
-            // shape validation refuses an empty one — so there is no emptiness
-            // guard to mirror for it the way there is for text.
-            //
-            // Two independent facts, because each fails on its own. The park stamp is
-            // written by the `SessionEnd` hook and is missed whenever the process
-            // crashes; the foreground-process inspector reads the process table and
-            // is available only for a tmux-backed row with a live pane. Both are
-            // machine facts — a column and `ps` — never the rendered screen, which
-            // this codebase forbids reading for state.
-            //
-            // The two rails split on the EMPTY payload — a bare Enter, which
-            // `--submit` with no text is — and they split deliberately:
-            //
-            //   - The park rail takes it. A parked row's pane holds a shell and
-            //     nothing else, so an Enter there has no message to lose and no
-            //     purpose to serve, and the refusal already names wake as the
-            //     remedy. Letting it through would be the one text payload that
-            //     reaches a session everyone agrees is gone.
-            //   - The foreground rail does not. A bare Enter is how a caller
-            //     answers a prompt the agent is already showing, and the inspector
-            //     is the fallible fact of the two — a pane it cannot read must not
-            //     cost a live row its Enter.
-            let subjectToParkRail: Bool
-            let subjectToForegroundRail: Bool
-            switch payload {
-            case .text(let body, _, _):
-                subjectToParkRail = true
-                subjectToForegroundRail = !body.isEmpty
-            case .keys:
-                subjectToParkRail = false
-                subjectToForegroundRail = false
-            case .parts:
-                subjectToParkRail = true
-                subjectToForegroundRail = true
-            }
-            if subjectToParkRail {
-                if terminal.hibernatedAt != nil {
-                    let message = Self.parkedSendRefusal(
-                        terminalID: terminal.id, exited: terminal.isExitStamped)
-                    await finishActuation(actuationID, .refused(.notEligible), error: message)
-                    return RPCResponse(error: message)
-                }
-                // The foreground rail is kind-aware, not Claude-only. The
-                // inspector's question is "does a foreground process whose command
-                // line contains <name> own this pane", and the kind supplies the
-                // name: "claude" for a Claude row, "codex" for a Codex one, and for
-                // a row whose kind was never recorded, whichever of the two the
-                // Claude session id decides — the same reading `v22_terminal_kind`
-                // backfilled onto every such row and `Terminal.isClaudeResumable`
-                // already requires. A shell has no name to supply — its pane pid IS
-                // the shell, with no agent under it — so the rail never runs for
-                // one, and a shell send that would otherwise be refused every time
-                // goes through.
-                //
-                // Covering Codex here matters more than it does for Claude: a Codex
-                // row is never exit-stamped, because Codex ships no `SessionEnd`
-                // hook, and stamping one would be worse than not — the wake path
-                // refuses a non-Claude row, so the stamp would park it unwakeably.
-                // This rail is therefore the ONLY thing standing between a Codex
-                // pane whose agent left and a message pasted into its shell and run.
-                // The park rail above stays kind-agnostic: a parked row of any kind
-                // has no live session behind it.
-                //
-                // A pane id that resolves to a pid is the precondition for asking at
-                // all, and `panePID > 0` is not decoration: a tmux that cannot answer
-                // reports "0", and asking the process table about pid 0 is a question
-                // with no meaning. An unreadable pid therefore proceeds — a tmux that
-                // cannot answer is not evidence that Claude left, and the pane
-                // consultation below is the rail that judges a missing or dead pane,
-                // properly.
-                if subjectToForegroundRail,
-                   let agentName = Self.foregroundAgentName(
-                        kind: terminal.kind, claudeSessionID: terminal.claudeSessionID),
-                   let panePIDString = try? await tmux.panePID(
-                        server: worktree.tmuxServer, paneID: terminal.tmuxPaneID),
-                   let panePID = Int32(panePIDString), panePID > 0,
-                   paneProcessInspector.foregroundAgentPID(
-                        panePID: panePID, matching: agentName) == nil {
-                    let message = Self.agentNotForegroundRefusal(
-                        terminalID: terminal.id, paneID: terminal.tmuxPaneID, agentName: agentName)
-                    await finishActuation(actuationID, .refused(.notEligible), error: message)
-                    return RPCResponse(error: message)
-                }
-            }
+        // Ahead of the awaiting-input gate below, which every deliverable send
+        // passes through: a send that skipped it would answer a permission
+        // dialog by committing whichever option is highlighted.
+        let compositeCause: String?
+        switch payload {
+        case .parts(let parts, _) where parts.count > 1:
+            compositeCause = "a message in more than one part"
+        case .parts, .text, .keys:
+            compositeCause = nil
+        }
+        if let compositeCause {
+            let message = Self.holderCompositeRefusal(
+                terminalID: terminal.id, cause: compositeCause)
+            await finishActuation(actuationID, .refused(.notEligible), error: message)
+            return RPCResponse(error: message)
         }
 
         // ─── The opt-in awaiting-input gate ───
@@ -3810,339 +3538,29 @@ extension RPCRouter {
             }
         }
 
-        // Resolved ONCE, ahead of every delivery arm, so the holder write and
-        // the tmux pastes read the same answer. A rail's own `.suppressed`
-        // passes through; a request's is granted only on a connection the
-        // daemon authenticated.
+        // A rail's own `.suppressed` passes through; a request's is granted
+        // only on a connection the daemon authenticated. The delivery is handed
+        // the EFFECTIVE disposition, not the rail's: an authenticated
+        // suppression must reach the write.
         let effectiveEnvelope = await effectiveEnvelope(
             railDisposition: envelope,
             requested: params.envelope,
             connection: connection)
 
-        // ─── The holder dispatch ───
-        //
-        // Ahead of the `--verify` rails below because the holder path declines
-        // `--verify` for a *different* reason than they do — no delivery
-        // observation exists for this transport at all, rather than a flag being
-        // off — and a caller needs to be told which. It is handed the EFFECTIVE
-        // disposition, not the rail's: an authenticated suppression must reach
-        // this transport too.
-        if terminal.transport == .holder {
-            return await performHolderSend(
-                payload: payload, terminal: terminal, actuationID: actuationID,
-                actor: actor, envelope: effectiveEnvelope)
-        }
-
-        // ─── The second refusal line: a well-formed act the daemon declines ───
-        //
-        // `--verify` while `delivery_verification_enabled` is off is a refusal,
-        // not a silent downgrade to an unverified send. A caller that asked for
-        // evidence must never be answered with a silence that reads like
-        // confirmation — that would rebuild, one layer up, the exact
-        // silent-failure class §12 exists to end. Nothing is typed, and the row
-        // shows the near-miss so the morning can see what the flag stopped.
-        //
-        // Read per call and only when `--verify` was armed, so an ordinary send
-        // pays no config read.
-        //
-        // Two conditions, because the flag and the machinery it enables are
-        // read at different times: the column per call, the verifier once at
-        // daemon start. Between flipping the flag on and restarting, the column
-        // says yes and there is still nothing to arm — and a send that
-        // dispatched with nothing armed would render `unconfirmed` forever,
-        // handing the caller a silence that reads like a delivery failure when
-        // nothing ever looked. Both conditions therefore refuse, and neither
-        // types anything.
-        if payload.isVerifyArmed {
-            // Only a target with an adapter that can answer may be verified. A
-            // shell keeps no transcript at all, and Codex's adapter is a
-            // different mechanism §12 describes but this slice does not build —
-            // either way the one observation that exists would return
-            // `undetermined` every time. Refuse rather than promise evidence the
-            // target cannot produce.
-            if !Self.supportsDeliveryObservation(terminal) {
-                let kindName = (terminal.kind ?? .shell).rawValue
-                let message = """
-                    terminal.send --verify was refused: terminal \
-                    \(terminal.id.uuidString) is a \(kindName) session, and delivery can only \
-                    be observed for a Claude session today — nothing was sent. Resend without \
-                    --verify.
-                    """
-                await finishActuation(actuationID, .refused(.notEligible), error: message)
-                return RPCResponse(error: message)
-            }
-            let enabled = (try? await db.config.get())?.deliveryVerificationEnabled ?? false
-            if !enabled {
-                let message = """
-                    terminal.send --verify was refused: delivery verification is disabled \
-                    (config.delivery_verification_enabled is off) — nothing was sent. Enable \
-                    it with the config.setDeliveryVerification RPC and restart the daemon, or \
-                    resend without --verify to accept an unverified send.
-                    """
-                await finishActuation(actuationID, .refused(.notEligible), error: message)
-                return RPCResponse(error: message)
-            }
-            if deliveryVerifier == nil {
-                let message = """
-                    terminal.send --verify was refused: delivery verification is enabled but \
-                    this daemon has no verifier wired, so the flag was turned on after it \
-                    started — nothing was sent. Restart the daemon to arm the observation, or \
-                    resend without --verify to accept an unverified send.
-                    """
-                await finishActuation(actuationID, .refused(.notEligible), error: message)
-                return RPCResponse(error: message)
-            }
-        }
-
-        // Ask the pane about itself before typing into it — the honest-transport
-        // check of issue #384 and the dead-pane class beside it. A decline made
-        // on an ANSWER is a refusal: the daemon declined without touching the
-        // transport. A consultation that could not be completed — thrown here,
-        // or answered `.unreachable` — is the opposite, and carries
-        // `.transportFailed` on the record instead of a refusal reason.
-        let refusal: PaneSendRefusal?
-        do {
-            refusal = try await consultPaneBeforeTyping(
-                terminal: terminal, server: worktree.tmuxServer)
-        } catch {
-            await finishActuation(actuationID, .transportFailed, error: "\(error)")
-            throw error
-        }
-        if let refusal {
-            await finishActuation(actuationID, refusal.outcome, error: refusal.message)
-            return RPCResponse(error: refusal.message)
-        }
-
-        // What actually reached the pane, envelope included — nil for a payload
-        // that pasted nothing (empty text, or keys). Handed to the arming seam
-        // below so a retry can re-deliver byte-identically.
-        var deliveredPayload: String?
-
-        do {
-            switch payload {
-            case .text(let text, let submit, _):
-                // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
-                // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads
-                // larger than the pty buffer (~1 KB) the pty splits `send-keys -l` into
-                // multiple rapid reads, which a TUI's non-bracketed paste-burst
-                // detection mistakes for a paste and coalesces — absorbing the trailing
-                // Enter so nothing submits. The explicit `ESC[201~` terminator puts the
-                // Enter provably outside the paste. tmux emits the wrappers iff the pane
-                // has bracketed-paste mode on — agent TUIs and modern interactive shells
-                // both enable it at the prompt; cooked-mode consumers get bare bytes and
-                // behave as before. Skip an empty body entirely (don't paste an empty
-                // buffer) but still press Enter below if requested.
-                //
-                // A non-empty text payload to an AGENT rides behind the dispatch
-                // envelope (§12): a one-line tag carrying this row's id and the
-                // identity the row was attributed to, then the caller's message
-                // verbatim. It is attribution the receiving agent can read, and
-                // — because a submitted message's verbatim content lands in the
-                // transcript JSONL — it is the machine fact a later observation
-                // looks for, requiring nothing of the agent. Unconditional along
-                // the axis that matters: verified or not, a prefix that appears
-                // only sometimes is one no reader can rely on.
-                //
-                // An EMPTY payload keeps today's behaviour exactly: nothing is
-                // pasted, and a bare `--submit` still presses Enter. `tbd
-                // terminal send --text "" --submit` is a real way to press Enter
-                // and must not start pasting a tag.
-                if !text.isEmpty {
-                    // ...and it rides every send to an AGENT. A shell is not a
-                    // reader of envelopes: it has no transcript to join back to,
-                    // and a `--submit` there would execute the tag as a command
-                    // line of its own before the caller's text ever ran. Every
-                    // sentence §12 uses to justify the envelope is about a
-                    // receiving agent and its transcript JSONL; a shell target
-                    // satisfies none of them, so prefixing one would be framing
-                    // nobody reads, delivered as a syntax error.
-                    //
-                    // ...and `envelope` is the one axis that can withhold it
-                    // from an agent: a daemon rail relaying the operator's own
-                    // words must deliver them byte-identically. It is not
-                    // reachable from `TerminalSendParams` — see
-                    // `DispatchEnvelopeDisposition`.
-                    let composed = effectiveEnvelope == .attached
-                        && Self.carriesDispatchEnvelope(terminal)
-                        ? Self.dispatchEnvelope(
-                            id: actuationID, from: (actor ?? .anonymous).dispatchLabel
-                        ) + "\n" + text
-                        : text
-                    try await tmux.pasteText(
-                        server: worktree.tmuxServer,
-                        paneID: terminal.tmuxPaneID,
-                        bytes: Data(composed.utf8)
-                    )
-                    deliveredPayload = composed
-                }
-
-                if submit {
-                    try await tmux.sendKey(
-                        server: worktree.tmuxServer,
-                        paneID: terminal.tmuxPaneID,
-                        key: "Enter"
-                    )
-                }
-
-            case .keys(let names, _):
-                // Named keys, one at a time, paced — see `PacedKeySender` for
-                // why back-to-back keys get dropped by a redrawing TUI. The
-                // `sendKey` call stays here, inside the file the actuation audit
-                // covers, and the pacing lives behind the closure.
-                try await pacedKeySender.send(names) { key in
-                    try await self.tmux.sendKey(
-                        server: worktree.tmuxServer,
-                        paneID: terminal.tmuxPaneID,
-                        key: key
-                    )
-                }
-
-            case .parts(let parts, let submit):
-                // Each part is its own explicit bracketed paste, in order, and
-                // then ONE Enter. The split is what makes an image attach: Claude
-                // Code turns a paste into an image only when the whole paste is
-                // one quoted path, so an image concatenated with the words around
-                // it silently becomes literal text.
-                //
-                // The envelope, when it applies, rides on the FIRST text part —
-                // one envelope for one message. Prepending it to every part would
-                // put a `<tbd-dispatch/>` line in the middle of a sentence.
-                var envelopePending = effectiveEnvelope == .attached
-                    && Self.carriesDispatchEnvelope(terminal)
-
-                // ─── An image-only message is still attributed ───
-                //
-                // With no text part to ride on, the envelope takes a leading
-                // paste of ITS OWN rather than being dropped. Dropping it would
-                // let any local process submit an unattributed user turn
-                // carrying an image, on a request that needs no authentication
-                // — the one property the envelope exists to deny. It cannot
-                // ride ON the image part, because an image attaches only when
-                // the whole paste is the quoted path and nothing else.
-                //
-                // Every part is already its own bracketed paste, so this costs
-                // the image paste nothing: it stays bare and alone, which is the
-                // measured "text + image as separate pastes" shape the parts
-                // payload is built on.
-                let carriesText = parts.contains { part in
-                    switch part {
-                    case .text(let value): return !value.isEmpty
-                    case .imagePath: return false
-                    }
-                }
-                if envelopePending && !carriesText {
-                    try await tmux.pasteText(
-                        server: worktree.tmuxServer,
-                        paneID: terminal.tmuxPaneID,
-                        bytes: Data((Self.dispatchEnvelope(
-                            id: actuationID, from: (actor ?? .anonymous).dispatchLabel
-                        ) + "\n").utf8)
-                    )
-                    envelopePending = false
-                }
-
-                // ─── The settle after an image paste ───
-                //
-                // Claude Code attaches an image and writes its `[Image#N]`
-                // token asynchronously, at the caret's position AT ATTACH TIME.
-                // So the wait belongs to the image paste rather than to any one
-                // successor: it is taken once per image part, before whatever
-                // comes next — the next paste, or the Enter if the image was
-                // last. That is why an image followed by text waits ONCE and
-                // not twice: by the time the trailing text has been pasted the
-                // token has already landed, and Enter after a plain text paste
-                // is the same thing the single-text arm has always done.
-                //
-                // `Self.imageAttachSettle` carries the measurement. Nothing
-                // here fires for a payload with no image part.
-                var settlePending = false
-                func settleIfNeeded() async throws {
-                    guard settlePending else { return }
-                    settlePending = false
-                    try await clock.sleep(for: Self.imageAttachSettle)
-                }
-
-                for part in parts {
-                    let body: String
-                    switch part {
-                    case .text(let value):
-                        // Skipped entirely, not pasted as an empty buffer — the
-                        // same reading the single-text arm gives an empty payload.
-                        // Skipped BEFORE the settle too: a part that pastes
-                        // nothing moves no caret, so it needs nothing waited for.
-                        guard !value.isEmpty else { continue }
-                        if envelopePending {
-                            body = Self.dispatchEnvelope(
-                                id: actuationID, from: (actor ?? .anonymous).dispatchLabel
-                            ) + "\n" + value
-                            envelopePending = false
-                        } else {
-                            body = value
-                        }
-                    case .imagePath(let path):
-                        // NEVER prefixed, whatever the envelope disposition: an
-                        // envelope line in front of the path is exactly the
-                        // "inside a sentence" case that measured as literal text.
-                        body = Self.quotedImagePath(path)
-                    }
-                    try await settleIfNeeded()
-                    try await tmux.pasteText(
-                        server: worktree.tmuxServer,
-                        paneID: terminal.tmuxPaneID,
-                        bytes: Data(body.utf8)
-                    )
-                    if case .imagePath = part { settlePending = true }
-                }
-
-                if submit {
-                    // An Enter that arrives mid-attach is swallowed, so the
-                    // same settle covers it when the image was the last part.
-                    try await settleIfNeeded()
-                    try await tmux.sendKey(
-                        server: worktree.tmuxServer,
-                        paneID: terminal.tmuxPaneID,
-                        key: "Enter"
-                    )
-                }
-
-                // `deliveredPayload` stays nil: it feeds the delivery verifier,
-                // which a parts payload cannot arm (`validateSendShape` refuses
-                // `--verify` with parts), so there is nothing to hand it.
-            }
-        } catch {
-            await finishActuation(actuationID, .transportFailed, error: "\(error)")
-            throw error
-        }
-
-        await finishActuation(actuationID, .dispatched)
-
-        // Hand off to the observation — the record's third rung. Reached only
-        // from here, only after `.dispatched`, and only for a verify-armed text
-        // payload that actually pasted something, so a verify-less send, a
-        // refusal and a transport failure all arm nothing. See
-        // `DeliveryVerificationArming` for the full contract.
-        if payload.isVerifyArmed, let deliveredPayload {
-            await deliveryVerifier?.armVerification(
-                actuationID: actuationID,
-                terminalID: terminal.id,
-                sessionID: terminal.claudeSessionID,
-                deliveredPayload: deliveredPayload,
-                submit: payload.recordedSubmit ?? false)
-        }
-        return .ok()
+        return await performHolderSend(
+            payload: payload, terminal: terminal, actuationID: actuationID,
+            actor: actor, envelope: effectiveEnvelope)
     }
 
     /// Deliver a `terminal.send` to a holder-backed session, by writing to the
-    /// session's pty rather than to a tmux pane.
+    /// session's pty.
     ///
-    /// The tmux arm above and this one differ in every mechanic and agree on
-    /// everything the caller can see: the same shape validation, the same
-    /// actuation row, the same dispatch envelope, the same per-terminal
-    /// serializer lane (this runs inside it). What changes is the destination —
-    /// `HolderInjectionCourier` routes by whether a viewer owns the pty — and
-    /// two things this transport cannot frame yet, each refused by name rather
-    /// than by "the holder transport", so a caller learns which capability is
-    /// missing:
+    /// It runs inside the per-terminal serializer lane, after the send core's
+    /// shape validation, actuation row and awaiting-input gate.
+    /// `HolderInjectionCourier` routes the bytes by whether a viewer owns the
+    /// pty. Two things this transport cannot frame yet are each refused by name
+    /// rather than by "the holder transport", so a caller learns which
+    /// capability is missing:
     ///
     /// - A composite send — more than one part — has no single-write framing
     ///   here at all; it is refused ahead of this function, by the composite
@@ -4158,14 +3576,13 @@ extension RPCRouter {
     ///
     /// `--verify` flows through, it is not refused as a transport limit: a
     /// verify-armed send to an observable agent session is composed here,
-    /// delivered by the courier, and armed for observation exactly as the tmux
-    /// arm arms it — the observation reads the child's transcript tail, not a
-    /// pane, so it is transport-blind. **`--verify` is the only thing that
-    /// arms an observation**, on this transport as on tmux; nothing about the
-    /// caller arms one on its behalf. The gate near the top of this function
-    /// refuses a `--verify` in the three states in which no observation could
-    /// be produced — a target with no transcript, the flag off, or no verifier
-    /// wired — mirroring the tmux arm's gate.
+    /// delivered by the courier, and armed for observation — the observation
+    /// reads the child's transcript tail, so it needs nothing from the
+    /// transport. **`--verify` is the only thing that arms an observation**;
+    /// nothing about the caller arms one on its behalf. The gate near the top
+    /// of this function refuses a `--verify` in the three states in which no
+    /// observation could be produced — a target with no transcript, the flag
+    /// off, or no verifier wired.
     /// `--keys` composes through `deliverHolderKeys`, which owns the named-key
     /// → bytes mapping.
     ///
@@ -4183,8 +3600,8 @@ extension RPCRouter {
     /// non-empty body in `ESC[200~`…`ESC[201~` when the child has bracketed
     /// paste on — or, for an agent session, when the reading cannot rule that
     /// out — and the submitting `\r` follows the end marker, so the Enter is
-    /// provably outside the paste, which is the property the tmux arm gets from
-    /// delivering in two acts and a mode-blind composition cannot have at all.
+    /// provably outside the paste, which a mode-blind composition cannot
+    /// guarantee at all.
     /// A child seen not to ask for bracketing gets bare bytes, because markers
     /// it does not understand are markers it prints.
     ///
@@ -4193,10 +3610,9 @@ extension RPCRouter {
     /// that window is depends on which store answered**, and for a session
     /// somebody has open the answer is ordinarily the live one: the oracle asks
     /// that viewer for a modes-only reading over the sidecar, and a `.viewer`
-    /// answer leaves only the moment between the read and the write — the
-    /// window tmux has too, since its server reads the pane's mode when it
-    /// pastes, not when the bytes land. A detached session's `.daemon` reading
-    /// is the same width, from the emulator the daemon is draining.
+    /// answer leaves only the moment between the read and the write. A
+    /// detached session's `.daemon` reading is the same width, from the
+    /// emulator the daemon is draining.
     ///
     /// `staleDaemon` is now the **pull-failure** arm rather than the ordinary
     /// shape of an attached send: the viewer did not answer inside
@@ -4257,15 +3673,28 @@ extension RPCRouter {
                 actuationID, Self.holderInputUnavailable(terminalID: terminal.id))
         }
 
-        // ─── Can this send be verified here? ───
+        // ─── The second refusal line: a well-formed act the daemon declines ───
         //
-        // The observation is transport-blind — it reads the child's transcript
-        // tail, not a pane — so the same three preconditions the tmux arm
-        // checks apply on the holder arm too, and the gate below mirrors it
-        // condition for condition, in the same order and the same words.
+        // `--verify` while `delivery_verification_enabled` is off is a refusal,
+        // not a silent downgrade to an unverified send. A caller that asked for
+        // evidence must never be answered with a silence that reads like
+        // confirmation — that would rebuild, one layer up, the exact
+        // silent-failure class §12 exists to end. Nothing is typed, and the row
+        // shows the near-miss so the morning can see what the flag stopped.
         //
-        // **An explicit `--verify` is the only thing that arms an observation**,
-        // here as on tmux. Arming on the sender's behalf — giving the daemon's
+        // Two conditions, because the flag and the machinery it enables are
+        // read at different times: the column per call, the verifier once at
+        // daemon start. Between flipping the flag on and restarting, the column
+        // says yes and there is still nothing to arm — and a send that
+        // dispatched with nothing armed would render `unconfirmed` forever,
+        // handing the caller a silence that reads like a delivery failure when
+        // nothing ever looked. Both conditions therefore refuse, and neither
+        // types anything. And only a target with an adapter that can answer may
+        // be verified: a shell keeps no transcript at all, and Codex's adapter
+        // is a different mechanism §12 describes but this slice does not build.
+        //
+        // **An explicit `--verify` is the only thing that arms an observation.**
+        // Arming on the sender's behalf — giving the daemon's
         // own rails, the limit resume and the queued prompt, an observation
         // they did not ask for — is a separate change, and one a term in this
         // gate cannot make, because neither rail reaches it with an envelope.
@@ -4287,8 +3716,7 @@ extension RPCRouter {
         //
         if payload.isVerifyArmed {
             // The config column is read inside this branch, so a send that did
-            // not ask for an observation pays no read — the same economy the
-            // tmux gate keeps.
+            // not ask for an observation pays no read.
             let verifyEnabled =
                 (try? await db.config.get())?.deliveryVerificationEnabled ?? false
             if !Self.supportsDeliveryObservation(terminal) {
@@ -4327,8 +3755,7 @@ extension RPCRouter {
         // `false` only for a lone image part: Claude Code attaches an image
         // exclusively when the WHOLE paste is one quoted path (measured on
         // 2.1.261), so a prefix ahead of it turns the path into literal text
-        // and attaches nothing — matching the tmux arm's rule that an image
-        // part is never enveloped.
+        // and attaches nothing, so an image part is never enveloped.
         let envelopeEligible: Bool
         switch payload {
         case .text(let body, let submitting, _):
@@ -4344,7 +3771,7 @@ extension RPCRouter {
             // multi-line send before this arm was reached. What lands here is
             // exactly one part, and the holder arm carries it the same way the
             // `.text` arm above carries its body: a text part's value verbatim,
-            // an image part as the same quoted path the tmux arm pastes.
+            // an image part as its quoted path (`quotedImagePath`).
             switch parts[0] {
             case .text(let value):
                 text = value
@@ -4354,9 +3781,9 @@ extension RPCRouter {
                 //
                 // An image attaches only when the WHOLE paste is the quoted path
                 // and nothing else (measured on 2.1.261), so the envelope that
-                // attributes this turn cannot ride ahead of it — and the tmux
-                // arm's answer, a separate leading paste, needs a second
-                // delivery this transport does not have. Dropping the envelope
+                // attributes this turn cannot ride ahead of it — and a separate
+                // leading paste for the envelope would need a second delivery
+                // this transport does not have. Dropping the envelope
                 // instead would let any local process submit an unattributed
                 // user turn carrying an image, which is the one property the
                 // envelope exists to deny.
@@ -4408,8 +3835,7 @@ extension RPCRouter {
     /// against the three preconditions in `performHolderSend`'s gate — a send
     /// that did not ask for an observation never gets one. On a successful
     /// write it hands the composed `body` (envelope and text, before
-    /// paste-marker wrapping) to the verifier, exactly as the tmux arm does. An
-    /// empty body arms nothing: `--text "" --submit` presses Enter and has no
+    /// paste-marker wrapping) to the verifier. An empty body arms nothing: `--text "" --submit` presses Enter and has no
     /// delivery to observe.
     private func deliverHolderText(
         _ text: String, submit: Bool, terminal: Terminal, actuationID: String,
@@ -4440,9 +3866,25 @@ extension RPCRouter {
         let bracketedPaste = HolderSendComposition.bracketedPaste(
             for: reading, unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal))
 
-        // Same envelope rule as the tmux arm, and for the same reasons — see
-        // the long comment there. Empty text stays empty: `--text "" --submit`
-        // is a real way to press Enter and must not start pasting a tag.
+        // A non-empty text payload to an AGENT rides behind the dispatch
+        // envelope (§12): a one-line tag carrying this row's id and the
+        // identity the row was attributed to, then the caller's message
+        // verbatim. It is attribution the receiving agent can read, and —
+        // because a submitted message's verbatim content lands in the
+        // transcript JSONL — it is the machine fact a later observation looks
+        // for, requiring nothing of the agent. Unconditional along the axis
+        // that matters: verified or not, a prefix that appears only sometimes
+        // is one no reader can rely on.
+        //
+        // A shell is not a reader of envelopes (`carriesDispatchEnvelope`): it
+        // has no transcript to join back to, and a submit there would execute
+        // the tag as a command line of its own before the caller's text ever
+        // ran. And `envelope` is the one axis that can withhold it from an
+        // agent: a daemon rail relaying the operator's own words must deliver
+        // them byte-identically (`DispatchEnvelopeDisposition`).
+        //
+        // Empty text stays empty: `--text "" --submit` is a real way to press
+        // Enter and must not start pasting a tag.
         let body = text.isEmpty
             ? ""
             : (envelopeEligible && envelope == .attached
@@ -4455,9 +3897,8 @@ extension RPCRouter {
 
         guard !message.isEmpty else {
             // Nothing to write, reached two ways. `--text ""` with no
-            // `--submit` is a well-formed act that names nothing — the tmux arm
-            // reaches the same outcome by skipping both of its sub-steps. A
-            // body that was nothing but paste markers reaches it too, because
+            // `--submit` is a well-formed act that names nothing. A body that
+            // was nothing but paste markers reaches it too, because
             // the composition strips those before it tests for emptiness, and a
             // caller's `ESC[201~` cannot be allowed to leave an open paste nor
             // its `ESC[200~` to restart one.
@@ -4485,8 +3926,9 @@ extension RPCRouter {
                 modeSource: modeSource, modeAgeMilliseconds: modeAge,
                 modesObserved: modesObserved, modeBracketedPaste: modeBracketedPaste,
                 bracketedPaste: bracketedPaste)
-            // Hand off to the observation, exactly as the tmux arm does after
-            // `.dispatched`: reached only on a successful write, only when the
+            // Hand off to the observation — the record's third rung — after
+            // `.dispatched` (see `DeliveryVerificationArming` for the full
+            // contract): reached only on a successful write, only when the
             // send was verify-armed, and only for a non-empty body — a
             // verify-less send, a refusal, a transport failure and a bare Enter
             // all arm nothing. The delivered payload is `body`: the envelope
@@ -4615,81 +4057,7 @@ extension RPCRouter {
         return RPCResponse(error: message)
     }
 
-    // MARK: - The pane consultation, and the verifier's re-delivery
-
-    /// Consult the pane the send names, and classify the answer.
-    ///
-    /// `nil` means "proceed" — the pane is alive and either agrees it is this
-    /// terminal or claims no identity at all. Anything else is a decline the
-    /// caller records and returns, with the message a human reads: a refusal
-    /// when tmux answered, a transport failure when it could not be reached.
-    ///
-    /// tmux's own exit status cannot carry this: `send-keys` into a
-    /// `remain-on-exit` dead pane exits 0, and keys sent to a reused pane id
-    /// land in a live stranger's composer with no error anywhere (issue #384).
-    /// Both answers arrive from ONE read-only `list-panes`, read BEFORE any
-    /// byte is written. Throws only when the consultation could not be RUN — a
-    /// wedged tmux tripping the subprocess timeout — which is a tmux command
-    /// failing, not an answer about the pane.
-    ///
-    /// Shared by the send path and by `redeliverVerifiedPayload`, so the retry
-    /// cannot re-type into a pane the first send would have refused.
-    private func consultPaneBeforeTyping(
-        terminal: Terminal, server: String
-    ) async throws -> PaneSendRefusal? {
-        switch try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID) {
-        case .absent:
-            return PaneSendRefusal(outcome: .refused(.notFound), message: """
-                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) \
-                no longer exists on server \(server) — nothing was sent
-                """)
-        case .unreachable:
-            // NOT a refusal, and above all not "no longer exists": the daemon
-            // could not reach the server, so it knows nothing about the pane.
-            // `transportFailed` is the honest classification — the daemon
-            // reached for the transport and the transport did not answer — and
-            // it is what keeps this out of the refusal reasons, none of which
-            // can describe a failed read without asserting something false
-            // about the target.
-            logger.warning("""
-                terminal.send: could not reach tmux server \(server, privacy: .public) to \
-                consult pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
-                \(terminal.id.uuidString, privacy: .public); nothing was sent
-                """)
-            return PaneSendRefusal(outcome: .transportFailed, message: """
-                could not reach tmux server \(server) to check pane \(terminal.tmuxPaneID) \
-                for terminal \(terminal.id.uuidString) — nothing was sent, and the pane's \
-                state is unknown (this is a failed read, not a missing pane). Retry; if it \
-                persists, check that the daemon and your shell resolve the same tmux socket.
-                """)
-        case .dead:
-            return PaneSendRefusal(outcome: .refused(.notEligible), message: """
-                tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) is \
-                dead (its process has exited) — nothing was sent; recreate the terminal's \
-                window first
-                """)
-        case .live(let paneTerminalID):
-            guard let paneTerminalID else {
-                // Absence is not disagreement. A pane spawned before TBD stamped
-                // identities, or by something outside TBD, answers with nothing —
-                // and refusing on nothing would turn this fix into a regression
-                // for every such pane. Only a POSITIVE disagreement refuses.
-                logger.debug("""
-                    terminal.send: pane \(terminal.tmuxPaneID, privacy: .public) claims no \
-                    terminal identity; proceeding without verifying it is terminal \
-                    \(terminal.id.uuidString, privacy: .public)
-                    """)
-                return nil
-            }
-            guard paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString)
-                != .orderedSame else { return nil }
-            return PaneSendRefusal(outcome: .refused(.targetMismatch), message: """
-                tmux pane \(terminal.tmuxPaneID) now belongs to terminal \
-                \(paneTerminalID), not the requested terminal \(terminal.id.uuidString) \
-                — nothing was sent (tmux reuses pane ids, so this coordinate is stale)
-                """)
-        }
-    }
+    // MARK: - The verifier's re-delivery
 
     /// Re-deliver an already-recorded payload, byte-identically, for the
     /// delivery verifier's single evidence-bounded retry (§12).
@@ -4703,25 +4071,23 @@ extension RPCRouter {
     /// thrown: a refused or transport-failed retry must be classified as what
     /// it was, not collapsed into "the payload failed".
     ///
-    /// It runs the same pane consultation the first send ran, through the same
-    /// helper: a minute has passed, and the pane may have died or been reused
-    /// since. A holder row has no pane, so its liveness question is the holder's
-    /// last reported child status instead. And both arms queue in the same
-    /// per-terminal lane, so a retry can never splice itself into a concurrent
-    /// send's write.
+    /// A minute has passed since the first send, so the child may have died
+    /// since: its liveness question is the holder's last reported child status.
+    /// And the retry queues in the same per-terminal lane as every send, so it
+    /// can never splice itself into a concurrent send's write. A row that is
+    /// no longer on the holder is not typed into: TBD no longer types into
+    /// tmux panes.
     func redeliverVerifiedPayload(
         terminalID: UUID, sessionID: String?, payload: String, submit: Bool
     ) async -> ActuationOutcome {
-        guard let terminal = try? await db.terminals.get(id: terminalID),
-              let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .refused(.notFound)
         }
-        // The kind is re-read too, not just the pane. A `recreateWindow` landing
-        // between the observation and this retry can turn an agent terminal into
-        // a shell while keeping its id, and the payload we are holding opens
-        // with an envelope — which a shell would run as a command line of its
-        // own. The eligibility that admitted the first send has to still hold
-        // for the second.
+        // The kind is re-read too. A row whose kind changed between the
+        // observation and this retry may no longer be an agent, and the payload
+        // we are holding opens with an envelope — which a shell would run as a
+        // command line of its own. The eligibility that admitted the first send
+        // has to still hold for the second.
         guard Self.supportsDeliveryObservation(terminal) else {
             return .refused(.notEligible)
         }
@@ -4744,104 +4110,65 @@ extension RPCRouter {
         if let sessionID, terminal.claudeSessionID != sessionID {
             return .refused(.targetMismatch)
         }
-        // ─── The holder transport's re-delivery ───
-        //
-        // A holder row has no pane to consult and no tmux server to paste
-        // through; it re-injects through the same courier the first send used.
-        // Everything the tmux arm below reaches for — `worktree.tmuxServer`,
-        // `consultPaneBeforeTyping`, `tmux.pasteText` — is meaningless here, so
-        // the retry lives entirely in this branch and returns before that body.
-        if terminal.transport == .holder {
-            // No courier means no input path at all — the same condition
-            // `performHolderSend` turns into `holderInputUnavailable`, which it
-            // classifies as `.notEligible` (via `refuseHolderSend`). The retry
-            // classifies it the same way rather than as a transport failure it
-            // never actually attempted.
-            guard let courier = holderInjectionCourier else {
-                return .refused(.notEligible)
-            }
-            // And it queues in the terminal's own lane, exactly as the tmux
-            // body below does: the retry is a SECOND writer to a pty another
-            // send may be mid-write on, and a write to a tty is not atomic. The
-            // liveness check goes inside the lane for the same reason the tmux
-            // arm consults the pane inside it — the answer must not be
-            // separated from the write it authorizes.
-            let outcome = try? await terminalSendSerializer.run(terminalID: terminalID) {
-                // A child the holder has already reported dead cannot receive a
-                // retry. Only a reported `.exited` refuses — `.alive`,
-                // `.exitedStatusUnknown` and a status never reported (nil) are
-                // all uncertainty, and uncertainty proceeds: the courier's own
-                // write is the authority on whether the pty still takes bytes.
-                if case .exited = await self.holderRegistry?.lastKnownStatus(for: terminalID) {
-                    return ActuationOutcome.refused(.notEligible)
-                }
-                // Recompose the paste-wrapping from a FRESH reading rather than
-                // replaying the exact bytes the first send wrote. A minute has
-                // passed since the observation, and the child's bracketed-paste
-                // mode can have flipped in it — a viewer attaching or
-                // detaching, a full-screen redraw — so the wrapping the first
-                // send baked in may now be wrong for the pty as it stands.
-                // `payload` is the composed body (envelope and text, before any
-                // paste marker), so it is the `body` argument here and takes no
-                // second envelope; only the wrapping is recomputed, exactly as
-                // `deliverHolderText` composes it.
-                let reading = await self.holderModeReading(terminalID: terminalID)
-                let message = HolderSendComposition.compose(
-                    body: payload, submit: submit,
-                    bracketedPaste: HolderSendComposition.bracketedPaste(
-                        for: reading,
-                        unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal)))
-                // An empty composition has no delivery to redo —
-                // `--text "" --submit` composes to a bare Enter with no body,
-                // and a body that was only paste markers composes to nothing at
-                // all. `deliverHolderText` treats the same emptiness as
-                // `.dispatched`; the retry returns the same, because there is
-                // nothing to re-deliver — not because a write succeeded.
-                // Verification is NOT re-armed here: this call IS the verifier's
-                // retry, and re-arming would make it observe its own
-                // re-delivery and retry that in turn.
-                guard !message.isEmpty else { return ActuationOutcome.dispatched }
-                switch await courier.deliver(terminalID: terminalID, bytes: message) {
-                case .viewerWrote, .daemonWrote:
-                    return ActuationOutcome.dispatched
-                case .notDelivered:
-                    return ActuationOutcome.transportFailed
-                }
-            }
-            // The lane rethrows only what the closure threw, and this one
-            // throws nothing — a nil here is cancellation, which reached no
-            // transport and is classified as the failed write it would have been.
-            return outcome ?? .transportFailed
+        guard terminal.transport == .holder else {
+            return .refused(.notEligible)
         }
-        let outcome: ActuationOutcome
-        do {
-            outcome = try await terminalSendSerializer.run(terminalID: terminalID) {
-                if let refusal = try await self.consultPaneBeforeTyping(
-                    terminal: terminal, server: worktree.tmuxServer) {
-                    return refusal.outcome
-                }
-                try await self.tmux.pasteText(
-                    server: worktree.tmuxServer,
-                    paneID: terminal.tmuxPaneID,
-                    bytes: Data(payload.utf8))
-                if submit {
-                    try await self.tmux.sendKey(
-                        server: worktree.tmuxServer,
-                        paneID: terminal.tmuxPaneID,
-                        key: "Enter")
-                }
-                return .dispatched
-            }
-        } catch {
-            // Either the consultation could not be run or the paste itself
-            // failed. Both are the transport, not a decision.
-            logger.warning("""
-                delivery retry: re-delivery to terminal \(terminalID.uuidString, privacy: .public) \
-                failed: \(error, privacy: .public)
-                """)
-            return .transportFailed
+        // No courier means no input path at all — the same condition
+        // `performHolderSend` turns into `holderInputUnavailable`, which it
+        // classifies as `.notEligible` (via `refuseHolderSend`). The retry
+        // classifies it the same way rather than as a transport failure it
+        // never actually attempted.
+        guard let courier = holderInjectionCourier else {
+            return .refused(.notEligible)
         }
-        return outcome
+        // And it queues in the terminal's own lane: the retry is a SECOND
+        // writer to a pty another send may be mid-write on, and a write to a
+        // tty is not atomic. The liveness check goes inside the lane so its
+        // answer is not separated from the write it authorizes.
+        let outcome = try? await terminalSendSerializer.run(terminalID: terminalID) {
+            // A child the holder has already reported dead cannot receive a
+            // retry. Only a reported `.exited` refuses — `.alive`,
+            // `.exitedStatusUnknown` and a status never reported (nil) are
+            // all uncertainty, and uncertainty proceeds: the courier's own
+            // write is the authority on whether the pty still takes bytes.
+            if case .exited = await self.holderRegistry?.lastKnownStatus(for: terminalID) {
+                return ActuationOutcome.refused(.notEligible)
+            }
+            // Recompose the paste-wrapping from a FRESH reading rather than
+            // replaying the exact bytes the first send wrote. A minute has
+            // passed since the observation, and the child's bracketed-paste
+            // mode can have flipped in it — a viewer attaching or detaching, a
+            // full-screen redraw — so the wrapping the first send baked in may
+            // now be wrong for the pty as it stands. `payload` is the composed
+            // body (envelope and text, before any paste marker), so it is the
+            // `body` argument here and takes no second envelope; only the
+            // wrapping is recomputed, exactly as `deliverHolderText` composes it.
+            let reading = await self.holderModeReading(terminalID: terminalID)
+            let message = HolderSendComposition.compose(
+                body: payload, submit: submit,
+                bracketedPaste: HolderSendComposition.bracketedPaste(
+                    for: reading,
+                    unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal)))
+            // An empty composition has no delivery to redo —
+            // `--text "" --submit` composes to a bare Enter with no body, and a
+            // body that was only paste markers composes to nothing at all.
+            // `deliverHolderText` treats the same emptiness as `.dispatched`;
+            // the retry returns the same, because there is nothing to
+            // re-deliver — not because a write succeeded. Verification is NOT
+            // re-armed here: this call IS the verifier's retry, and re-arming
+            // would make it observe its own re-delivery and retry that in turn.
+            guard !message.isEmpty else { return ActuationOutcome.dispatched }
+            switch await courier.deliver(terminalID: terminalID, bytes: message) {
+            case .viewerWrote, .daemonWrote:
+                return ActuationOutcome.dispatched
+            case .notDelivered:
+                return ActuationOutcome.transportFailed
+            }
+        }
+        // The lane rethrows only what the closure threw, and this one throws
+        // nothing — a nil here is cancellation, which reached no transport and
+        // is classified as the failed write it would have been.
+        return outcome ?? .transportFailed
     }
 
     // MARK: - terminal.send payload shape
@@ -4864,9 +4191,9 @@ extension RPCRouter {
     /// is addressing it and so a later reader can join a transcript message back
     /// to its actuation row — and a shell has neither property: nothing reads the
     /// tag, no transcript records it, and `--submit` would run it as a command
-    /// line of its own. `tbd terminal send` into a plain shell pane is a
-    /// supported thing to do (`docs/tmux-integration.md`), so this is a real
-    /// target rather than a theoretical one.
+    /// line of its own. `tbd terminal send` into a plain shell tab is a
+    /// supported thing to do, so this is a real target rather than a
+    /// theoretical one.
     ///
     /// A terminal with no recorded kind is treated as a shell — the same
     /// defaulting the rest of this file uses (`terminal.kind ?? .shell`), and the
@@ -4974,31 +4301,6 @@ extension RPCRouter {
     static func quotedImagePath(_ path: String) -> String {
         shellEscape(path)
     }
-
-    /// How long the parts arm waits after pasting an image path, before it
-    /// pastes anything else or presses Enter.
-    ///
-    /// **Why a wait exists at all.** Claude Code turns the paste into an
-    /// attachment *asynchronously* and then writes its `[Image#N]` token in at
-    /// wherever the caret is when the attach lands. Pasting the next part
-    /// before that happens moves the caret, so the token arrives at the END of
-    /// the message — the person's sentence reads
-    /// `look at  and tell me what it is[Image#1]` — and an Enter that arrives
-    /// mid-attach is swallowed, leaving the message standing unsent. Both were
-    /// observed live against Claude Code 2.1.261, on the first image a given
-    /// Claude process had ever been given.
-    ///
-    /// **Where the number comes from.** Measured against the real 2.1.261 TUI
-    /// driven under a pty against the fake model API, pasting one bare quoted
-    /// image path into a fresh session and timing until `[Image#1]` rendered:
-    /// 15 fresh sessions, min 0.18 s, max 0.68 s, median ≈0.24 s (the live
-    /// verification's own hand observation on a loaded fleet machine was ≈1 s).
-    /// 2 s is a clean number above twice both maxima.
-    ///
-    /// It is one constant in one place so a soak can move it, and it is spent
-    /// only by a payload that actually carries an image — a text-only parts
-    /// send waits for nothing.
-    static let imageAttachSettle: Duration = .seconds(2)
 
     /// Whether an adapter exists that can actually observe a delivery to this
     /// target — the narrower question `--verify` turns on.
@@ -5141,62 +4443,45 @@ extension RPCRouter {
 
     // MARK: - Main Area Size Broadcast
 
-    /// Resize every known tmux window to the new cell dimensions. Called by
-    /// the app when its main terminal area resizes (debounced) so detached
-    /// panes don't keep stale dimensions; attached panes get overwritten by
-    /// SwiftTerm's TIOCSWINSZ within milliseconds.
+    /// Resize every holder session to the new cell dimensions. Called by the
+    /// app when its main terminal area resizes (debounced), so a session nobody
+    /// is viewing does not keep stale dimensions; a session somebody is viewing
+    /// is sized by its viewer within milliseconds.
+    ///
+    /// A tmux row is left alone: TBD no longer drives tmux.
     func handleSetMainAreaSize(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(SetMainAreaSizeParams.self, from: paramsData)
         guard params.cols >= TmuxManager.minCols, params.rows >= TmuxManager.minRows else {
             // Silently ignore degenerate sizes — clients can race below the
-            // minimum during window setup; tmux handles it correctly when the
-            // next valid size comes in.
+            // minimum during window setup, and the next valid size follows.
             return .ok()
         }
+        guard let holderRegistry else { return .ok() }
 
         let allTerminals = try await db.terminals.list()
-        // Filter to active worktrees only — archived worktrees have had their
-        // tmux servers killed, so resizing windows there spawns dead `tmux
-        // resize-window` processes (errors swallowed by `try?`) on every
-        // resize-debounce tick during a window drag.
-        let worktrees = try await db.worktrees.listLocal(status: .active)
-        let serverByWorktree = Dictionary(uniqueKeysWithValues: worktrees.map { ($0.id, $0.tmuxServer) })
+        // Active worktrees only: an archived worktree's sessions are gone.
+        let activeWorktreeIDs = Set(try await db.worktrees.listLocal(status: .active).map(\.id))
 
         logger.debug("setMainAreaSize \(params.cols, privacy: .public)x\(params.rows, privacy: .public) across \(allTerminals.count, privacy: .public) terminals")
 
-        for terminal in allTerminals {
-            guard let server = serverByWorktree[terminal.worktreeID] else { continue }
-            // Not a refusal: this is the one mechanic in the holder family the
-            // transport can answer, so it is asked rather than skipped. A
-            // holder row's `tmuxWindowID` is the empty string, so `resizeWindow`
-            // addressed nothing and the failure was swallowed by `try?` — the
-            // session stayed at the size it was spawned with while the app's
-            // main area moved out from under it, and the daemon's own emulator
-            // (the surface `terminal.output` renders) kept the old grid too.
-            // `HolderReader.resize` is the authority for both halves: it
-            // reshapes the emulator so rendering matches, and sets the pty's
-            // window size so the child gets `SIGWINCH` and can lay itself out.
+        for terminal in allTerminals
+        where terminal.transport == .holder && activeWorktreeIDs.contains(terminal.worktreeID) {
+            // `HolderReader.resize` is the authority for both halves of a
+            // session's size: it reshapes the daemon's emulator (the surface
+            // `terminal.output` renders), and sets the pty's window size so the
+            // child gets `SIGWINCH` and can lay itself out. Through the same
+            // rule as `pane.resize`, not straight to the reader: a session
+            // whose descriptor has been vended to a viewer is the viewer's to
+            // size, and this fan-out reaches one in the state where the daemon
+            // still holds a suspended reader for it.
             //
             // A row whose reader is missing is skipped silently, unlike
             // `terminal.output`, which reports it. There a caller asked about
             // one named session and an empty screen would be a false claim;
             // this is a fan-out over every terminal on a resize-debounce tick,
             // and a session nothing has adopted has no grid to reshape.
-            if terminal.transport == .holder {
-                // Through the same rule as `pane.resize`, not straight to the
-                // reader: a session whose descriptor has been vended to a viewer
-                // is the viewer's to size, and this fan-out reaches one in the
-                // state where the daemon still holds a suspended reader for it.
-                await holderRegistry?.applyViewerResize(
-                    terminalID: terminal.id, columns: params.cols, rows: params.rows)
-                continue
-            }
-            try? await tmux.resizeWindow(
-                server: server,
-                windowID: terminal.tmuxWindowID,
-                cols: params.cols,
-                rows: params.rows
-            )
+            await holderRegistry.applyViewerResize(
+                terminalID: terminal.id, columns: params.cols, rows: params.rows)
         }
         return .ok()
     }
@@ -5300,8 +4585,7 @@ extension RPCRouter {
                 let beforeCount = try await db.worktrees.listLocal(repoID: repo.id, status: .active).count
                 try await lifecycle.reconcile(
                     repoID: repo.id,
-                    actuationLog: actuationLog,
-                    reapSharedScratchTmuxResources: true)
+                    actuationLog: actuationLog)
                 let afterCount = try await db.worktrees.listLocal(repoID: repo.id, status: .active).count
                 let delta = abs(beforeCount - afterCount)
                 worktreesReconciled += delta
@@ -5314,8 +4598,7 @@ extension RPCRouter {
         // loop: cleanup is also the explicit retry path on zero-repo installs.
         do {
             try await lifecycle.reconcileScratchTerminals(
-                actuationLog: actuationLog,
-                reapOrphanTmuxResources: true)
+                actuationLog: actuationLog)
         } catch {
             errors.append("Scratch terminal reconcile failed: \(error)")
         }

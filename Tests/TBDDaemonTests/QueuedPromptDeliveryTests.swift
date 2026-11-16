@@ -21,35 +21,23 @@ struct QueuedPromptDeliveryTests {
 
     // MARK: - Recorders
 
-    /// Thread-safe collector for tmux argv lists invoked during dryRun.
-    private final class ArgvRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _calls: [[String]] = []
-        var calls: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return _calls
-        }
-        func record(_ args: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            _calls.append(args)
-        }
-        var joinedAll: String {
-            calls.map { $0.joined(separator: " ") }.joined(separator: "\n")
-        }
-    }
-
-    /// Collects the payloads handed to `pasteText`; the argv cannot carry them
-    /// (the real path passes the body through a temp file).
+    /// What the holder courier was asked to write, read back as the message
+    /// and whether an Enter followed it. With no mode reading the holder writes
+    /// the body bare and the submitting `\r` last, in the same write.
     private final class PasteRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var _pastes: [String] = []
-        var pastes: [String] {
-            lock.lock(); defer { lock.unlock() }
-            return _pastes
-        }
+        private var _enters = 0
+        var pastes: [String] { lock.withLock { _pastes } }
+        /// How many writes ended in the submitting `\r`.
+        var enters: Int { lock.withLock { _enters } }
         func record(_ bytes: Data) {
-            lock.lock(); defer { lock.unlock() }
-            _pastes.append(String(decoding: bytes, as: UTF8.self))
+            let submits = bytes.last == HolderSendComposition.submitByte
+            let body = submits ? bytes.dropLast() : bytes
+            lock.withLock {
+                if !body.isEmpty { _pastes.append(String(decoding: body, as: UTF8.self)) }
+                if submits { _enters += 1 }
+            }
         }
     }
 
@@ -321,7 +309,6 @@ struct QueuedPromptDeliveryTests {
         let db: TBDDatabase
         let terminal: Terminal
         let pastes: PasteRecorder
-        let recorder: ArgvRecorder
         let actuationLogPath: String
         let transcriptPath: String
     }
@@ -356,20 +343,15 @@ struct QueuedPromptDeliveryTests {
         #expect(response.success)
     }
 
-    /// A router over a dry-run tmux with an agent terminal, for the questions
-    /// only the real send core can answer: which bytes reach the pane, and
-    /// whether an Enter follows them.
+    /// A router with a holder-backed agent terminal and a recording courier,
+    /// for the questions only the real send core can answer: which bytes reach
+    /// the session, and whether an Enter follows them.
     private func makeSendFixture(kind: TerminalKind = .claude) async throws -> SendFixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-qp-send-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let recorder = ArgvRecorder()
         let pastes = PasteRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.record($0) },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
-            dryRunPasteBytes: { _, _, bytes in pastes.record(bytes) })
+        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
         let actuationLogPath = directory.appendingPathComponent("actuations.jsonl").path
         let transcriptPath = directory.appendingPathComponent("transcript.jsonl").path
@@ -382,15 +364,20 @@ struct QueuedPromptDeliveryTests {
             startTime: Date(),
             configDirManager: isolatedConfigDirManager(),
             actuationLog: ActuationLog(path: actuationLogPath))
+        router.holderInjectionCourier = HolderInjectionCourier(
+            sendFrame: { _ in },
+            viewerAttachment: { _ in nil },
+            writeDirectly: { _, bytes in pastes.record(bytes) })
         let repo = try await db.repos.create(
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         let worktree = try await db.worktrees.create(
             repoID: repo.id, name: "acme-wt", branch: "main",
             path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7", kind: kind)
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "", kind: kind,
+            transport: .holder, childPID: 4242)
         return SendFixture(
-            router: router, db: db, terminal: terminal, pastes: pastes, recorder: recorder,
+            router: router, db: db, terminal: terminal, pastes: pastes,
             actuationLogPath: actuationLogPath, transcriptPath: transcriptPath)
     }
 
@@ -729,8 +716,7 @@ struct QueuedPromptDeliveryTests {
             terminalID: fixture.terminal.id, text: "staged", submit: false)
 
         #expect(fixture.pastes.pastes == ["staged"])
-        #expect(!fixture.recorder.joinedAll.contains("send-keys"))
-        #expect(!fixture.recorder.joinedAll.contains("Enter"))
+        #expect(fixture.pastes.enters == 0)
     }
 
     @Test("submit: true does send an Enter after the paste")
@@ -740,7 +726,8 @@ struct QueuedPromptDeliveryTests {
         _ = await fixture.router.sendQueuedPromptVerbatim(
             terminalID: fixture.terminal.id, text: "go", submit: true)
 
-        #expect(fixture.recorder.joinedAll.contains("Enter"))
+        #expect(fixture.pastes.pastes == ["go"])
+        #expect(fixture.pastes.enters == 1)
     }
 
     /// The pair, at the coordinator: the submit bit the operator chose is the
@@ -812,7 +799,7 @@ struct QueuedPromptDeliveryTests {
 
     // MARK: - Verbatim, with the envelope suppressed
 
-    /// The bytes that actually reach the pane, from the real send core: the
+    /// The bytes that actually reach the session, from the real send core: the
     /// operator's own words, with no `<tbd-dispatch/>` framing.
     @Test("the internal send delivers verbatim, with no dispatch envelope")
     func internalSendSuppressesEnvelope() async throws {
@@ -1681,7 +1668,7 @@ struct QueuedPromptDeliveryTests {
         // The operator's own words, verbatim, with no dispatch framing — and
         // exactly one paste, which is the whole claim this feature makes.
         #expect(fixture.pastes.pastes == [Self.multiLinePrompt])
-        #expect(fixture.recorder.joinedAll.contains("Enter"))
+        #expect(fixture.pastes.enters == 1)
         #expect(try await pendingPrompt(fixture.db, fixture.terminal.worktreeID) == nil)
         #expect(try await fixture.db.notifications.unread(
             worktreeID: fixture.terminal.worktreeID).isEmpty)
@@ -1705,7 +1692,7 @@ struct QueuedPromptDeliveryTests {
         await awaitDeliveries(coordinator)
 
         #expect(fixture.pastes.pastes == [Self.multiLinePrompt])
-        #expect(!fixture.recorder.joinedAll.contains("Enter"))
+        #expect(fixture.pastes.enters == 0)
         // Cleared on the paste, and on nothing else: nothing observable records
         // text sitting unsent in a composer, so the successful paste is the
         // whole of what can be known.

@@ -52,18 +52,10 @@ extension ActuationOutcome {
             case .paneBelongsToAnotherTerminal: return .refused(.targetMismatch)
             case .paneMissing, .processExited: return .refused(.notFound)
             }
-        // The pane could not be READ — no tmux server answered. No refusal
-        // reason can say that without asserting something false about the
-        // target, and `notFound` in particular would put "the terminal is gone"
-        // on the permanent record on the strength of a failed read.
-        case .paneUnreadable: return .transportFailed
         // The row is there but cannot be woken as asked: nothing to resume, a
         // tab that is not Claude's, or the profile it was pinned to no longer
         // exists.
         case .noSessionID, .notAClaudeTab, .profileMissing: return .refused(.notEligible)
-        // The row is exit-stamped and its pane is busy: a well-formed wake the
-        // daemon declines, and nothing was respawned.
-        case .paneBusy: return .refused(.notEligible)
         // The row is parked, but no longer the one the caller chose. Declined
         // with nothing touched.
         case .conditionNotMet: return .refused(.notEligible)
@@ -87,11 +79,8 @@ extension ActuationOutcome {
             case .paneBelongsToAnotherTerminal(let actual):
                 return "Pane \(paneID) answers with a different terminal: \(actual)"
             }
-        case .paneUnreadable(let paneID, let server):
-            return "Could not reach tmux server \(server) to check pane \(paneID)"
         case .profileMissing(let profileID):
             return "Profile no longer exists: \(profileID.uuidString)"
-        case .paneBusy(let pid): return HibernationCoordinator.paneBusyRefusal(pid: pid)
         case .conditionNotMet: return "the row no longer meets this wake's condition"
         }
     }

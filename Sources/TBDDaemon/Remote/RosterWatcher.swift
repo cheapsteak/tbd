@@ -31,15 +31,9 @@ public struct TBDSpawnedSession: Sendable, Equatable {
     /// The worktree directory on this machine. Joined against the record's
     /// `cwd`.
     public let worktreePath: String
-    /// The tmux pane the session runs in — `%3541` — or empty for a
-    /// holder-backed terminal, which has none. Joined against the pane
-    /// component of the record's `tmux`, the fallback when no Claude session id
-    /// was captured. Never part of the announced name: that names the terminal
-    /// by `terminalID`, which every transport carries.
-    public let tmuxPaneID: String
     /// The Claude session id TBD captured for this terminal through the
     /// `SessionStart` hook, when one was captured. Joined against the record's
-    /// `sessionId`, and the stronger of the two joins when present.
+    /// `sessionId`, the one join the roster admits on.
     public let claudeSessionID: String?
     /// The permission class TBD launched the session in, or nil when TBD
     /// cannot vouch for one. A remote peer's message into this session is
@@ -53,7 +47,6 @@ public struct TBDSpawnedSession: Sendable, Equatable {
         terminalID: UUID,
         displayName: String,
         worktreePath: String,
-        tmuxPaneID: String,
         claudeSessionID: String?,
         permissionClass: ShadowPeerPermissionClass? = nil
     ) {
@@ -62,7 +55,6 @@ public struct TBDSpawnedSession: Sendable, Equatable {
         self.terminalID = terminalID
         self.displayName = displayName
         self.worktreePath = worktreePath
-        self.tmuxPaneID = tmuxPaneID
         self.claudeSessionID = claudeSessionID
         self.permissionClass = permissionClass
     }
@@ -116,7 +108,6 @@ public struct DatabaseLocalSessionDirectory: LocalSessionDirectory {
                     terminalID: terminal.id,
                     displayName: worktree.displayName,
                     worktreePath: worktree.localPath,
-                    tmuxPaneID: terminal.tmuxPaneID,
                     claudeSessionID: terminal.claudeSessionID,
                     permissionClass: Self.spawnedPermissionClass)
             }
@@ -142,7 +133,7 @@ public struct DatabaseLocalSessionDirectory: LocalSessionDirectory {
     ///
     /// The class can drift after launch — a user can leave bypass mode
     /// mid-session, managed settings can disable it, or a plain `claude` can
-    /// be run by hand in the pane — and then the receiver prompts while TBD
+    /// be run by hand in the terminal — and then the receiver prompts while TBD
     /// stamps `bypass`. That fails closed: the receiver holds the message as
     /// `mode-mismatch` for a human to approve.
     static let spawnedPermissionClass = ClaudeSpawnCommandBuilder.spawnedPermissionClass
@@ -176,12 +167,6 @@ public struct LocalPeerRegistryRecord: Sendable, Equatable, Decodable {
     public let peerProtocol: Int?
     public let name: String?
     public let status: String?
-    /// `"<session>:<window>.<pane>"`, e.g. `main:@3541.%3541`. Note that the
-    /// first component is the tmux *session* name, not the server socket: every
-    /// TBD repo server has a session called `main`, and so does a user's own
-    /// default server. The pane alone is therefore not a machine-wide unique
-    /// key, which is why the pane join below is paired with a `cwd` match.
-    public let tmux: String?
     public let procStart: String?
     public let version: String?
     public let kind: String?
@@ -193,28 +178,9 @@ public struct LocalPeerRegistryRecord: Sendable, Equatable, Decodable {
         case peerProtocol
         case name
         case status
-        case tmux
         case procStart
         case version
         case kind
-    }
-
-    /// The pane component of `tmux`, normalised to include its `%`.
-    ///
-    /// Nil when the record carries no tmux coordinates — a plain-terminal
-    /// `claude`, a `cloud` row, or one of the four records in the census that
-    /// simply had none — and nil again when the value is not shaped like a pane
-    /// id. A field that has changed shape must read as "no pane", never as a
-    /// pane nothing can match: the first is a session that stays local, the
-    /// second is a join that quietly stops working.
-    public var tmuxPaneID: String? {
-        guard let tmux, let pane = tmux.split(separator: ".").last, !pane.isEmpty else {
-            return nil
-        }
-        let normalized = RosterJoinKeys.normalizedPaneID(String(pane))
-        let digits = normalized.dropFirst()
-        guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return nil }
-        return normalized
     }
 
     /// The status to announce for a record that carries none.
@@ -873,22 +839,15 @@ public actor RosterWatcher {
     ///
     /// **Only TBD-spawned sessions, and the test is a join** — never a marker
     /// inside the record, which is impossible (an unknown key makes a record
-    /// invisible), and never a guess from a path. Two joins, both exact
-    /// equality against facts TBD itself wrote:
+    /// invisible), and never a guess from a path. One join, exact equality
+    /// against a fact TBD itself wrote: the record's `sessionId` against the
+    /// Claude session id TBD captured for a terminal through its `SessionStart`
+    /// hook.
     ///
-    /// - the record's `sessionId` against the Claude session id TBD captured
-    ///   for a terminal through its `SessionStart` hook, or
-    /// - the record's `cwd` against a worktree directory **and** the pane
-    ///   component of its `tmux` against that worktree's terminal pane.
-    ///
-    /// Either is sufficient; the session-id join is preferred when both are
-    /// available. The pane join is paired with `cwd` rather than used alone
-    /// because a pane id is unique per tmux *server*, and TBD runs one server
-    /// per repository alongside whatever servers the user runs themselves.
-    ///
-    /// Both joins fail closed. A TBD session whose hook never fired and whose
-    /// worktree row has moved on is not announced — it stays local, which is
-    /// the harmless direction.
+    /// The join fails closed. A TBD session whose hook never fired is not
+    /// announced — it stays local, which is the harmless direction. A path
+    /// alone cannot stand in for the session id: several sessions run in one
+    /// worktree directory, TBD's and the user's alike.
     ///
     /// **So does the liveness check, and it requires the record's own
     /// `procStart`.** A record that carries no start time is not admitted at
@@ -952,16 +911,8 @@ public actor RosterWatcher {
     private func match(
         record: LocalPeerRegistryRecord, against spawned: [TBDSpawnedSession]
     ) -> TBDSpawnedSession? {
-        if let sessionID = record.sessionID, !sessionID.isEmpty,
-           let bySession = spawned.first(where: { $0.claudeSessionID == sessionID }) {
-            return bySession
-        }
-        guard let cwd = record.cwd, let pane = record.tmuxPaneID else { return nil }
-        let normalizedCWD = RosterJoinKeys.normalizedPath(cwd)
-        return spawned.first { session in
-            RosterJoinKeys.normalizedPath(session.worktreePath) == normalizedCWD
-                && RosterJoinKeys.normalizedPaneID(session.tmuxPaneID) == pane
-        }
+        guard let sessionID = record.sessionID, !sessionID.isEmpty else { return nil }
+        return spawned.first { $0.claudeSessionID == sessionID }
     }
 
     /// `<origin>:<display name> <terminal short id>`, e.g.
@@ -974,11 +925,10 @@ public actor RosterWatcher {
     /// one that occasionally needs a ref.
     ///
     /// The discriminator is the terminal row's id rather than any transport
-    /// coordinate. A holder-backed terminal has no tmux pane, so a pane would
-    /// give every holder tab in a worktree the same name, and a tmux terminal
-    /// woken from a park gets a new pane. A wake always re-announces the
-    /// session — new process, new socket, new handle — but with a terminal
-    /// discriminator it comes back under the name its peers already knew.
+    /// coordinate, which a holder-backed terminal does not have. A wake always
+    /// re-announces the session — new process, new socket, new handle — but
+    /// with a terminal discriminator it comes back under the name its peers
+    /// already knew.
     /// The short id is
     /// the prefix of what `tbd terminal list` prints for the row on this
     /// machine, so whoever holds a name can find the terminal it names here —
@@ -1042,11 +992,6 @@ enum RosterJoinKeys {
         let stem = String(filename.dropLast(".json".count))
         guard let value = pid_t(stem), String(value) == stem, value > 0 else { return nil }
         return value
-    }
-
-    /// A pane id with its `%`, whichever way it was written.
-    static func normalizedPaneID(_ pane: String) -> String {
-        pane.hasPrefix("%") ? pane : "%\(pane)"
     }
 
     /// Lexical path normalisation only — no symlink resolution, which would

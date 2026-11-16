@@ -254,10 +254,11 @@ struct PeerListTests {
         #expect(row.tmuxPane == nil)
     }
 
-    /// The cwd-and-pane fallback join has to keep working for a tmux session
-    /// whose `SessionStart` hook never fired — that is the case the session id
-    /// cannot cover.
-    @Test func localRowJoinsOnCwdAndPaneWhenNoSessionIDWasCaptured() throws {
+    /// The session id is the only recorded join. A tmux session whose
+    /// `SessionStart` hook never fired is not placed by its working directory
+    /// and pane, even when both name a TBD terminal: TBD no longer reads tmux
+    /// coordinates, and the row lists as external, with the pane it claims.
+    @Test func aTmuxSessionWithNoCapturedSessionIDIsNotJoinedByItsPane() throws {
         let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
         let terminal = Self.terminal(worktreeID: worktree.id, pane: "%77")
         let scan = PeerRegistryScan(entries: [
@@ -269,37 +270,15 @@ struct PeerListTests {
         let result = Self.compose(
             scan: scan,
             fleet: PeerListFleet(
-                reachable: true, worktrees: [worktree], terminals: [terminal]))
-
-        let row = try #require(result.peers.first)
-        #expect(row.kind == .local)
-        #expect(row.terminalID == terminal.id)
-        // The point of the join: the row is placed even though its name matches
-        // no worktree, which is precisely the drift the docs warn about.
-        #expect(row.name == "some-slug-name")
-    }
-
-    /// A pane id belongs to one tmux *server*, and TBD runs one per repository
-    /// alongside whatever servers the user runs. A pane match with the wrong
-    /// directory must not place a row.
-    @Test func paneJoinDoesNotFireAcrossDifferentWorktrees() throws {
-        let laneA = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
-        let laneB = Self.worktree(displayName: "lane-b", path: Self.laneBPath)
-        let terminal = Self.terminal(worktreeID: laneB.id, pane: "%77")
-        let scan = PeerRegistryScan(entries: [
-            PeerRegistryEntry(pid: 4003, record: try Self.record(Self.liveSessionFields(
-                cwd: Self.laneAPath, name: "elsewhere",
-                pane: "%77", socket: "/opt/peertest/socks/4003.sock")))
-        ])
-
-        let result = Self.compose(
-            scan: scan,
-            fleet: PeerListFleet(
-                reachable: true, worktrees: [laneA, laneB], terminals: [terminal]))
+                reachable: true, worktrees: [worktree], terminals: [terminal]),
+            processes: Self.table([4001: 1, 4002: 4001]))
 
         let row = try #require(result.peers.first)
         #expect(row.kind == .external)
         #expect(row.terminalID == nil)
+        #expect(row.joinedBy == nil)
+        #expect(row.unjoinedReason == .noTerminal)
+        #expect(row.tmuxPane == "%77")
     }
 
     // MARK: - Shadow rows
@@ -1172,13 +1151,14 @@ struct PeerListTests {
         }
     }
 
-    /// The tmux transport's joins are untouched by a process table in hand: a
-    /// pane still joins its tmux terminal, by pane.
-    @Test func aTmuxSessionStillJoinsByPaneWithAProcessTableInHand() throws {
+    /// A tmux session joined by its captured session id lists its terminal's
+    /// own pane, with a process table in hand as without one.
+    @Test func aTmuxSessionJoinedBySessionIDListsItsPane() throws {
         let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
-        let terminal = Self.terminal(worktreeID: worktree.id, pane: "%77")
+        let terminal = Self.terminal(
+            worktreeID: worktree.id, pane: "%77", claudeSessionID: "S-tmux")
         let entry = PeerRegistryEntry(pid: 4002, record: try Self.record(Self.liveSessionFields(
-            cwd: Self.laneAPath, name: "lane-a", pane: "%77",
+            sessionID: "S-tmux", cwd: Self.laneAPath, name: "lane-a", pane: "%77",
             socket: "/opt/peertest/socks/4002.sock")))
 
         let result = Self.compose(
@@ -1189,7 +1169,7 @@ struct PeerListTests {
         let row = try #require(result.peers.first)
         #expect(row.kind == .local)
         #expect(row.terminalID == terminal.id)
-        #expect(row.joinedBy == .tmuxPane)
+        #expect(row.joinedBy == .sessionID)
         #expect(row.tmuxPane == "%77")
     }
 

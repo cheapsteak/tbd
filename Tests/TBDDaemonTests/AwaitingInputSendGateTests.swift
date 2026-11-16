@@ -117,7 +117,7 @@ struct AwaitingInputSendGateOptInTests {
 
         #expect(!response.success)
         #expect(try #require(response.error).contains("Allow Bash(rm -rf)?"))
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
     }
 
     /// **The load-bearing negative.** The same row, the same prompt, no opt-in:
@@ -131,7 +131,7 @@ struct AwaitingInputSendGateOptInTests {
             actor: ActuationActor.session(worktree: "W", terminal: "T"))
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(!(harness.tmux.pastedBodies.isEmpty))
+        #expect(!(harness.delivered.pastedBodies.isEmpty))
     }
 
     @Test func anOptedInSendToAnIdleSessionGoesThrough() async throws {
@@ -180,7 +180,7 @@ struct AwaitingInputSendGateOptInTests {
         let second = try await harness.send(gated, actor: .app)
         #expect(!second.success)
         #expect(try #require(second.error).contains("a prompt on screen"))
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
         #expect(try await harness.db.terminals.get(id: harness.terminal.id)?
             .awaitingInputReason == reason)
     }

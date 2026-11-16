@@ -416,13 +416,6 @@ public final class RPCRouter: Sendable {
     /// it is not a general-purpose "what time is it".
     let now: @Sendable () -> Date
 
-    /// How the daemon asks whether Claude owns a pane's foreground process
-    /// group. The same seam the limit-resume actuator uses, held here so the
-    /// send path can refuse a pane whose agent has left, and the tmux in-place
-    /// swap can find the Claude process it signals, without any test needing
-    /// a real `ps`. A process-table fact, never screen text.
-    let paneProcessInspector: any PaneProcessInspecting
-
     /// The identity the FD-vending sidecar recorded for its current client.
     ///
     /// That client is the app: it connects the sidecar eagerly and
@@ -438,9 +431,7 @@ public final class RPCRouter: Sendable {
     let recordedAppIdentity: @Sendable () async -> ProcessIdentity?
     /// The one process-fact reader, injected for the same reason `AgentReaper`
     /// and `AppLivenessArbiter` take one: the re-verification must be statable
-    /// in a test without a process to inspect. Also how the tmux in-place
-    /// swap sends SIGTERM to the session it ends, so a test can see the pid
-    /// it signalled.
+    /// in a test without a process to inspect.
     let processSignaller: any ProcessSignaller
 
     /// How the hook-caller guard reads the kernel's process table: one
@@ -451,8 +442,8 @@ public final class RPCRouter: Sendable {
     /// accepting.
     let processTableReader: @Sendable () -> ProcessTableSnapshot?
 
-    /// Behavior seam for send-path settling after an image paste and the
-    /// signal ending's poll before an in-place profile replacement. A
+    /// Behavior seam for the handlers that wait: an attach's bound, the
+    /// session restore's gap between batches, the PR poll schedule. A
     /// `Duration` is behavior, so this is the `Clock` seam rather than the
     /// `now` date seam beside it, and it is existential (`any Clock<Duration>`)
     /// for the reason every other subsystem here holds one that way — a generic
@@ -491,7 +482,6 @@ public final class RPCRouter: Sendable {
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
-        paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
         completionInventory: CompletionInventoryService = CompletionInventoryService(),
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
         processSignaller: any ProcessSignaller = ProductionProcessSignaller(),
@@ -509,7 +499,6 @@ public final class RPCRouter: Sendable {
         self.processTableReader = processTableReader
         self.clock = clock
         self.now = now
-        self.paneProcessInspector = paneProcessInspector
         self.completionInventory = completionInventory
         self.actuationLog = actuationLog
         self.db = db
@@ -1004,8 +993,6 @@ public final class RPCRouter: Sendable {
                 let params = try decoder.decode(AppSetComposerDraftsParams.self, from: request.paramsData)
                 composerDrafts.replace(with: Set(params.terminalIDs))
                 return .ok()
-            case RPCMethod.appearanceUpdateColorFgBg:
-                return try await handleAppearanceUpdateColorFgBg(request.paramsData)
             case RPCMethod.setMainAreaSize:
                 return try await handleSetMainAreaSize(request.paramsData)
             case RPCMethod.sessionList:

@@ -306,11 +306,20 @@ struct HolderTmuxAssumptionGateTests {
     /// A router with the same sandboxed config dirs the coordinator gets: the
     /// swap path seeds folder trust and writes a settings overlay before it
     /// spawns anything, and neither belongs in the developer's real `~/.claude`.
-    private func router(_ db: TBDDatabase, tmux: TmuxManager) -> RPCRouter {
-        RPCRouter(
+    ///
+    /// The leftover-tmux probe answers `probe` rather than looking for a real
+    /// socket, defaulting to the server being gone — what an install whose
+    /// tmux sessions ended with the update finds.
+    private func router(
+        _ db: TBDDatabase, tmux: TmuxManager,
+        probe: LeftoverTmuxServerProbe = LeftoverTmuxServerProbe { _ in .absent }
+    ) -> RPCRouter {
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.leftoverTmuxProbe = probe
+        return RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
@@ -646,8 +655,10 @@ struct HolderTmuxAssumptionGateTests {
     }
 
     /// Manual park needs no flag at all, and specifically not the idle sweep's:
-    /// `auto_hibernate_enabled` written EXPLICITLY off, on both transports.
-    @Test("manual park is permitted on both transports with auto-hibernate off")
+    /// `auto_hibernate_enabled` written EXPLICITLY off. The holder row reaches
+    /// its own reader check rather than being refused for the switch, and a
+    /// live tmux row's refusal is the still-running one, not the switch's.
+    @Test("manual park is not refused for the auto-hibernate switch")
     func manualParkIgnoresTheAutoHibernateSwitch() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setAutoHibernate(enabled: false, idleMinutes: 30)
@@ -661,11 +672,12 @@ struct HolderTmuxAssumptionGateTests {
         #expect(tmuxRow.isManuallyHibernatable())
         #expect(holderRow.isManuallyHibernatable())
 
-        // The tmux row parks outright; the holder row reaches its own reader
-        // check rather than being refused for its transport.
+        let tmuxResult = await coordinator(db, tmux: TmuxManager(dryRun: true))
+            .manualHibernate(terminalID: tmuxRow.id)
         #expect(
-            await coordinator(db, tmux: TmuxManager(dryRun: true))
-                .manualHibernate(terminalID: tmuxRow.id) == .ok)
+            tmuxResult == .notEligible(reason: LeftoverTmuxSession.stillRunningRefusal(
+                terminalID: tmuxRow.id, server: wt.tmuxServer)),
+            "\(tmuxResult)")
         let holderResult = await coordinator(
             db, tmux: TmuxManager(dryRun: true),
             registry: holderRegistry(listing: [holderRow])
@@ -676,21 +688,26 @@ struct HolderTmuxAssumptionGateTests {
             "a manual holder park was refused for something other than its missing reader: \(holderResult)")
     }
 
-    @Test("an identical tmux row is still manually hibernatable and parks")
-    func tmuxRowStillManuallyHibernatable() async throws {
+    /// TBD no longer stops tmux sessions, so an identical live tmux row is
+    /// refused a park with the still-running advice, and keeps every column.
+    @Test("an identical live tmux row is refused a park as still running in tmux")
+    func tmuxRowIsRefusedAPark() async throws {
         let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .tmux)
+        let before = RowFingerprint(terminal)
 
-        #expect(terminal.isManuallyHibernatable())
-        #expect(terminal.isAutoHibernationEligible())
-
-        let result = await coordinator(db, tmux: TmuxManager(dryRun: true))
+        let result = await coordinator(db, tmux: deadWindowTmux(recorded))
             .manualHibernate(terminalID: terminal.id)
-        #expect(result == .ok)
-        #expect(try await db.terminals.get(id: terminal.id)?.hibernatedAt != nil)
+        #expect(result == .notEligible(reason: LeftoverTmuxSession.stillRunningRefusal(
+            terminalID: terminal.id, server: wt.tmuxServer)), "\(result)")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+        #expect(recorded.snapshot().isEmpty,
+                "a refused park reached tmux: \(recorded.snapshot())")
     }
 
     // MARK: - Gate 2a: no park judges the screen
@@ -1970,12 +1987,12 @@ struct HolderTmuxAssumptionGateTests {
     ///
     /// This gate is the one that does NOT refuse. The holder transport can
     /// answer this question: `HolderReader.resize` reshapes the emulator and
-    /// sets the pty's window size, which is both halves of what the tmux call
-    /// was for. Refusing a mechanic the transport can serve would remove a
-    /// working feature rather than close a hole.
+    /// sets the pty's window size. Refusing a mechanic the transport can serve
+    /// would remove a working feature rather than close a hole.
     ///
-    /// What these two tests pin is the branch: a holder row no longer reaches
-    /// tmux, and a tmux row still does. That the reader is then actually
+    /// What these two tests pin is that neither transport reaches tmux: a
+    /// holder row is resized through its holder, and a tmux row is left alone
+    /// because TBD no longer drives tmux. That the reader is then actually
     /// resized needs a real `TBDHolder` to observe and belongs in
     /// `TBDDaemonLiveTests` — here `reader(for:)` answers nil, which is also
     /// the un-adopted case the branch must survive without throwing.
@@ -2003,28 +2020,29 @@ struct HolderTmuxAssumptionGateTests {
         #expect(RowFingerprint(after) == before)
     }
 
-    @Test("setMainAreaSize still resizes an identical tmux row's window")
-    func setMainAreaSizeStillResizesTmuxRow() async throws {
+    @Test("setMainAreaSize leaves an identical tmux row's window alone")
+    func setMainAreaSizeLeavesTmuxRowAlone() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
-        _ = try await seedClaudeTerminal(db, worktreeID: wt.id, transport: .tmux)
+        let terminal = try await seedClaudeTerminal(db, worktreeID: wt.id, transport: .tmux)
+        let before = RowFingerprint(terminal)
 
         let router = router(db, tmux: tmux)
-        // Wired in and listing nothing, so an inverted transport comparison
-        // reaches a registry that has never heard of this row rather than a nil
-        // that would make the branch unreachable either way.
+        // Wired in and listing nothing, so the loop runs and meets a row it
+        // must skip, rather than a nil registry that returns before the loop.
         router.holderRegistry = holderRegistry(listing: [])
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.setMainAreaSize,
             params: SetMainAreaSizeParams(cols: 120, rows: 40)))
 
         #expect(response.success, "error: \(response.error ?? "nil")")
-        let argv = recorded.snapshot()
-        #expect(argv.contains { $0.contains("resize-window") && $0.contains("@7") },
-                "the tmux leg must still resize its own window: \(argv)")
+        #expect(recorded.snapshot().isEmpty,
+                "setMainAreaSize reached tmux for a tmux row: \(recorded.snapshot())")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
     }
 
     // MARK: - Gate 9: the verb that refused for the wrong reason
@@ -2681,27 +2699,41 @@ struct HolderTmuxAssumptionGateTests {
         #expect(recorded.snapshot().isEmpty)
     }
 
-    @Test("terminal.send still types into an identical tmux row")
-    func sendStillActsOnTmuxRow() async throws {
+    /// TBD no longer types into tmux. An identical tmux row is refused as a
+    /// session that may still be running there, with `terminalOnTmux`, and
+    /// nothing reaches tmux, the courier, or the row. The probe is not asked:
+    /// a refusal that names how to end the session holds whether it runs.
+    @Test("terminal.send refuses an identical tmux row as still running in tmux")
+    func sendRefusesTmuxRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
-        // The dry-run pane consultation answers "alive, carrying no identity",
-        // which is the branch that proceeds.
         let tmux = deadWindowTmux(recorded)
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .tmux)
+        let before = RowFingerprint(terminal)
+        let writes = HolderWrites()
 
-        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+        let rpc = router(db, tmux: tmux, probe: LeftoverTmuxServerProbe { _ in
+            Issue.record("a send must not probe for the tmux server")
+            return .running
+        })
+        rpc.holderInjectionCourier = writes.courier()
+        let response = await rpc.handle(try RPCRequest(
             method: RPCMethod.terminalSend,
             params: TerminalSendParams(
                 terminalID: terminal.id, text: "hello", submit: true)))
 
-        #expect(response.success, "error: \(response.error ?? "nil")")
-        let argv = recorded.snapshot()
-        #expect(argv.contains { $0.contains("paste-buffer") },
-                "the tmux leg must still paste: \(argv)")
+        #expect(!response.success)
+        #expect(response.knownErrorCode == .terminalOnTmux)
+        #expect(response.error == LeftoverTmuxSession.stillRunningRefusal(
+            terminalID: terminal.id, server: wt.tmuxServer))
+        #expect(writes.all.isEmpty, "a tmux row reached the holder courier")
+        #expect(recorded.snapshot().isEmpty,
+                "terminal.send reached tmux for a tmux row: \(recorded.snapshot())")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
     }
 
     // MARK: - Gate 8: the other teardowns that delete a row
@@ -2865,8 +2897,7 @@ struct HolderTmuxAssumptionGateTests {
         let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
 
         try await lifecycle(db, tmux: tmux, registry: registry).reconcile(
-            repoID: repo.id, actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: false)
+            repoID: repo.id, actuationLog: makeTestActuationLog())
 
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
         #expect(try await db.terminals.get(id: terminal.id) == nil)
@@ -2969,9 +3000,8 @@ struct HolderTmuxAssumptionGateTests {
     }
 
     /// An actuator whose every side effect is observable: no real sleeping, no
-    /// transcript on disk, a tmux double that records the keys it is asked to
-    /// type, and — when the caller passes one — a holder input path that
-    /// records the bytes it is handed.
+    /// transcript on disk, and — when the caller passes one — a holder input
+    /// path that records the bytes it is handed.
     ///
     /// `holderSend` defaults to nil, which is also what a daemon with no holder
     /// registry wires, so the flag-off tests below assert the flag and not an
@@ -2982,13 +3012,13 @@ struct HolderTmuxAssumptionGateTests {
     /// does: that is what a daemon with no holder registry wires, so a test
     /// that says nothing about liveness is asserting on today's behaviour.
     private func resumeActuator(
-        _ db: TBDDatabase, tmux: FakeResumeTmux,
+        _ db: TBDDatabase,
         holderSend: (@Sendable (UUID, Data) async -> Bool)? = nil,
         holderSessionEnded: (@Sendable (UUID) async -> Bool)? = nil,
         waiter: @escaping @Sendable (Duration) async -> Void = { _ in }
     ) -> LimitResumeActuator {
         LimitResumeActuator(
-            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            db: db,
             readTranscript: { _ in nil },
             transcriptModifiedAt: { _ in nil },
             waiter: waiter, actuationLog: makeTestActuationLog(),
@@ -3021,24 +3051,20 @@ struct HolderTmuxAssumptionGateTests {
             id: terminal.id, activityState: .working, source: .derived)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
-        tmux.windowAlive = false   // what a real server answers for ""
         let holder = RecordedHolderWrites()
         let outcome = await resumeActuator(
-            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+            db, holderSend: holder.send, waiter: holder.waiter
         ).actuate(resume)
 
         #expect(outcome == .sent, "expected .sent, got \(outcome)")
-        #expect(tmux.sends.isEmpty,
-                "the holder arm reached tmux: \(tmux.sends)")
         #expect(!holder.writes().isEmpty,
                 "the rail wrote nothing to the holder's pty: \(outcome)")
     }
 
     /// How the rail delivers a resume through the holder input path.
     ///
-    /// Three writes (ESC, the text, a lone CR) with the tmux arm's 150 ms
-    /// pause between each, asserted as one ordered log because the order is the
+    /// Three writes (ESC, the text, a lone CR) with a 150 ms pause between
+    /// each, asserted as one ordered log because the order is the
     /// property. ESC has to arrive in a read of its own: an ink-style parser
     /// reads ESC followed immediately by a printable byte as a meta key, and by
     /// the text's leading `[` as a CSI introducer. The CR is its own write
@@ -3056,22 +3082,16 @@ struct HolderTmuxAssumptionGateTests {
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .holder)
         // The activity hook already reports working, so the first verification
-        // poll succeeds without a transcript on disk — the same fixture the
-        // tmux leg uses, because verification reads hook-fed state and the
-        // transcript and so is the same code for both transports. It also
-        // means verification never reaches its own `waiter` call, so every
-        // pause in the log below belongs to the send.
+        // poll succeeds without a transcript on disk. It also means
+        // verification never reaches its own `waiter` call, so every pause in
+        // the log below belongs to the send.
         try await db.terminals.setActivityState(
             id: terminal.id, activityState: .working, source: .derived)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
-        // A holder row must not consult tmux either way; answering "alive"
-        // makes that a real assertion rather than a refusal in disguise.
-        tmux.windowAlive = true
         let holder = RecordedHolderWrites()
         let outcome = await resumeActuator(
-            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+            db, holderSend: holder.send, waiter: holder.waiter
         ).actuate(resume)
 
         #expect(outcome == .sent, "expected .sent, got \(outcome)")
@@ -3089,13 +3109,11 @@ struct HolderTmuxAssumptionGateTests {
             #expect(!bytes.contains(0x0D),
                     "a text-carrying holder write also carried a CR: \(Array(bytes))")
         }
-        #expect(tmux.sends.isEmpty,
-                "the holder arm reached tmux: \(tmux.sends)")
     }
 
     /// Parking cancels the pending row, so this is the fire-time backstop for a
-    /// park that raced the scheduler. Same silent cancel as the tmux path:
-    /// `.terminalGone`, nothing written.
+    /// park that raced the scheduler. A silent cancel: `.terminalGone`, nothing
+    /// written.
     @Test("auto-resume writes nothing to a parked holder row")
     func autoResumeLeavesParkedHolderRowAlone() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -3109,20 +3127,16 @@ struct HolderTmuxAssumptionGateTests {
         try await db.terminals.setHibernated(
             id: terminal.id, sessionID: "sess-holdergate", snapshot: nil)
 
-        let tmux = FakeResumeTmux()
-        tmux.windowAlive = true
         let holder = RecordedHolderWrites()
-        let outcome = await resumeActuator(db, tmux: tmux, holderSend: holder.send)
+        let outcome = await resumeActuator(db, holderSend: holder.send)
             .actuate(resume)
 
         #expect(outcome == .terminalGone, "expected .terminalGone, got \(outcome)")
         #expect(holder.writes().isEmpty,
                 "auto-resume wrote into a parked holder session")
-        #expect(tmux.sends.isEmpty)
     }
 
-    /// The holder arm's liveness answer, in the position `windowExists`
-    /// occupies on the tmux arm and with the same silent cancel.
+    /// The holder arm's liveness answer, and its silent cancel.
     ///
     /// Nothing had parked this row: its child simply ended. Without the seam
     /// the arm has no liveness question at all and types "continue" onto a pty
@@ -3139,18 +3153,15 @@ struct HolderTmuxAssumptionGateTests {
             id: terminal.id, activityState: .working, source: .derived)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
-        tmux.windowAlive = true
         let holder = RecordedHolderWrites()
         let outcome = await resumeActuator(
-            db, tmux: tmux, holderSend: holder.send,
+            db, holderSend: holder.send,
             holderSessionEnded: { _ in true }
         ).actuate(resume)
 
         #expect(outcome == .terminalGone, "expected .terminalGone, got \(outcome)")
         #expect(holder.writes().isEmpty,
                 "auto-resume typed into a session its holder had reported over")
-        #expect(tmux.sends.isEmpty)
     }
 
     /// The other answer. A seam that answered "ended" for everything would pass
@@ -3168,11 +3179,9 @@ struct HolderTmuxAssumptionGateTests {
             id: terminal.id, activityState: .working, source: .derived)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
-        tmux.windowAlive = true
         let holder = RecordedHolderWrites()
         let outcome = await resumeActuator(
-            db, tmux: tmux, holderSend: holder.send,
+            db, holderSend: holder.send,
             holderSessionEnded: { _ in false }
         ).actuate(resume)
 
@@ -3199,11 +3208,9 @@ struct HolderTmuxAssumptionGateTests {
             id: terminal.id, activityState: .working, source: .derived)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
-        tmux.windowAlive = true
         let holder = RecordedHolderWrites()
         let outcome = await resumeActuator(
-            db, tmux: tmux, holderSend: holder.send, holderSessionEnded: nil
+            db, holderSend: holder.send, holderSessionEnded: nil
         ).actuate(resume)
 
         #expect(outcome == .sent, "expected .sent, got \(outcome)")
@@ -3230,17 +3237,15 @@ struct HolderTmuxAssumptionGateTests {
             db, worktreeID: wt.id, transport: .holder)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
         let holder = RecordedHolderWrites(acceptedWrites: 0)
         let outcome = await resumeActuator(
-            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+            db, holderSend: holder.send, waiter: holder.waiter
         ).actuate(resume)
 
         #expect(outcome == .failed(LimitResumeActuator.holderWriteRefused),
                 "expected the named write failure, got \(outcome)")
         #expect(holder.snapshot() == [.write(terminalID: terminal.id, bytes: Data([0x1B]))],
                 "a refused Escape was followed by more: \(holder.snapshot())")
-        #expect(tmux.sends.isEmpty)
     }
 
     /// The other half of the same failure: the Escape lands, the text does not.
@@ -3256,10 +3261,9 @@ struct HolderTmuxAssumptionGateTests {
             db, worktreeID: wt.id, transport: .holder)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
         let holder = RecordedHolderWrites(acceptedWrites: 1)
         let outcome = await resumeActuator(
-            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+            db, holderSend: holder.send, waiter: holder.waiter
         ).actuate(resume)
 
         #expect(outcome == .failed(LimitResumeActuator.holderWriteRefused),
@@ -3269,12 +3273,11 @@ struct HolderTmuxAssumptionGateTests {
             .pause(.milliseconds(150)),
             .write(terminalID: terminal.id, bytes: Data(expectedResumeText.utf8)),
         ], "the send was retried or reshaped: \(holder.snapshot())")
-        #expect(tmux.sends.isEmpty)
     }
 
     /// The third half of the same failure: the Escape and the text land, the
     /// carriage return does not. The text sits unsent in the composer, so this
-    /// is a failure by name and not a send; still no retry, and no tmux.
+    /// is a failure by name and not a send; still no retry.
     @Test("auto-resume fails by name when the holder input path refuses the submitting CR")
     func autoResumeFailsByNameWhenHolderSubmitIsRefused() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -3284,10 +3287,9 @@ struct HolderTmuxAssumptionGateTests {
             db, worktreeID: wt.id, transport: .holder)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
         let holder = RecordedHolderWrites(acceptedWrites: 2)
         let outcome = await resumeActuator(
-            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+            db, holderSend: holder.send, waiter: holder.waiter
         ).actuate(resume)
 
         #expect(outcome == .failed(LimitResumeActuator.holderWriteRefused),
@@ -3299,7 +3301,6 @@ struct HolderTmuxAssumptionGateTests {
             .pause(.milliseconds(150)),
             .write(terminalID: terminal.id, bytes: Data([0x0D])),
         ], "the send was retried or reshaped: \(holder.snapshot())")
-        #expect(tmux.sends.isEmpty)
     }
 
     /// The flag is on, the row is a holder row, and this daemon has no way to
@@ -3316,24 +3317,20 @@ struct HolderTmuxAssumptionGateTests {
         let before = RowFingerprint(terminal)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
-        tmux.windowAlive = true
-        let outcome = await resumeActuator(db, tmux: tmux, holderSend: nil).actuate(resume)
+        let outcome = await resumeActuator(db, holderSend: nil).actuate(resume)
 
         #expect(outcome == .failed(LimitResumeActuator.holderInputPathMissing),
                 "expected the named missing-path failure, got \(outcome)")
-        #expect(tmux.sends.isEmpty,
-                "a daemon with no holder input path fell back to typing at tmux: \(tmux.sends)")
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before)
     }
 
-    /// The tmux leg: transport decides how a row is resumed and nothing else.
-    /// A tmux row still gets the three-key sequence through `send-keys`, and
-    /// the holder input path is never touched. An inverted transport comparison
-    /// would disable auto-resume for the transport that has a pane to type into.
-    @Test("auto-resume still types the continue sequence into a tmux row")
-    func autoResumeStillActsOnTmuxRow() async throws {
+    /// The tmux leg: TBD no longer types into tmux, so an armed resume on a
+    /// live tmux row fails by name, which notifies, rather than cancelling in
+    /// silence. Nothing is written anywhere: an inverted transport comparison
+    /// would route the tmux row through the holder input path.
+    @Test("auto-resume fails by name on a tmux row and types nothing")
+    func autoResumeFailsByNameOnTmuxRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -3345,14 +3342,12 @@ struct HolderTmuxAssumptionGateTests {
             id: terminal.id, activityState: .working, source: .derived)
         let resume = try await armedResume(db, terminal: terminal)
 
-        let tmux = FakeResumeTmux()
-        tmux.windowAlive = true
         let holder = RecordedHolderWrites()
-        let outcome = await resumeActuator(db, tmux: tmux, holderSend: holder.send)
+        let outcome = await resumeActuator(db, holderSend: holder.send)
             .actuate(resume)
 
-        #expect(outcome == .sent, "expected .sent, got \(outcome)")
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
+        #expect(outcome == .failed(LimitResumeActuator.tmuxSessionNotTyped),
+                "expected the named tmux failure, got \(outcome)")
         #expect(holder.writes().isEmpty,
                 "a tmux row was routed through the holder input path")
     }
@@ -3389,7 +3384,7 @@ struct HolderTmuxAssumptionGateTests {
             db: db, tmux: TmuxManager(dryRun: true),
             configDirManager: isolatedConfigDirManager(),
             now: dates.provider,
-            exitPollAttempts: 1, exitPollInterval: .milliseconds(1),
+            exitPollInterval: .milliseconds(1),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: ActuationLog(path: logPath))
         await coordinator.setHolderRegistry(registry)

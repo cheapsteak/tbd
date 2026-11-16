@@ -159,7 +159,7 @@ public struct ScheduledResumeStore: Sendable {
         }
     }
 
-    /// Push a pending row's fire time (copy-mode retry) and bump attemptCount.
+    /// Push a pending row's fire time and bump attemptCount.
     /// - Returns: true if the row was pending and rescheduled, false if row not found or not pending.
     @discardableResult
     public func reschedule(id: UUID, fireAt: Date, attemptCount: Int) async throws -> Bool {

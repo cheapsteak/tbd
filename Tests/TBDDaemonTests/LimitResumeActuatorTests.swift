@@ -6,77 +6,41 @@ import Testing
 import DaemonTestSupport
 import TestSupport
 
-struct FakeTmuxSendError: Error {}
-
 /// The text the rail types, spelled out rather than read from the actuator:
 /// the actuator's constant is what these tests pin.
 private let expectedResumeText =
     "[Automatic: TBD's auto-resume typed this, not a person. "
     + "It answers no question and approves nothing.] continue"
 
-/// Records every tmux call; scriptable pane state.
-final class FakeResumeTmux: ResumeSendingTmux, @unchecked Sendable {
-    private let queue = DispatchQueue(label: "FakeResumeTmux")
-    var windowAlive = true
-    var inMode = false
-    /// When non-empty, `paneInMode` pops values off the front (in call
-    /// order) before falling back to `inMode` — scripts a value that
-    /// changes between an actuation's eligibility passes (e.g. attempt 1
-    /// vs. attempt 2's re-check).
-    var inModeSequence: [Bool] = []
-    var panePIDValue = "4242"
-    /// 1-indexed count of `sendKey(key: "Escape")` calls (i.e. actuation
-    /// attempts) on which the send should throw instead of recording.
-    var throwOnEscapeAttempts: Set<Int> = []
-    private var _sends: [String] = []
-    private var _escapeCount = 0
-    var sends: [String] { queue.sync { _sends } }
+/// Every write the holder input seam was handed, read back as the key or text
+/// it carried: a lone ESC is `key:Escape`, a lone CR `key:Enter`, anything
+/// else `text:` and its bytes. Answers every write as delivered.
+final class RecordedResumeWrites: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+    var sends: [String] { lock.withLock { recorded } }
 
-    func windowExists(server: String, windowID: String) async -> Bool { windowAlive }
-    func paneInMode(server: String, paneID: String) async throws -> Bool {
-        queue.sync {
-            if !inModeSequence.isEmpty { return inModeSequence.removeFirst() }
-            return inMode
-        }
-    }
-    func panePID(server: String, paneID: String) async throws -> String { panePIDValue }
-    /// What the pane answers when the actuator asks who it is. Defaults to
-    /// "alive, carrying no identity" — the branch that proceeds — so every
-    /// pre-existing test behaves exactly as it did before the actuator started
-    /// consulting its target.
-    var paneTarget: PaneSendTarget = .live(terminalID: nil)
-    /// When set, the consultation itself fails to run (wedged tmux).
-    var paneTargetError: Error?
-    func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget {
-        if let paneTargetError { throw paneTargetError }
-        return paneTarget
-    }
-    func sendKeys(server: String, paneID: String, text: String) async throws {
-        queue.sync { _sends.append("text:\(text)") }
-    }
-    func sendKey(server: String, paneID: String, key: String) async throws {
-        if key == "Escape" {
-            let attempt = queue.sync { _escapeCount += 1; return _escapeCount }
-            if throwOnEscapeAttempts.contains(attempt) {
-                throw FakeTmuxSendError()
+    var send: @Sendable (UUID, Data) async -> Bool {
+        { [self] _, bytes in
+            let entry: String
+            switch bytes {
+            case Data([0x1B]): entry = "key:Escape"
+            case Data([0x0D]): entry = "key:Enter"
+            default: entry = "text:" + String(decoding: bytes, as: UTF8.self)
             }
+            lock.withLock { recorded.append(entry) }
+            return true
         }
-        queue.sync { _sends.append("key:\(key)") }
     }
 }
 
-struct FakeInspector: PaneProcessInspecting {
-    var claudePID: Int32?
-    /// Whatever owns the pane's foreground group. Defaults to the pane pid —
-    /// an idle shell — because no test in this file exercises that rail.
-    var foregroundPID: Int32?
-    func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32? { claudePID }
-    func paneForegroundPID(panePID: Int32) -> Int32? { foregroundPID ?? panePID }
-}
-
+/// The rail on a holder-backed row, the one transport TBD types into. How the
+/// holder arm frames and paces its writes, and how it fails when a write is
+/// refused, is `HolderTmuxAssumptionGateTests`' subject; these pin the
+/// eligibility, verification and retry rules every resume runs through.
 @Suite struct LimitResumeActuatorTests {
     let db: TBDDatabase
-    let tmux = FakeResumeTmux()
+    let holder = RecordedResumeWrites()
     let terminalID: UUID
     let worktreeID: UUID
     let row: ScheduledResume
@@ -95,7 +59,8 @@ struct FakeInspector: PaneProcessInspecting {
             path: "/tmp/act-wt-\(UUID().uuidString)", tmuxServer: "tbd-act")
         worktreeID = wt.id
         let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder, childPID: 4242)
         terminalID = terminal.id
         try await db.terminals.updateSession(
             id: terminal.id, sessionID: "sess", transcriptPath: "/tmp/act-transcript.jsonl")
@@ -111,15 +76,15 @@ struct FakeInspector: PaneProcessInspecting {
     }
 
     private func makeActuator(
-        inspector: FakeInspector = FakeInspector(claudePID: 4242),
         transcript: Data? = Data("{}\n".utf8),
         transcriptMtime: Date? = nil
     ) -> LimitResumeActuator {
         LimitResumeActuator(
-            db: db, tmux: tmux, inspector: inspector,
+            db: db,
             readTranscript: { _ in transcript },
             transcriptModifiedAt: { _ in transcriptMtime },
-            waiter: { _ in }, actuationLog: makeTestActuationLog())   // no real sleeping in unit tests
+            waiter: { _ in }, actuationLog: makeTestActuationLog(),   // no real sleeping in unit tests
+            holderSend: holder.send)
     }
 
     @Test func missingTerminalIsTerminalGone() async throws {
@@ -129,14 +94,14 @@ struct FakeInspector: PaneProcessInspecting {
             limitType: "session", rawMessage: "m")
         let outcome = await makeActuator().actuate(orphan)
         #expect(outcome == .terminalGone)
-        #expect(tmux.sends.isEmpty)
+        #expect(holder.sends.isEmpty)
     }
 
     @Test func suspendedTerminalIsTerminalGone() async throws {
         try await db.terminals.setSuspended(id: terminalID, sessionID: "sess", snapshot: nil)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .terminalGone)
-        #expect(tmux.sends.isEmpty)
+        #expect(holder.sends.isEmpty)
     }
 
     /// Reconciliation guard: under the unified park model a limit-parked
@@ -149,92 +114,7 @@ struct FakeInspector: PaneProcessInspecting {
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess", snapshot: nil)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .terminalGone)
-        #expect(tmux.sends.isEmpty)
-    }
-
-    @Test func deadWindowIsTerminalGone() async throws {
-        tmux.windowAlive = false
-        let outcome = await makeActuator().actuate(row)
-        #expect(outcome == .terminalGone)
-    }
-
-    // MARK: - Pane target consultation (eligibility step 1a)
-    //
-    // The auto-resume actuator is the component issue #384 caught typing into
-    // a stranger: `windowExists` proves a window id resolves, never that the
-    // pane still belongs to this terminal. Same rule as `terminal.send` —
-    // only a POSITIVE disagreement refuses.
-
-    @Test func paneOwnedByAnotherTerminalTypesNothing() async throws {
-        tmux.paneTarget = .live(terminalID: UUID().uuidString)
-        let outcome = await makeActuator().actuate(row)
-        guard case .failed(let message) = outcome else {
-            Issue.record("expected .failed, got \(outcome)")
-            return
-        }
-        #expect(message.contains(terminalID.uuidString))
-        #expect(message.contains("%1"))
-        #expect(tmux.sends.isEmpty)
-    }
-
-    @Test func paneWithNoIdentityStillGetsTheResume() async throws {
-        // The no-regression branch: absence is not disagreement.
-        tmux.paneTarget = .live(terminalID: nil)
-        try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
-        let outcome = await makeActuator().actuate(row)
-        #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
-    }
-
-    @Test func paneIdentityMatchIsCaseInsensitiveAndSends() async throws {
-        tmux.paneTarget = .live(terminalID: terminalID.uuidString.lowercased())
-        try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
-        let outcome = await makeActuator().actuate(row)
-        #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
-    }
-
-    @Test func vanishedPaneIsTerminalGone() async throws {
-        tmux.paneTarget = .absent
-        let outcome = await makeActuator().actuate(row)
-        #expect(outcome == .terminalGone)
-        #expect(tmux.sends.isEmpty)
-    }
-
-    @Test func deadPaneIsTerminalGone() async throws {
-        // The case tmux reports as success: `send-keys` into a remain-on-exit
-        // pane exits 0, so only the consultation can catch it.
-        tmux.paneTarget = .dead(terminalID: terminalID.uuidString)
-        let outcome = await makeActuator().actuate(row)
-        #expect(outcome == .terminalGone)
-        #expect(tmux.sends.isEmpty)
-    }
-
-    /// `.terminalGone` CANCELS the scheduled resume, permanently. Doing that
-    /// because no tmux server answered would throw away a pending resume for a
-    /// session that is very likely still running, so an unreachable server
-    /// fails the attempt (retryable) instead of cancelling the row.
-    @Test func unreachableServerDoesNotCancelTheResume() async throws {
-        tmux.paneTarget = .unreachable
-        let outcome = await makeActuator().actuate(row)
-        guard case .failed(let message) = outcome else {
-            Issue.record("expected .failed, got \(outcome) — an unreachable server must not cancel")
-            return
-        }
-        #expect(message.contains("could not reach tmux server"))
-        #expect(outcome != .terminalGone)
-        #expect(tmux.sends.isEmpty)
-    }
-
-    @Test func unrunnableConsultationTypesNothing() async throws {
-        tmux.paneTargetError = FakeTmuxSendError()
-        let outcome = await makeActuator().actuate(row)
-        guard case .failed(let message) = outcome else {
-            Issue.record("expected .failed, got \(outcome)")
-            return
-        }
-        #expect(message.contains("could not verify the target pane"))
-        #expect(tmux.sends.isEmpty)
+        #expect(holder.sends.isEmpty)
     }
 
     @Test func newerTranscriptRecordCancels() async throws {
@@ -242,20 +122,7 @@ struct FakeInspector: PaneProcessInspecting {
         let line = #"{"type":"user","timestamp":"2099-01-01T00:00:00.000Z"}"#
         let outcome = await makeActuator(transcript: Data((line + "\n").utf8)).actuate(row)
         #expect(outcome == .userAlreadyContinued)
-        #expect(tmux.sends.isEmpty)
-    }
-
-    @Test func copyModeReschedules() async throws {
-        tmux.inMode = true
-        let outcome = await makeActuator().actuate(row)
-        #expect(outcome == .paneInCopyMode)
-        #expect(tmux.sends.isEmpty)
-    }
-
-    @Test func claudeNotForegroundFails() async throws {
-        let outcome = await makeActuator(inspector: FakeInspector(claudePID: nil)).actuate(row)
-        if case .failed = outcome {} else { Issue.record("expected .failed, got \(outcome)") }
-        #expect(tmux.sends.isEmpty)   // never type into a bare shell
+        #expect(holder.sends.isEmpty)
     }
 
     @Test func happyPathSendsEscapeContinueEnterAndVerifiesViaActivity() async throws {
@@ -263,7 +130,7 @@ struct FakeInspector: PaneProcessInspecting {
         try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
+        #expect(holder.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func verifyTimeoutRetriesOnceThenFails() async throws {
@@ -272,7 +139,7 @@ struct FakeInspector: PaneProcessInspecting {
         let outcome = await makeActuator().actuate(row)
         if case .failed = outcome {} else { Issue.record("expected .failed, got \(outcome)") }
         // Sequence sent twice: initial + one retry (spec §Actuation 6).
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter",
+        #expect(holder.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter",
                                "key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
@@ -285,25 +152,12 @@ struct FakeInspector: PaneProcessInspecting {
             return Data(repeating: 0x7b, count: n <= 1 ? 10 : 500)  // grows after first read
         }
         let actuator = LimitResumeActuator(
-            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            db: db,
             readTranscript: growing,
-            transcriptModifiedAt: { _ in nil }, waiter: { _ in }, actuationLog: makeTestActuationLog())
+            transcriptModifiedAt: { _ in nil }, waiter: { _ in }, actuationLog: makeTestActuationLog(),
+            holderSend: holder.send)
         let outcome = await actuator.actuate(row)
         #expect(outcome == .sent)
-    }
-
-    // MARK: - Retry re-runs eligibility (spec §Actuation "one retry of steps 1-5")
-
-    @Test func copyModeEnteredBetweenAttemptsReschedulesAfterOneSend() async throws {
-        // Attempt 1's eligibility pass sees no copy-mode and sends; attempt
-        // 1's verify window times out (idle, flat transcript); attempt 2's
-        // eligibility RE-CHECK sees copy-mode now set and reschedules
-        // instead of blind-Escaping the user's scrollback.
-        try await db.terminals.setActivityState(id: terminalID, activityState: .idle, source: .derived)
-        tmux.inModeSequence = [false, true]
-        let outcome = await makeActuator().actuate(row)
-        #expect(outcome == .paneInCopyMode)
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func userContinuedBetweenAttemptsCancelsAfterOneSend() async throws {
@@ -326,19 +180,20 @@ struct FakeInspector: PaneProcessInspecting {
             return n == 1 ? padding : newerRecordLine
         }
         let actuator = LimitResumeActuator(
-            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            db: db,
             readTranscript: flipping,
-            transcriptModifiedAt: { _ in nil }, waiter: { _ in }, actuationLog: makeTestActuationLog())
+            transcriptModifiedAt: { _ in nil }, waiter: { _ in }, actuationLog: makeTestActuationLog(),
+            holderSend: holder.send)
         let outcome = await actuator.actuate(row)
         #expect(outcome == .userAlreadyContinued)
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
+        #expect(holder.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func toggleFlippedOffBetweenAttemptsCancelsAfterOneSend() async throws {
         // Attempt 1's eligibility pass sees the toggle on and sends; attempt
         // 1's verify window times out (idle, flat transcript, exactly like
         // `verifyTimeoutRetriesOnceThenFails`). The injected `waiter` — the
-        // same seam `sendContinueSequence`/`verifyResumed` already await on
+        // same seam the send's pauses and `verifyResumed` already await on
         // — flips the toggle off as a side effect of its FIRST call (the
         // interKeyPause after attempt 1's Escape), so by the time attempt
         // 2's eligibility RE-CHECK (step 0a) runs, the gate is off and it
@@ -352,14 +207,15 @@ struct FakeInspector: PaneProcessInspecting {
             }
         }
         let actuator = LimitResumeActuator(
-            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            db: db,
             readTranscript: { _ in Data("{}\n".utf8) },
             transcriptModifiedAt: { _ in nil },
-            waiter: flippingWaiter, actuationLog: makeTestActuationLog())
+            waiter: flippingWaiter, actuationLog: makeTestActuationLog(),
+            holderSend: holder.send)
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
         // Only attempt 1's 3 sends — attempt 2 never fires.
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
+        #expect(holder.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     // MARK: - Eligibility 0a: limitType-aware gate (spec 2026-07-08 §Gating)
@@ -387,7 +243,7 @@ struct FakeInspector: PaneProcessInspecting {
         let apiErrorRow = try await insertApiErrorRow()
         let outcome = await makeActuator().actuate(apiErrorRow)
         #expect(outcome == .cancelledExternally)
-        #expect(tmux.sends.isEmpty)
+        #expect(holder.sends.isEmpty)
     }
 
     @Test func apiErrorRowProceedsPastEligibility0aWhenApiErrorToggleOnEvenIfLimitResetOff() async throws {
@@ -398,7 +254,7 @@ struct FakeInspector: PaneProcessInspecting {
         let outcome = await makeActuator().actuate(apiErrorRow)
         // Falls through past 0a and runs the full send sequence (happy path).
         #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
+        #expect(holder.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func sessionRowUnaffectedByApiErrorToggle() async throws {
@@ -407,7 +263,7 @@ struct FakeInspector: PaneProcessInspecting {
         try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
+        #expect(holder.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func sessionRowCancelledExternallyWhenLimitResetOffEvenIfApiErrorOn() async throws {
@@ -415,7 +271,7 @@ struct FakeInspector: PaneProcessInspecting {
         try await db.config.setAutoResumeOnApiError(true)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .cancelledExternally)
-        #expect(tmux.sends.isEmpty)
+        #expect(holder.sends.isEmpty)
     }
 
     @Test func rowCancelledBetweenAttemptsCancelsAfterOneSend() async throws {
@@ -436,14 +292,15 @@ struct FakeInspector: PaneProcessInspecting {
             }
         }
         let actuator = LimitResumeActuator(
-            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            db: db,
             readTranscript: { _ in Data("{}\n".utf8) },
             transcriptModifiedAt: { _ in nil },
-            waiter: cancellingWaiter, actuationLog: makeTestActuationLog())
+            waiter: cancellingWaiter, actuationLog: makeTestActuationLog(),
+            holderSend: holder.send)
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
         // Only attempt 1's 3 sends — attempt 2 never fires.
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
+        #expect(holder.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
         // The row stays cancelled — not resurrected by a stray write.
         let stored = try await db.scheduledResumes.get(id: row.id)
         #expect(stored?.status == .cancelled)
@@ -460,7 +317,7 @@ struct FakeInspector: PaneProcessInspecting {
             transcriptMtime: row.createdAt.addingTimeInterval(1))
         let continued = await actuator.userAlreadyContinued(row)
         #expect(continued)
-        #expect(tmux.sends.isEmpty)   // read-only probe: never touches tmux
+        #expect(holder.sends.isEmpty)   // read-only probe: never writes
     }
 
     @Test func earlyProbeFalseWhenTranscriptHasNoNewerRecord() async throws {
@@ -492,12 +349,13 @@ struct FakeInspector: PaneProcessInspecting {
             (#"{"type":"user","timestamp":"2099-01-01T00:00:00.000Z"}"# + "\n").utf8)
         let staleMtime = row.createdAt.addingTimeInterval(-1)
         let actuator = LimitResumeActuator(
-            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            db: db,
             readTranscript: { _ in
                 reads.withLock { $0 += 1 }
                 return newerRecord
             },
-            transcriptModifiedAt: { _ in staleMtime }, waiter: { _ in }, actuationLog: makeTestActuationLog())
+            transcriptModifiedAt: { _ in staleMtime }, waiter: { _ in }, actuationLog: makeTestActuationLog(),
+            holderSend: holder.send)
         let continued = await actuator.userAlreadyContinued(row)
         #expect(continued == false)
         #expect(reads.withLock { $0 } == 0)
@@ -509,12 +367,13 @@ struct FakeInspector: PaneProcessInspecting {
             (#"{"type":"user","timestamp":"2099-01-01T00:00:00.000Z"}"# + "\n").utf8)
         let freshMtime = row.createdAt.addingTimeInterval(1)
         let actuator = LimitResumeActuator(
-            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            db: db,
             readTranscript: { _ in
                 reads.withLock { $0 += 1 }
                 return newerRecord
             },
-            transcriptModifiedAt: { _ in freshMtime }, waiter: { _ in }, actuationLog: makeTestActuationLog())
+            transcriptModifiedAt: { _ in freshMtime }, waiter: { _ in }, actuationLog: makeTestActuationLog(),
+            holderSend: holder.send)
         let continued = await actuator.userAlreadyContinued(row)
         #expect(continued)
         #expect(reads.withLock { $0 } == 1)
@@ -540,57 +399,27 @@ struct FakeInspector: PaneProcessInspecting {
             transcriptMtime: row.createdAt.addingTimeInterval(-1)   // would skip the early read
         ).actuate(row)
         #expect(outcome == .userAlreadyContinued)
-        #expect(tmux.sends.isEmpty)
+        #expect(holder.sends.isEmpty)
     }
 
-    // MARK: - Thrown send retries instead of instant .failed
+    /// TBD no longer types into tmux. An armed resume on a live tmux row fails
+    /// by name, which notifies the person, rather than cancelling in silence or
+    /// typing anything.
+    @Test func liveTmuxRowIsNotTyped() async throws {
+        let tmuxRow = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        try await db.terminals.updateSession(
+            id: tmuxRow.id, sessionID: "sess-tmux", transcriptPath: "/tmp/act-transcript.jsonl")
+        try await db.terminals.setActivityState(
+            id: tmuxRow.id, activityState: .working, source: .derived)
+        let resume = ScheduledResume(
+            terminalID: tmuxRow.id, worktreeID: worktreeID, claudeSessionID: "sess-tmux",
+            resetsAt: row.resetsAt, fireAt: row.fireAt,
+            limitType: "session", rawMessage: "m", createdAt: row.createdAt)
+        _ = try await db.scheduledResumes.insertPending(resume)
 
-    @Test func throwingSendOnFirstAttemptRetriesAndSucceeds() async throws {
-        try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
-        tmux.throwOnEscapeAttempts = [1]
-        let outcome = await makeActuator().actuate(row)
-        #expect(outcome == .sent)
-        // Attempt 1 threw before recording anything; attempt 2 sent in full.
-        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
-    }
-
-    @Test func throwingSendOnBothAttemptsFails() async throws {
-        try await db.terminals.setActivityState(id: terminalID, activityState: .idle, source: .derived)
-        tmux.throwOnEscapeAttempts = [1, 2]
-        let outcome = await makeActuator().actuate(row)
-        if case .failed = outcome {} else { Issue.record("expected .failed, got \(outcome)") }
-        #expect(tmux.sends.isEmpty)
-    }
-}
-
-// MARK: - ProductionPaneProcessInspector
-
-@Suite struct ProductionPaneProcessInspectorTests {
-    @Test func paneChildWithForegroundClaudeIsFound() {
-        let signaller = FakeProcessSignaller()
-        signaller.childrenByServer[100] = [200]
-        signaller.cmdlines[200] = "/opt/homebrew/bin/claude"
-        signaller.stats[200] = "S+"
-        let inspector = ProductionPaneProcessInspector(signaller: signaller)
-        #expect(inspector.foregroundClaudePID(panePID: 100) == 200)
-    }
-
-    @Test func childWithoutForegroundFlagIsNotFound() {
-        let signaller = FakeProcessSignaller()
-        signaller.childrenByServer[100] = [200]
-        signaller.cmdlines[200] = "claude"
-        signaller.stats[200] = "Ss"   // no trailing "+"
-        let inspector = ProductionPaneProcessInspector(signaller: signaller)
-        #expect(inspector.foregroundClaudePID(panePID: 100) == nil)
-    }
-
-    @Test func grandchildWithForegroundClaudeIsFound() {
-        let signaller = FakeProcessSignaller()
-        signaller.childrenByServer[100] = [200]     // pane -> wrapper shell
-        signaller.childrenByServer[200] = [300]     // wrapper shell -> claude
-        signaller.cmdlines[300] = "claude"
-        signaller.stats[300] = "S+"
-        let inspector = ProductionPaneProcessInspector(signaller: signaller)
-        #expect(inspector.foregroundClaudePID(panePID: 100) == 300)
+        let outcome = await makeActuator().actuate(resume)
+        #expect(outcome == .failed(LimitResumeActuator.tmuxSessionNotTyped))
+        #expect(holder.sends.isEmpty)
     }
 }

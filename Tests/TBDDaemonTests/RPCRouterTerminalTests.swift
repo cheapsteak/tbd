@@ -60,34 +60,9 @@ extension RPCRouterTests {
         #expect(terminals.map(\.id) == holder.launches.map(\.terminalID))
     }
 
-    /// Thread-safe collector for tmux argv lists invoked during dryRun.
-    private final class SendRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _calls: [[String]] = []
-        var calls: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return _calls
-        }
-        func record(_ args: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            _calls.append(args)
-        }
-    }
-
-    /// A router whose tmux records every dryRun argv, plus a seeded terminal to
-    /// send to. Used by the bracketed-paste ordering tests below.
-    private func makeRecorderFixture() async throws -> (RPCRouter, SendRecorder, Terminal) {
-        let recorder = SendRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorder.record($0) })
-        let db = try TBDDatabase(inMemory: true)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux,
-            startTime: Date(),
-            actuationLog: makeTestActuationLog()
-        )
+    /// A live tmux row and the worktree that names its server: what an install
+    /// whose tmux sessions outlived the update still has.
+    private func makeTmuxRow() async throws -> Terminal {
         let repo = try await db.repos.create(
             path: "/tmp/test-repo-\(UUID().uuidString)",
             displayName: "test-repo",
@@ -100,113 +75,50 @@ extension RPCRouterTests {
             path: "/tmp/test-wt-\(UUID().uuidString)",
             tmuxServer: "tbd-test"
         )
-        let terminal = try await db.terminals.create(
+        return try await db.terminals.create(
             worktreeID: wt.id,
             tmuxWindowID: "@mock-0",
-            tmuxPaneID: "%mock-0"
+            tmuxPaneID: "%mock-0",
+            claudeSessionID: "sess-1",
+            kind: .claude
         )
-        return (router, recorder, terminal)
     }
 
-    @Test("terminal.send with submit brackets the paste then presses Enter, in order")
-    func terminalSendBracketedPasteThenEnter() async throws {
-        let (router, recorder, terminal) = try await makeRecorderFixture()
+    /// TBD no longer types into tmux. A send to a row whose session may still
+    /// be running there is refused with `terminalOnTmux`, telling the person
+    /// how to end the session and then move it, and nothing is probed.
+    @Test("terminal.send to a live tmux row is refused as still running in tmux")
+    func terminalSendToALiveTmuxRowIsRefused() async throws {
+        let terminal = try await makeTmuxRow()
 
-        let request = try RPCRequest(
+        let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSend,
-            params: TerminalSendParams(
-                terminalID: terminal.id,
-                text: "line one\nline two\nline three",
-                submit: true
-            )
-        )
-        #expect(await router.handle(request).success)
+            params: TerminalSendParams(terminalID: terminal.id, text: "echo hello", submit: true)
+        ))
 
-        let calls = recorder.calls
-        let loadIdx = try #require(calls.firstIndex { $0.contains("load-buffer") })
-        let pasteIdx = try #require(calls.firstIndex { $0.contains("paste-buffer") })
-        let enterIdx = try #require(
-            calls.firstIndex { $0.contains("send-keys") && $0.contains("Enter") })
-
-        // Ordering: load the buffer, paste it, THEN press Enter.
-        #expect(loadIdx < pasteIdx)
-        #expect(pasteIdx < enterIdx)
-
-        // The paste must use -p (bracketed-paste authority to tmux) and target
-        // the pane; the Enter must NOT be part of the paste.
-        let pasteArgs = calls[pasteIdx]
-        #expect(pasteArgs.contains("-p"))
-        #expect(pasteArgs.contains("-t"))
-        #expect(pasteArgs.contains("%mock-0"))
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
+        #expect(response.error == LeftoverTmuxSession.stillRunningRefusal(
+            terminalID: terminal.id, server: "tbd-test"))
+        #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
     }
 
-    @Test("terminal.send without submit does not press Enter")
-    func terminalSendNoSubmitNoEnter() async throws {
-        let (router, recorder, terminal) = try await makeRecorderFixture()
+    /// A parked tmux row has nothing running to end, so its refusal points
+    /// straight at the move, and at the retry that follows it.
+    @Test("terminal.send --keys to a parked tmux row is refused with the move first")
+    func terminalSendToAParkedTmuxRowIsRefused() async throws {
+        let terminal = try await makeTmuxRow()
+        try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-1")
 
-        let request = try RPCRequest(
+        let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSend,
-            params: TerminalSendParams(
-                terminalID: terminal.id,
-                text: "line one\nline two",
-                submit: false
-            )
-        )
-        #expect(await router.handle(request).success)
+            params: TerminalSendParams(terminalID: terminal.id, keys: "Escape")
+        ))
 
-        let calls = recorder.calls
-        // Body still pasted...
-        #expect(calls.contains { $0.contains("paste-buffer") })
-        // ...but no Enter keystroke.
-        #expect(!calls.contains { $0.contains("send-keys") && $0.contains("Enter") })
-    }
-
-    @Test("terminal.send with empty text and submit presses Enter but skips the paste")
-    func terminalSendEmptyTextSubmitEnterOnly() async throws {
-        let (router, recorder, terminal) = try await makeRecorderFixture()
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalSend,
-            params: TerminalSendParams(terminalID: terminal.id, text: "", submit: true)
-        )
-        #expect(await router.handle(request).success)
-
-        let calls = recorder.calls
-        // Empty body → never load or paste an empty buffer...
-        #expect(!calls.contains { $0.contains("load-buffer") })
-        #expect(!calls.contains { $0.contains("paste-buffer") })
-        // ...but a bare --submit still presses Enter.
-        #expect(calls.contains { $0.contains("send-keys") && $0.contains("Enter") })
-    }
-
-    @Test("terminal.send dispatches to tmux")
-    func terminalSend() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/test-repo-\(UUID().uuidString)",
-            displayName: "test-repo",
-            defaultBranch: "main"
-        )
-        let wt = try await db.worktrees.create(
-            repoID: repo.id,
-            name: "test-wt",
-            branch: "tbd/test-wt",
-            path: "/tmp/test-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-test"
-        )
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id,
-            tmuxWindowID: "@mock-0",
-            tmuxPaneID: "%mock-0"
-        )
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalSend,
-            params: TerminalSendParams(terminalID: terminal.id, text: "echo hello")
-        )
-        let response = await router.handle(request)
-
-        // dryRun tmux should succeed
-        #expect(response.success)
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
+        #expect(response.error == TerminalTransportMigrator.migrateFirstRefusal(
+            terminalID: terminal.id, retry: "wake it and send the keys again"))
     }
 
     // MARK: - Claude Terminal Creation
@@ -337,5 +249,21 @@ extension RPCRouterTests {
         let response = await router.handle(request)
         #expect(!response.success)
         #expect(response.error?.contains("Terminal not found") == true)
+    }
+
+    /// TBD no longer reads tmux panes, so a tmux row's output is refused in
+    /// the same words as a send to it.
+    @Test("terminal.output of a live tmux row is refused as still running in tmux")
+    func terminalOutputOfALiveTmuxRowIsRefused() async throws {
+        let terminal = try await makeTmuxRow()
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalOutput,
+            params: TerminalOutputParams(terminalID: terminal.id)))
+
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
+        #expect(response.error == LeftoverTmuxSession.stillRunningRefusal(
+            terminalID: terminal.id, server: "tbd-test"))
     }
 }

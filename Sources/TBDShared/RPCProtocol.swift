@@ -146,13 +146,22 @@ public enum RPCErrorCode: String, Sendable {
     /// provider identity is not the required source provider. This includes a
     /// repeated Continue-in-Claude request after the row already became Claude.
     case terminalWrongProvider
-    /// A request that would start or replace the process behind a terminal —
-    /// a window recreate, an in-place account switch — was refused because the
-    /// row is still on the tmux transport, which TBD no longer starts sessions
-    /// on. Nothing was changed. The text says what to do instead: run
-    /// `tbd terminal migrate <id>` to move the row to the pty holder, or, for a
-    /// tab no migration can move, close it and open a new one. Either way a
-    /// plain retry cannot help, so the app offers none.
+    /// A request was refused because the row is still on the tmux transport,
+    /// which TBD no longer starts sessions on, shows, sends to or stops.
+    /// Nothing was changed. Two cases, and the text says what to do in each:
+    ///
+    /// - **The row's session may still be running in tmux** – a tmux server
+    ///   an earlier build started can outlive `tbd update`. Any request that
+    ///   would reach the session (a view, a send, a recreate, a move) is
+    ///   refused with `tmux -L <server> kill-server`, which ends it, followed
+    ///   by `tbd terminal migrate <id>`.
+    /// - **Nothing of the row runs in tmux any more** – a parked row, or one
+    ///   whose window is gone. A request that would start or replace its
+    ///   process (a window recreate, an in-place account switch, a send) names
+    ///   `tbd terminal migrate <id>` to move the row to the pty holder, or, for
+    ///   a tab no migration can move, says to close it and open a new one.
+    ///
+    /// Either way a plain retry cannot help, so the app offers none.
     case terminalOnTmux
     /// An agent start or wake was held by the user's start-admission command
     /// (`~/tbd/hooks/start-admission`). The message is the command's reason.
@@ -397,7 +406,6 @@ public enum RPCMethod {
     public static let tabSetOrder = "tab.setOrder"
     public static let tabList     = "tab.list"
     public static let worktreeSetActiveTab = "worktree.setActiveTab"
-    public static let appearanceUpdateColorFgBg = "appearance.updateColorFgBg"
     public static let repoListBranches = "repo.listBranches"
     public static let repoListOpenPRs = "repo.listOpenPRs"
     public static let configSetEnvOverrides       = "config.setEnvOverrides"
@@ -763,15 +771,6 @@ public struct AppSetForegroundStateParams: Codable, Sendable {
 public struct AppSetComposerDraftsParams: Codable, Sendable {
     public let terminalIDs: [UUID]
     public init(terminalIDs: [UUID]) { self.terminalIDs = terminalIDs }
-}
-
-// MARK: - Appearance RPC
-
-public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
-    /// COLORFGBG environment variable value computed from terminal color scheme's
-    /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
-    public let value: String
-    public init(value: String) { self.value = value }
 }
 
 // MARK: - Terminal Swap Profile

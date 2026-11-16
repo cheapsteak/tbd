@@ -22,69 +22,21 @@ import Foundation
     }
 }
 
-@Suite struct AgentReaperDetectionTests {
-    private func reaper(_ tmux: FakeTmuxQuerier, _ sig: FakeProcessSignaller) -> AgentReaper {
-        AgentReaper(tmux: tmux, signaller: sig, graceAttempts: 2, pollInterval: .milliseconds(1))
-    }
-
-    @Test func orphansAreChildrenMinusLivePanes() async {
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        tmux.serverPIDs["tbd-x"] = 1000
-        sig.childrenByServer[1000] = [11, 22, 33]
-        tmux.panePIDs["tbd-x"] = [22]               // only 22 has a live pane
-        let orphans = await reaper(tmux, sig).findStructuralOrphans(server: "tbd-x")
-        #expect(Set(orphans) == [11, 33])
-    }
-
-    @Test func livePaneIsNeverAnOrphan() async {
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        tmux.serverPIDs["tbd-x"] = 1000
-        sig.childrenByServer[1000] = [42]
-        tmux.panePIDs["tbd-x"] = [42]
-        let orphans = await reaper(tmux, sig).findStructuralOrphans(server: "tbd-x")
-        #expect(orphans.isEmpty)
-    }
-
-    @Test func noServerPIDYieldsNoOrphans() async {
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        let orphans = await reaper(tmux, sig).findStructuralOrphans(server: "gone")
-        #expect(orphans.isEmpty)
-    }
-
-    @Test func fingerprintMatchesTBDArgvOnly() {
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        sig.cmdlines[11] = "claude --settings /Users/x/tbd/runtime/claude-overlay.json"
-        sig.cmdlines[12] = "claude --plugin-dir /Users/x/Library/Application Support/TBD/plugin"
-        sig.cmdlines[13] = "node /Users/x/script.js"       // a user's own non-agent process
-        let r = reaper(tmux, sig)
-        #expect(r.isTBDOwned(11) == true)
-        #expect(r.isTBDOwned(12) == true)
-        #expect(r.isTBDOwned(13) == false)
-    }
-
-    @Test func ownershipRecognizesAgentBinariesAndMarkers() {
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        sig.cmdlines[1] = "codex"
-        sig.cmdlines[2] = "/Users/x/.local/bin/codex --resume ABC"
-        sig.cmdlines[3] = "claude --resume ABC"
-        sig.cmdlines[4] = "claude --settings /x/claude-overlay.json"
-        sig.cmdlines[5] = "claude --plugin-dir /x/TBD/plugin"
-        sig.cmdlines[6] = "node script.js"
-        sig.cmdlines[7] = "/opt/homebrew/bin/make"
-        let r = reaper(tmux, sig)
-        #expect(r.isTBDOwned(1) == true)   // bare codex
-        #expect(r.isTBDOwned(2) == true)   // codex by path
-        #expect(r.isTBDOwned(3) == true)   // claude agent binary
-        #expect(r.isTBDOwned(4) == true)   // overlay marker
-        #expect(r.isTBDOwned(5) == true)   // plugin marker
-        #expect(r.isTBDOwned(6) == false)  // non-agent detached process
-        #expect(r.isTBDOwned(7) == false)  // non-agent binary, no markers
+@Suite struct AgentReaperAgentBinaryTests {
+    @Test func recognizesAgentBinariesByArgvZero() {
+        #expect(AgentReaper.isAgentBinary("codex"))                                // bare codex
+        #expect(AgentReaper.isAgentBinary("/Users/x/.local/bin/codex --resume ABC")) // codex by path
+        #expect(AgentReaper.isAgentBinary("claude --resume ABC"))                  // claude agent binary
+        #expect(!AgentReaper.isAgentBinary("node script.js"))                      // non-agent process
+        #expect(!AgentReaper.isAgentBinary("/opt/homebrew/bin/make"))              // non-agent binary
+        #expect(!AgentReaper.isAgentBinary("node /Users/x/claude/script.js"))      // agent name in a later arg
+        #expect(!AgentReaper.isAgentBinary(""))
     }
 }
 
 @Suite struct AgentReaperEscalationTests {
     private func reaper(_ sig: FakeProcessSignaller) -> AgentReaper {
-        AgentReaper(tmux: FakeTmuxQuerier(), signaller: sig, graceAttempts: 2, pollInterval: .milliseconds(1))
+        AgentReaper(signaller: sig, graceAttempts: 2, pollInterval: .milliseconds(1))
     }
 
     @Test func reapSendsSigtermThenSigkillWhenProcessSurvives() async {
@@ -117,56 +69,5 @@ import Foundation
         await reaper(sig).escalateAfterHangup(10)
         #expect(sig.terminated == [10])
         #expect(sig.killed == [10])
-    }
-}
-
-@Suite struct AgentReaperSweepTests {
-    private func reaper(_ tmux: FakeTmuxQuerier, _ sig: FakeProcessSignaller) -> AgentReaper {
-        AgentReaper(tmux: tmux, signaller: sig, graceAttempts: 1, pollInterval: .milliseconds(1))
-    }
-
-    @Test func sweepReapsOwnedOrphansAcrossServers() async {
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        tmux.serverPIDs = ["tbd-a": 100, "tbd-b": 200]
-        sig.childrenByServer = [100: [11, 12], 200: [21]]
-        tmux.panePIDs = ["tbd-a": [12], "tbd-b": []]      // 11 and 21 are orphans
-        // Both orphans carry the TBD fingerprint.
-        sig.cmdlines = [11: "claude --plugin-dir /x/TBD/plugin",
-                        21: "claude --settings /x/claude-overlay.json"]
-        sig.behaviors = [11: .init(aliveAfterTerminate: false), 21: .init(aliveAfterTerminate: false)]
-        await reaper(tmux, sig).sweep(servers: ["tbd-a", "tbd-b"])
-        #expect(Set(sig.terminated) == [11, 21])
-    }
-
-    @Test func sweepSkipsUnownedOrphans() async {
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        tmux.serverPIDs = ["tbd-a": 100]
-        sig.childrenByServer = [100: [11]]
-        tmux.panePIDs = ["tbd-a": []]            // 11 is structurally an orphan
-        sig.cmdlines = [11: "/usr/bin/make -j8"] // but a user-detached non-agent process
-        await reaper(tmux, sig).sweep(servers: ["tbd-a"])
-        #expect(sig.terminated.isEmpty)
-        #expect(sig.killed.isEmpty)
-    }
-
-    @Test func sweepReapsCodexOrphan() async {
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        tmux.serverPIDs = ["tbd-a": 100]
-        sig.childrenByServer = [100: [11]]
-        tmux.panePIDs = ["tbd-a": []]                     // 11 is structurally an orphan
-        sig.cmdlines = [11: "/Users/x/.local/bin/codex --resume ABC"]
-        sig.behaviors = [11: .init(aliveAfterTerminate: false)]
-        await reaper(tmux, sig).sweep(servers: ["tbd-a"])
-        #expect(sig.terminated == [11])                   // codex orphan IS reaped
-    }
-
-    @Test func reapServerChildrenSignalsOwnedChildren() async {
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        tmux.serverPIDs = ["tbd-a": 100]
-        sig.childrenByServer = [100: [11, 12]]
-        sig.cmdlines = [11: "claude --plugin-dir /x/TBD/plugin", 12: "node /Users/x/script.js"]
-        sig.behaviors = [11: .init(aliveAfterTerminate: false)]
-        await reaper(tmux, sig).reapServerChildren(server: "tbd-a")
-        #expect(sig.terminated == [11])                   // only the owned child
     }
 }

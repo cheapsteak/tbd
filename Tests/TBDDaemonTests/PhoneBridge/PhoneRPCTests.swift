@@ -588,7 +588,6 @@ private struct ReusedAppPIDSignaller: ProcessSignaller {
     }
     func commandLine(_ pid: Int32) -> String? { SendHarness.AuthenticatedApp.commandLine }
     func stat(_ pid: Int32) -> String? { nil }
-    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
     func terminate(_ pid: Int32) {}
     func forceKill(_ pid: Int32) {}
 }

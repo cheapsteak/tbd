@@ -49,7 +49,20 @@ struct ActuationLogWiringTests {
             actuationLog: ActuationLog(path: path)
         )
         router.holderRegistry = registry
+        // A courier whose viewer is always detached and whose direct write
+        // lands nowhere, so a send to a holder row dispatches without a pty.
+        router.holderInjectionCourier = HolderInjectionCourier(
+            sendFrame: { _ in },
+            viewerAttachment: { _ in nil },
+            writeDirectly: { _, _ in })
         return Fixture(router: router, db: db, logPath: path)
+    }
+
+    /// A holder-backed terminal, the transport a send types into.
+    private func makeHolderTerminal(in db: TBDDatabase, worktree: Worktree) async throws -> Terminal {
+        try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder, childPID: 4242)
     }
 
     /// A path that can never be opened: its parent is a regular file.
@@ -86,8 +99,7 @@ struct ActuationLogWiringTests {
     func sendWritesRequestAndOutcome() async throws {
         let fixture = try makeFixture()
         let worktree = try await makeWorktree(in: fixture.db)
-        let terminal = try await fixture.db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        let terminal = try await makeHolderTerminal(in: fixture.db, worktree: worktree)
 
         let response = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalSend,
@@ -123,8 +135,7 @@ struct ActuationLogWiringTests {
     func undeclaredCallerIsAnonymous() async throws {
         let fixture = try makeFixture()
         let worktree = try await makeWorktree(in: fixture.db)
-        let terminal = try await fixture.db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        let terminal = try await makeHolderTerminal(in: fixture.db, worktree: worktree)
 
         _ = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalSend,
@@ -140,8 +151,7 @@ struct ActuationLogWiringTests {
     func appActorRecorded() async throws {
         let fixture = try makeFixture()
         let worktree = try await makeWorktree(in: fixture.db)
-        let terminal = try await fixture.db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        let terminal = try await makeHolderTerminal(in: fixture.db, worktree: worktree)
 
         _ = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalSend,
@@ -259,9 +269,11 @@ struct ActuationLogWiringTests {
         let fixture = try makeFixture()
         let worktree = try await makeWorktree(in: fixture.db)
         // A plain shell terminal is not manually hibernatable — the daemon
-        // declines before it touches the transport.
+        // declines before it touches the transport. On the holder, so the
+        // decline is the eligibility rail's and not the tmux refusal.
         let terminal = try await fixture.db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder)
 
         _ = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalHibernate,
@@ -385,8 +397,7 @@ struct ActuationLogWiringTests {
     func unwritableRecordRefusesSend() async throws {
         let fixture = try makeFixture(logPath: try makeUnwritablePath())
         let worktree = try await makeWorktree(in: fixture.db)
-        let terminal = try await fixture.db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        let terminal = try await makeHolderTerminal(in: fixture.db, worktree: worktree)
 
         let response = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalSend,
@@ -418,8 +429,7 @@ struct ActuationLogWiringTests {
     func recoversOnceRecordIsWritableAgain() async throws {
         let fixture = try makeFixture()
         let worktree = try await makeWorktree(in: fixture.db)
-        let terminal = try await fixture.db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        let terminal = try await makeHolderTerminal(in: fixture.db, worktree: worktree)
 
         func send() async -> RPCResponse {
             await fixture.router.handle(try! RPCRequest(

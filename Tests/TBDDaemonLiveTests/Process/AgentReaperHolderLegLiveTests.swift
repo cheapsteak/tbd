@@ -373,7 +373,7 @@ struct AgentReaperHolderLegLiveTests {
         _ signaller: RecordingProcessSignaller, records: [HolderChildRecord]
     ) -> AgentReaper {
         AgentReaper(
-            tmux: NoTmuxQuerier(), signaller: signaller,
+            signaller: signaller,
             // A 100 ms grace rather than the production 3 seconds, so the job
             // that declines SIGTERM reaches SIGKILL at once. The escalation
             // path is the same at any length: the grace only decides how long
@@ -397,9 +397,8 @@ struct AgentReaperHolderLegLiveTests {
 
     /// The case the leg exists for: a holder that died while the daemon was
     /// down, and a job that ignored the resulting hangup and reparented to
-    /// launchd. `WorktreeLifecycle+Reconcile` skips holder rows and the tmux
-    /// sweep enumerates children of tmux server pids, so nothing but this leg
-    /// can see it.
+    /// launchd. `WorktreeLifecycle+Reconcile` reads holder rows but signals
+    /// no process, so nothing but this leg can reclaim it.
     ///
     /// Nothing is armed here, and that is a claim too: `AgentReaper` carries no
     /// switch, and neither does this leg, so the ordinary sweep reclaims the
@@ -732,7 +731,6 @@ private final class RecordingProcessSignaller: ProcessSignaller, @unchecked Send
         return real.isAlive(pid)
     }
 
-    func children(ofServerPID serverPID: Int32) -> [Int32] { real.children(ofServerPID: serverPID) }
 
     func commandLine(_ pid: Int32) -> String? {
         record(.commandLine(pid))
@@ -765,11 +763,4 @@ private final class RecordingProcessSignaller: ProcessSignaller, @unchecked Send
         record(.forceKillProcessOnly(pid))
         real.forceKillProcessOnly(pid)
     }
-}
-
-/// The holder leg never asks tmux anything; this makes that structural rather
-/// than incidental.
-private struct NoTmuxQuerier: TmuxProcessQuerying {
-    func serverPID(server: String) async -> Int32? { nil }
-    func livePanePIDs(server: String) async -> Set<Int32> { [] }
 }

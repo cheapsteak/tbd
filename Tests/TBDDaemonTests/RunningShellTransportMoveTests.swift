@@ -7,15 +7,14 @@ import DaemonTestSupport
 import TestSupport
 
 /// `HibernationCoordinator.moveRunningShellToHolder` — the one path that moves
-/// a session with nothing to resume, by stopping its program and starting a
-/// fresh login shell on a holder in the same working directory.
+/// a live session with nothing to resume, once its tmux server is gone, by
+/// starting a fresh login shell on a holder in the same working directory.
 /// (`docs/specs/2026-10-11-holder-transport-migration-design.md`)
 ///
-/// Four steps in a fixed order — refuse, kill, spawn, write once — and what
-/// these tests prove is the order and the two states a failure may land in:
-/// the row untouched with its program still running, or the row untouched with
-/// its window dead. Nothing may leave a row naming a transport its live
-/// process is not on.
+/// Three steps in a fixed order — refuse, spawn, write once — and what these
+/// tests prove is the order, that the move asks nothing of tmux, and that every
+/// failure leaves the row untouched. Nothing may leave a row naming a transport
+/// its live process is not on.
 ///
 /// The spawn goes through `HolderSpawnOracle`, the coordinator's test seam for
 /// it, because a real spawn means a real `TBDHolder`, a real pty and a real
@@ -44,7 +43,8 @@ struct RunningShellTransportMoveTests {
         }
     }
 
-    /// Every tmux argv the dry-run manager was handed.
+    /// Every tmux argv the dry-run manager was handed. The move reaches only
+    /// rows whose tmux server is gone, so it must hand tmux nothing at all.
     private final class TmuxArgvRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var argvs: [[String]] = []
@@ -55,9 +55,6 @@ struct RunningShellTransportMoveTests {
         var all: [[String]] {
             lock.lock(); defer { lock.unlock() }
             return argvs
-        }
-        func count(_ subcommand: String) -> Int {
-            all.filter { $0.contains(subcommand) }.count
         }
     }
 
@@ -108,26 +105,14 @@ struct RunningShellTransportMoveTests {
     /// `spawnThrows` makes the oracle refuse after recording its launch, which
     /// is what a holder that could not be started looks like from here.
     ///
-    /// `beforeTheWrite` runs inside the oracle's spawn, i.e. after the kill and
-    /// before the one guarded write — the window in which another writer can
-    /// change the row and take the race.
-    /// `panePID` and `paneForegroundPID` drive the busy rail, exactly as they
-    /// do in the migrator's own fixture: a foreground pid equal to the pane's
-    /// pid is an idle interactive shell (the default — `FakeInspector` answers
-    /// with the pane pid when given nil), a different one is something the
-    /// person started, and a pane pid of `"0"` is an unreadable one.
-    ///
-    /// `windowPresence` is what the kill's failure branch probes.
+    /// `beforeTheWrite` runs inside the oracle's spawn, i.e. before the one
+    /// guarded write — the window in which another writer can change the row
+    /// and take the race.
     private static func makeFixture(
         holderRegistryPresent: Bool = true,
         holderSpawnable: Bool = true,
         spawnThrows: Bool = false,
         spawnThrowsAlreadyRegistered: Bool = false,
-        paneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil,
-        panePID: String = "4100",
-        paneForegroundPID: Int32? = nil,
-        killWindowThrows: Bool = false,
-        windowPresence: TmuxPresence = .alive,
         beforeTheWrite: (@Sendable (TBDDatabase, UUID) async -> Void)? = nil
     ) async throws -> Fixture {
         let home = fencedScratchRoot(prefix: "tbdrstm")
@@ -137,14 +122,7 @@ struct RunningShellTransportMoveTests {
         let tmuxArgv = TmuxArgvRecorder()
         let tmux = TmuxManager(
             dryRun: true,
-            dryRunRecorder: { tmuxArgv.record($0) },
-            dryRunKillWindowError: { _, _ -> Error? in
-                guard killWindowThrows else { return nil }
-                return TmuxError.timedOut(command: "kill-window", timeout: .seconds(5))
-            },
-            dryRunPaneSendTarget: paneSendTarget,
-            dryRunPanePID: { _, _ in panePID },
-            dryRunWindowPresence: { _, _ in windowPresence })
+            dryRunRecorder: { tmuxArgv.record($0) })
 
         let repoPath = "\(home)/repo"
         try FileManager.default.createDirectory(
@@ -161,8 +139,6 @@ struct RunningShellTransportMoveTests {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux,
             configDirManager: makeIsolatedConfigDirManager(tag: "running-shell-move"),
-            paneProcessInspector: FakeInspector(
-                claudePID: nil, foregroundPID: paneForegroundPID),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "running-shell-move"))
         // The registry is wired in every arm but the one that asserts its
@@ -200,7 +176,7 @@ struct RunningShellTransportMoveTests {
             coordinator: coordinator, spawns: spawns)
     }
 
-    /// A running tmux row with no conversation to resume: a shell. Pinned and
+    /// A live tmux row with no conversation to resume: a shell. Pinned and
     /// labelled, because the move must keep both.
     private static func runningShell(_ fixture: Fixture) async throws -> Terminal {
         let created = try await fixture.db.terminals.create(
@@ -266,26 +242,25 @@ struct RunningShellTransportMoveTests {
         #expect(after.worktreeID == row.worktreeID)
     }
 
-    /// The kill is what stops the session's program, and one kill is all it
-    /// takes: there is no park, so nothing else in this path touches tmux.
-    @Test("the move kills the row's own window exactly once")
-    func theMoveKillsTheRowsWindowExactlyOnce() async throws {
+    /// The move reaches only shells whose tmux server is gone, so there is
+    /// nothing left there to stop or to read: it starts the replacement and
+    /// records it, and hands tmux nothing.
+    @Test("the move asks nothing of tmux")
+    func theMoveAsksNothingOfTmux() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
         let row = try await Self.runningShell(fixture)
 
         #expect(await fixture.coordinator.moveRunningShellToHolder(terminal: row) == .moved)
 
-        #expect(fixture.tmuxArgv.count("kill-window") == 1,
-                "the move did not stop the program exactly once: \(fixture.tmuxArgv.all)")
-        #expect(fixture.tmuxArgv.all.contains { $0.contains("kill-window") && $0.contains("@7") },
-                "a window was killed, but not this row's: \(fixture.tmuxArgv.all)")
+        #expect(fixture.tmuxArgv.all.isEmpty,
+                "the move invoked tmux: \(fixture.tmuxArgv.all)")
     }
 
     /// "The same working directory" is the worktree's path, which is where a
     /// tmux shell for this row was created too — and the replacement carries
     /// the incarnation the row ends up naming, so a hook from it is
-    /// attributable to this process rather than to the one just killed.
+    /// attributable to this process rather than to the one its server took.
     @Test("the launch is a login shell in the worktree, carrying the minted incarnation")
     func theLaunchIsALoginShellInTheWorktree() async throws {
         let fixture = try await Self.makeFixture()
@@ -322,7 +297,7 @@ struct RunningShellTransportMoveTests {
     }
 
     /// The dead process's session and activity facts are cleared, so the
-    /// replacement's first hook cannot read as a resume of what was killed.
+    /// replacement's first hook cannot read as a resume of what ran before.
     @Test("the move clears the dead process's activity facts")
     func theMoveClearsTheDeadProcessActivityFacts() async throws {
         let fixture = try await Self.makeFixture()
@@ -334,7 +309,7 @@ struct RunningShellTransportMoveTests {
 
         let after = try #require(try await fixture.db.terminals.get(id: row.id))
         #expect(after.activityState == .unknown,
-                "the killed process's activity state outlived it")
+                "the dead process's activity state outlived it")
         #expect(after.claudeSessionID == nil)
         #expect(after.pendingSessionIncarnationID == nil)
     }
@@ -342,7 +317,7 @@ struct RunningShellTransportMoveTests {
     // MARK: - Refusing before anything is touched
 
     /// The production branch, with no oracle: a daemon that cannot start a
-    /// holder must leave the session the program it has.
+    /// holder must leave the row as it is rather than half-move it.
     @Test("a registry that cannot spawn refuses and touches nothing")
     func aRegistryThatCannotSpawnRefusesAndTouchesNothing() async throws {
         let fixture = try await Self.makeFixture(holderSpawnable: false)
@@ -353,8 +328,8 @@ struct RunningShellTransportMoveTests {
 
         #expect(outcome == .refused(
             reason: TerminalTransportMigrator.holderUnspawnableRefusal))
-        #expect(fixture.tmuxArgv.count("kill-window") == 0,
-                "a refused move stopped the session's program: \(fixture.tmuxArgv.all)")
+        #expect(fixture.tmuxArgv.all.isEmpty,
+                "a refused move invoked tmux: \(fixture.tmuxArgv.all)")
         #expect(try await fixture.db.terminals.get(id: row.id) == row,
                 "a refused move changed the row")
     }
@@ -372,84 +347,11 @@ struct RunningShellTransportMoveTests {
 
         #expect(outcome == .refused(
             reason: TerminalTransportMigrator.holderUnspawnableRefusal))
-        #expect(fixture.tmuxArgv.count("kill-window") == 0,
-                "a refused move stopped the session's program: \(fixture.tmuxArgv.all)")
+        #expect(fixture.tmuxArgv.all.isEmpty,
+                "a refused move invoked tmux: \(fixture.tmuxArgv.all)")
         #expect(await fixture.launches.isEmpty)
         #expect(try await fixture.db.terminals.get(id: row.id) == row,
                 "a refused move changed the row")
-    }
-
-    /// The pane-ownership guard, both refusing answers. A tmux server restart
-    /// resets window and pane numbering, and several worktrees of one repo
-    /// share a server, so this row's coordinate can collide with an unrelated
-    /// live terminal's — and a consultation that could not be run is "we do
-    /// not know", not "gone".
-    @Test(arguments: RefusingPaneAnswer.allCases)
-    func aPaneNotProvablyOursRefusesAndTouchesNothing(
-        _ refusal: RefusingPaneAnswer
-    ) async throws {
-        let fixture = try await Self.makeFixture(
-            paneSendTarget: { _, _ in try refusal.answer() })
-        defer { fixture.tearDown() }
-        let row = try await Self.runningShell(fixture)
-
-        let outcome = await fixture.coordinator.moveRunningShellToHolder(terminal: row)
-
-        guard case .refused(let reason) = outcome else {
-            Issue.record("an unverified pane was moved anyway: \(outcome)")
-            return
-        }
-        #expect(reason.contains("Stopping its program would have risked"),
-                "the refusal did not name the recycled coordinate: \(reason)")
-        #expect(fixture.tmuxArgv.count("kill-window") == 0,
-                "the move killed a window it could not prove was this row's: \(fixture.tmuxArgv.all)")
-        #expect(await fixture.launches.isEmpty,
-                "the move started a holder for a session it had not stopped")
-        #expect(try await fixture.db.terminals.get(id: row.id) == row,
-                "a refused move changed the row")
-    }
-
-    /// The busy rail, and the only one a shell can have: a shell fires no
-    /// hooks, so its activity state is never written and the eligibility rails
-    /// that skip a busy session can never fire for one. The process table
-    /// answers instead, and a fleet-wide run is exactly the case where the
-    /// person did not pick this tab.
-    ///
-    /// `busy`, not `refused`, because it is a state they can change — which is
-    /// a different column of a fleet run's report.
-    @Test("a pane running something other than its own shell is left alone and named")
-    func aPaneRunningSomethingElseIsLeftAloneAndNamed() async throws {
-        let fixture = try await Self.makeFixture(
-            panePID: "4100", paneForegroundPID: 4242)
-        defer { fixture.tearDown() }
-        let row = try await Self.runningShell(fixture)
-
-        let outcome = await fixture.coordinator.moveRunningShellToHolder(terminal: row)
-
-        #expect(outcome == .busy(
-            reason: HibernationCoordinator.shellMovePaneBusyRefusal(pid: 4242)))
-        #expect(fixture.tmuxArgv.count("kill-window") == 0,
-                "the move stopped something the person started: \(fixture.tmuxArgv.all)")
-        #expect(await fixture.launches.isEmpty, "the move started a holder anyway")
-        #expect(try await fixture.db.terminals.get(id: row.id) == row,
-                "a busy session's row was changed")
-    }
-
-    /// The rail's other two legs, both of which must proceed. A foreground pid
-    /// equal to the pane's own is an idle interactive shell — that is the
-    /// ordinary case and the one the whole feature exists for. A pane pid tmux
-    /// cannot answer for is not evidence that a process is there, so it
-    /// proceeds too, exactly as it does for the wake; refusing on it would
-    /// strand the row behind a probe failure with no way back.
-    @Test(arguments: ["4100", "0"])
-    func anIdleOrUnreadablePaneStillMoves(_ panePID: String) async throws {
-        let fixture = try await Self.makeFixture(panePID: panePID)
-        defer { fixture.tearDown() }
-        let row = try await Self.runningShell(fixture)
-
-        #expect(await fixture.coordinator.moveRunningShellToHolder(terminal: row) == .moved)
-
-        #expect(try await fixture.db.terminals.get(id: row.id)?.transport == .holder)
     }
 
     /// A worktree that gives the move no local directory. `getLocal` answers
@@ -467,65 +369,16 @@ struct RunningShellTransportMoveTests {
 
         #expect(outcome == .refused(
             reason: HibernationCoordinator.shellMoveWorktreeUnreadableRefusal))
-        #expect(fixture.tmuxArgv.count("kill-window") == 0,
-                "a refused move stopped the session's program: \(fixture.tmuxArgv.all)")
         #expect(await fixture.launches.isEmpty)
     }
 
-    /// A window that is already gone is not a failure to stop anything.
-    /// `PaneOwnership.owned` covers "pane gone, server positively absent" on
-    /// purpose, so a row whose window died before the person reached for this
-    /// gesture arrives at the kill and gets an error from it — and must not be
-    /// refused over a program that no longer exists.
-    @Test("a kill that fails on an already-gone window still moves the session")
-    func aKillOnAnAlreadyGoneWindowStillMoves() async throws {
-        let fixture = try await Self.makeFixture(
-            killWindowThrows: true, windowPresence: .absent)
-        defer { fixture.tearDown() }
-        let row = try await Self.runningShell(fixture)
+    // MARK: - Failing at the spawn or the write
 
-        #expect(await fixture.coordinator.moveRunningShellToHolder(terminal: row) == .moved)
-
-        let after = try #require(try await fixture.db.terminals.get(id: row.id))
-        #expect(after.transport == .holder)
-        #expect(after.holderPID == Self.holderPID)
-    }
-
-    /// A kill that tmux would not perform leaves the program running, so
-    /// nothing may be started beside it: two live programs for one row is the
-    /// one state this path must never produce. Both answers that are not a
-    /// positive "no such window" refuse — `.unknown` is "we do not know",
-    /// which is a refusal at every site in this family.
-    @Test(arguments: [TmuxPresence.alive, TmuxPresence.unknown])
-    func aKillTmuxRefusesStartsNothingOnAWindowNotProvablyGone(
-        _ presence: TmuxPresence
-    ) async throws {
-        let fixture = try await Self.makeFixture(
-            killWindowThrows: true, windowPresence: presence)
-        defer { fixture.tearDown() }
-        let row = try await Self.runningShell(fixture)
-
-        let outcome = await fixture.coordinator.moveRunningShellToHolder(terminal: row)
-
-        guard case .refused(let reason) = outcome else {
-            Issue.record("a window that could not be stopped was moved anyway: \(outcome)")
-            return
-        }
-        #expect(reason.contains("could not be stopped"),
-                "the refusal did not name the failed kill: \(reason)")
-        #expect(await fixture.launches.isEmpty,
-                "a second program was started beside one that is still running")
-        #expect(try await fixture.db.terminals.get(id: row.id) == row,
-                "a refused move changed the row")
-    }
-
-    // MARK: - Failing after the kill
-
-    /// The first of the two states a failed move lands in: the row untouched,
-    /// still naming the window that is now dead, exactly as it read before the
-    /// move because nothing rewrote it. The refusal names the move to run
-    /// again, with this session's id, because running it again is what moves
-    /// a row in that state.
+    /// A spawn that fails leaves the row untouched, still naming its tmux
+    /// coordinates, exactly as it read before the move because nothing
+    /// rewrote it. The refusal names the move to run again, with this
+    /// session's id, because running it again is what moves a row in that
+    /// state.
     @Test("a spawn that fails leaves the row on tmux with its coordinates intact")
     func aSpawnThatFailsLeavesTheRowOnTmux() async throws {
         let fixture = try await Self.makeFixture(spawnThrows: true)
@@ -555,9 +408,8 @@ struct RunningShellTransportMoveTests {
     /// The loser of two concurrent moves of one row. The registry declines the
     /// spawn because the winner already has a holder for this session, and the
     /// spawn-failure message must not be reused for it: its advice — the row
-    /// reads as running on tmux with its window gone, and running the move
-    /// again moves it — is false in every particular once the winner has moved
-    /// the row.
+    /// still reads as live on tmux, and running the move again moves it — is
+    /// false in every particular once the winner has moved the row.
     @Test("a spawn the registry declines as already-registered says another move won")
     func aSecondConcurrentMoveSaysAnotherMoveWon() async throws {
         let fixture = try await Self.makeFixture(spawnThrowsAlreadyRegistered: true)
@@ -575,31 +427,11 @@ struct RunningShellTransportMoveTests {
                 "a spawn that never happened was abandoned")
     }
 
-    /// The parity guard its sibling retire has. No reachable row shape has
-    /// `transport == .tmux` with blank coordinates today, but `kill-window -t
-    /// ''` on a server several worktrees share is not a no-op, and a row that
-    /// names no window has nothing to stop — so the move carries on to the
-    /// replacement shell without asking tmux to kill anything.
-    @Test("a row naming no tmux window kills nothing and still moves")
-    func aRowNamingNoTmuxWindowKillsNothing() async throws {
-        let fixture = try await Self.makeFixture()
-        defer { fixture.tearDown() }
-        var row = try await Self.runningShell(fixture)
-        try await fixture.db.terminals.updateTmuxIDs(id: row.id, windowID: "", paneID: "")
-        row = try #require(try await fixture.db.terminals.get(id: row.id))
-
-        #expect(await fixture.coordinator.moveRunningShellToHolder(terminal: row) == .moved)
-
-        #expect(fixture.tmuxArgv.count("kill-window") == 0,
-                "the move asked tmux to kill a window it does not name: \(fixture.tmuxArgv.all)")
-        #expect(try await fixture.db.terminals.get(id: row.id)?.transport == .holder)
-    }
-
-    /// The second state, and the reason the abandon is not optional: a holder
-    /// and a job no row names would be reclaimable by nothing.
+    /// The reason the abandon is not optional: a holder and a job no row names
+    /// would be reclaimable by nothing.
     ///
     /// The race is staged by rotating the row's incarnation in the gap between
-    /// the kill and the write, as any writer that changes the row there would.
+    /// the spawn and the write, as any writer that changes the row there would.
     /// The compare-and-set then writes nothing, and the row keeps what that
     /// writer left.
     @Test("a write that loses its compare-and-set abandons the holder")

@@ -8,15 +8,14 @@ import TBDShared
 /// A single body of text — one line or many — composes into that write cleanly:
 /// `HolderSendComposition` wraps it in `ESC[200~`…`ESC[201~` when the child's
 /// bracketed-paste mode calls for it and puts the submitting `\r` after the end
-/// marker, which is the same "the Enter is provably outside the paste" property
-/// the tmux arm gets from pasting and pressing Enter as two separate acts. So a
-/// multi-line message is DELIVERED here, not refused.
+/// marker, so the Enter is provably outside the paste. So a multi-line message
+/// is DELIVERED here, not refused.
 ///
 /// What is still refused is a message that is more than one body: several
 /// parts, or a lone image whose write would also have to carry the dispatch
-/// envelope attributing the turn. The tmux arm frames those as separate pastes;
-/// this transport has only the one write, and how a single write could frame a
-/// multi-body message is out of scope until a spec settles it.
+/// envelope attributing the turn. The transport has only the one write, and
+/// how a single write could frame a multi-body message is out of scope until a
+/// spec settles it.
 @Suite("holder composite send: what one write can frame")
 struct HolderCompositeSendRefusalTests {
 
@@ -24,7 +23,7 @@ struct HolderCompositeSendRefusalTests {
     private static let pasteStart = Data([0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e])
     /// `ESC [ 2 0 1 ~` — the end of a bracketed paste.
     private static let pasteEnd = Data([0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e])
-    /// Carriage return: what `send-keys Enter` puts on a pty.
+    /// Carriage return: the byte that submits.
     private static let submitByte: UInt8 = 0x0d
 
     /// A child that has asked for bracketed paste, witnessed by the daemon's own
@@ -88,43 +87,27 @@ struct HolderCompositeSendRefusalTests {
         #expect(body.hasSuffix("\nline one\nline two"))
     }
 
-    /// **Both transports carry the same message.** The tmux arm pastes the
-    /// composed body and then presses Enter; the holder arm writes the same
-    /// composed body wrapped, with the same Enter after the end marker. Asserted
-    /// side by side, with the envelope's first line dropped from each because it
-    /// carries that harness's own actuation id.
-    ///
-    /// Discriminates: on `origin/main` the holder leg is refused and writes
-    /// nothing, so there is no body to compare.
-    @Test func aMultiLineSendCarriesTheSameMessageOnBothTransports() async throws {
-        let params = { (id: UUID) in
-            TerminalSendParams(terminalID: id, text: "line one\nline two", submit: true)
-        }
-
-        let tmuxHarness = try await SendHarness.make(transport: .tmux)
-        #expect(try await tmuxHarness.send(params(tmuxHarness.terminal.id), actor: .app).success)
-        #expect(tmuxHarness.tmux.pastedBodies.count == 1)
-        #expect(tmuxHarness.tmux.sentKeys == ["Enter"])
-        let tmuxBody = try #require(tmuxHarness.tmux.pastedBodies.first)
-
+    /// **The caller's message arrives verbatim** behind the envelope line,
+    /// wrapped, with the Enter after the end marker. The envelope's own line is
+    /// dropped before comparing because it carries this harness's actuation id.
+    @Test func aMultiLineSendCarriesTheCallersMessageVerbatim() async throws {
         let recorder = HolderWriteRecorder()
-        let holderHarness = try await SendHarness.make(
+        let harness = try await SendHarness.make(
             transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
-        holderHarness.router.holderModeOracle = { _ in Self.bracketingChild(true) }
-        #expect(
-            try await holderHarness.send(params(holderHarness.terminal.id), actor: .app).success)
+        harness.router.holderModeOracle = { _ in Self.bracketingChild(true) }
+        #expect(try await harness.send(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, text: "line one\nline two", submit: true),
+            actor: .app).success)
         let data = try #require(recorder.writes.first)
-        let holderBody = String(
+        #expect(data.last == Self.submitByte)
+        let body = String(
             decoding: data.dropFirst(Self.pasteStart.count)
                 .dropLast(Self.pasteEnd.count + 1),
             as: UTF8.self)
 
-        // Everything after the envelope line, which is the caller's message
-        // verbatim on both transports.
-        #expect(
-            String(holderBody.drop(while: { $0 != "\n" }))
-                == String(tmuxBody.drop(while: { $0 != "\n" })))
-        #expect(String(holderBody.drop(while: { $0 != "\n" })) == "\nline one\nline two")
+        #expect(body.hasPrefix("<tbd-dispatch"))
+        #expect(String(body.drop(while: { $0 != "\n" })) == "\nline one\nline two")
     }
 
     /// A child that never asked for bracketing gets bare bytes — markers it does
@@ -233,10 +216,9 @@ struct HolderCompositeSendRefusalTests {
     /// attaches an image only when the whole paste is the quoted path and
     /// nothing else (measured on 2.1.261), so prefixing it attaches nothing —
     /// and dropping the envelope instead would let any local process submit an
-    /// unattributed user turn carrying an image. The tmux arm escapes the
-    /// dilemma by pasting the envelope separately; this transport has no second
-    /// write to give, and how one write could frame both is out of scope until a
-    /// spec settles it.
+    /// unattributed user turn carrying an image. There is no second write to
+    /// give, and how one write could frame both is out of scope until a spec
+    /// settles it.
     ///
     /// `connection: nil` (unauthenticated, asking for no suppression) is the
     /// disposition an envelope attaches under.
@@ -261,7 +243,7 @@ struct HolderCompositeSendRefusalTests {
 
     /// The other branch: an authenticated connection that asked for suppression
     /// carries no envelope, so the one write is the bare quoted path and the
-    /// image attaches exactly as it does on tmux.
+    /// image attaches.
     @Test func anAuthenticatedSingleImagePartSendToAHolderRowIsDelivered() async throws {
         let recorder = HolderWriteRecorder()
         let harness = try await SendHarness.makeAuthenticated(
@@ -320,25 +302,35 @@ struct HolderCompositeSendRefusalTests {
         #expect(body == "hello\r")
     }
 
-    /// A tmux row is untouched by any of it.
-    @Test func aTmuxRowStillAcceptsMultiLineAndParts() async throws {
+    /// A tmux row never reaches any of it: TBD no longer types into tmux, so
+    /// both shapes are refused as a session still running there, ahead of the
+    /// holder's framing rules, and nothing is written.
+    @Test func aTmuxRowIsRefusedBeforeTheHolderFramingRules() async throws {
         let harness = try await SendHarness.make(transport: .tmux)
+        let expected = LeftoverTmuxSession.stillRunningRefusal(
+            terminalID: harness.terminal.id, server: "tbd-acme")
+
         let multiline = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "line one\nline two", submit: true),
             actor: .app)
-        #expect(multiline.success, "error was: \(multiline.error ?? "none")")
+        #expect(!multiline.success)
+        #expect(multiline.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
+        #expect(multiline.error == expected)
 
         let parts = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, submit: true,
             parts: [.text("a"), .imagePath("/tmp/a.png")]),
             actor: .app)
-        #expect(parts.success, "error was: \(parts.error ?? "none")")
+        #expect(!parts.success)
+        #expect(parts.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
+        #expect(parts.error == expected)
+        #expect(harness.delivered.writes.isEmpty, "nothing may be written")
     }
 }
 
 /// Collects the bytes `SendHarness`'s stubbed `HolderInjectionCourier` was
 /// asked to write, when a test passes `holderDeliveryRecorder`. A lock-guarded
-/// class, matching `SendHarness.TmuxDouble`, because the courier's
+/// class, matching `SendHarness.DeliveryDouble`, because the courier's
 /// `writeDirectly` closure runs off the test's task.
 private final class HolderWriteRecorder: @unchecked Sendable {
     private let lock = NSLock()

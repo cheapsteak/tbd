@@ -21,7 +21,7 @@ import Testing
     }
 
     /// A wedged pane process that survives kill-window's SIGHUP gets escalated.
-    @Test func killWindowAndReapEscalatesSurvivor() async throws {
+    @Test func tearDownWindowEscalatesSurvivor() async throws {
         let sig = FakeProcessSignaller()
         // panePID in dryRun is "0" → Int32(0). This exercises the escalation path
         // in isolation via the fake signaller's scripted behavior for pid 0 — it
@@ -29,29 +29,17 @@ import Testing
         // false via the `guard pid > 0`, so only the fake escalates here).
         sig.behaviors[0] = .init(aliveInitially: true, aliveAfterTerminate: true, aliveAfterKill: false)
         let lifecycle = try makeLifecycle(signaller: sig)
-        await lifecycle.killWindowAndReap(server: "tbd-x", windowID: "@1", paneID: "%1")
+        _ = await lifecycle.tearDownWindow(server: "tbd-x", windowID: "@1", paneID: "%1")
         #expect(sig.terminated == [0])
         #expect(sig.killed == [0])
     }
 
-    @Test func killWindowAndReapNoOpWhenPaneAlreadyDead() async throws {
+    @Test func tearDownWindowNoOpWhenPaneAlreadyDead() async throws {
         let sig = FakeProcessSignaller()
         sig.behaviors[0] = .init(aliveInitially: false)
         let lifecycle = try makeLifecycle(signaller: sig)
-        await lifecycle.killWindowAndReap(server: "tbd-x", windowID: "@1", paneID: "%1")
+        _ = await lifecycle.tearDownWindow(server: "tbd-x", windowID: "@1", paneID: "%1")
         #expect(sig.terminated.isEmpty)
         #expect(sig.killed.isEmpty)
-    }
-
-    @Test func reapServerChildrenRunsForOwnedChildren() async {
-        // Unit-level guard on the reaper method reconcile now calls before kill-server.
-        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
-        tmux.serverPIDs = ["tbd-x": 500]
-        sig.childrenByServer = [500: [77]]
-        sig.cmdlines = [77: "claude --plugin-dir /x/TBD/plugin"]
-        sig.behaviors = [77: .init(aliveAfterTerminate: false)]
-        let reaper = AgentReaper(tmux: tmux, signaller: sig, graceAttempts: 1, pollInterval: .milliseconds(1))
-        await reaper.reapServerChildren(server: "tbd-x")
-        #expect(sig.terminated == [77])
     }
 }

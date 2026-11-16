@@ -1000,10 +1000,8 @@ public struct OrphanProcessCollector: Sendable {
     /// The orphan root plus every descendant of it in the snapshot, ordered
     /// **leaf-first** (deepest generation first).
     ///
-    /// Computed here rather than by calling
-    /// `ProcessSignaller.children(ofServerPID:)` in a loop, because that helper
-    /// walks exactly one generation by construction. A protected pid is skipped
-    /// and never descended into.
+    /// Computed from the snapshot, every generation at once. A protected pid
+    /// is skipped and never descended into.
     ///
     /// Leaf-first so that no descendant is still unsignalled at the moment its
     /// ancestor gets SIGTERM — an ancestor signalled first could spend its own

@@ -87,8 +87,8 @@ struct SubprocessTimeoutTests {
         // A macOS pipe buffer is 64KB. Before stdout was drained concurrently
         // with the child, a command emitting more (e.g. `ps -Ao` with ~900+
         // processes) blocked writing to the full pipe while the caller waited
-        // for exit — mutual deadlock, resolved only by the timeout (or, at the
-        // original detectOrphanedClaudeProcesses call site, never). Lock down
+        // for exit — mutual deadlock, resolved only by the timeout (or, at a
+        // call site with no timeout, never). Lock down
         // that a 100KB emitter completes and returns its FULL output. With the
         // deadline virtual and never advanced, a regression presents as a hang
         // caught by the suite's limit instead of being masked as a timeout.
