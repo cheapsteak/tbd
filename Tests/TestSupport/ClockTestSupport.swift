@@ -128,7 +128,7 @@ public extension Trait where Self == TimeLimitTrait {
     /// Grepping only for the literal `waitForSuspension(` undercounts every
     /// figure below, which is how a PR #547 reviewer read two of these chains
     /// as shallower than they are.
-    /// - The poller chains are nominally deeper still —
+    /// - The poller chains look deep on paper —
     ///   `GatedIntervalSleepTests.returnsAfterExpectedPollCount` pays six
     ///   guards (3 `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1
     ///   `FireRecorder.next()`) for 270 s, 30 s under this limit;
