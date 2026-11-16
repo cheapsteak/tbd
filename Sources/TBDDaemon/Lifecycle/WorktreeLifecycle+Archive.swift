@@ -510,6 +510,41 @@ extension WorktreeLifecycle {
         return revived.worktree
     }
 
+    /// Whether a revive of `worktree` finishes an earlier one: the row is
+    /// already active and still carries archived tabs to restore.
+    static func isReviveRetry(_ worktree: LocalWorktree, pendingTabs: [ArchivedAgentTab]) -> Bool {
+        worktree.status == .active && worktree.archivedAgentTabs != nil && !pendingTabs.isEmpty
+    }
+
+    /// Whether a revive opens a tab, and so must ask the spawn gate. A first
+    /// revive always does. A retry re-adds nothing and opens a tab only for an
+    /// archived session that still has none, and none at all when it skips
+    /// the agent, so a daemon that cannot start a holder can still finish it.
+    static func reviveAsksSpawnGate(
+        isRetry: Bool, skipClaude: Bool, missingTabs: [ArchivedAgentTab]
+    ) -> Bool {
+        !isRetry || (!skipClaude && !missingTabs.isEmpty)
+    }
+
+    /// `reviveAsksSpawnGate` for the worktree as it stands now, for a caller
+    /// that asks the gate before the revive does: `worktree.revive`'s handler
+    /// asks it ahead of start admission, and must exempt exactly the retries
+    /// `beginReviveWorktree` exempts, or it refuses a retry the lifecycle
+    /// would finish. True when the row cannot be read, so the gate is asked
+    /// and the revive's own lookup reports the missing row.
+    func reviveAsksSpawnGate(
+        worktreeID: UUID, skipClaude: Bool = false, preferred: AgentSessionIdentity?
+    ) async throws -> Bool {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else { return true }
+        let pendingTabs = try await db.worktrees.archivedAgentTabsForRevive(id: worktreeID)
+        guard Self.isReviveRetry(worktree, pendingTabs: pendingTabs) else { return true }
+        let tabs = try await archivedRestorePlan(worktreeID: worktreeID, preferred: preferred)
+        let terminals = try await db.terminals.list(worktreeID: worktreeID)
+        return Self.reviveAsksSpawnGate(
+            isRetry: true, skipClaude: skipClaude,
+            missingTabs: missingArchivedAgentTabs(tabs, terminals: terminals))
+    }
+
     /// Non-blocking revive. Validates, re-adds the git worktree, then:
     ///
     /// - No `preSession` hook → spawns all terminals inline, flips the row to
@@ -533,7 +568,7 @@ extension WorktreeLifecycle {
         }
 
         let pendingTabs = try await db.worktrees.archivedAgentTabsForRevive(id: worktreeID)
-        let isRetry = worktree.status == .active && worktree.archivedAgentTabs != nil && !pendingTabs.isEmpty
+        let isRetry = Self.isReviveRetry(worktree, pendingTabs: pendingTabs)
         guard worktree.status == .archived || isRetry else {
             throw WorktreeLifecycleError.worktreeAlreadyActive(worktreeID)
         }
@@ -564,8 +599,8 @@ extension WorktreeLifecycle {
         // the row archived; asked after the re-add, the gate would leave the
         // checkout on disk, the row revived and no tab open. A retry re-adds
         // nothing and opens a tab only for an archived session that still has
-        // none, so it is asked only then.
-        if !isRetry || (!skipClaude && !missingTabs.isEmpty) {
+        // none, so it is asked only then (`reviveAsksSpawnGate`).
+        if Self.reviveAsksSpawnGate(isRetry: isRetry, skipClaude: skipClaude, missingTabs: missingTabs) {
             _ = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
         }
         let preparedArchivedCodexLaunches = try prepareArchivedCodexLaunches(skipClaude ? [] : missingTabs)

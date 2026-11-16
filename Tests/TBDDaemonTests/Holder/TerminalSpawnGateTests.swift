@@ -189,4 +189,83 @@ struct TerminalSpawnGateTests {
         #expect(try await db.worktrees.get(id: worktree.id)?.status == .archived,
                 "the refused revive changed the row's status")
     }
+
+    /// A revive retry whose archived sessions all have a tab already opens no
+    /// tab, so it needs no holder: on a daemon that cannot start one,
+    /// `worktree.revive` finishes it rather than answering with the gate's
+    /// refusal. The handler asks the gate ahead of the lifecycle, and it must
+    /// exempt exactly the retries the lifecycle exempts.
+    @Test func aReviveRetryThatOpensNoTabSucceedsWithoutAHolder() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date(),
+            actuationLog: makeTestActuationLog())
+        router.holderRegistry = Self.registry(spawner: nil)
+        let scratch = fencedScratchRoot(prefix: "tbdgate")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        let wtPath = "\(scratch)/wt"
+        try FileManager.default.createDirectory(atPath: wtPath, withIntermediateDirectories: true)
+        let repo = try await db.repos.create(
+            path: "\(scratch)/repo", displayName: "acme", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "tbd/wt",
+            path: wtPath, tmuxServer: "tbd-gate-test")
+        // An earlier revive re-added the checkout and opened the archived
+        // session's tab, then stopped before it cleared the restore plan: the
+        // row is active and still carries the plan, and the plan's one session
+        // already has its tab.
+        let identity = AgentSessionIdentity(agentKind: .claude, sessionID: "acme-session")
+        try await db.worktrees.setArchivedAgentTabs(id: worktree.id, tabs: [
+            ArchivedAgentTab(identity: identity, ordinal: 0, isPrimary: true, claudeSpawnExtras: nil),
+        ])
+        _ = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: "Claude", claudeSessionID: identity.sessionID, kind: .claude,
+            transport: .holder)
+        #expect(try await db.worktrees.get(id: worktree.id)?.status == .active)
+        #expect(try await router.lifecycle.reviveAsksSpawnGate(
+            worktreeID: worktree.id, preferred: nil) == false)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeRevive,
+            params: WorktreeReviveParams(worktreeID: worktree.id)))
+
+        #expect(response.success, "the retry was refused: \(response.error ?? "")")
+        #expect(response.error != TerminalSpawnRefusal.holderUnavailable.message)
+        #expect(try await db.terminals.list(worktreeID: worktree.id).count == 1,
+                "the retry opened a tab")
+        #expect(try await db.worktrees.archivedAgentTabsForRevive(id: worktree.id).isEmpty,
+                "the retry did not finish the revive")
+    }
+
+    /// The other side of the same exemption: a first revive always opens a
+    /// tab, so `reviveAsksSpawnGate` says to ask the gate.
+    @Test func aFirstReviveAsksTheSpawnGate() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        let scratch = fencedScratchRoot(prefix: "tbdgate")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        let repo = try await db.repos.create(
+            path: "\(scratch)/repo", displayName: "acme", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "tbd/wt",
+            path: "\(scratch)/wt", tmuxServer: "tbd-gate-test")
+        try await db.worktrees.archive(id: worktree.id)
+
+        #expect(try await lifecycle.reviveAsksSpawnGate(
+            worktreeID: worktree.id, preferred: nil))
+        #expect(WorktreeLifecycle.reviveAsksSpawnGate(
+            isRetry: false, skipClaude: true, missingTabs: []))
+        #expect(!WorktreeLifecycle.reviveAsksSpawnGate(
+            isRetry: true, skipClaude: true, missingTabs: [
+                ArchivedAgentTab(
+                    identity: AgentSessionIdentity(agentKind: .claude, sessionID: "acme"),
+                    ordinal: 0, isPrimary: true, claudeSpawnExtras: nil),
+            ]))
+    }
 }
