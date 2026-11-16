@@ -285,6 +285,66 @@ struct ReconcileLeftoverTmuxTests {
         #expect(try await db.terminals.get(id: rows.claude.id) == changed)
     }
 
+    /// The pass reads a worktree's rows before it probes their server, so a
+    /// `terminal.migrate` that lands while the probe runs leaves the pass
+    /// holding a stale read of both rows. This probe makes that migrate land
+    /// exactly there, then answers gone. An unconditional write would stamp a
+    /// park on the agent now running on the holder, or delete the shell's row.
+    @Test("a row that moved to the holder between the pass's read and its write is left alone")
+    func aRowMovedToTheHolderMidPassIsLeftAlone() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        let rows = try await seedTerminals(db: db, worktree: main)
+        let claudeID = rows.claude.id
+        let shellID = rows.shell.id
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in
+            await Self.migrateToHolder(db: db, claudeID: claudeID, shellID: shellID)
+            return .absent
+        }
+
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+
+        let claude = try #require(try await db.terminals.get(id: claudeID))
+        #expect(claude.transport == .holder)
+        #expect(!claude.isParked,
+                "reconcile parked a session that was already running on the holder")
+        let shell = try #require(try await db.terminals.get(id: shellID),
+                                 "reconcile deleted a shell that was already running on the holder")
+        #expect(shell.transport == .holder)
+    }
+
+    /// Move both seeded rows to the holder as `terminal.migrate` does once
+    /// their tmux server is gone: the resumable row is parked, moved and
+    /// woken; the shell is started again on the holder in one write. A row
+    /// already on the holder is left alone, so a second call changes nothing.
+    private static func migrateToHolder(db: TBDDatabase, claudeID: UUID, shellID: UUID) async {
+        do {
+            if let claude = try await db.terminals.get(id: claudeID), claude.transport == .tmux {
+                try await db.terminals.setHibernated(
+                    id: claudeID, sessionID: "sess-tmux", reason: .recovery)
+                if let parked = try await db.terminals.get(id: claudeID) {
+                    _ = try await db.terminals.setParkedTransport(
+                        id: claudeID,
+                        expectedState: TerminalReplacementSnapshot(terminal: parked),
+                        transport: .holder)
+                }
+                try await db.terminals.clearHibernated(id: claudeID)
+            }
+            if let shell = try await db.terminals.get(id: shellID), shell.transport == .tmux {
+                _ = try await db.terminals.moveRunningShellToHolder(
+                    id: shellID,
+                    expectedState: TerminalReplacementSnapshot(terminal: shell),
+                    incarnationID: UUID(), holderPID: 4242, childPID: 4243, startedAt: Date())
+            }
+        } catch {
+            Issue.record("the simulated migrate failed: \(error)")
+        }
+    }
+
     // MARK: - The sighting
 
     @Test("the sighting names the server the row's worktree stores and the probe's answer")

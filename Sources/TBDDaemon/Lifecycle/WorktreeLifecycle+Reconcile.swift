@@ -540,17 +540,20 @@ extension WorktreeLifecycle {
                     logger.info("reconcile: preserving pending Codex recovery terminal \(terminal.id, privacy: .public) for post-bind continuation recovery")
                     continue
                 }
-                // **Two transports, one fork.** Each arm establishes the
+                // **Two transports, one outcome.** Each arm establishes the
                 // same fact in its own vocabulary — nothing can reach this
-                // session any more — and then hands it to the shared
-                // park-or-delete outcome below.
+                // session any more — and then parks the row if it has a
+                // session to resume, or deletes it if it has none.
                 //
                 // A holder row's ground truth is the holder inventory
                 // (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
                 // "Reconciliation"), which is what `holderRowVerdict(for:)`
-                // reads. A tmux row's is its server's socket
+                // reads; the shared fork below disposes of it. A tmux row's is
+                // its server's socket
                 // (`docs/specs/2026-10-11-holder-transport-migration-design.md`,
-                // "A live row whose tmux server outlived the update").
+                // "A live row whose tmux server outlived the update"), and
+                // `disposeOfLeftoverTmuxRow` disposes of it, each write a
+                // compare-and-set.
                 let disposal: String
                 switch terminal.transport {
                 case .holder:
@@ -579,7 +582,9 @@ extension WorktreeLifecycle {
                         logger.info("reconcile: keeping tmux terminal \(terminal.id, privacy: .public) live — tmux server \(wt.tmuxServer, privacy: .public) may still be running")
                         continue
                     }
-                    disposal = "its tmux server \(wt.tmuxServer) is gone"
+                    await disposeOfLeftoverTmuxRow(
+                        terminal, server: wt.tmuxServer, actuationLog: actuationLog)
+                    continue
                 }
 
                 // An identified agent row is parked with its provider's native
@@ -605,10 +610,8 @@ extension WorktreeLifecycle {
                         // `.sessionOver` established — so leaving their pids on
                         // the row would point the reaper's holder leg and every
                         // identity check at numbers the kernel has recycled.
-                        if terminal.transport == .holder {
-                            try await db.terminals.setHolderProcess(
-                                id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
-                        }
+                        try await db.terminals.setHolderProcess(
+                            id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
                         await actuationLog.appendOutcome(
                             confirms: actuationID, result: .dispatched)
                     } catch {
@@ -626,6 +629,77 @@ extension WorktreeLifecycle {
                     terminalID: terminal.id, from: pendingQuestions)
             }
         }
+    }
+
+    /// Park or delete a live tmux row whose tmux server the probe found gone.
+    ///
+    /// Each write is a compare-and-set against the row as this pass read it,
+    /// and that is the point of keeping this apart from the holder arm's
+    /// fork. The pass reads a worktree's rows before it probes, and a
+    /// `terminal.migrate` can move the same row to the holder in between. An
+    /// unconditional write would then stamp a park on a session already
+    /// running on the holder, or delete its row, and a later wake of that
+    /// park would start a second agent on the same session id. Both moves to
+    /// the holder blank the row's tmux coordinates and change its session
+    /// incarnation or its park, so the comparison fails and the row is left
+    /// as it is.
+    ///
+    /// A row with a session to resume is parked by `parkLeftoverTmuxRow`, the
+    /// park Check Again and the migration make; a row with nothing to resume
+    /// is deleted with its tab.
+    private func disposeOfLeftoverTmuxRow(
+        _ terminal: Terminal, server: String, actuationLog: ActuationLog
+    ) async {
+        guard let resumePlan = terminal.recoveryResumePlan else {
+            let deleted: Bool
+            do {
+                deleted = try await db.deleteLeftoverTmuxTerminalAndTab(
+                    id: terminal.id,
+                    expectedState: TerminalReplacementSnapshot(terminal: terminal))
+            } catch {
+                logger.warning("reconcile: could not delete tmux terminal \(terminal.id, privacy: .public) whose tmux server \(server, privacy: .public) is gone: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard deleted else {
+                logger.info("reconcile: left tmux terminal \(terminal.id, privacy: .public) as it is — it changed after this pass read it")
+                return
+            }
+            await sessionTitles.forget(terminalID: terminal.id)
+            await pendingQuestions.clear(terminalID: terminal.id)
+            await subscriptions?.broadcastPendingPrompts(
+                terminalID: terminal.id, from: pendingQuestions)
+            logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — its tmux server \(server, privacy: .public) is gone, no session to preserve")
+            return
+        }
+
+        let sessionID = resumePlan.identity.sessionID
+        // This park bypasses `HibernationCoordinator`, so the reconcile rail
+        // records its own independent actuation. Fail closed if that
+        // authoritative record cannot be made.
+        var row = ActuationRow(actor: .daemon(rail: ActuationRail.reconcile), kind: .hibernate)
+        row.target = .local(worktree: terminal.worktreeID, terminal: terminal.id)
+        guard let actuationID = try? await actuationLog.appendRequest(row) else {
+            logger.warning("reconcile: skipped parking terminal \(terminal.id, privacy: .public) — the actuation record is unwritable")
+            return
+        }
+        let parked: Terminal?
+        do {
+            parked = try await parkLeftoverTmuxRow(terminal)
+        } catch {
+            await actuationLog.appendOutcome(
+                confirms: actuationID, result: .transportFailed, error: "\(error)")
+            logger.warning("reconcile: could not park tmux terminal \(terminal.id, privacy: .public) whose tmux server \(server, privacy: .public) is gone: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        guard parked != nil else {
+            await actuationLog.appendOutcome(
+                confirms: actuationID, result: .refused(.notEligible),
+                error: "the row changed after reconcile read it")
+            logger.info("reconcile: left tmux terminal \(terminal.id, privacy: .public) as it is — it changed after this pass read it")
+            return
+        }
+        await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
+        logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — its tmux server \(server, privacy: .public) is gone, session \(sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
     }
 
     // MARK: - The holder inventory
