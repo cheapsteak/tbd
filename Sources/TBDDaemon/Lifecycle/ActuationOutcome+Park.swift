@@ -35,8 +35,11 @@ extension ActuationOutcome {
     static func classify(_ result: WakeResult) -> ActuationOutcome {
         switch result {
         case .ok: return .dispatched
-        // The holder spawn was tried and failed — the one wake path that is a
-        // transport failure rather than a decline.
+        // Every wake that got past the row checks and then stopped: a failed
+        // or refused holder spawn, but also declines that start nothing — the
+        // Codex prompt and preparation refusals, a row that changed under the
+        // wake, and the answers that keep a row parked over a live holder.
+        // All of them are recorded as transport failures.
         case .respawnFailed: return .transportFailed
         // The row is on tmux, which TBD no longer drives. Declined with
         // nothing touched, as a send to such a row is.

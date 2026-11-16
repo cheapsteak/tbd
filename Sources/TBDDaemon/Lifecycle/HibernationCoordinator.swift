@@ -101,9 +101,23 @@ public enum WakeResult: Equatable, Sendable {
     /// the row stays as it was. Kept for compatibility with Claude-only callers.
     case notAClaudeTab(kind: TerminalKind)
     case inFlight        // a wake for this terminal is already respawning
-    /// The wake could not start the session: the holder spawn failed. The row
-    /// stays as it was so a later retry can wake it; `reason` names the real
-    /// failure instead of the misleading "Terminal not found".
+    /// The wake got past the row checks and then stopped without leaving the
+    /// session running under an un-parked row. Several causes share it, and
+    /// not all of them start anything:
+    ///
+    /// - a Codex wake that cannot deliver its initial prompt, or whose resume
+    ///   could not be prepared;
+    /// - a row that changed while the wake prepared or launched;
+    /// - a holder spawn that failed or could not be attempted;
+    /// - a running session, a replacement just started or a holder already
+    ///   there, whose pids or un-parked marker could not be written;
+    /// - an answer that keeps the row parked over a live holder: the daemon is
+    ///   shutting down, a teardown let the session go, or it was released
+    ///   while the wake adopted it.
+    ///
+    /// The wake does not un-park the row, so a later wake can try again, and
+    /// `reason` names the real cause instead of the misleading "Terminal not
+    /// found".
     case respawnFailed(reason: String)
     /// The row is on the tmux transport, which TBD no longer starts, reaches
     /// or stops sessions on (`tmuxWakeRefusal`). Nothing was touched and an
