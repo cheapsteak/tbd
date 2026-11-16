@@ -92,7 +92,7 @@ struct FDVendingServerTests {
         defer { Darwin.close(writeFD) }
 
         let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%3", attachID: UUID()))
-        try await server.send(fd: readFD, header: header)
+        _ = try await server.sendReportingRecipient(fd: readFD, header: header)
         Darwin.close(readFD)
 
         let (rxFD, rxHeader) = try SidecarTestSupport.receiveVend(from: clientSideFD)
@@ -115,7 +115,7 @@ struct FDVendingServerTests {
         let clock = EventDrivenTestClock()
         let server = FDVendingServer(retryAttempts: 3, retryInterval: Self.interval, clock: clock)
 
-        let send = Task { try await server.send(fd: 0, header: Data()) }
+        let send = Task { _ = try await server.sendReportingRecipient(fd: 0, header: Data()) }
         try await clock.requireAdvanceWhenArmed(by: Self.interval)
         try await clock.requireAdvanceWhenArmed(by: Self.interval)
 
@@ -138,7 +138,7 @@ struct FDVendingServerTests {
         let header = try JSONEncoder().encode(
             FDVendHeader(worktreeID: UUID(), paneID: "%late", attachID: UUID()))
 
-        let send = Task { try await server.send(fd: readFD, header: header) }
+        let send = Task { _ = try await server.sendReportingRecipient(fd: readFD, header: header) }
 
         // Two intervals with nobody connected: still retrying, not yet failed.
         try await clock.requireAdvanceWhenArmed(by: Self.interval)
@@ -174,7 +174,7 @@ struct FDVendingServerTests {
         let finished = SidecarEventCounter()
         let send = Task {
             defer { finished.record() }
-            try await server.send(fd: 0, header: Data())
+            _ = try await server.sendReportingRecipient(fd: 0, header: Data())
         }
 
         try await clock.requireAdvanceWhenArmed(by: Self.interval)
@@ -203,7 +203,7 @@ struct FDVendingServerTests {
         let finished = SidecarEventCounter()
         let send = Task {
             defer { finished.record() }
-            try await server.send(fd: 0, header: Data())
+            _ = try await server.sendReportingRecipient(fd: 0, header: Data())
         }
 
         try await clock.requireAdvanceWhenArmed(by: .milliseconds(49))
@@ -226,7 +226,7 @@ struct FDVendingServerTests {
         let (readFD, writeFD) = try makePipe()
 
         let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%42", attachID: UUID()))
-        try await server.send(fd: readFD, header: header)
+        _ = try await server.sendReportingRecipient(fd: readFD, header: header)
         Darwin.close(readFD)
 
         let (rxFD, rxHeader) = try SidecarTestSupport.receiveVend(from: clientSideFD)
@@ -265,7 +265,7 @@ struct FDVendingServerTests {
         Darwin.close(clientSideFD)   // app dies → reader sees EOF
         #expect(await waitUntil { exited.count == 1 })
 
-        // A real payload fd to vend. The point: send() must REFUSE because the
+        // A real payload fd to vend. The point: the vend must REFUSE because the
         // stale clientFD was cleared — NOT sendmsg() a vend frame into a closed
         // or recycled fd number. The retry window is virtual here (3 attempts →
         // 2 waits), so exhausting it costs no wall time, but the assertion is
@@ -273,7 +273,7 @@ struct FDVendingServerTests {
         let (readFD, writeFD) = try makePipe()
         defer { Darwin.close(readFD); Darwin.close(writeFD) }
         let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%stale", attachID: UUID()))
-        let send = Task { try await server.send(fd: readFD, header: header) }
+        let send = Task { _ = try await server.sendReportingRecipient(fd: readFD, header: header) }
         try await clock.requireAdvanceWhenArmed(by: Self.interval)
         try await clock.requireAdvanceWhenArmed(by: Self.interval)
         await #expect(throws: FDVendingServerError.notConnected) { try await send.value }

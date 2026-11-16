@@ -20,8 +20,6 @@ struct TmuxPreparedSession: Equatable, Sendable {
 /// the previous coordinator is still alive and yet to be torn down. Handing
 /// the generation back lets each coordinator reclaim only the view session its
 /// own preparation created, so a stale teardown cannot kill a fresher session.
-/// Same shape, and same reason, as the control-mode attach generation in
-/// `TerminalPanelView`.
 struct TmuxSessionPreparation: Equatable, Sendable {
     let session: TmuxPreparedSession
     let generation: UInt64
