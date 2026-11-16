@@ -408,8 +408,9 @@ never unlinks it, and nothing TBD runs creates one any more.
 - The backstop refuses a parked `tmux` row's wake with its stated reason, ahead
   of the resume-plan and Codex-prompt checks, and that reason names the session.
 - Check Again on a live tmux row refuses with the still-running advice while the
-  server may run and parks the row once it is gone; a send to a live tmux row
-  refuses with `terminalOnTmux`.
+  server may run and parks the row once it is gone; a send, a wake or a park
+  of a live tmux row, and a wake of a parked one, refuse with `terminalOnTmux`,
+  and the actuation record calls each wake or park refusal `not-eligible`.
 - The app shows the notice for a live tmux row and not for a parked one or a
   holder row.
 
