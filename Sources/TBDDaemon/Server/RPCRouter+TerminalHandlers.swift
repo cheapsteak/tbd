@@ -1401,37 +1401,6 @@ extension RPCRouter {
             + "tmux window to recreate. Its session is unchanged."
     }
 
-    /// The refusal `terminal.recreateWindow` returns for a tmux row with no
-    /// agent session to park. TBD no longer opens tmux windows, so it cannot
-    /// stand a dead one back up, and what to do instead depends on whether a
-    /// migration can move the row:
-    ///
-    /// - **A shell** can be moved, so the refusal names
-    ///   `tbd terminal migrate <id>`.
-    /// - **A tab the migration always skips** — a Codex tab with no thread, a
-    ///   Claude tab whose session never began, a setup or pre-session hook tab
-    ///   — is told to close the tab and open a new one. The rows are the
-    ///   migration's (`TransportMigrationEligibility.nothingToResumeSkip`), so
-    ///   this refusal never names a migration that would turn the row away.
-    ///   The words are not the migration's: those are written for a row whose
-    ///   window is alive, and say that a hook tab closes itself or that a
-    ///   Codex session is running. Here the window is gone, so whatever ran in
-    ///   it has ended, and closing the tab is the only thing left to do.
-    static func tmuxRecreateRefusal(for terminal: Terminal) -> String {
-        guard TransportMigrationEligibility.nothingToResumeSkip(terminal) != nil else {
-            return TerminalTransportMigrator.migrateFirstRefusal(
-                terminalID: terminal.id, retry: "open it again")
-        }
-        return "Terminal \(terminal.id.uuidString) runs on the tmux transport, which TBD no longer "
-            + "starts sessions on, so its window cannot be recreated. \(unmovableTmuxRecreateAdvice)"
-    }
-
-    /// What `tmuxRecreateRefusal(for:)` tells a person about a tab the
-    /// migration always skips, once its window has gone.
-    static let unmovableTmuxRecreateAdvice =
-        "This tab's window is gone, and nothing that ran in it can move to the pty holder; "
-        + "close the tab and open a new one, which starts on the pty holder."
-
     /// The refusal `terminal.swapProfile` returns for an in-place switch of a
     /// running row still on the tmux transport: the switch replaces the
     /// session's process, which TBD no longer does on tmux.
@@ -1460,9 +1429,9 @@ extension RPCRouter {
     ///     migration followed by a wake.
     ///   - **Gone, with nothing to resume** – a shell, an agent tab whose
     ///     session never began, a hook tab – nothing a park could keep, so it
-    ///     is refused and left exactly as it was. The refusal says what to do:
-    ///     migrate a shell, close and reopen a tab the migration cannot move
-    ///     (`tmuxRecreateRefusal(for:)`).
+    ///     is refused and left exactly as it was, with a plain message: tmux
+    ///     has stopped, and the tab had no conversation to keep, so close it
+    ///     (`LeftoverTmuxSession.nothingToKeepRefusal`).
     ///
     /// Every tmux refusal carries `RPCErrorCode.terminalOnTmux`, which the app
     /// reads, rather than the text, to hide its Retry.
@@ -1495,11 +1464,11 @@ extension RPCRouter {
                     terminalID: terminal.id, server: sighting.server),
                 code: RPCErrorCode.terminalOnTmux.rawValue)
         }
-        // A row with no agent session to keep would be recreated as a shell,
-        // which TBD no longer does on tmux.
+        // tmux has stopped, and a row with no conversation has nothing a park
+        // could keep.
         guard let plan = terminal.recoveryResumePlan else {
             return RPCResponse(
-                error: Self.tmuxRecreateRefusal(for: terminal),
+                error: LeftoverTmuxSession.nothingToKeepRefusal,
                 code: RPCErrorCode.terminalOnTmux.rawValue)
         }
         let reparkID = try await beginActuation(

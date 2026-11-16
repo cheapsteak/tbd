@@ -170,6 +170,43 @@ struct RecreateWindowProbeTests {
         #expect(run.tmuxCalls.isEmpty, "recreateWindow reached tmux: \(run.tmuxCalls)")
     }
 
+    /// A shell has no conversation, so there is nothing a park could keep.
+    /// While its server may still run it gets the same advice as an agent row,
+    /// which is what the app's notice promises it. Once the server is gone it
+    /// is refused plainly, told to close the tab, and left exactly as it was.
+    /// The code stays `terminalOnTmux` either way, so the app offers no Retry.
+    @Test("a row with nothing to resume is told to close the tab once its tmux server is gone",
+          arguments: [LeftoverTmuxServerState.running, .absent])
+    func aRowWithNothingToResume(server: LeftoverTmuxServerState) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@8", tmuxPaneID: "%8",
+            kind: .shell, transport: .tmux)
+        let before = RowFingerprint(terminal)
+
+        let response = await router(db, tmux: tmux, server: server).handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
+
+        #expect(!response.success)
+        #expect(response.knownErrorCode == .terminalOnTmux)
+        switch server {
+        case .running:
+            #expect(response.error == LeftoverTmuxSession.stillRunningRefusal(
+                terminalID: terminal.id, server: "tbd-recreate"))
+        case .absent:
+            #expect(response.error == LeftoverTmuxSession.nothingToKeepRefusal)
+        }
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "a refused recreate mutated the row it was supposed to leave alone")
+        #expect(recorded.snapshot().isEmpty, "recreateWindow reached tmux: \(recorded.snapshot())")
+    }
+
     /// A row already parked has nothing running to look for: the request is
     /// answered with the row as it is, and the probe is not asked.
     @Test("a parked tmux row is returned unchanged without asking the probe")

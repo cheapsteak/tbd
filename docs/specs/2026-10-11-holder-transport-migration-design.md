@@ -137,17 +137,20 @@ tmux still holds. Leaving a dead server's row live costs a notice and a click.
 **Gone.** The row is parked with its session id kept, reason `.recovery`, and
 from there the ordinary path moves it: its wake refuses and names
 `tbd terminal migrate`, the migration rewrites it, and a wake opens it on the
-holder. A live tmux row with nothing to resume is deleted by reconcile, as any
-unreachable non-resumable row is; Check Again refuses it and names the
-migration, which moves a shell.
+holder. A live tmux row with nothing to resume — a shell, a hook tab, an agent
+tab whose session never began — is deleted by reconcile, as any unreachable
+non-resumable row is. Check Again refuses it plainly: tmux has stopped, and the
+tab had no conversation to keep, so close it. A migration still moves a shell,
+as a fresh one on the holder.
 
 **Running.** The row stays live. The app shows a notice in place of the
 terminal: the session is still running in tmux, which this version of TBD can
 no longer show; `tmux -L <server> kill-server` ends it, along with the repo's
 other tmux tabs, since one server carries them all; restarting the Mac ends it
-too; and Check Again looks again. Every request that would have to reach the
-session — a view, a send, an output read, a wake, a park, a migration — refuses
-with the same advice and the `terminalOnTmux` error code
+too; and Check Again looks again, after which a tab with a conversation is
+parked and a tab with none can be closed. Every request that would have to
+reach the session — a view, a send, an output read, a wake, a park, a
+migration — refuses with the same advice and the `terminalOnTmux` error code
 (`LeftoverTmuxSession`). The app derives the notice from the row it already
 holds — `transport == .tmux` and not parked — and the server name from the
 worktree's `tmuxServer`, so no model field is added.

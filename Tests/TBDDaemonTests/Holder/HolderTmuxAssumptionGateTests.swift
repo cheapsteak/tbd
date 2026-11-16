@@ -390,11 +390,11 @@ struct HolderTmuxAssumptionGateTests {
                 "recreateWindow reached tmux for a holder row: \(recorded.snapshot())")
     }
 
-    /// TBD no longer opens tmux windows, so a tmux SHELL row whose window is
-    /// gone is refused, with the migration named, rather than stood back up.
-    /// A tmux agent row is parked instead, keeping its session
+    /// TBD no longer opens tmux windows, so a tmux SHELL row whose server is
+    /// gone is refused rather than stood back up: it had no conversation to
+    /// keep. A tmux agent row is parked instead, keeping its session
     /// (`RecreateWindowProbeTests`).
-    @Test("recreateWindow refuses a tmux shell row whose window is gone and leaves every column alone")
+    @Test("recreateWindow refuses a tmux shell row whose server is gone and leaves every column alone")
     func recreateWindowRefusesTmuxShellRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
@@ -411,10 +411,9 @@ struct HolderTmuxAssumptionGateTests {
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
         #expect(!response.success)
-        #expect(response.error == RPCRouter.tmuxRecreateRefusal(for: terminal))
+        #expect(response.error == LeftoverTmuxSession.nothingToKeepRefusal)
         #expect(response.knownErrorCode == .terminalOnTmux,
                 "the app reads the code, not the text, to hide its Retry")
-        #expect(response.error?.contains("tbd terminal migrate \(terminal.id.uuidString)") == true)
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
                 "recreateWindow mutated a tmux row it was supposed to refuse")
@@ -440,13 +439,14 @@ struct HolderTmuxAssumptionGateTests {
         }
     }
 
-    /// A tmux row whose window is gone and which the migration would skip is
-    /// told to close the tab and open a new one, not to run a migration that
-    /// would turn it away. Nor is it given the migration's own skip, which is
-    /// written for a live window: it would tell a pre-session tab whose hook
-    /// has died that the tab closes itself, and a dead Codex tab that its
-    /// session is running. The code stays `terminalOnTmux`, so the app still
-    /// offers no Retry, and the row is left as it was.
+    /// A tmux row whose server is gone and which the migration would skip is
+    /// told plainly that it had no conversation to keep, and to close it, not
+    /// to run a migration that would turn it away. Nor is it given the
+    /// migration's own skip, which is written for a live window: it would tell
+    /// a pre-session tab whose hook has died that the tab closes itself, and a
+    /// dead Codex tab that its session is running. The code stays
+    /// `terminalOnTmux`, so the app still offers no Retry, and the row is left
+    /// as it was.
     @Test("recreateWindow tells a tmux row the migration skips to close the tab",
           arguments: UnmovableTmuxRow.allCases)
     func recreateWindowTellsAnUnmovableTmuxRowToCloseTheTab(_ kind: UnmovableTmuxRow) async throws {
@@ -483,9 +483,7 @@ struct HolderTmuxAssumptionGateTests {
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
         #expect(!response.success)
-        #expect(response.error == RPCRouter.tmuxRecreateRefusal(for: terminal))
-        #expect(response.error?.hasSuffix(RPCRouter.unmovableTmuxRecreateAdvice) == true,
-                "the refusal did not tell the person to close the tab: \(response.error ?? "nil")")
+        #expect(response.error == LeftoverTmuxSession.nothingToKeepRefusal)
         #expect(response.error?.contains(kind.skip) == false,
                 "the refusal gave the migration's skip, which is written for a live window")
         #expect(response.error?.contains("tbd terminal migrate") == false,
