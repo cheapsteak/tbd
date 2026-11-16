@@ -152,11 +152,13 @@ with the same advice and the `terminalOnTmux` error code
 holds — `transport == .tmux` and not parked — and the server name from the
 worktree's `tmuxServer`, so no model field is added.
 
-**When it runs.** Reconcile probes at daemon startup and on demand (`tbd
-cleanup`, a repo add, the hourly scratch maintenance), once per server name per
-pass. Check Again is `terminal.recreateWindow`, which probes the row's server
-and parks the row once it is gone. A migration probes the row it is asked to
-move. No timer runs it.
+**When it runs.** Reconcile probes once per server name per pass, wherever it
+runs: at daemon startup, on demand (`tbd cleanup`, a repo add), and on a timer —
+the hourly orphan maintenance (`Daemon.performOrphanMaintenance`) runs
+`reconcileScratchTerminals`, which probes the servers of scratch worktrees'
+live tmux rows, and like the rest of that pass it answers to the GC switch.
+Check Again is `terminal.recreateWindow`, which probes the row's server and
+parks the row once it is gone. A migration probes the row it is asked to move.
 
 **This probe is a transition measure; on 2027-01-15 it is replaced by parking
 on sight.** No tmux server started before 2026-11-14 should still be running by

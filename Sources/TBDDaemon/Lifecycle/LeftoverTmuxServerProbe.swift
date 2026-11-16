@@ -37,9 +37,12 @@ struct LeftoverTmuxServerSighting: Sendable, Equatable {
 ///   every other request that would have to reach the session refuse with
 ///   `LeftoverTmuxSession.stillRunningRefusal(terminalID:server:)`.
 ///
-/// It runs in reconcile, at daemon startup and on demand, and when a person
-/// asks to check again (`terminal.recreateWindow`) or to migrate the row. No
-/// timer runs it.
+/// It runs wherever reconcile does: at daemon startup, on demand (`tbd
+/// cleanup`, a repo add), and every hour in `Daemon.performOrphanMaintenance`,
+/// whose `reconcileScratchTerminals` pass probes the servers of scratch
+/// worktrees' live tmux rows while the GC switch is on. It also runs when a
+/// person asks to check again (`terminal.recreateWindow`) or to migrate the
+/// row.
 ///
 /// **This probe is a transition measure; on 2027-01-15 it is replaced by
 /// parking on sight**, which parks every live tmux row without asking its
