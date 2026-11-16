@@ -49,8 +49,8 @@ struct OutgoingInputQueueTests {
     private final class WriteRecorder {
         private(set) var writes: [Data] = []
         /// What the transport reports back. `false` models the panel shape H1
-        /// is about: a holder-backed panel takes the `.localPTY` arm with a nil
-        /// `localProcess`, so the bytes reach nothing.
+        /// is about: a panel with no write descriptor — never attached, or its
+        /// duplicate could not be taken — so the bytes reach nothing.
         var result = true
 
         func write(_ data: Data) -> OutgoingInputQueue.WriteAttempt {
@@ -161,10 +161,10 @@ struct OutgoingInputQueueTests {
     @Test("An injection the transport never took is not acked as written")
     func injectionThatReachedNothingIsNotAckedAsWritten() async throws {
         let recorder = WriteRecorder()
-        // The holder-backed panel shape: `performOutgoingWrite` takes the
-        // `.localPTY` arm, finds no `localProcess`, and hands the bytes to
-        // nobody. Acking `true` here would stop the daemon falling back and
-        // lose the prompt invisibly — the failure H1 named.
+        // The shape of a panel with no write descriptor: `performOutgoingWrite`
+        // finds nothing to write to and hands the bytes to nobody. Acking
+        // `true` here would stop the daemon falling back and lose the prompt
+        // invisibly — the failure H1 named.
         recorder.result = false
         let clock = EventDrivenTestClock()
         let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: clock) { data in
@@ -371,7 +371,7 @@ struct OutgoingInputQueueTests {
 /// `send(source:data:)` hands every outgoing chunk. That decision depends on a
 /// vendored fork's chunking behaviour, so it gets its own coverage on the real
 /// path — `makeCoordinatorHarness()` builds a `Coordinator` on production
-/// wiring with a real pty child.
+/// wiring, attached to a real pty.
 ///
 /// Scope, stated plainly: the chunks are handed to the delegate directly, so
 /// this pins the CLASSIFICATION rather than SwiftTerm's chunking. Driving the
@@ -389,8 +389,8 @@ struct OutgoingInputQueuePasteMarkerTests {
     private static let end = ArraySlice(EscapeSequences.bracketedPasteEnd)
 
     @Test("The start marker opens a paste and the end marker closes it")
-    func markersOpenAndCloseThePaste() {
-        let harness = makeCoordinatorHarness()
+    func markersOpenAndCloseThePaste() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let queue = harness.coordinator.outgoingQueueForTesting
         #expect(queue.isPasteOpenForTesting == false)
@@ -407,8 +407,8 @@ struct OutgoingInputQueuePasteMarkerTests {
     }
 
     @Test("Ordinary typing never opens a paste")
-    func payloadOnlyDoesNotOpenAPaste() {
-        let harness = makeCoordinatorHarness()
+    func payloadOnlyDoesNotOpenAPaste() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let queue = harness.coordinator.outgoingQueueForTesting
 

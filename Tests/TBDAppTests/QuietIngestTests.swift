@@ -11,8 +11,8 @@ import TestSupport
 /// emulator. This suite drives `Coordinator.feedSnapshot` on the production
 /// wiring — a real `TBDTerminalView` inside a real `SwiftTermEngine` whose
 /// delegate is a real `Coordinator`, exactly as `makeNSView` wires one — and
-/// asserts on **what did not happen**: no bytes reached the child, no ring, no
-/// pasteboard write, no `TIOCSWINSZ`, no notification.
+/// asserts on **what did not happen**: no bytes reached the session, no ring,
+/// no pasteboard write, no `TIOCSWINSZ`, no notification.
 ///
 /// Every one of those is an assertion about an absence, so every test carries a
 /// positive control on the same path: the same bytes fed **live** must produce
@@ -20,13 +20,15 @@ import TestSupport
 /// broken fixture — an escape sequence this emulator ignores, a probe wired to
 /// nothing — reads as a pass.
 ///
-/// **The child is real.** `send`'s only observable effect on the local-PTY
-/// route is a write to `localProcess`'s descriptor, and `LocalProcess.send`
-/// drops everything unless a process is actually running — so a coordinator
-/// with no child would report "no bytes escaped" for the wrong reason. The
-/// harness therefore starts one (`/bin/cat`, killed at teardown) and reads
-/// the tty's own echo back through the `LocalProcessDelegate`. That descriptor
-/// is also the witness for the resize guard.
+/// **The pty is real.** `send`'s only observable effect is a write to the
+/// panel's own duplicate of the session's pty, and a panel that never attached
+/// has nowhere to write — so a coordinator with no pty would report "no bytes
+/// escaped" for the wrong reason. The harness therefore attaches the
+/// coordinator through the production attach path (`startHolderClient`, with a
+/// stub standing in for the daemon's two attach RPCs) to a real pty pair
+/// (`RawPTYPair`), and reads what the panel wrote off the session's end. The
+/// pty's window size is also the witness for the resize guard. No child
+/// process is started.
 ///
 /// **Timing is the subtle part.** SwiftTerm hops every `TerminalViewDelegate`
 /// callback through `TerminalView.onMain`, an unconditional
@@ -49,20 +51,25 @@ import TestSupport
 struct QuietIngestTests {
 
     @Test("A terminal query inside a snapshot produces no outgoing bytes")
-    func queriesAreNotAnswered() async {
-        let harness = makeCoordinatorHarness()
+    func queriesAreNotAnswered() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
-        #expect(harness.childPID > 0, "no child means no observable outgoing path")
         // DA1, DSR cursor-position and a DECRQM — all reply-producing.
         let snapshot = Data("\u{1b}[c\u{1b}[6n\u{1b}[?7$p".utf8)
         harness.coordinator.feedSnapshot(snapshot, into: harness.engine)
         await harness.settle()
-        #expect(harness.sentBytes.isEmpty, "replies escaped into the child's stdin")
+        #expect(harness.sentBytes.isEmpty, "replies escaped into the session's pty")
+
+        // Positive control: the same queries fed live are answered on the same
+        // pty, so the write path is real and the fixture bytes provoke replies.
+        harness.terminalView.feed(byteArray: [UInt8](snapshot)[...])
+        let answered = await harness.waitUntil { !harness.sentBytes.isEmpty }
+        #expect(answered, "live queries must reach the session's pty")
     }
 
     @Test("A BEL in a snapshot does not ring")
-    func bellIsSilent() async {
-        let harness = makeCoordinatorHarness()
+    func bellIsSilent() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         harness.coordinator.feedSnapshot(Data("hello\u{07}".utf8), into: harness.engine)
         await harness.settle()
@@ -95,8 +102,8 @@ struct QuietIngestTests {
     /// first drafted — and this goes red while the guard in `bell` stays
     /// untouched. The two tests fail to different mutations on purpose.
     @Test("A BEL in a snapshot reaches the delegate while the ingest flag is still raised")
-    func bellArrivesDuringIngest() async {
-        let harness = makeCoordinatorHarness()
+    func bellArrivesDuringIngest() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let spy = RecordingTerminalViewDelegate()
         let coordinator = harness.coordinator
@@ -116,8 +123,8 @@ struct QuietIngestTests {
     /// with the guard perfectly intact. What the marker asks is narrower and
     /// unspoofable — did *this* OSC 52 land on the pasteboard.
     @Test("An OSC 52 in a snapshot does not touch the pasteboard")
-    func clipboardUntouched() async {
-        let harness = makeCoordinatorHarness()
+    func clipboardUntouched() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let marker = "tbd-quiet-ingest-\(UUID().uuidString)"
         let osc52 = Data(
@@ -142,22 +149,22 @@ struct QuietIngestTests {
                 "the spy arm must not write either")
     }
 
-    /// A replayed DECCOLM must not resize the child's pty.
+    /// A replayed DECCOLM must not resize the session's pty.
     ///
     /// `CSI ? 40 h` is what enables DECCOLM in this emulator (xterm's
     /// `allowC132`); `CSI ? 3 h` then resizes the buffer to 132 columns and
     /// notifies the delegate — which is where the `TIOCSWINSZ` lives. The
-    /// child's pty is the witness.
-    @Test("A resize sequence in a snapshot does not resize the child's pty")
-    func resizeIsNotPropagated() async {
-        let harness = makeCoordinatorHarness()
+    /// session's pty is the witness.
+    @Test("A resize sequence in a snapshot does not resize the session's pty")
+    func resizeIsNotPropagated() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
-        // The baseline is whatever the view's own geometry already pushed down
-        // to the pty — a real `sizeChanged` fires on layout, before any of
-        // this — so it is read, not assumed.
+        // The baseline is the width the harness started the session at, read
+        // rather than assumed, so a layout pass that moved it is caught here.
         await harness.settle()
         let baseline = harness.ptyColumns()
         #expect(baseline > 0)
+        #expect(baseline != 132, "a replayed DECCOLM needs a column count to move from")
         #expect(baseline != 80, "the control below needs a column count to move to")
 
         harness.coordinator.feedSnapshot(
@@ -174,8 +181,8 @@ struct QuietIngestTests {
     }
 
     @Test("An OSC 777 in a snapshot raises no notification")
-    func notificationsAreSuppressed() async {
-        let harness = makeCoordinatorHarness()
+    func notificationsAreSuppressed() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let osc777 = Data("\u{1b}]777;notify;Title;Body\u{07}".utf8)
         harness.coordinator.feedSnapshot(osc777, into: harness.engine)
@@ -190,8 +197,8 @@ struct QuietIngestTests {
     }
 
     @Test("The flag is lowered afterwards, so live output behaves normally")
-    func flagIsRestored() async {
-        let harness = makeCoordinatorHarness()
+    func flagIsRestored() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         harness.coordinator.feedSnapshot(Data("x".utf8), into: harness.engine)
         await harness.settle()
@@ -204,37 +211,35 @@ struct QuietIngestTests {
 
 // MARK: - Harness
 
-/// The column count the harness's pty starts at.
-private let quietIngestInitialColumns: UInt16 = 200
-
-/// A panel wired the way `TerminalPanelRepresentable.makeNSView` wires one,
-/// plus the probes that make each suppressed side effect observable.
+/// A panel wired the way `TerminalPanelRepresentable.makeNSView` wires one and
+/// attached the way `startHolderClient` attaches one, plus the probes that make
+/// each suppressed side effect observable.
 @MainActor
 final class QuietIngestHarness {
-    /// Deliberately neither 80 nor 132, so a DECCOLM in either direction shows
-    /// up in the pty's window size. File-scope-backed so the `LocalProcess`
-    /// delegate, which answers off the main actor, can read it too.
-    static var initialPtyColumns: UInt16 { quietIngestInitialColumns }
+    /// The width the harness starts the session at. Deliberately neither 80
+    /// nor 132, so a DECCOLM in either direction shows up in the pty's window
+    /// size.
+    static let initialPtyColumns: UInt16 = 200
 
     let appState: AppState
     let coordinator: TerminalPanelRepresentable.Coordinator
     let engine: SwiftTermEngine
     let terminalView: TBDTerminalView
     let terminalID: UUID
-    let childPID: pid_t
 
-    private let process: LocalProcess
-    private let outgoing: OutgoingRecorder
+    /// The session's pty. The panel writes through its own duplicate of the
+    /// master; the session's end is where those writes arrive.
+    private let pty: RawPTYPair
     private let defaultsSuite: TestDefaultsSuite
     private let notifications = MainCounter()
     private let beeps = MainCounter()
+    private var received: [UInt8] = []
 
     init(
         appState: AppState,
         coordinator: TerminalPanelRepresentable.Coordinator,
         engine: SwiftTermEngine,
-        process: LocalProcess,
-        outgoing: OutgoingRecorder,
+        pty: RawPTYPair,
         terminalID: UUID,
         defaultsSuite: TestDefaultsSuite
     ) {
@@ -242,11 +247,9 @@ final class QuietIngestHarness {
         self.coordinator = coordinator
         self.engine = engine
         self.terminalView = engine.terminalView
-        self.process = process
-        self.outgoing = outgoing
+        self.pty = pty
         self.terminalID = terminalID
         self.defaultsSuite = defaultsSuite
-        self.childPID = process.shellPid
         // Counted where production delivers a notification, the coordinator's
         // own hook, so the count rides view -> engine -> coordinator.
         let counter = notifications
@@ -261,25 +264,48 @@ final class QuietIngestHarness {
     /// swizzle, checked at runtime rather than assumed).
     var beepCount: Int { beeps.value }
 
-    /// What came back off the child's tty. The line discipline echoes whatever
-    /// the coordinator wrote, so a non-empty buffer means bytes escaped.
-    var sentBytes: [UInt8] { outgoing.recorded }
+    /// Every byte the panel wrote to the session's pty since the harness was
+    /// built, read off the session's end. The slave is in raw mode, so nothing
+    /// is echoed back and nothing is held for a newline: a non-empty buffer
+    /// means bytes escaped.
+    var sentBytes: [UInt8] {
+        while true {
+            let chunk = pty.drainSession(64 * 1024)
+            if chunk.isEmpty { break }
+            received.append(contentsOf: chunk)
+        }
+        return received
+    }
+
+    /// Forgets what the attach itself wrote, so `sentBytes` covers only what a
+    /// test provoked.
+    func discardSentBytes() {
+        _ = sentBytes
+        received.removeAll()
+    }
 
     var notificationCount: Int { notifications.value }
 
-    /// The child pty's current column count: what `sizeChanged`'s `TIOCSWINSZ`
-    /// would have changed.
+    /// The pty's current column count: what `sizeChanged`'s `TIOCSWINSZ` would
+    /// have changed.
     func ptyColumns() -> UInt16 {
         var size = winsize()
-        guard process.childfd >= 0, ioctl(process.childfd, TIOCGWINSZ, &size) == 0 else { return 0 }
+        guard ioctl(pty.ptyFD, TIOCGWINSZ, &size) == 0 else { return 0 }
         return size.ws_col
+    }
+
+    /// Sets the session's width from the session's side of the panel, without
+    /// telling the view.
+    func setSessionColumns(_ columns: UInt16) {
+        var size = winsize(ws_row: 24, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0)
+        _ = ioctl(pty.ptyFD, TIOCSWINSZ, &size)
     }
 
     /// Lets every deferred callback land: five main-queue turns with a short
     /// real pause between them. The main-queue turns are what the delegate hops
     /// need (they are FIFO behind the feed); the pauses cover the two paths
     /// that leave the main queue — the OSC observation's private serial queue,
-    /// and the tty round trip behind `sentBytes`.
+    /// and the write that lands on the session's end behind `sentBytes`.
     func settle() async {
         for _ in 0..<5 { await hop() }
     }
@@ -315,25 +341,46 @@ final class QuietIngestHarness {
     func tearDown() {
         coordinator.onTerminalNotification = nil
         terminalView.terminalDelegate = nil
-        coordinator.localProcess = nil
-        // The child never exits on its own; end it now. `LocalProcess`'s own
-        // exit monitor does the `waitpid`.
-        if childPID > 0 { kill(childPID, SIGKILL) }
+        // Stops the reader, closes the panel's write duplicate and hands the
+        // attach back through the stub. The fixture's own ends close after.
+        coordinator.cleanup()
+        pty.close()
         defaultsSuite.tearDown()
     }
 }
 
-/// Builds a coordinator on the production wiring, with a probe for each side
-/// effect a snapshot must not fire.
+/// Builds a coordinator on the production wiring, attached to a real pty, with
+/// a probe for each side effect a snapshot must not fire.
 @MainActor
-func makeCoordinatorHarness() -> QuietIngestHarness {
+func makeCoordinatorHarness() async throws -> QuietIngestHarness {
     // Isolated defaults: `UserDefaults.standard` on this unbundled executable is
     // the developer's real TBDApp.plist.
     let suite = TestDefaultsSuite("TBDAppTests.QuietIngest")
     let defaults = suite.defaults
     let appState = AppState(userDefaults: defaults)
 
+    // The attach finds its worktree through the row AppState holds. A holder
+    // row carries empty tmux coordinates by construction.
+    let worktreeID = UUID()
     let terminalID = UUID()
+    appState.terminals[worktreeID] = [Terminal(
+        id: terminalID,
+        worktreeID: worktreeID,
+        tmuxWindowID: "",
+        tmuxPaneID: "",
+        label: "Shell",
+        kind: .shell,
+        transport: .holder
+    )]
+
+    // The session's pty, and the descriptor the stub vends: a duplicate of its
+    // master, `O_NONBLOCK` as the daemon's vend is (the flag rides the
+    // duplicate). Close-on-exec from creation, because sibling suites in this
+    // process spawn children, and one that inherited the vended end would hold
+    // the session open past the panel.
+    let pty = try RawPTYPair()
+    let vended = fcntl(pty.ptyFD, F_DUPFD_CLOEXEC, 0)
+    try #require(vended >= 0, "could not duplicate the fixture pty (errno \(errno))")
 
     let view = TBDTerminalView(
         frame: CGRect(x: 0, y: 0, width: 600, height: 300),
@@ -344,66 +391,52 @@ func makeCoordinatorHarness() -> QuietIngestHarness {
     let coordinator = TerminalPanelRepresentable.Coordinator()
     coordinator.appState = appState
     coordinator.panelID = terminalID
+    coordinator.holderAttachClient = QuietIngestStubAttach(
+        attachment: HolderAttachment(ptyFD: vended, generation: 7, snapshotPreamble: Data()))
     let engine = SwiftTermEngine(view: view)
-    coordinator.engine = engine
-
-    // A real PTY child, for the reason the suite comment gives. The delegate is
-    // the recorder rather than the coordinator: the coordinator would feed the
-    // echo straight back into the view under test.
-    let outgoing = OutgoingRecorder()
-    let process = LocalProcess(delegate: outgoing, dispatchQueue: .main)
-    // The child must live exactly as long as the test, however starved the
-    // test is: a `sleep N` exits mid-test once the pass delays the test past N
-    // seconds (the suite has hit a 240 s time limit), after which
-    // `LocalProcess.send` drops every write and every probe reads as an
-    // absence. `cat` blocks reading its tty forever, and since the tty is in
-    // canonical mode and no test sends a newline it writes nothing back; the
-    // line discipline's echo, which `sentBytes` reads, is unaffected.
-    // `tearDown` kills it; if teardown never runs, the kernel hangs up the pty
-    // when this process's master descriptor closes and SIGHUP ends the child
-    // (it is the session leader on that tty).
-    process.startProcess(executable: "/bin/cat", args: [], environment: nil, execName: nil)
-    coordinator.localProcess = process
-
+    // As `makeNSView` wires them, before the attach.
     engine.delegate = coordinator
+    coordinator.engine = engine
+    await coordinator.startHolderClient(engine: engine)
 
-    return QuietIngestHarness(
+    let harness = QuietIngestHarness(
         appState: appState,
         coordinator: coordinator,
         engine: engine,
-        process: process,
-        outgoing: outgoing,
+        pty: pty,
         terminalID: terminalID,
         defaultsSuite: suite
     )
+    // What the attach wrote, if anything, is not what any test is about.
+    await harness.settle()
+    harness.discardSentBytes()
+    // The attach set the session to the view's grid. Start it instead at a
+    // width that is neither 80 nor 132, so a DECCOLM in either direction shows
+    // up in the pty's window size, as a session another viewer sized would.
+    harness.setSessionColumns(QuietIngestHarness.initialPtyColumns)
+    return harness
 }
 
 // MARK: - Probes
 
-/// Records what comes back off the child's tty, and reports the window size the
-/// pty is created with.
-final class OutgoingRecorder: LocalProcessDelegate, @unchecked Sendable {
-    private let lock = NSLock()
-    private var bytes: [UInt8] = []
+/// Stands in for the daemon's attach RPCs, handing over a descriptor the
+/// harness can read.
+private struct QuietIngestStubAttach: HolderAttaching {
+    let attachment: HolderAttachment
 
-    var recorded: [UInt8] {
-        lock.lock()
-        defer { lock.unlock() }
-        return bytes
-    }
+    func attach(
+        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64,
+        grid: (cols: Int, rows: Int)?
+    ) async throws -> HolderAttachment { attachment }
 
-    func processTerminated(_ source: LocalProcess, exitCode: Int32?) {}
+    func ready(
+        worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64
+    ) async throws {}
 
-    func dataReceived(slice: ArraySlice<UInt8>) {
-        lock.lock()
-        bytes.append(contentsOf: slice)
-        lock.unlock()
-    }
-
-    func getWindowSize() -> winsize {
-        winsize(
-            ws_row: 24, ws_col: quietIngestInitialColumns, ws_xpixel: 0, ws_ypixel: 0)
-    }
+    func detach(
+        worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
+        snapshotPreamble: Data
+    ) async throws {}
 }
 
 /// A `TerminalViewDelegate` that only counts, for the control arm that may not

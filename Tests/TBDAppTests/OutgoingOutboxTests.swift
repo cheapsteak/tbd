@@ -326,7 +326,7 @@ struct OutgoingOutboxTests {
 
         #expect(await queue.enqueueInjection(Data("hi\r".utf8)) == true, """
             `true` means accepted by a writer that will complete — the same \
-            meaning the localProcess and sidecar arms carry
+            meaning every other write path carries
             """)
     }
 
