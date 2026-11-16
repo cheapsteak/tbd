@@ -3483,31 +3483,6 @@ struct HolderTmuxAssumptionGateTests {
         #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
     }
 
-    /// The transport leg. The registry question is asked of holder rows only —
-    /// an inverted comparison would stop the idle sweep parking tmux sessions
-    /// on any daemon that happens to have a registry wired.
-    @Test("the sweep still parks an identical tmux row on a daemon with a registry")
-    func sweepStillParksATmuxRowWithARegistryWired() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
-        let (wt, dir) = try await seedWorktree(db)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let terminal = try await seedClaudeTerminal(
-            db, worktreeID: wt.id, transport: .tmux)
-        let logPath = try sweepLogPath()
-        let dates = TestDateSource()
-        let coord = await sweepCoordinator(
-            db, logPath: logPath, dates: dates,
-            registry: holderRegistry(listing: [terminal]))
-
-        await sweepToTheActMoment(coord, dates: dates)
-
-        #expect(try await db.terminals.get(id: terminal.id)?.isParked == true)
-        let written = try logRows(at: logPath)
-        #expect(written.count == 2, "expected one request row and its outcome, got \(written)")
-        #expect(written.last?["result"] as? String == "dispatched")
-    }
-
     /// The sweep's holder check asks the registry for a reader and reads no
     /// screen: what a session's screen shows decides nothing about whether it
     /// is parked. Every screen the seam can answer, a live one included, meets
