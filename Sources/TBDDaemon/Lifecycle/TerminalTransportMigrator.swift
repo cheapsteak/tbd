@@ -172,6 +172,14 @@ actor TerminalTransportMigrator {
     /// The skip for a row the database no longer holds, or could not be read.
     static let notFoundSkip = "Terminal not found"
 
+    /// The skip for a live row whose park was written and whose row then could
+    /// not be read back, so there was no row to move. The session stays parked
+    /// on tmux, and the next run moves it as a parked row.
+    static func parkedUnreadableSkip(_ error: String) -> String {
+        "Parked the session, since its tmux server is gone, but could not read it back "
+            + "(\(error)); run the migration again to move it"
+    }
+
     private let db: TBDDatabase
     private let operations: Operations
 
@@ -300,6 +308,8 @@ actor TerminalTransportMigrator {
                 // Closed before or during the park, or parked and then gone
                 // before it could be read back.
                 return .skipped(reason: Self.notFoundSkip)
+            case .parkedUnreadable(let error):
+                return .skipped(reason: Self.parkedUnreadableSkip(error))
             case .leftAlone, .superseded:
                 return .skipped(reason: Self.raceSkip)
             }

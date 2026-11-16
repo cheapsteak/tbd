@@ -692,7 +692,9 @@ extension WorktreeLifecycle {
             return
         }
         switch outcome {
-        case .parked:
+        case .parked, .parkedUnreadable:
+            // This pass needs no row back, so a park it could not read back
+            // is a park like any other.
             await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
             logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — its tmux server \(server, privacy: .public) is gone, session \(sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
         case .leftAlone:

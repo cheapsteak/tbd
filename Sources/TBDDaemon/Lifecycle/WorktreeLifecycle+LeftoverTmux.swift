@@ -94,10 +94,14 @@ extension WorktreeLifecycle {
         await subscriptions?.broadcastPendingPrompts(
             terminalID: terminal.id, from: pendingQuestions)
         logger.notice("leftover tmux park: parked terminal \(terminal.id, privacy: .public) — its tmux server is gone; session preserved, it wakes after `tbd terminal migrate`")
-        // The park is written. A read back that fails must not report it as
-        // failed, so it reads as a row that could not be shown.
-        let parked: Terminal? = try? await db.terminals.get(id: terminal.id)
-        return .parked(parked)
+        // The park is written, so a read back that fails reports a park, not
+        // a failure, and not a tab that is gone.
+        do {
+            return .parked(try await db.terminals.get(id: terminal.id))
+        } catch {
+            logger.warning("leftover tmux park: parked terminal \(terminal.id, privacy: .public), but could not read it back: \(error.localizedDescription, privacy: .public)")
+            return .parkedUnreadable(error: String(describing: error))
+        }
     }
 
     /// The row as it reads after one of the park's halves threw `failure`, nil
@@ -112,20 +116,25 @@ extension WorktreeLifecycle {
     }
 }
 
-/// What `WorktreeLifecycle.parkLeftoverTmuxRow` did with a row. The four are
+/// What `WorktreeLifecycle.parkLeftoverTmuxRow` did with a row. The cases are
 /// kept apart because each caller reports them differently: only `leftAlone`
-/// declined the act, `closed` found nothing to park, and `superseded` is a
-/// park that was written.
+/// declined the act, `closed` leaves no row to report on, whether or not its
+/// park's first half was written, and `parkedUnreadable` and `superseded` are
+/// parks that were written.
 enum LeftoverTmuxParkOutcome: Sendable, Equatable {
     /// Parked, with the ended agent's process token fenced. Carries the row as
-    /// it reads now, nil when it was closed in the moment after or could not
-    /// be read back.
+    /// it reads now, nil when it was closed in the moment after.
     case parked(Terminal?)
+    /// Parked and fenced, but reading the row back failed, so there is no row
+    /// to show. Carries that read's failure. The park stands; only the read
+    /// failed.
+    case parkedUnreadable(error: String)
     /// Nothing was written: the row is not a live tmux row with a session to
     /// resume, or it changed after the caller read it.
     case leftAlone
     /// The row was closed before the park could be written, or between its
-    /// two halves. Nothing of it is left to keep.
+    /// two halves, after the first half had parked it. Either way the row is
+    /// gone, and nothing of it is left to keep.
     case closed
     /// The park was written, but the row changed again before the fence:
     /// whatever changed it decides what it is now.

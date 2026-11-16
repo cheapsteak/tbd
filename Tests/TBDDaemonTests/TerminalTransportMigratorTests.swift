@@ -64,6 +64,8 @@ struct TerminalTransportMigratorTests {
         /// The tab was closed before the park: `parkLeftover` reports it
         /// closed.
         case closedFirst
+        /// The park was written, and reading the row back failed.
+        case parkedUnreadable
         /// The park's write threw.
         case fails
     }
@@ -143,6 +145,8 @@ struct TerminalTransportMigratorTests {
                         switch parkOverride[terminal.id] {
                         case .changedFirst: return .leftAlone
                         case .closedFirst: return .closed
+                        case .parkedUnreadable:
+                            return .parkedUnreadable(error: "acme read failed")
                         case .fails: throw StagedParkError()
                         case nil: break
                         }
@@ -731,6 +735,25 @@ struct TerminalTransportMigratorTests {
             .migrate(terminalID: row.id)
 
         #expect(outcome == .skipped(reason: TerminalTransportMigrator.notFoundSkip))
+        #expect(await fixture.calls == [.sighting(row.id), .park(row.id)])
+    }
+
+    /// A park that was written but could not be read back is not a tab that
+    /// is gone: the row is there, parked, and the next run moves it as a
+    /// parked row. So it is a skip that names the failed read and says to run
+    /// the migration again, never the not-found skip. Nothing is woken.
+    @Test("a park that cannot be read back is a skip naming the read, not not-found")
+    func aParkThatCannotBeReadBackIsNotNotFound() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture)
+
+        let outcome = await fixture.recordingMigrator(parkOverride: [row.id: .parkedUnreadable])
+            .migrate(terminalID: row.id)
+
+        #expect(outcome == .skipped(
+            reason: TerminalTransportMigrator.parkedUnreadableSkip("acme read failed")))
+        #expect(outcome != .skipped(reason: TerminalTransportMigrator.notFoundSkip))
         #expect(await fixture.calls == [.sighting(row.id), .park(row.id)])
     }
 

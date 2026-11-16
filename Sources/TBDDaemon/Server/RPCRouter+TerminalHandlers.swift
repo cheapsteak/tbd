@@ -1485,6 +1485,13 @@ extension RPCRouter {
                 return RPCResponse(error: "Terminal not found: \(params.terminalID)")
             }
             return try RPCResponse(result: parked)
+        case .parkedUnreadable(let error):
+            // The park was written, so it is recorded as dispatched; only the
+            // row that would answer the request could not be read.
+            let refusal = "Terminal \(terminal.id) was parked, since its tmux server is gone, "
+                + "but could not be read back (\(error)). Check again to see it."
+            await finishActuation(reparkID, .dispatched, error: refusal)
+            return RPCResponse(error: refusal)
         case .leftAlone:
             let refusal = "Terminal \(terminal.id) changed before TBD could park it, "
                 + "and was left as it is. Check again to look at it afresh."
