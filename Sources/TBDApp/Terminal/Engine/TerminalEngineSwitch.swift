@@ -32,8 +32,8 @@ enum TerminalEngineSwitchCommand {
         experimentEnabled
     }
 
-    /// It runs only for a focused holder panel: a tmux or control-mode panel
-    /// stays on SwiftTerm, and a local PTY (remote attach or remote sign-in)
+    /// It runs only for a focused holder panel: a tmux panel stays on
+    /// SwiftTerm, and a local PTY (remote attach or remote sign-in)
     /// has no daemon session to hand back.
     static func isEnabled(experimentEnabled: Bool, focusedHost: TerminalEngineHost?) -> Bool {
         experimentEnabled && focusedHost == .panel(.holder)

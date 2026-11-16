@@ -333,17 +333,6 @@ final class GhosttyEngine: TerminalEngine {
         }
     }
 
-    func setControlModePasteInterception(enabled: Bool) {
-        guard enabled else {
-            terminalView.onPaste = nil
-            return
-        }
-        terminalView.onPaste = { [weak self] text in
-            guard let self, let delegate = self.delegate else { return false }
-            return delegate.engine(self, controlModePaste: Data(text.utf8))
-        }
-    }
-
     func deliverDroppedText(_ text: String) {
         terminalView.deliverDroppedText(text)
     }

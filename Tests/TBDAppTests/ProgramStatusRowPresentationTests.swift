@@ -341,7 +341,7 @@ struct ProgramStatusMirrorTests {
         defer { cleanup() }
         let id = UUID()
         state.applyProgramStatusSnapshot(snapshot(id, revision: 1, state: .done))
-        let refreshed = DaemonCapabilitiesResult(controlModeEnabled: false)
+        let refreshed = DaemonCapabilitiesResult()
         state.daemonCapabilitiesFetcher = { @MainActor in refreshed }
         await state.refreshDaemonCapabilities()
         #expect(state.programStatusSnapshots[id]?.main?.state == .done)

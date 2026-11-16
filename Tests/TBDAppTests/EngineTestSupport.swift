@@ -213,9 +213,4 @@ final class EngineEventRecorder: TerminalEngineDelegate {
     func engineMovedToWindow(_ e: any TerminalEngine) {
         calls.append("movedToWindow")
     }
-
-    func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool {
-        calls.append("controlModePaste")
-        return false
-    }
 }

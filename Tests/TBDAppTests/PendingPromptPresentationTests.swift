@@ -271,7 +271,7 @@ struct PendingPromptPresentationTests {
         defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         // Flag on, so the prompts render as cards and actually merge.
-        var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
+        var caps = DaemonCapabilitiesResult()
         caps.transcriptPromptAnswerEnabled = true
         state.daemonCapabilities = caps
         let raw: [TranscriptItem] = [.assistantText(id: "a", text: "a", timestamp: nil)]
@@ -302,7 +302,7 @@ struct PendingPromptPresentationTests {
             Config.transcriptPromptAnswerDefault ? [.answerable] : [.readOnly(note: nil)]
         #expect(beforeLoad == shipped)
 
-        var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
+        var caps = DaemonCapabilitiesResult()
         caps.transcriptPromptAnswerEnabled = false
         state.daemonCapabilities = caps
         let reportedOff = PendingPromptMerge.livePrompts(appState: state, terminalID: Fix.terminalID)

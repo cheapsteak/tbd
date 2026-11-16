@@ -522,10 +522,9 @@ extension AppState {
     // MARK: - Settings toggle (Task 11)
 
     /// Persist the remote-backends master switch, then re-fetch capabilities
-    /// so the Settings toggle reflects the daemon's persisted state — mirrors
-    /// `setControlModeEnabled`'s keep-last-known-value refresh (R8-M1): a
-    /// transient RPC failure right after a successful set must not snap the
-    /// toggle back off. The daemon only constructs its `RemoteProviderManager`
+    /// so the Settings toggle reflects the daemon's persisted state, keeping
+    /// the last known value (R8-M1): a transient RPC failure right after a
+    /// successful set must not snap the toggle back off. The daemon only constructs its `RemoteProviderManager`
     /// at boot (`RPCRouter+RemoteHandlers.swift`), so a successful set here
     /// does NOT itself start polling — `remoteBackendsLive` in the refreshed
     /// capabilities is what tells the Settings view whether a restart has

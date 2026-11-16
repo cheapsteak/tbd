@@ -152,7 +152,7 @@ struct HolderClaimReconcileFlagTests {
     }
 
     @Test func capabilitiesRoundTripTheValue() throws {
-        var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
+        var caps = DaemonCapabilitiesResult()
         caps.holderClaimReconcileEnabled = true
         let decoded = try JSONDecoder().decode(
             DaemonCapabilitiesResult.self, from: JSONEncoder().encode(caps))

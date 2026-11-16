@@ -285,7 +285,7 @@ struct HolderClaimSweepTests {
             state.holderClaimReconcileFlagSetter = { @MainActor enabled in written.append(enabled) }
             state.daemonCapabilitiesFetcher = { @MainActor in
                 refreshes += 1
-                var capabilities = DaemonCapabilitiesResult(controlModeEnabled: false)
+                var capabilities = DaemonCapabilitiesResult()
                 capabilities.holderClaimReconcileEnabled = true
                 return capabilities
             }

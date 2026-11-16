@@ -314,8 +314,7 @@ final class OutgoingInputQueue {
     /// append with no hop. Fire-and-forget by design: the caller is a
     /// synchronous SwiftTerm delegate callback with nobody to report a
     /// transport failure to, exactly as it was before this queue existed
-    /// (`localProcess?.send` / `fdSidecar.sendInput` were already
-    /// fire-and-forget).
+    /// (`localProcess?.send` was already fire-and-forget).
     ///
     /// Nobody to report to is not the same as nothing to say: the transport
     /// now *knows* when the bytes reached nothing, and on a panel whose child

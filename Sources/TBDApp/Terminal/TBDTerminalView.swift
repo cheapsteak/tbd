@@ -69,16 +69,6 @@ class TBDTerminalView: TerminalView {
     /// kept-alive pane that a tab switch puts back on screen.
     var onMovedToWindow: (() -> Void)?
 
-    /// Intercept a pasteboard paste of ANY size (the paste ruling v2). Set while
-    /// a control-mode attach is live; cleared on detach/cleanup. Returns true
-    /// when the handler consumed `data` — shipped it as a `.paste` sidecar frame,
-    /// or refused an oversize payload (logged + dropped) — in which case
-    /// SwiftTerm's normal paste is skipped. Returns false ONLY when not attached:
-    /// the sole case where `super.paste` (SwiftTerm's local bracketed paste) may
-    /// run, because SwiftTerm's DECSET-2004 tracking can be stale after a
-    /// re-attach and tmux must stay the bracketing authority while attached.
-    var onControlModePaste: ((Data) -> Bool)?
-
     /// Whether this view answers the Program Status Protocol (OSC 7501) probe
     /// and forwards its reports. Written on main by `TerminalPanelRepresentable`
     /// (on only for a holder-transport panel, whatever agent it runs); read on
@@ -157,22 +147,10 @@ class TBDTerminalView: TerminalView {
         fatalError("init(coder:) is not supported — TBDTerminalView requires an AppearanceSettings")
     }
 
-    /// Intercept pastes BEFORE SwiftTerm brackets the content. Reads the
-    /// pasteboard the same way SwiftTerm's own `paste` does (general pasteboard,
-    /// `.string`), hands the UTF-8 bytes to `onControlModePaste`; if that returns
-    /// true the paste was consumed — shipped as a `.paste` sidecar frame (the
-    /// daemon-side `paste-buffer -p` owns bracketed-paste wrapping) or refused
-    /// as oversize. Fall through to SwiftTerm's normal three-call bracketed
-    /// paste ONLY when no control-mode attach is live.
-    ///
-    /// That ownership is CONTINGENT, not unconditional: `-p` wraps in
-    /// ESC[200~/ESC[201~ only because the pane's application has enabled
-    /// bracketed-paste mode (DECSET 2004). Against a pane that has NOT, the
-    /// same `-p` delivers the bytes verbatim with no markers — measured on
-    /// tmux 3.6a (22 wrapped bytes vs 10 bare). If an agent TUI ever stops
-    /// setting 2004, handing the paste to the daemon wraps nothing. Asserted
-    /// nightly by probe P3 in `scripts/nightly-tmux-probes.sh` (PR #523), a
-    /// two-arm probe: 2004 on → wrapped, 2004 off → verbatim.
+    /// Reads the pasteboard the same way SwiftTerm's own `paste` does (general
+    /// pasteboard, `.string`) to pick the paste's route: SwiftTerm's normal
+    /// three-call bracketed paste for text, or Codex's clipboard-image key for
+    /// an image-only pasteboard on a Codex terminal.
     override func paste(_ sender: Any) {
         let pasteboard = NSPasteboard.general
         let text = pasteboard.string(forType: .string)
@@ -182,11 +160,6 @@ class TBDTerminalView: TerminalView {
             isCodexTerminal: isCodexTerminal
         ) {
         case .text:
-            if let text,
-               let handler = onControlModePaste,
-               handler(Data(text.utf8)) {
-                return
-            }
             super.paste(sender)
         case .codexImage:
             // Codex owns clipboard-image decoding. Its TUI binds that action
@@ -199,7 +172,7 @@ class TBDTerminalView: TerminalView {
     }
 
     /// Text always wins when the pasteboard advertises both text and an image,
-    /// preserving ordinary Cmd-V and the existing control-mode paste route.
+    /// preserving ordinary Cmd-V.
     nonisolated static func pasteAction(
         text: String?,
         hasImage: Bool,
@@ -789,21 +762,10 @@ class TBDTerminalView: TerminalView {
         return true
     }
 
-    /// Route drag-drop-synthesized text (the shell-quoted dropped paths).
-    /// While a control-mode attach is live, a drop is a paste-shaped bulk
-    /// insert and MUST ride the same decision path as a pasteboard paste
-    /// (R6-H3): `send()` would ship it as ONE `.input` sidecar frame, and an
-    /// oversize drop would exceed the sidecar scanner's frame cap — desyncing
-    /// (and tearing down) the app-wide shared sidecar connection. The handler
-    /// consumes it (ships a `.paste` frame, or refuses oversize with the
-    /// in-pane message); a nil handler or `false` (not attached) falls to the
-    /// local keystroke path, exactly the pre-control-mode behavior. Split
-    /// from `performDragOperation` so the routing branch is headlessly
-    /// testable (`NSDraggingInfo` is not constructible in tests).
+    /// Route drag-drop-synthesized text (the shell-quoted dropped paths) down
+    /// the local keystroke path, unbracketed. Split from `performDragOperation`
+    /// so a test can drive it (`NSDraggingInfo` is not constructible in tests).
     func deliverDroppedText(_ text: String) {
-        if let handler = onControlModePaste, handler(Data(text.utf8)) {
-            return
-        }
         send(Array(text.utf8))
     }
 

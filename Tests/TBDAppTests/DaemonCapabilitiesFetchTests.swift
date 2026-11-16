@@ -33,14 +33,14 @@ struct DaemonCapabilitiesFetchTests {
         await Fixture.withState { state in
             state.programStatusListFetcher = { @MainActor in [] }
             state.isConnected = true
-            state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: true)
+            state.daemonCapabilities = DaemonCapabilitiesResult(remoteBackendsEnabled: true)
             let fetch = CapabilitiesFetchStub()
             fetch.install(on: state)
 
             // A reconnect whose fetch fails keeps the capabilities it held.
             await state.fetchDaemonCapabilitiesAtConnect()
             #expect(fetch.count == 1)
-            #expect(state.daemonCapabilities?.controlModeEnabled == true,
+            #expect(state.daemonCapabilities?.remoteBackendsEnabled == true,
                     "a transient failure must not switch a capability off")
 
             // Held capabilities need no retry.
@@ -64,10 +64,10 @@ struct DaemonCapabilitiesFetchTests {
             #expect(fetch.count == 3)
             #expect(state.daemonCapabilities == nil)
 
-            fetch.result = DaemonCapabilitiesResult(controlModeEnabled: true)
+            fetch.result = DaemonCapabilitiesResult(remoteBackendsEnabled: true)
             await state.retryDaemonCapabilitiesIfMissing()
             #expect(fetch.count == 4)
-            #expect(state.daemonCapabilities?.controlModeEnabled == true)
+            #expect(state.daemonCapabilities?.remoteBackendsEnabled == true)
 
             await state.retryDaemonCapabilitiesIfMissing()
             #expect(fetch.count == 4, "a successful retry ends the retries")

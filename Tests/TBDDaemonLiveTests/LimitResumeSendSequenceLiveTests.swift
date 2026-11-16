@@ -92,7 +92,7 @@ struct LimitResumeSendSequenceLiveTests {
     }
 
     @Test func sequenceArrivesVerbatim() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-resume-\(UUID().uuidString.prefix(8))"
         let outputPath = NSTemporaryDirectory() + "tbd-resume-capture-\(UUID().uuidString).bin"
         defer {
@@ -100,45 +100,6 @@ struct LimitResumeSendSequenceLiveTests {
             try? FileManager.default.removeItem(atPath: outputPath)
         }
         let paneID = try await startRawCapture(server: server, outputPath: outputPath)
-        try await runSequence(server: server, paneID: paneID)
-        try await awaitFileBytes(path: outputPath, expected: Self.expectedBytes)
-    }
-
-    @Test func sequenceArrivesVerbatimWithControlModeClientAttached() async throws {
-        guard let version = await TmuxVersion.detect(),
-              version >= TmuxVersion.controlModeMinimum else { return }
-        let server = "tbd-test-resume-cc-\(UUID().uuidString.prefix(8))"
-        let outputPath = NSTemporaryDirectory() + "tbd-resume-capture-\(UUID().uuidString).bin"
-        // A live `tmux -CC` client on the same server — the "control-mode on"
-        // coexistence case. Daemon-initiated send-keys must land identically.
-        // Uses the production TmuxControlConnection (pty-backed) rather than a
-        // Process/Pipe fake: `tmux -CC` requires a real tty on stdin/stdout and
-        // exits immediately with "tcgetattr failed" when given plain pipes.
-        let connection = TmuxControlConnection(serverName: server)
-        defer {
-            connection.stop()
-            tmux(["-L", server, "kill-server"])
-            try? FileManager.default.removeItem(atPath: outputPath)
-        }
-        let paneID = try await startRawCapture(server: server, outputPath: outputPath)
-        try connection.start()
-
-        // Poll tmux list-clients until exactly 1 client is attached.
-        // Use #{client_pid} format so each attached client emits one non-empty
-        // line — #{client_tty} is empty for -CC control-mode clients.
-        let deadline = ContinuousClock.now + .seconds(15)
-        while ContinuousClock.now < deadline {
-            if let output = tmuxCapture(["-L", server, "list-clients", "-F", "#{client_pid}"]),
-               output.split(separator: "\n", omittingEmptySubsequences: true).count == 1 {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        if ContinuousClock.now >= deadline {
-            Issue.record("tmux -CC client never attached within 15s")
-            return
-        }
-
         try await runSequence(server: server, paneID: paneID)
         try await awaitFileBytes(path: outputPath, expected: Self.expectedBytes)
     }

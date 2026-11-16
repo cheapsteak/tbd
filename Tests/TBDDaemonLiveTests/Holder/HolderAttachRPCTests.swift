@@ -261,17 +261,16 @@ struct HolderAttachRPCTests {
 
     // MARK: - The branch
 
-    /// A request that names no terminal is answered by the control-mode path,
-    /// and leaves holder sessions in this worktree alone.
+    /// A request that names no terminal is answered "unavailable", and leaves
+    /// holder sessions in this worktree alone.
     ///
     /// **What this does and does not pin.** The holder branch is unreachable
     /// without a terminal id under *any* mutation of the transport check, so
     /// this cannot fail for the reason its sibling can — the discrimination
-    /// between the two paths lives there, in
-    /// `aRequestNamingATmuxRowTakesTheControlModePath`, and not here. What it
-    /// does pin is the nil case reaching the tmux path at all rather than
-    /// erroring, plus the session's reader surviving a request that named
-    /// something else.
+    /// lives there, in `aRequestNamingATmuxRowIsUnavailable`, and not here.
+    /// What it does pin is the nil case being answered rather than erroring,
+    /// plus the session's reader surviving a request that named something
+    /// else.
     @Test func aRequestWithoutATerminalIDLeavesHolderSessionsAlone() async throws {
         let harness = try await RPCHarness.start(command: Self.echoJob)
         defer { harness.tearDown() }
@@ -294,8 +293,8 @@ struct HolderAttachRPCTests {
     }
 
     /// Naming a terminal is not enough: the row's transport is the gate, so a
-    /// tmux-backed row goes down the tmux path even when the app names it.
-    @Test func aRequestNamingATmuxRowTakesTheControlModePath() async throws {
+    /// tmux-backed row is answered "unavailable" even when the app names it.
+    @Test func aRequestNamingATmuxRowIsUnavailable() async throws {
         let harness = try await RPCHarness.start(command: Self.echoJob)
         defer { harness.tearDown() }
         let tmuxRow = try await harness.db.terminals.create(
@@ -308,11 +307,10 @@ struct HolderAttachRPCTests {
                     worktreeID: harness.worktreeID, paneID: "%7", windowID: "@7",
                     attachID: UUID(), terminalID: tmuxRow.id)))
 
-        // The answer has to be the control-mode path's, and only the answer can
-        // say so: a tmux row sent down the holder path finds no reader for that
-        // terminal and fails, while leaving this session's own reader draining
-        // — so asserting on the session alone would pass either way. This
-        // bridge's gate is off, which is what the tmux path replies then.
+        // Only the answer can say which branch ran: a tmux row sent down the
+        // holder path finds no reader for that terminal and fails, while
+        // leaving this session's own reader draining — so asserting on the
+        // session alone would pass either way.
         #expect(response.success)
         #expect(
             try response.decodeResult(AttachRequestResult.self).status == "unavailable",
@@ -408,11 +406,10 @@ struct HolderAttachRPCTests {
 
     // MARK: - pane.detach
 
-    /// The wiring the handback rides on. Before this branch existed a holder
-    /// row fell through to the control-mode arm, which resolves nothing for it
-    /// and answers ok — so a closed tab left its session claimed by a viewer
-    /// that no longer existed, undrained and un-reattachable for the daemon's
-    /// life.
+    /// The wiring the handback rides on. Without it a detach would answer ok
+    /// and do nothing — so a closed tab would leave its session claimed by a
+    /// viewer that no longer existed, undrained and un-reattachable for the
+    /// daemon's life.
     @Test func aDetachHandsTheSessionBackToTheDaemon() async throws {
         let harness = try await RPCHarness.start(command: Self.echoJob)
         defer { harness.tearDown() }
@@ -474,8 +471,8 @@ struct HolderAttachRPCTests {
     }
 
     /// The discriminator for the branch itself: a detach with no `terminalID`
-    /// is a control-mode detach and must not touch a holder session, however
-    /// the worktree resolves.
+    /// names no holder session and must not touch one, however the worktree
+    /// resolves.
     @Test func aDetachWithoutATerminalIDLeavesHolderSessionsAlone() async throws {
         let harness = try await RPCHarness.start(command: Self.echoJob)
         defer { harness.tearDown() }
@@ -553,11 +550,9 @@ private struct RPCHarness {
             await vending.adoptConnection(fd: pair[0])
             appSide = pair[1]
         }
-        // The control-mode bridge is present only for its fd sidecar, which is
-        // the one piece of it the holder path borrows. Its gate is deliberately
-        // off: a holder attach must not depend on tmux's version.
-        router.controlMode = TmuxControlModeBridge(
-            supervisor: TmuxControlSupervisor(), environment: [:], fdVending: vending,
+        // The fd sidecar is the holder path's vend channel.
+        router.attachSidecar = AttachSidecar(
+            fdVending: vending,
             readyTimeout: readyTimeout, clock: clock ?? ContinuousClock())
         router.holderRegistry = fixture.registry
 

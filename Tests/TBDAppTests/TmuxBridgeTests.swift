@@ -32,6 +32,9 @@ struct TmuxBridgeTests {
         #expect(TmuxBridge.remainOnExitFormatArgs(windowID: "@147") == [
             "set-option", "-wt", "@147", "remain-on-exit-format", "",
         ])
+        #expect(TmuxBridge.windowSizeLatestArgs(windowID: "@147") == [
+            "set-option", "-wt", "@147", "window-size", "latest",
+        ])
         #expect(TmuxBridge.activeWindowQueryArgs(sessionName: sessionName) == [
             "display-message", "-p", "-t", sessionName, "#{window_id}",
         ])
@@ -291,8 +294,66 @@ struct TmuxBridgeTests {
             "select-window",
             "set-option",
             "set-option",
+            "set-option",
             "display-message",
         ])
+    }
+
+    /// A window the retired tmux control mode attached was left at
+    /// `window-size manual`, which pins its size so a grouped viewer cannot
+    /// resize it. Every preparation hands the window it links back to
+    /// `latest`, on that window's server and before the viewer attaches.
+    @Test func preparationHandsItsWindowBackToWindowSizeLatest() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let resolver = try fixture.resolvingResolver()
+        let runner = WindowSizeRecordingRunner(refusesWindowSize: false)
+        let bridge = TmuxBridge(
+            tmuxExecutableResolver: resolver,
+            commandRunner: { _, server, args in await runner.run(server: server, args: args) }
+        )
+
+        _ = try await bridge.prepareSession(
+            panelID: UUID(uuidString: "4C4F1A61-F385-46AB-861D-42A425DB427B")!,
+            server: "tbd-repo",
+            windowID: "@147"
+        ).get()
+
+        let invocations = await runner.invocations
+        let reset = WindowSizeRecordingRunner.Invocation(
+            server: "tbd-repo",
+            args: ["set-option", "-wt", "@147", "window-size", "latest"]
+        )
+        let resetIndex = try #require(
+            invocations.firstIndex(of: reset),
+            "preparation must set window-size latest on the window it links"
+        )
+        let linkIndex = try #require(invocations.firstIndex { $0.args.first == "link-window" })
+        #expect(linkIndex < resetIndex)
+    }
+
+    /// The reset is best-effort: a tmux that refuses it still gets its view.
+    @Test func aRefusedWindowSizeResetDoesNotFailPreparation() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let resolver = try fixture.resolvingResolver()
+        let runner = WindowSizeRecordingRunner(refusesWindowSize: true)
+        let bridge = TmuxBridge(
+            tmuxExecutableResolver: resolver,
+            commandRunner: { _, server, args in await runner.run(server: server, args: args) }
+        )
+
+        let prepared = try await bridge.prepareSession(
+            panelID: UUID(uuidString: "4C4F1A61-F385-46AB-861D-42A425DB427B")!,
+            server: "tbd-repo",
+            windowID: "@147"
+        ).get().session
+
+        #expect(prepared.arguments == [
+            "-u", "-L", "tbd-repo", "attach", "-t", "tbd-view-4c4f1a61",
+        ])
+        let attempted = await runner.invocations.contains { $0.args.contains("window-size") }
+        #expect(attempted, "the refused reset must actually have been attempted")
     }
 
     @Test func createFailureWithoutALeftoverSessionIsNotRetried() async throws {
@@ -363,6 +424,34 @@ private actor ScriptedTmuxRunner {
         default:
             return TmuxCommandOutcome(success: true, output: "")
         }
+    }
+}
+
+/// Records each tmux invocation with the server it went to, answers the
+/// selection query with `@147`, and can refuse the `window-size` reset, so a
+/// test can see both that preparation issues it and that it survives a refusal.
+private actor WindowSizeRecordingRunner {
+    struct Invocation: Equatable, Sendable {
+        let server: String
+        let args: [String]
+    }
+
+    private(set) var invocations: [Invocation] = []
+    private let refusesWindowSize: Bool
+
+    init(refusesWindowSize: Bool) {
+        self.refusesWindowSize = refusesWindowSize
+    }
+
+    func run(server: String, args: [String]) -> TmuxCommandOutcome {
+        invocations.append(Invocation(server: server, args: args))
+        if args.first == "display-message" {
+            return TmuxCommandOutcome(success: true, output: "@147")
+        }
+        if refusesWindowSize, args.contains("window-size") {
+            return TmuxCommandOutcome(success: false, output: "invalid option: window-size")
+        }
+        return TmuxCommandOutcome(success: true, output: "")
     }
 }
 

@@ -223,10 +223,10 @@ private struct SidecarRouter {
         }
         let vending = FDVendingServer(retryAttempts: 1)
         await vending.adoptConnection(fd: pair[0])
-        // Present for its fd sidecar alone. The ready timeout is far past the
-        // test, so no acknowledgement is ever owed within it.
-        router.controlMode = TmuxControlModeBridge(
-            supervisor: TmuxControlSupervisor(), environment: [:], fdVending: vending,
+        // The fd sidecar. The ready timeout is far past the test, so no
+        // acknowledgement is ever owed within it.
+        router.attachSidecar = AttachSidecar(
+            fdVending: vending,
             readyTimeout: .seconds(600))
         router.holderRegistry = registry
         return SidecarRouter(router: router, worktreeID: worktree.id, appSide: pair[1])

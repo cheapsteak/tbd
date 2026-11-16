@@ -107,7 +107,7 @@ struct ClaudeCloudSettingsTests {
             state.claudeCloudFlagSetter = { @MainActor enabled in written.append(enabled) }
             state.daemonCapabilitiesFetcher = { @MainActor in
                 refreshes += 1
-                return DaemonCapabilitiesResult(controlModeEnabled: false, claudeCloudEnabled: true)
+                return DaemonCapabilitiesResult(claudeCloudEnabled: true)
             }
 
             await state.setClaudeCloudEnabled(true)

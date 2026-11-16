@@ -7,15 +7,14 @@ import Testing
 import TBDShared
 import TestSupport
 
-/// Tier 2: drives the **two real attach entry points** —
-/// `Coordinator.startTmuxClient` and `Coordinator.startControlModeClient` —
-/// for a holder-backed panel, and requires that each one attaches to the
-/// session's pty instead of reaching the tmux machinery behind it.
+/// Tier 2: drives the **real attach entry point** — `Coordinator.startTmuxClient`
+/// — for a holder-backed panel, and requires that it attaches to the session's
+/// pty instead of reaching the tmux machinery behind it.
 ///
 /// `TerminalPanelViewTests` covers the pure decision function
 /// (`transportPreparationNotice(for:)`) and the `panelTransport()` lookup under
 /// it. Those would all stay green if someone deleted or reordered the
-/// `if await handleHolderTransport(into:) { return }` line at the top of either
+/// `if await handleHolderTransport(into:) { return }` line at the top of the
 /// attach path, which is the whole defect this gate exists to prevent — a
 /// holder row would go back to being classified as a broken tmux window and
 /// the false "recovery" banner would return. So the assertions here are about
@@ -26,15 +25,6 @@ import TestSupport
 ///   empty while the screen the daemon handed back appears in the buffer. This
 ///   is the discriminator for `startTmuxClient`: dropping its branch sends
 ///   `prepareSession` straight into `kill-session` / `new-session`.
-/// - **No control-mode attach was requested.** `startControlModeClient`'s
-///   failure path unconditionally clears two pieces of state before it falls
-///   back — the view's `onControlModePaste` interceptor and the pane's
-///   `controlModeAttachedPanes` record. Both are seeded here as probes, so a
-///   holder panel that leaves them untouched has demonstrably never called
-///   `openAttach`. Dropping that branch clears both, and the tmux recorder
-///   cannot see it: the fallback lands in `startTmuxClient`, whose own branch
-///   still suppresses tmux. The probes are the only thing that separates the
-///   two mutations.
 /// - **The ordering the attach depends on.** The preamble goes in through
 ///   `feedSnapshot`, and the reader is wired only after that feed's ingest
 ///   window has closed — `feedSnapshot` lowers its flag a main-queue turn
@@ -43,18 +33,15 @@ import TestSupport
 ///   after the reader exists, so the state observed AT the ack is the
 ///   observable form of that ordering.
 ///
-/// Each branch also has a positive control on the same entry point with a
+/// The branch also has a positive control on the same entry point with a
 /// `.tmux` panel, so a branch that suppressed *everything* would fail too, plus
 /// the refusal case: when the daemon says the attach is unavailable, the
 /// placard is what the panel shows.
 ///
 /// **Nothing here talks to a live daemon or a live tmux.** Every tmux command
 /// goes through the recorder (the resolver points at a stub binary the runner
-/// never executes), the holder attach goes through an injected
-/// `HolderAttaching` stub over a real pipe, and the control-mode positive
-/// control's `openAttach` runs against `TBD_SOCKET_PATH`, which
-/// `scripts/test.sh` fences onto a scratch path with no listener — the connect
-/// fails with ENOENT and returns at once.
+/// never executes), and the holder attach goes through an injected
+/// `HolderAttaching` stub over a real pipe.
 // A hang guard, and it has to clear the bounded waits below, which run to
 // `TestDeadlines.saturatedPass` (120 s): a suite limit under that truncates
 // their named diagnostic into a bare "Time limit was exceeded" — measured, by
@@ -782,89 +769,5 @@ struct TerminalHolderTransportGateTests {
         // The refusing runner makes preparation fail at `new-session`, which
         // classifies as `.commandFailed` — the pre-existing copy, unchanged.
         #expect(didFeed(TerminalPreparationPresentation.commandFailedMessage, panel))
-    }
-
-    // MARK: - startControlModeClient
-
-    @MainActor
-    @Test("startControlModeClient attaches a holder panel to its pty and requests no pane attach")
-    func startControlModeClientAttachesHolderPanel() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .holder, fixture: fixture)
-        defer { tearDown(panel) }
-        let pty = try FakePTY()
-        defer { pty.closeWriteEnd() }
-        let stub = attachStub(panel, fd: pty.readEnd)
-
-        // Two probes for state the control-mode attach path clears
-        // unconditionally on its failure route, before it falls back. Surviving
-        // both is the evidence that `openAttach` was never called — the tmux
-        // recorder cannot show it, because the fallback's own branch would
-        // suppress tmux anyway.
-        panel.view.onControlModePaste = { _ in true }
-        panel.state.controlModePaneAttached(
-            worktreeID: panel.worktreeID, paneID: Self.paneID, generation: nil)
-        let paneKey = ControlModePaneKey(worktreeID: panel.worktreeID, paneID: Self.paneID)
-
-        await panel.coordinator.startControlModeClient(
-            engine: panel.engine,
-            appState: panel.state,
-            worktreeID: panel.worktreeID,
-            paneID: Self.paneID,
-            bridge: panel.bridge,
-            server: Self.server,
-            windowID: "",
-            panelID: panel.terminalID
-        )
-
-        #expect(panel.view.onControlModePaste != nil,
-                "the control-mode attach path's failure teardown ran, so an attach was attempted")
-        #expect(panel.state.controlModeAttachedPanes.index(forKey: paneKey) != nil,
-                "the control-mode attach path's failure teardown ran, so an attach was attempted")
-        let recorded = await panel.runner.recorded()
-        #expect(recorded.isEmpty,
-                "the grouped-sessions fallback must not be reached either, ran \(recorded)")
-        #expect(stub.attaches == 1, "the panel must take the holder attach from this entry point too")
-        #expect(rowText(0, panel) == Self.preambleText,
-                "the screen the daemon handed back must be on the terminal")
-        #expect(!didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
-                "the placard belongs to a refused attach, not to a live one")
-    }
-
-    @MainActor
-    @Test("startControlModeClient still attempts an attach for a tmux-backed panel")
-    func startControlModeClientStillAttemptsAttachForTmuxPanel() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .tmux, fixture: fixture)
-        defer { tearDown(panel) }
-
-        panel.view.onControlModePaste = { _ in true }
-        panel.state.controlModePaneAttached(
-            worktreeID: panel.worktreeID, paneID: Self.paneID, generation: nil)
-        let paneKey = ControlModePaneKey(worktreeID: panel.worktreeID, paneID: Self.paneID)
-
-        await panel.coordinator.startControlModeClient(
-            engine: panel.engine,
-            appState: panel.state,
-            worktreeID: panel.worktreeID,
-            paneID: Self.paneID,
-            bridge: panel.bridge,
-            server: Self.server,
-            windowID: Self.windowID,
-            panelID: panel.terminalID
-        )
-
-        // There is no daemon behind the fenced socket, so the attach fails and
-        // its teardown clears both probes on the way to the fallback. That is
-        // the pre-existing behavior the branch must leave alone.
-        #expect(panel.view.onControlModePaste == nil)
-        #expect(panel.state.controlModeAttachedPanes.index(forKey: paneKey) == nil)
-        let recorded = await panel.runner.recorded()
-        #expect(!recorded.isEmpty,
-                "the grouped-sessions fallback must still run for a tmux-backed panel")
-        #expect(!didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
-                "the holder notice must never appear on a tmux-backed panel")
     }
 }

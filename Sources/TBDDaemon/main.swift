@@ -16,8 +16,8 @@ signal(SIGTERM, SIG_IGN)
 signal(SIGINT, SIG_IGN)
 // A raw write to a peer-closed UNIX socket (FDVendingServer's sidecar sends)
 // would otherwise raise a process-killing SIGPIPE instead of returning EPIPE
-// into FDChannel's error path. Pty writes (control mode) fail with EIO and
-// never signal, but the sidecar socket path needs this (R7-H1 hardening).
+// into FDChannel's error path. Pty writes fail with EIO and never signal,
+// but the sidecar socket path needs this.
 signal(SIGPIPE, SIG_IGN)
 
 let sigTermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)

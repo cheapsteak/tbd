@@ -119,17 +119,6 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the tmux control-mode opt-in (M5). The attach gate reads the
-    /// flag per decision (`env || flag`), so this applies to newly created
-    /// panes immediately — existing attached panes are not torn down.
-    func handleConfigSetControlMode(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(ConfigSetControlModeParams.self, from: paramsData)
-        try await db.config.setControlModeEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
     /// Persist the delivery-acknowledgement soak flag (design §12). This is how
     /// an operator enables the flag for its soak — **and enabling it means
     /// restarting the daemon afterwards**, because the observation machinery is

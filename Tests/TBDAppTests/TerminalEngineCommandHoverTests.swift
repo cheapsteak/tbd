@@ -277,7 +277,6 @@ private final class HoverRecorder: TerminalEngineDelegate {
         return true
     }
     func engineMovedToWindow(_ e: any TerminalEngine) {}
-    func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool { false }
 }
 
 /// An engine from the factory over a scratch worktree holding `notes.txt`, with a GitHub remote,

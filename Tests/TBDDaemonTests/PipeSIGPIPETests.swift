@@ -12,9 +12,8 @@ import Testing
 /// process-wide disposition, which every suite in the process shares. They
 /// cover the helper. The production call sites are covered by a read-back
 /// through each one's own descriptor, in the suites for the bounded runner,
-/// the pane fanout, the peer link, the shadow peer helper, the Codex session
-/// importer and the Codex usage fetcher (`Tests/CLAUDE.md`, the SIGPIPE entry,
-/// lists them).
+/// the peer link, the shadow peer helper, the Codex session importer and the
+/// Codex usage fetcher (`Tests/CLAUDE.md`, the SIGPIPE entry, lists them).
 @Suite("PipeSIGPIPE")
 struct PipeSIGPIPETests {
 

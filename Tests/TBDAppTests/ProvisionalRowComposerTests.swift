@@ -291,7 +291,7 @@ struct ProvisionalRowPublishTests {
     ) -> AppState {
         let state = AppState(userDefaults: suite.defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(
-            controlModeEnabled: false, transcriptStreamingEnabled: streaming)
+            transcriptStreamingEnabled: streaming)
         state.terminals = [worktreeID: [
             Terminal(worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
                      claudeSessionID: sessionID, kind: .claude,

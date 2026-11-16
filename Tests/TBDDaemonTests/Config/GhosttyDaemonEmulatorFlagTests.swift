@@ -101,7 +101,7 @@ struct GhosttyDaemonEmulatorFlagTests {
         let decodedConfig = try JSONDecoder().decode(Config.self, from: JSONEncoder().encode(config))
         #expect(decodedConfig.ghosttyDaemonEmulatorEnabled == true)
 
-        var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
+        var caps = DaemonCapabilitiesResult()
         caps.ghosttyDaemonEmulatorEnabled = true
         let decodedCaps = try JSONDecoder().decode(
             DaemonCapabilitiesResult.self, from: JSONEncoder().encode(caps))

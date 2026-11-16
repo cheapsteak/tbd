@@ -348,11 +348,10 @@ private struct ReconcileRPCHarness {
         let vending = FDVendingServer(
             retryAttempts: 1, peerIdentity: { _ in HandbackFixture.viewerApp })
         await vending.adoptConnection(fd: pair[0])
-        // Present only for its fd sidecar, the one piece of the bridge the
-        // holder path borrows. The ready timeout is far beyond any test here,
-        // so it never settles an attach behind one's back.
-        router.controlMode = TmuxControlModeBridge(
-            supervisor: TmuxControlSupervisor(), environment: [:], fdVending: vending,
+        // The fd sidecar. The ready timeout is far beyond any test here, so it
+        // never settles an attach behind one's back.
+        router.attachSidecar = AttachSidecar(
+            fdVending: vending,
             readyTimeout: .seconds(600), clock: ContinuousClock())
         router.holderRegistry = fixture.registry
         let app = HandbackFixture.viewerApp

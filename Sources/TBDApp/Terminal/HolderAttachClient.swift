@@ -322,8 +322,11 @@ struct HolderAttachUndelivered: Error, LocalizedError {
 /// would be acking on behalf of a reader that does not exist yet.
 struct HolderAttachClient: HolderAttaching {
     let daemonClient: DaemonClient
-    /// How long to wait for the vended descriptor. Matches the control-mode
-    /// path's bound.
+    /// How long to wait, after `attach.request` is answered, for the vended
+    /// descriptor to arrive on the sidecar. Its own literal, unrelated to the
+    /// daemon's `AttachSidecar.readyTimeout`: that one bounds how long the
+    /// daemon waits for `attach.ready` after the vend, a different wait on the
+    /// other side of the handshake. Both happen to be 5 s.
     var fdTimeout: Duration = .seconds(5)
     /// The waits between resends of a handback or release; see
     /// `HolderAttaching.resendDelays`.
@@ -334,10 +337,9 @@ struct HolderAttachClient: HolderAttaching {
 
     /// Request the pty for one holder-backed session.
     ///
-    /// Ordering is `DaemonClient.openAttach`'s, for its reason: the sidecar
-    /// waiter is registered SYNCHRONOUSLY before the RPC is issued, so a vend
-    /// that comes back faster than this function resumes still has somewhere to
-    /// land. `expectFD` is not `async` precisely so that ordering is available.
+    /// The sidecar waiter is registered SYNCHRONOUSLY before the RPC is
+    /// issued, so a vend that comes back faster than this function resumes
+    /// still has somewhere to land. `expectFD` is not `async` precisely so that ordering is available.
     ///
     /// `attachSeq` defaults to 0, which sends none: the panel always passes
     /// the seq its hold minted, and a caller with no hold has nothing a sweep
@@ -473,18 +475,17 @@ struct HolderAttachClient: HolderAttaching {
 /// Drains a vended pty descriptor on a dedicated thread, handing each chunk to
 /// a callback.
 ///
-/// Two things separate this from `ControlModeStreamReader`, and both come from
-/// what is on the other end of the descriptor:
+/// Two things shape it, and both come from what is on the other end of the
+/// descriptor:
 ///
 /// - **It polls.** The vended fd is a `dup` of the pty master the daemon
 ///   opened `O_NONBLOCK`, and that flag lives on the shared open file
 ///   description, so it rides the `dup`. A `read()` loop against it returns
 ///   `EAGAIN` immediately and forever — a busy spin at 100% CPU. `poll()` is
 ///   what makes the wait a wait.
-/// - **`stop()` is sufficient on its own.** The control-mode reader exits on
-///   the EOF its paired `pane.detach` guarantees; a pty master has no such
-///   EOF while the session lives, so the poll timeout is what lets the loop
-///   notice the flag and release the descriptor.
+/// - **`stop()` is sufficient on its own.** A pty master has no EOF while the
+///   session lives, so the poll timeout is what lets the loop notice the flag
+///   and release the descriptor.
 ///
 /// The reader thread OWNS the fd and closes it when the loop exits — never
 /// close it from outside, which would race fd-number reuse.

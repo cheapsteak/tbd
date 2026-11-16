@@ -125,7 +125,7 @@ struct TerminalSendTargetCheckLiveTests {
 
     @Test("a dead remain-on-exit pane errors, though raw send-keys into it exits 0")
     func deadPaneErrors() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-send-dead-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
 
@@ -156,7 +156,7 @@ struct TerminalSendTargetCheckLiveTests {
 
     @Test("a pane coordinate tmux cannot resolve is refused as not-found")
     func missingPaneRefused() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-send-gone-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
         #expect(tmux(["-L", server, "new-session", "-d", "-s", "main",
@@ -180,7 +180,7 @@ struct TerminalSendTargetCheckLiveTests {
 
     @Test("a live pane belonging to another terminal is refused, naming both ids")
     func mismatchedPaneRefused() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-send-mismatch-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
         #expect(tmux(["-L", server, "new-session", "-d", "-s", "main",
@@ -209,7 +209,7 @@ struct TerminalSendTargetCheckLiveTests {
 
     @Test("a live pane carrying no identity still sends")
     func unresolvablePaneSends() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-send-anon-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
         #expect(tmux(["-L", server, "new-session", "-d", "-s", "main",
@@ -237,7 +237,7 @@ struct TerminalSendTargetCheckLiveTests {
     /// behavior, not TBD's, and a dry-run fixture cannot witness it.
     @Test("a hand-split window does not make the send read the wrong pane")
     func splitWindowDoesNotConfuseTheTarget() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-send-split-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
 
@@ -275,7 +275,7 @@ struct TerminalSendTargetCheckLiveTests {
 
     @Test("createWindow stamps the pane, and the stamped pane accepts its own sends")
     func createWindowStampsAndSends() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-send-stamp-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
 
@@ -299,7 +299,7 @@ struct TerminalSendTargetCheckLiveTests {
     /// swapped pane would answer with a stale identity.
     @Test("respawn-window leaves a start command carrying the planted terminal id")
     func respawnRefreshesStartCommand() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-send-respawn-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
 
