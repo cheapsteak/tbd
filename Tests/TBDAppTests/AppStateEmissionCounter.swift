@@ -180,8 +180,6 @@ final class AppStateEmissionTracker {
         _ = state.daemonBuildIdentity
         _ = state.daemonUpdateStatus
         _ = state.dismissedUpdateCommit
-        _ = state.controlModeAttachedPanes
-        _ = state.controlModeFailingInputPanes
         _ = state.historyActiveWorktrees
         _ = state.historyLoadStates
         _ = state.selectedSessionIDs
@@ -320,8 +318,6 @@ final class AppStateEmissionTracker {
         "daemonBuildIdentity",
         "daemonUpdateStatus",
         "dismissedUpdateCommit",
-        "controlModeAttachedPanes",
-        "controlModeFailingInputPanes",
         "historyActiveWorktrees",
         "historyLoadStates",
         "selectedSessionIDs",

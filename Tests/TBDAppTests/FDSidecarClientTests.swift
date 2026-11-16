@@ -108,10 +108,8 @@ struct FDSidecarClientTests {
     /// the time any waiter is resumed — not later, on the main actor, after an
     /// async return.
     ///
-    /// Both production callers register through `expectFD` and are settled by
-    /// that one loop — `HolderAttachClient.attach` (a holder session, empty
-    /// `windowID`) and `DaemonClient.openAttach` (a control-mode pane) — so
-    /// both key shapes are driven here.
+    /// The production caller, `HolderAttachClient.attach`, registers through
+    /// `expectFD` and is settled by that one loop.
     @Test("a vended descriptor is close-on-exec by the time its waiter sees it")
     func vendedDescriptorIsCloseOnExec() async throws {
         let (daemonSide, appSide) = try makeSocketPair()
@@ -121,39 +119,26 @@ struct FDSidecarClientTests {
 
         let worktreeID = UUID()
         let holderAttach = UUID()
-        let controlAttach = UUID()
         let holderPromise = client.expectFD(
             worktreeID: worktreeID, paneID: "holder-pane", attachID: holderAttach)
-        let controlPromise = client.expectFD(
-            worktreeID: worktreeID, paneID: "%7", attachID: controlAttach)
 
-        for (paneID, attachID) in [("holder-pane", holderAttach), ("%7", controlAttach)] {
-            let (readFD, writeFD) = try makePipe()
-            defer { Darwin.close(writeFD) }
-            // Clear it on the sender's side, so "the flag rode across" is not
-            // an available reading of a pass — the row above shows it cannot.
-            #expect(fcntl(readFD, F_SETFD, 0) == 0)
-            #expect(!Self.isCloseOnExec(readFD))
-            try vend(readFD: readFD, worktreeID: worktreeID, paneID: paneID,
-                     attachID: attachID, over: daemonSide)
-        }
+        let (readFD, writeFD) = try makePipe()
+        defer { Darwin.close(writeFD) }
+        // Clear it on the sender's side, so "the flag rode across" is not an
+        // available reading of a pass — the row above shows it cannot.
+        #expect(fcntl(readFD, F_SETFD, 0) == 0)
+        #expect(!Self.isCloseOnExec(readFD))
+        try vend(readFD: readFD, worktreeID: worktreeID, paneID: "holder-pane",
+                 attachID: holderAttach, over: daemonSide)
 
         let holderFD = try await holderPromise.value(timeout: TestDeadlines.saturatedPass)
         defer { Darwin.close(holderFD) }
-        let controlFD = try await controlPromise.value(timeout: TestDeadlines.saturatedPass)
-        defer { Darwin.close(controlFD) }
 
         #expect(
             Self.isCloseOnExec(holderFD),
             """
             a holder session's pty reached its waiter inheritable, so any child this app spawns \
             holds that session open for as long as it lives
-            """)
-        #expect(
-            Self.isCloseOnExec(controlFD),
-            """
-            a control-mode attach's pty reached its waiter inheritable — the same window, on the \
-            path that shares this receive loop
             """)
     }
 

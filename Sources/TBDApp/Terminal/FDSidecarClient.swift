@@ -190,10 +190,8 @@ final class FDSidecarClient: @unchecked Sendable {
     /// failure). It is deliberately not a delivery receipt: the socket write
     /// happens later on `sendQueue`, so a disconnected socket or a
     /// `FDChannel.sendData` throw is logged there and cannot be reported to
-    /// this caller. `TerminalPanelView.performOutgoingWrite` narrows that
-    /// residue by checking `isConnected` before calling, and the daemon's
-    /// fail-open injection deadline is what covers the rest — see the
-    /// `.sidecarInput` arm's comment for the whole argument.
+    /// this caller. A caller narrows that residue by checking `isConnected`
+    /// before calling.
     ///
     /// `@discardableResult` because the keystroke path is fire-and-forget by
     /// design and the tests that exercise the side effect ignore the value.
@@ -201,11 +199,9 @@ final class FDSidecarClient: @unchecked Sendable {
     func sendInput(worktreeID: UUID, paneID: String, bytes: Data) -> Bool {
         // Defense-in-depth cap (R6-H3), mirroring `sendPaste`'s guard: a
         // single `.input` frame that couldn't fit the daemon scanner's 4 MiB
-        // hard cap would desync the ONE app-wide sidecar connection and kill
-        // control-mode input everywhere (no Phase A reconnect). Keystrokes
-        // are tiny — anything near the cap is a bug or abuse upstream (the
-        // drag-drop and paste paths both route through PasteInterception),
-        // so refusing is strictly safer than writing.
+        // hard cap would desync the ONE app-wide sidecar connection.
+        // Keystrokes are tiny — anything near the cap is a bug or abuse
+        // upstream, so refusing is strictly safer than writing.
         guard bytes.count <= SidecarFrameCodec.maxPasteBytes else {
             logger.fault("""
                 sidecar: sendInput payload \(bytes.count, privacy: .public) bytes exceeds cap \
@@ -237,17 +233,15 @@ final class FDSidecarClient: @unchecked Sendable {
         return true
     }
 
-    /// Send bulk paste `bytes` for a pane to the daemon as a `.paste` frame (the
-    /// paste ruling v2: every control-mode paste rides this path). Same serial
-    /// `sendQueue` + inline-encode pattern as `sendInput`, so a paste and a
-    /// following keystroke stay FIFO-ordered on the wire. Oversize payloads are
-    /// dropped defensively — the view-level `PasteInterception` gate already
-    /// refuses them before they reach here.
+    /// Send bulk paste `bytes` for a pane to the daemon as a `.paste` frame.
+    /// Same serial `sendQueue` + inline-encode pattern as `sendInput`, so a
+    /// paste and a following keystroke stay FIFO-ordered on the wire. Oversize
+    /// payloads are dropped defensively.
     func sendPaste(worktreeID: UUID, paneID: String, bytes: Data) {
         guard bytes.count <= SidecarFrameCodec.maxPasteBytes else {
             logger.fault("""
                 sidecar: sendPaste payload \(bytes.count, privacy: .public) bytes exceeds cap \
-                \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping (view gate should have prevented this)
+                \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping
                 """)
             return
         }
@@ -385,9 +379,8 @@ final class FDSidecarClient: @unchecked Sendable {
             // `SCM_RIGHTS` is inheritable unless somebody says otherwise, and
             // darwin has no `MSG_CMSG_CLOEXEC` to ask for anything else on the
             // `recvmsg` itself. What comes through here is a session's pty
-            // master — vended for a holder attach (`HolderAttachClient`) or a
-            // control-mode attach (`DaemonClient.openAttach`), both of which
-            // register through `expectFD` and are settled by this one loop —
+            // master — vended for a holder attach (`HolderAttachClient`), which
+            // registers through `expectFD` and is settled by this one loop —
             // and it lives as long as the session does. This app spawns
             // children constantly: every local-PTY panel is a `forkpty`, and
             // the git and PR-status tools it shells out to are more. One such

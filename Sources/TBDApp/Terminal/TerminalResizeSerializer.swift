@@ -1,7 +1,7 @@
 import Foundation
 
-/// Latest-wins serialization state for `pane.resize` RPCs on both the
-/// control-mode and pty-holder transports (R5-M3). The Coordinator's 100 ms
+/// Latest-wins serialization state for `pane.resize` RPCs on the pty-holder
+/// transport (R5-M3). The Coordinator's 100 ms
 /// debounce collapses a window-drag flurry to its tail, but
 /// cancel-and-replace only cancels the wrapper Task — each `paneResize` RPC
 /// rides its own socket task, so an already-in-flight resize has no ordering
@@ -12,7 +12,7 @@ import Foundation
 /// while one is in flight stashes the latest size instead of sending, and the
 /// in-flight call's completion sends the stash (the sender loops until
 /// quiescent). Pure decision state, extracted so the branchy logic is
-/// headlessly testable — mirrors `TerminalResizeGate` / `PasteInterception`.
+/// headlessly testable — mirrors `TerminalResizeGate`.
 /// MainActor-confined by its owner (a Coordinator stored property), like the
 /// rest of the resize/debounce state.
 struct TerminalResizeSerializer {
@@ -61,8 +61,7 @@ struct TerminalResizeSerializer {
     /// guard: it would keep firing `pane.resize` RPCs for a dead view. A
     /// torn-down coordinator stops draining outright — the stashed size is
     /// irrelevant post-teardown (the pane is detached or detaching; the next
-    /// live view sends its own initial resize). Mirrors
-    /// `ControlModeAttachAbort.shouldStartFallback`'s pure-gate shape.
+    /// live view sends its own initial resize).
     static func shouldContinueDraining(tornDown: Bool) -> Bool {
         !tornDown
     }

@@ -44,8 +44,7 @@ struct TerminalSendBracketedPasteLiveTests {
     }
 
     /// The body AS IT ARRIVES on the wire: tmux `paste-buffer` (without `-r`)
-    /// translates every LF (0x0a) to CR (0x0d) — the same behavior as the proven
-    /// GUI paste path (`PasteExecutor`, also no `-r`). The TUI treats each CR
+    /// translates every LF (0x0a) to CR (0x0d). The TUI treats each CR
     /// inside the bracketed block as a line break in the pasted text (not a
     /// submit), so multi-line messages land intact. Length is preserved.
     private static func pastedForm(_ body: Data) -> Data {
@@ -143,7 +142,7 @@ struct TerminalSendBracketedPasteLiveTests {
 
     @Test("bracketed pane: body wrapped in ESC[200~/201~ with Enter OUTSIDE the paste")
     func bracketedPaneEnterOutsidePaste() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-send-brk-\(UUID().uuidString.prefix(8))"
         let outputPath = NSTemporaryDirectory() + "tbd-send-brk-\(UUID().uuidString).bin"
         defer {
@@ -162,7 +161,7 @@ struct TerminalSendBracketedPasteLiveTests {
 
     @Test("plain pane: body arrives bare + Enter, no bracketed markers")
     func plainPaneNoBrackets() async throws {
-        guard await TmuxVersion.detect() != nil else { return }
+        guard TmuxManager.tmuxPath() != nil else { return }
         let server = "tbd-test-send-plain-\(UUID().uuidString.prefix(8))"
         let outputPath = NSTemporaryDirectory() + "tbd-send-plain-\(UUID().uuidString).bin"
         defer {

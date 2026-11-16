@@ -52,8 +52,7 @@ private final class ProcessExitGate: @unchecked Sendable {
 /// parked in `read(2)` does NOT wake that thread — it leaks the reader and,
 /// worse, frees the fd *number* for reuse by another consumer in this same
 /// process (GRDB, NIO) which the parked reader then reads from when it finally
-/// wakes. `TmuxControlConnection.stop()` documents that hazard and dances
-/// around it with a semaphore; this type sidesteps it entirely, because a
+/// wakes. This type sidesteps that hazard entirely, because a
 /// `readabilityHandler` only ever reads when bytes (or EOF) are already
 /// waiting, so no thread is ever parked at close time.
 ///
@@ -361,7 +360,7 @@ actor ProviderEventsSupervisor {
 
     /// SIGTERM the child's whole process GROUP, then SIGKILL it after a grace
     /// period if anything survived — the same escalation `BoundedProcessRunner`
-    /// and `TmuxControlConnection` already use, applied to the group rather
+    /// already uses, applied to the group rather
     /// than the single pid for two reasons: a `bash` parked in a foreground
     /// `sleep` defers SIGTERM until that command finishes (so pid-only SIGTERM
     /// never kills it), and grandchildren that inherited the pipe's write end

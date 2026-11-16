@@ -460,13 +460,13 @@ struct RemoteAppStateTests {
                 == "Off, but a poller from before this change is still running in the daemon — restart to fully stop it.")
     }
 
-    // MARK: - Task 11: Settings toggle — setRemoteBackendsEnabled (mirrors setControlModeEnabled, R8-M1)
+    // MARK: - Task 11: Settings toggle — setRemoteBackendsEnabled (keep-last-known-value refresh, R8-M1)
 
     @Test func setRemoteBackendsEnabled_refreshesCapabilitiesOnSuccess() async {
         await withStateAsync { state in
             state.remoteBackendsSetter = { _ in }  // set RPC succeeds
             state.daemonCapabilitiesFetcher = {
-                DaemonCapabilitiesResult(controlModeEnabled: false, remoteBackendsEnabled: true, remoteBackendsLive: false)
+                DaemonCapabilitiesResult(remoteBackendsEnabled: true, remoteBackendsLive: false)
             }
             #expect(state.daemonCapabilities == nil)
 
@@ -482,7 +482,7 @@ struct RemoteAppStateTests {
             state.remoteBackendsSetter = { _ in }  // set RPC succeeds...
             state.daemonCapabilitiesFetcher = { nil }  // ...but the re-fetch transiently fails
             state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, remoteBackendsEnabled: true, remoteBackendsLive: true)
+                remoteBackendsEnabled: true, remoteBackendsLive: true)
 
             await state.setRemoteBackendsEnabled(true)
 
@@ -703,7 +703,7 @@ struct RemoteAppStateTests {
         await withStateAsync { state in
             #expect(state.remoteDeleteEnabled == Config.remoteDeleteEnabledDefault)
             state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, remoteDeleteEnabled: true)
+                remoteDeleteEnabled: true)
             #expect(state.remoteDeleteEnabled)
         }
     }

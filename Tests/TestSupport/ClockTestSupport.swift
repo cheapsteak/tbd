@@ -93,16 +93,13 @@ public extension Trait where Self == TimeLimitTrait {
     /// clock-driven test can sit on: an arming wait (45 s — this file's
     /// `waitForSuspension`, re-derived below, and `EventDrivenTestClock`'s
     /// strict waits, which keep its value) and `ciSafeDeadline` (120 s,
-    /// `Tests/TBDDaemonTests/ControlModeTestSupport.swift`). Clock-driven
-    /// suites really do consume the latter — `AttachRPCOrchestrationTests` and
-    /// `PaneRepairCoordinatorTests` are both `.clockDriven, .serialized` and
-    /// between them hold 44 `waitFor` call sites — so the two values race and
-    /// must be derived together.
+    /// `Tests/TBDDaemonTests/CISafeDeadline.swift`). A clock-driven suite that
+    /// consumes the latter races the two values, so they must be derived
+    /// together.
     ///
     /// The invariant is **not** "every chained wait in a test fits inside this
-    /// limit". `waitFor` is non-throwing on timeout, so chains are real, and the
-    /// deepest is 6 waits in one `PaneRepairCoordinator` test — unsatisfiable
-    /// then (6 x 30 s vs `.minutes(1)`) and unsatisfiable now. The invariant is:
+    /// limit". `waitFor` is non-throwing on timeout, so chains are real. The
+    /// invariant is:
     /// **this limit must afford the first full deadline plus the rest of an
     /// ordinary test.** The first timeout's `Issue.record` fires immediately
     /// with its named diagnostic, so it survives even if this limit later
@@ -122,8 +119,8 @@ public extension Trait where Self == TimeLimitTrait {
     /// milliseconds.
     ///
     /// **The margin is thin, and it is worth naming how thin.** Do not read
-    /// "300 s" as comfortable headroom — several existing chains sit near or
-    /// past it, all consistent with the invariant (only an already-failing test
+    /// "300 s" as comfortable headroom — existing chains sit near it, all
+    /// consistent with the invariant (only an already-failing test
     /// ever pays a full chain of timeouts), but with nothing to spare:
     /// Count `advanceWhenSuspended` as a `waitForSuspension` when you tally a
     /// chain — it *calls* one before advancing, so it pays the full guard —
@@ -131,12 +128,6 @@ public extension Trait where Self == TimeLimitTrait {
     /// Grepping only for the literal `waitForSuspension(` undercounts every
     /// figure below, which is how a PR #547 reviewer read two of these chains
     /// as shallower than they are.
-    /// - `PaneRepairCoordinatorTests.readerWaitEscalatesToTheSlowInterval`
-    ///   chains five clock guards — four `requireAdvanceWhenArmed` and one
-    ///   `requireSleeperArmed`, 225 s — and its two `waitFor` calls take the
-    ///   paper worst case to 465 s. Its clock waits are the strict form, so a
-    ///   missed arming throws and ends the chain; what one run can pay is its
-    ///   two `waitFor` calls, 240 s, or the first of them plus one clock guard.
     /// - The poller chains are nominally deeper still —
     ///   `GatedIntervalSleepTests.returnsAfterExpectedPollCount` pays six
     ///   guards (3 `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1
@@ -148,11 +139,6 @@ public extension Trait where Self == TimeLimitTrait {
     ///   with nothing behind it to inherit the run, so at most one 45 s guard
     ///   elapses in any single run and 270 s describes a run that cannot
     ///   happen (see "The event-driven clock" below).
-    /// - In `PaneRepairCoordinatorTests`, **10 of 13** tests have a paper worst
-    ///   case above 300 s (counting each `ciSafeDeadline` wait — `waitFor` and
-    ///   the suite's `readUntil` — at 120 s and each clock wait at 45 s), not
-    ///   just the 6-`waitFor` chain usually cited, which with its two
-    ///   `readUntil` reads is 960 s.
     ///
     /// **If these start tripping, shorten the chain — do not raise this limit.**
     /// The limit is derived from `TestDeadlines.saturatedPass` through the
@@ -270,13 +256,11 @@ public extension TestClock {
     /// with no assertion fired, a diagnostic that names the symptom rather than
     /// the cause, and minutes of CI burned.
     ///
-    /// That failure is field-observed, not hypothetical.
-    /// `PaneRepairCoordinatorTests`' broken-pipe test drove the repair's
+    /// That failure is field-observed, not hypothetical. A test drove a
     /// reader-wait — a `poll(2)`-and-re-arm loop — with a single advance after
-    /// closing the pipe's read end, and wedged in CI for a full 240 s limit
-    /// with only the pause written, the sink still `repairing` and the repair
-    /// still in flight: the exact fingerprint of a probe that read "keep
-    /// waiting" once and then never got another advance. It survived a
+    /// closing a pipe's read end, and wedged in CI for a full 240 s limit with
+    /// the work still in flight: the exact fingerprint of a probe that read
+    /// "keep waiting" once and then never got another advance. It survived a
     /// `.timeLimit` raise from 60 s to 240 s, because the wait was not slow —
     /// it was over.
     ///
@@ -293,12 +277,11 @@ public extension TestClock {
     ///
     /// ## When NOT to use it
     ///
-    /// Where the **number** of advances is itself the property under test.
-    /// `PaneRepairCoordinatorTests.readerWaitEscalatesToTheSlowInterval` pins
-    /// the pacing-escalation boundary by advancing an exact number of times and
-    /// asserting nothing happened; this helper deliberately advances as often
-    /// as the code re-arms, which would dissolve that proof. Use the explicit
-    /// `advanceWhenSuspended` pair there.
+    /// Where the **number** of advances is itself the property under test —
+    /// a test that pins a pacing boundary by advancing an exact number of
+    /// times and asserting nothing happened. This helper deliberately advances
+    /// as often as the code re-arms, which would dissolve that proof. Use the
+    /// explicit `advanceWhenSuspended` pair there.
     ///
     /// **And — the sharper limit — where the loop under test re-arms under a
     /// saturated fast pass, because this helper starves the re-arm it is

@@ -131,8 +131,8 @@ actor HolderInjectionCourier {
     ///
     /// The app's frame scanner reads a declared length past its 4 MiB hard cap
     /// as corruption: it sets `isDesynced` and the receive loop closes the
-    /// sidecar, which takes control-mode input down **app-wide** until the app
-    /// reconnects — and a sidecar-only death with the RPC socket intact has no
+    /// sidecar, which takes every holder attach and injection down
+    /// **app-wide** until the app reconnects — and a sidecar-only death with the RPC socket intact has no
     /// recovery at all. Separately, `FDVendingServer.sendFrame` is a
     /// synchronous blocking send *on the actor*, so a multi-MiB payload to a
     /// slow app parks the whole fd-vending actor for every session.

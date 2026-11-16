@@ -378,7 +378,6 @@ private final class CommandClickRecorder: TerminalEngineDelegate {
         return claimsPress
     }
     func engineMovedToWindow(_ e: any TerminalEngine) {}
-    func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool { false }
 }
 
 /// An engine from the factory over a scratch worktree holding `notes.txt`, mounted in an

@@ -79,10 +79,4 @@ protocol TerminalEngineDelegate: AnyObject {
     /// The view was inserted into a window, including a kept-alive pane that a
     /// tab switch puts back on screen.
     func engineMovedToWindow(_ e: any TerminalEngine)
-
-    /// A pasteboard paste, before the terminal brackets it. Return true when
-    /// the paste was consumed, so the terminal's own paste is skipped. Asked
-    /// only while `TerminalEngine.setControlModePasteInterception(enabled:)` is
-    /// on.
-    func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool
 }

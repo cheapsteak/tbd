@@ -55,7 +55,7 @@ import Testing
         #expect(configLabels.contains("composerDraftEnabled"))
         #expect(!configLabels.contains("ptyHolderEnabled"))
 
-        let capabilityLabels = Mirror(reflecting: DaemonCapabilitiesResult(controlModeEnabled: false))
+        let capabilityLabels = Mirror(reflecting: DaemonCapabilitiesResult())
             .children.compactMap(\.label)
         #expect(capabilityLabels.contains("ptyHolderSupported"))
         #expect(!capabilityLabels.contains("ptyHolderEnabled"))

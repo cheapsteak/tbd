@@ -186,8 +186,8 @@ enum ChildReaper {
     ///
     /// `pid <= 0` is rejected because those are not pids to `waitpid`: `0`
     /// means the caller's whole process group and `-1` means any child, either
-    /// of which would park on, and reap, unrelated processes. A control-mode
-    /// panel has no `LocalProcess` at all and yields `0` here.
+    /// of which would park on, and reap, unrelated processes. A holder panel
+    /// has no `LocalProcess` at all and yields `0` here.
     static func shouldReap(pid: pid_t, alreadyObserved: Bool) -> Bool {
         pid > 0 && !alreadyObserved
     }
@@ -205,8 +205,8 @@ enum ChildReaper {
     /// wrong exit code in one terminal message, and which the pinned revision
     /// already closes.
     static func reap(pid: pid_t, unless observation: ChildExitObservation) {
-        // Cheap early-out, and the only check a control-mode panel (pid 0)
-        // ever reaches — it keeps teardown from starting a pointless thread.
+        // Cheap early-out, and the only check a holder panel (pid 0) ever
+        // reaches — it keeps teardown from starting a pointless thread.
         guard shouldReap(pid: pid, alreadyObserved: observation.wasObserved) else { return }
         // Registered before the thread starts, so a drain requested the
         // instant `reap` returns already counts this one.

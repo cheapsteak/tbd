@@ -92,10 +92,9 @@ final class SwiftTermEngine: TerminalEngine, TerminalViewDelegate {
 
     // MARK: - The view's closure hooks
 
-    /// The hooks that are always on. Click routing and paste interception are
-    /// not among them, because whether they are installed at all is what the
-    /// view acts on: see `setClickRouting(enabled:)` and
-    /// `setControlModePasteInterception(enabled:)`.
+    /// The hooks that are always on. Click routing is not among them, because
+    /// whether it is installed at all is what the view acts on: see
+    /// `setClickRouting(enabled:)`.
     private func installForwarders() {
         terminalView.onFilePathClicked = { [weak self] path in
             guard let self else { return }
@@ -136,17 +135,6 @@ final class SwiftTermEngine: TerminalEngine, TerminalViewDelegate {
         terminalView.onFocusChange = { [weak self] focused in
             guard let self else { return }
             self.delegate?.engine(self, focusChanged: focused)
-        }
-    }
-
-    func setControlModePasteInterception(enabled: Bool) {
-        guard enabled else {
-            terminalView.onControlModePaste = nil
-            return
-        }
-        terminalView.onControlModePaste = { [weak self] data in
-            guard let self, let delegate = self.delegate else { return false }
-            return delegate.engine(self, controlModePaste: data)
         }
     }
 

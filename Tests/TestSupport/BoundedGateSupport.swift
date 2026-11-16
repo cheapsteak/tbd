@@ -41,9 +41,9 @@ import Testing
 //
 // Gates reached from a dedicated `Thread` never had the problem and need
 // nothing: `FDVendingServer` delivers to its sinks from a dedicated receive
-// thread. `WorktreeDeletionQueue` and `TmuxControlSupervisor` reach their gates
-// from dispatch queues, which keeps them off the cooperative pool but does NOT
-// give them dedicated threads. Their small fixed counts keep a plain bounded
+// thread. `WorktreeDeletionQueue` reaches its gates from dispatch queues,
+// which keeps them off the cooperative pool but does NOT give them dedicated
+// threads. Its small fixed counts keep a plain bounded
 // `waitForGate`; the executor below cannot share libdispatch workers with them,
 // because many simultaneous gate tasks can consume every such worker.
 //
@@ -151,12 +151,11 @@ public func gateHoldingTask<Success: Sendable>(
 /// either that is not checked against the other is a bug, and adjacency is
 /// what makes that checkable — and it is reachable from both
 /// `Tests/TBDDaemonTests` and `Tests/TBDDaemonLiveTests`, which is what keeps
-/// `ciSafeDeadline`, `TmuxControlSupervisorTeardownTests.teardownWaitDeadline`
-/// and `ProviderEventsSupervisorTests.saturatedWaitDeadline` one constant
-/// rather than three that can drift apart unnoticed.
+/// `ciSafeDeadline` and `ProviderEventsSupervisorTests.saturatedWaitDeadline`
+/// one constant rather than two that can drift apart unnoticed.
 ///
 /// The derivation itself — why 120 s, and what re-derives it — stays with
-/// `ciSafeDeadline` in `Tests/TBDDaemonTests/ControlModeTestSupport.swift`,
+/// `ciSafeDeadline` in `Tests/TBDDaemonTests/CISafeDeadline.swift`,
 /// which is where the reasoning about population and contention lives.
 public enum TestDeadlines {
     /// 120 s, as a `TimeInterval` for `Date`-based waits.
@@ -253,9 +252,8 @@ public func waitFor(
 /// **Sized to dominate the longest legitimate hold, not to be snappy.** A gate
 /// is held for as long as the test's own observation takes, and the outer
 /// observations are themselves hang-catchers sized against a loaded runner:
-/// the `TmuxControlSupervisor` teardown gates are held across a `waitUntil`
-/// bounded by that suite's own `teardownWaitDeadline`
-/// (``TestDeadlines/saturatedPass``, the value `ciSafeDeadline` carries). A
+/// a gate can be held across a `waitUntil` bounded by
+/// ``TestDeadlines/saturatedPass``, the value `ciSafeDeadline` carries. A
 /// gate deadline below that would go red on a merely slow machine, and a
 /// spuriously red CI is worse than the bug this bound exists to report. 150 s
 /// clears `saturatedPass`'s 120 s by 30 s while staying a small fraction of

@@ -549,49 +549,6 @@ struct DeltaIngestionTests {
         }
     }
 
-    /// Control-mode input health is edge-triggered by the daemon, but the app
-    /// must not assume that: a duplicate recovery must cost nothing.
-    @Test("controlModeInputHealthChanged: healthy for an already-healthy pane")
-    func redundantHealthyDelta() {
-        withEmissionState { state in
-            let worktreeID = UUID()
-            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%1", generation: 1)
-
-            let count = countEmissions(of: state) {
-                state.handleDelta(.controlModeInputHealthChanged(ControlModeInputHealthDelta(
-                    worktreeID: worktreeID, paneID: "%1", healthy: true, generation: 1
-                )))
-            }
-
-            // KNOWN ISSUE — `AppState.controlModeFailingInputPanes`, via
-            // `applyControlModeInputHealthDelta` (AppState.swift:2101).
-            // `Set.remove` on an absent member is still a get-modify-set of the
-            // tracked property, so it notifies. Ideal 0, observed 1.
-            // Fix: `guard controlModeFailingInputPanes.contains(key)`.
-            withKnownIssue("a redundant recovery still republishes (#667)") {
-                #expect(count == 0)
-            }
-        }
-    }
-
-    @Test("controlModeInputHealthChanged: a real failure")
-    func failingHealthDelta() {
-        withEmissionState { state in
-            let worktreeID = UUID()
-            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%1", generation: 1)
-
-            let count = countEmissions(of: state) {
-                state.handleDelta(.controlModeInputHealthChanged(ControlModeInputHealthDelta(
-                    worktreeID: worktreeID, paneID: "%1", healthy: false, generation: 1
-                )))
-            }
-
-            #expect(state.isInputDeliveryFailing(
-                ControlModePaneKey(worktreeID: worktreeID, paneID: "%1")
-            ))
-            #expect(count == 1)
-        }
-    }
 }
 
 // MARK: - Notification arrivals
@@ -729,65 +686,6 @@ struct RemoteRefreshTests {
         // disk write regardless.
         withKnownIssue("an unchanged remote refresh still notifies (#667)") {
             #expect(count == 0)
-        }
-    }
-}
-
-// MARK: - Control-mode attach bookkeeping
-
-/// Attach/detach bookkeeping runs on every pane materialization, which the
-/// worktree pager does on selection churn as well as on real attaches.
-@MainActor
-@Suite("Control-mode attach bookkeeping")
-struct ControlModeAttachTests {
-
-    @Test("re-attaching the same pane with the same generation")
-    func idempotentAttach() {
-        withEmissionState { state in
-            let worktreeID = UUID()
-            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%1", generation: 7)
-
-            let count = countEmissions(of: state) {
-                state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%1", generation: 7)
-            }
-
-            // KNOWN ISSUE — `controlModeAttachedPanes` + `controlModeFailingInputPanes`
-            // (AppState.swift:2059–2060). Both writes are unconditional, so an
-            // idempotent re-attach costs 2. Ideal 0. Fix: guard both at the
-            // assignment site.
-            withKnownIssue("an idempotent re-attach publishes twice (#667)") {
-                #expect(count == 0)
-            }
-        }
-    }
-
-    @Test("detaching a pane that was never attached")
-    func detachOfUnknownPane() {
-        withEmissionState { state in
-            let count = countEmissions(of: state) {
-                state.controlModePaneDetached(worktreeID: UUID(), paneID: "%99")
-            }
-
-            // KNOWN ISSUE — `controlModeAttachedPanes` + `controlModeFailingInputPanes`
-            // (AppState.swift:2083–2084). `removeValue` / `remove` on absent
-            // keys still publish. Ideal 0, observed 2. The method's own doc
-            // comment calls it idempotent — it is idempotent in *state* but not
-            // in *invalidation*, which is precisely the distinction this file
-            // exists to make. Fix: guard both at the assignment site.
-            withKnownIssue("a no-op detach publishes twice (#667)") {
-                #expect(count == 0)
-            }
-        }
-    }
-
-    @Test("a real attach publishes")
-    func realAttachPublishes() {
-        withEmissionState { state in
-            let count = countEmissions(of: state) {
-                state.controlModePaneAttached(worktreeID: UUID(), paneID: "%1", generation: 1)
-            }
-
-            #expect(count >= 1)
         }
     }
 }

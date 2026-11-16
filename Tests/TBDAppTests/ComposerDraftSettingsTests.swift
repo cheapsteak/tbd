@@ -22,7 +22,7 @@ struct ComposerDraftSettingsTests {
     }
 
     private static func capabilities(composerDraft: Bool) -> DaemonCapabilitiesResult {
-        var result = DaemonCapabilitiesResult(controlModeEnabled: false)
+        var result = DaemonCapabilitiesResult()
         result.composerDraftEnabled = composerDraft
         return result
     }

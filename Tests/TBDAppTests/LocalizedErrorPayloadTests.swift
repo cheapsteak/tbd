@@ -101,11 +101,7 @@ struct LocalizedErrorPayloadTests {
             ("DaemonClientError.receiveFailed", DaemonClientError.receiveFailed("EOF before the frame header")),
             ("DaemonClientError.invalidResponse", DaemonClientError.invalidResponse),
             ("DaemonClientError.rpcError", DaemonClientError.rpcError("worktree.wake refused", code: "terminalSessionGone")),
-            ("DaemonClientError.attachUnavailable", DaemonClientError.attachUnavailable("controlModeDisabled")),
-            (
-                "AttachFDVendError",
-                AttachFDVendError(generation: 4207, underlying: FDSidecarError.timedOut)
-            ),
+            ("DaemonClientError.attachUnavailable", DaemonClientError.attachUnavailable("unavailable")),
             ("FDSidecarError.connectFailed", FDSidecarError.connectFailed(61)),
             ("FDSidecarError.notConnected", FDSidecarError.notConnected),
             ("FDSidecarError.timedOut", FDSidecarError.timedOut),
@@ -232,21 +228,6 @@ struct LocalizedErrorPayloadTests {
             ["Branch"],
             "RemoteCreateFormLogic.FieldError.missingRequired"
         )
-    }
-
-    /// The nested case: `AttachFDVendError` wraps another error and renders it
-    /// through `localizedDescription`. If the wrapped type ever loses its
-    /// conformance, the bridge string appears *inside* an otherwise-correct
-    /// message — the shape a whole-string check would miss.
-    @Test("a wrapping error renders both its own payload and the wrapped one")
-    func wrappedErrorPayloadRenders() {
-        let wrapper = AttachFDVendError(generation: 4207, underlying: FDSidecarError.connectFailed(61))
-        assertNotBridgeString(wrapper, "AttachFDVendError")
-        assertRenders(wrapper, ["4207", "61"], "AttachFDVendError")
-
-        let noGeneration = AttachFDVendError(generation: nil, underlying: FDSidecarError.superseded)
-        assertNotBridgeString(noGeneration, "AttachFDVendError(generation: nil)")
-        assertRenders(noGeneration, ["none", "superseded"], "AttachFDVendError(generation: nil)")
     }
 
     /// Guards the guard: the bridge-shape regex must actually reject a real

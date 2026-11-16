@@ -148,14 +148,6 @@ public struct WorktreeLifecycle: Sendable {
         (@Sendable (_ worktreeID: UUID, _ worktreePath: String, _ repoPath: String)
             async -> Void)?
 
-    /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
-    /// one (tests, older callers); when present, lifecycle paths open a gated
-    /// logging-only `tmux -CC` connection after each `ensureServer()`.
-    ///
-    /// Set by `Daemon` after construction (`internal`, so the public init's
-    /// signature does not leak the internal bridge type).
-    var controlMode: TmuxControlModeBridge?
-
     /// Owner of the prompt parked at worktree creation (design 2026-08-10).
     /// `spawnPrimaryTerminals` hands it any parked prompt the command line
     /// could not carry. `nil` when the daemon did not wire one (mock mode,
@@ -246,7 +238,6 @@ public struct WorktreeLifecycle: Sendable {
         self.modelProfileResolver = modelProfileResolver
         self.pendingQuestions = pendingQuestions
         self.configDirManager = configDirManager
-        self.controlMode = nil
         self.preSessionTimeout = preSessionTimeout
         self.preSessionPollInterval = preSessionPollInterval
         self.processSignaller = processSignaller

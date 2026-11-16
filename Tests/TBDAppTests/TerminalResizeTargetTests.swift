@@ -4,12 +4,11 @@ import Testing
 
 @testable import TBDApp
 
-/// Which daemon-side authority a panel's `pane.resize` names.
+/// Which holder session a panel's `pane.resize` names.
 ///
 /// A holder row carries no tmux coordinates — `windowID` is the empty string —
-/// so a resize keyed by window resolves nothing and is dropped without a word.
-/// That is how a holder panel's `sizeChanged` came to reach the pty at all:
-/// there was no arm here to address the session by name.
+/// so a resize keyed by window would resolve nothing and be dropped without a
+/// word. The session is addressed by name instead.
 @Suite struct TerminalResizeTargetTests {
 
     private let worktree = UUID()
@@ -19,27 +18,17 @@ import Testing
         let target = TerminalResizeTarget.resolve(
             holderPTYIsOwned: true,
             worktreeID: worktree,
-            terminalID: terminal,
-            controlMode: nil)
-        #expect(target == .holderSession(worktreeID: worktree, terminalID: terminal))
+            terminalID: terminal)
+        #expect(target == TerminalResizeTarget(worktreeID: worktree, terminalID: terminal))
     }
 
-    @Test func aControlModePanelAddressesItsWindow() {
-        let target = TerminalResizeTarget.resolve(
-            holderPTYIsOwned: false,
-            worktreeID: worktree,
-            terminalID: terminal,
-            controlMode: (worktreeID: worktree, windowID: "@7"))
-        #expect(target == .controlModeWindow(worktreeID: worktree, windowID: "@7"))
-    }
-
-    /// A panel that is neither has nothing to tell the daemon: the local-PTY
-    /// path already sized its own child, and a detached panel is not rendered.
-    @Test func aPanelWithNeitherTransportAddressesNothing() {
+    /// A panel that owns no holder pty has nothing to tell the daemon: the
+    /// local-PTY path already sized its own child, and a detached panel is not
+    /// rendered.
+    @Test func aPanelWithoutAHolderPTYAddressesNothing() {
         #expect(
             TerminalResizeTarget.resolve(
-                holderPTYIsOwned: false, worktreeID: worktree, terminalID: terminal,
-                controlMode: nil) == nil)
+                holderPTYIsOwned: false, worktreeID: worktree, terminalID: terminal) == nil)
     }
 
     /// The panel is holder-backed but its row could not be resolved, so there
@@ -47,8 +36,7 @@ import Testing
     @Test func aHolderPanelWithNoResolvableRowAddressesNothing() {
         #expect(
             TerminalResizeTarget.resolve(
-                holderPTYIsOwned: true, worktreeID: nil, terminalID: terminal,
-                controlMode: nil) == nil)
+                holderPTYIsOwned: true, worktreeID: nil, terminalID: terminal) == nil)
     }
 }
 

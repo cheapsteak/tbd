@@ -308,7 +308,7 @@ struct ChildReaperTests {
     func shouldNotReapNonPositivePids() {
         // waitpid(0, …) waits on the whole process group and waitpid(-1, …) on
         // any child — either would park on, and reap, unrelated processes. A
-        // control-mode panel has no LocalProcess and lands here with 0.
+        // holder panel has no LocalProcess and lands here with 0.
         for observed in [false, true] {
             #expect(!ChildReaper.shouldReap(pid: 0, alreadyObserved: observed))
             #expect(!ChildReaper.shouldReap(pid: -1, alreadyObserved: observed))

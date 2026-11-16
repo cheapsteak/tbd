@@ -48,8 +48,7 @@ enum TerminalEngineNotice: Equatable, Sendable {
 
 /// Where a terminal engine is being built, which decides the kinds it may be.
 enum TerminalEngineHost: Equatable, Sendable {
-    /// A panel in the main area or the dock, on this transport. Control mode is
-    /// a tmux panel.
+    /// A panel in the main area or the dock, on this transport.
     case panel(TerminalTransport)
     /// A local PTY: the remote attach pane and the remote sign-in sheet.
     case localPTY
@@ -83,7 +82,7 @@ enum TerminalEngineFactory {
     ///
     /// libghostty only while `useGhosttyTerminalEngine` resolves to true, and
     /// only where the program's own mouse modes reach the terminal: holder
-    /// panels and local PTYs. A tmux or control-mode panel stays on SwiftTerm,
+    /// panels and local PTYs. A tmux panel stays on SwiftTerm,
     /// because tmux holds a mouse mode of its own there and SwiftTerm is what
     /// keeps local selection working under it.
     ///
