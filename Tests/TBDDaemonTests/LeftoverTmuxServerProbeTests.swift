@@ -460,7 +460,7 @@ struct LeftoverTmuxServerProbeTests {
         _ = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
         let table = ProcessTableSnapshot(entries: [
             4242: ProcessTableSnapshot.Entry(
-                parent: 1, startedAt: nil, command: "tmux", realUserID: getuid()),
+                parent: 1, startedAt: nil, command: Array("tmux".utf8), realUserID: getuid()),
         ])
         let raw = Self.procArgs(
             argc: 4, path: "/opt/acme/Cellar/tmux/3.4/bin/tmux",
@@ -499,7 +499,8 @@ struct LeftoverTmuxServerProbeTests {
     func theListerFindsTmuxByCommandNameOrPath() {
         let uid = getuid()
         let entry = { (command: String, owner: uid_t?) in
-            ProcessTableSnapshot.Entry(parent: 1, startedAt: nil, command: command, realUserID: owner)
+            ProcessTableSnapshot.Entry(
+                parent: 1, startedAt: nil, command: Array(command.utf8), realUserID: owner)
         }
         let table = ProcessTableSnapshot(entries: [
             10: entry("tmux", uid), 11: entry("tmux", Self.anotherUser), 12: entry("tmux", nil),
@@ -565,8 +566,27 @@ struct LeftoverTmuxServerProbeTests {
         defer { Self.endChild(pid) }
 
         let entry = try #require(ProcessTableSnapshot.read()?.entries[pid])
-        #expect(entry.command == "sleep")
+        #expect(entry.command == Array("sleep".utf8))
         #expect(entry.realUserID == getuid())
+    }
+
+    /// A saved name whose `MAXCOMLEN` cut splits a character. The kernel keeps
+    /// the cut bytes as they are — `acme-terminal-m` and the first byte of
+    /// `é` for the name below, measured on a real process — and those match
+    /// the saved name's bytes cut the same way, so a server run from it whose
+    /// binary was deleted, with no path to read, is still found. Decoding
+    /// either side as UTF-8 would have failed and missed it.
+    @Test("a tmux name the kernel cut mid-character still matches by command name")
+    func aNameCutMidCharacterStillMatches() {
+        let name = "acme-terminal-mélange"
+        let kept = Array(name.utf8.prefix(16))
+        #expect(String(bytes: kept, encoding: .utf8) == nil,
+                "the fixture's cut does not split a character")
+
+        #expect(LeftoverTmuxServerProbe.isTmux(
+            command: kept, executablePath: nil, names: ["tmux", name]))
+        #expect(!LeftoverTmuxServerProbe.isTmux(
+            command: Array("acme-terminal-mu".utf8), executablePath: nil, names: ["tmux", name]))
     }
 
     // MARK: - Which command lines name the server

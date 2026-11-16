@@ -134,11 +134,13 @@ no tmux binary for either. The server is gone only when both say so.
     `tmux`, or is the name of the binary saved through the tmux path fallback
     (`TmuxExecutableResolver`), which accepts any name. The kernel cuts a
     command name to 16 bytes (`MAXCOMLEN`), so the saved name is cut the same
-    way before it is compared. The command name is what matters when a package
-    manager upgrades tmux: it deletes the old version's binary, a server
-    started from it keeps running, and `proc_pidpath` fails for that server
-    from then on, while its command name stays `tmux`. The path covers a
-    binary started through a link of another name.
+    way before it is compared, and the two are compared as bytes: a cut can
+    split a character, and the kernel keeps the split bytes as they are. The
+    command name is what matters when a package manager upgrades tmux: it
+    deletes the old version's binary, a server started from it keeps running,
+    and `proc_pidpath` fails for that server from then on, while its command
+    name stays `tmux`. The path covers a binary started through a link of
+    another name.
   - **Whose** – "this user" is the daemon's `getuid()`, compared with each
     process's real user id (`p_ruid`, from the same table read). tmux keeps
     each user's sockets under `tmux-<uid>`, so another user's tmux cannot be a
@@ -369,9 +371,11 @@ never unlinks it, and nothing TBD runs creates one any more.
   names the server. The lister, over a literal table, finds tmux by command
   name, by path, and by the saved binary's name cut to 16 bytes, asks for a
   path only when the command name does not settle it, and asks nothing of
-  another user's process; against the real kernel, the table gives a started
-  process's command name and real user id. The `-L` matcher finds the
-  separate, joined and clustered forms and nothing else. The argv reader
+  another user's process; a saved name whose cut splits a character still
+  matches the command name the kernel keeps for it; against the real kernel,
+  the table gives a started process's command name and real user id. The
+  `-L` matcher finds the separate, joined and clustered forms and nothing
+  else. The argv reader
   starts argv at the 8-byte boundary the kernel pads the executable path to,
   so an empty `argv[0]` is read in place rather than taken for padding, and it
   stops before the environment; a process started with an empty `argv[0]` under

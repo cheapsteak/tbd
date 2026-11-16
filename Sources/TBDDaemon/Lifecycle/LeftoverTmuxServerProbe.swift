@@ -314,9 +314,11 @@ struct LeftoverTmuxServerProbe: Sendable {
         return names
     }
 
-    /// Whether a process is tmux: its command name is one of `names` cut to
-    /// `MAXCOMLEN` bytes, as the kernel cuts it, or the last component of its
-    /// executable path is one of `names`.
+    /// Whether a process is tmux: its command name is the bytes of one of
+    /// `names` cut to `MAXCOMLEN`, as the kernel cuts it, or the last
+    /// component of its executable path is one of `names`. The command name
+    /// is compared as bytes, so a name whose cut splits a character still
+    /// matches.
     ///
     /// The command name comes first because it survives the binary being
     /// deleted: a package manager that upgrades tmux removes the old version's
@@ -325,17 +327,18 @@ struct LeftoverTmuxServerProbe: Sendable {
     /// name does not match, and covers a binary run through a link of another
     /// name.
     static func isTmux(
-        command: String?, executablePath: @autoclosure () -> String?, names: Set<String>
+        command: [UInt8]?, executablePath: @autoclosure () -> String?, names: Set<String>
     ) -> Bool {
         if let command, names.contains(where: { commandName($0) == command }) { return true }
         guard let path = executablePath() else { return false }
         return names.contains((path as NSString).lastPathComponent)
     }
 
-    /// `name` as the kernel keeps it for a process it was executed as: its
-    /// first `MAXCOMLEN` bytes. Nil when that cut splits a character.
-    static func commandName(_ name: String) -> String? {
-        String(bytes: name.utf8.prefix(Int(MAXCOMLEN)), encoding: .utf8)
+    /// `name` as the kernel keeps it for a process it was executed as: the
+    /// first `MAXCOMLEN` bytes of its UTF-8, even where that cut splits a
+    /// character.
+    static func commandName(_ name: String) -> [UInt8] {
+        Array(name.utf8.prefix(Int(MAXCOMLEN)))
     }
 
     /// What the kernel pads the executable path in a `KERN_PROCARGS2` buffer
