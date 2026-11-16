@@ -1468,7 +1468,7 @@ test_no_wake_skips_the_stage() {
     mkdir -p "$state" "$TEST_TMP/no-wake-bin"
     mkstub_tbd "$TEST_TMP/no-wake-bin"
     printf '[{"id":"w1"}]\n' > "$state/worktrees.json"
-    printf '[{"id":"a","hibernatedAt":"2026-09-04T12:00:01Z","hibernateReason":"recovery"}]\n' \
+    printf '[{"id":"a","hibernatedAt":"2026-09-04T12:00:01Z","hibernateReason":"recovery","transport":"holder"}]\n' \
         > "$state/terminals-w1.json"
     : > "$state/wake.log"
 
@@ -1500,12 +1500,12 @@ test_no_wake_skips_the_stage() {
 # MARK: - The wake sweep
 
 WAKE_ROWS='[
- {"id":"aaa","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"recovery"},
- {"id":"bbb","hibernatedAt":"2026-09-04T11:00:00Z","hibernateReason":"recovery"},
- {"id":"ccc","hibernatedAt":"2026-09-04T12:00:07Z","hibernateReason":"idle"},
- {"id":"ddd","hibernatedAt":null,"hibernateReason":null},
- {"id":"eee","hibernatedAt":"2026-09-04T12:00:00Z","hibernateReason":"recovery"},
- {"id":"fff","hibernatedAt":"2026-09-04T12:30:11Z","hibernateReason":"recovery"}
+ {"id":"aaa","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"recovery","transport":"holder"},
+ {"id":"bbb","hibernatedAt":"2026-09-04T11:00:00Z","hibernateReason":"recovery","transport":"holder"},
+ {"id":"ccc","hibernatedAt":"2026-09-04T12:00:07Z","hibernateReason":"idle","transport":"holder"},
+ {"id":"ddd","hibernatedAt":null,"hibernateReason":null,"transport":"holder"},
+ {"id":"eee","hibernatedAt":"2026-09-04T12:00:00Z","hibernateReason":"recovery","transport":"holder"},
+ {"id":"fff","hibernatedAt":"2026-09-04T12:30:11Z","hibernateReason":"recovery","transport":"holder"}
 ]'
 
 test_wake_candidate_filter() {
@@ -1520,12 +1520,28 @@ test_wake_candidate_filter() {
     picked="$(printf '%s' "$WAKE_ROWS" | select_wake_candidates "2026-09-05T00:00:00Z" | tr '\n' ' ')"
     assert_eq "a later handover leaves earlier parks alone" "" "$picked"
 
-    picked="$(printf '%s' '[{"id":"g","hibernatedAt":"2026-09-04T12:00:05.482Z","hibernateReason":"recovery"}]' \
+    picked="$(printf '%s' '[{"id":"g","hibernatedAt":"2026-09-04T12:00:05.482Z","hibernateReason":"recovery","transport":"holder"}]' \
         | select_wake_candidates "2026-09-04T12:00:00Z" | tr '\n' ' ')"
     assert_eq "fractional seconds compare correctly" "g " "$picked"
 
     assert_eq "an empty list yields no candidate" "" \
         "$(printf '[]' | select_wake_candidates "")"
+}
+
+# A recovery park on tmux is not this update's to wake: the daemon refuses it
+# and names `tbd terminal migrate`. Absent and unrecognized transports read as
+# tmux, as the app's decoder reads them. The holder row beside them is the
+# positive control: the same park, on the holder, is taken.
+test_wake_candidates_exclude_tmux_rows() {
+    local picked
+    picked="$(printf '%s' '[
+ {"id":"tmx","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"recovery","transport":"tmux"},
+ {"id":"nul","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"recovery","transport":null},
+ {"id":"abs","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"recovery"},
+ {"id":"unk","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"recovery","transport":"acme"},
+ {"id":"hld","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"recovery","transport":"holder"}
+]' | select_wake_candidates "2026-09-04T12:00:00Z" | tr '\n' ' ')"
+    assert_eq "only the holder row of a recovery park is a candidate" "hld " "$picked"
 }
 
 test_wake_batches_and_paces() {
@@ -1641,8 +1657,8 @@ test_no_wake_and_wake_only() {
 [{"id":"11111111-1111-1111-1111-111111111111"}]
 EOF
     cat > "$case_dir/state/terminals-11111111-1111-1111-1111-111111111111.json" << 'EOF'
-[{"id":"aaa","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"recovery"},
- {"id":"bbb","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"idle"}]
+[{"id":"aaa","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"recovery","transport":"holder"},
+ {"id":"bbb","hibernatedAt":"2026-09-04T12:00:05Z","hibernateReason":"idle","transport":"holder"}]
 EOF
     : > "$case_dir/state/wake.log"
 
@@ -1667,9 +1683,9 @@ test_terminals_are_collected_across_worktrees() {
     mkdir -p "$state" "$TEST_TMP/collect-bin"
     mkstub_tbd "$TEST_TMP/collect-bin"
     printf '[{"id":"w1"},{"id":"w2"}]\n' > "$state/worktrees.json"
-    printf '[{"id":"a","hibernatedAt":"2026-09-04T12:00:01Z","hibernateReason":"recovery"}]\n' \
+    printf '[{"id":"a","hibernatedAt":"2026-09-04T12:00:01Z","hibernateReason":"recovery","transport":"holder"}]\n' \
         > "$state/terminals-w1.json"
-    printf '[{"id":"b","hibernatedAt":"2026-09-04T12:00:02Z","hibernateReason":"recovery"}]\n' \
+    printf '[{"id":"b","hibernatedAt":"2026-09-04T12:00:02Z","hibernateReason":"recovery","transport":"holder"}]\n' \
         > "$state/terminals-w2.json"
 
     out="$(
@@ -1694,7 +1710,8 @@ test_terminals_survive_brackets_and_pretty_printing() {
     "id" : "a",
     "label" : "review [wip",
     "hibernatedAt" : "2026-09-04T12:00:01Z",
-    "hibernateReason" : "recovery"
+    "hibernateReason" : "recovery",
+    "transport" : "holder"
   }
 ]
 EOF
@@ -1704,7 +1721,8 @@ EOF
     "id" : "b",
     "label" : "plain",
     "hibernatedAt" : "2026-09-04T12:00:02Z",
-    "hibernateReason" : "recovery"
+    "hibernateReason" : "recovery",
+    "transport" : "holder"
   }
 ]
 EOF
@@ -1723,7 +1741,7 @@ test_a_terminal_list_that_is_not_json_is_skipped_not_fatal() {
     mkstub_tbd "$TEST_TMP/badjson-bin"
     printf '[{"id":"w1"},{"id":"w2"}]\n' > "$state/worktrees.json"
     printf 'not json\n' > "$state/terminals-w1.json"
-    printf '[{"id":"b","hibernatedAt":"2026-09-04T12:00:02Z","hibernateReason":"recovery"}]\n' \
+    printf '[{"id":"b","hibernatedAt":"2026-09-04T12:00:02Z","hibernateReason":"recovery","transport":"holder"}]\n' \
         > "$state/terminals-w2.json"
 
     out="$(
@@ -3598,6 +3616,7 @@ test_no_wake_skips_the_stage
 test_no_app_skips_the_relaunch
 test_app_stage_seeds_the_tmux_fallback
 test_wake_candidate_filter
+test_wake_candidates_exclude_tmux_rows
 test_wake_batches_and_paces
 test_wake_counts_failures
 test_wake_ignores_other_background_children

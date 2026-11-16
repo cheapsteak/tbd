@@ -140,8 +140,8 @@ park live sessions wholesale. Four things make the handover safe.
 - **Reconcile parks only on positive evidence.** A holder row is parked only
   when its holder's exit probe answers that the holder is gone; a round trip
   that merely failed leaves the row alone. A row still on tmux is parked only
-  when its tmux server's socket is missing or refuses connections, and any
-  other answer, a timeout included, leaves it live; see
+  when every place its tmux server's socket can be is missing or refuses
+  connections, and any other answer, a timeout included, leaves it live; see
   [the design](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update).
 - **A second un-park pass runs after reconcile.** The first pass runs before
   reconcile, so it cannot repair a park the same boot creates. The second one
@@ -151,9 +151,11 @@ park live sessions wholesale. Four things make the handover safe.
   The script wakes those three at a time, two seconds apart, because N
   simultaneous `claude --resume` respawns have taken a machine down before
   (issues #284 and #367). The counts land in the summary, failures included.
-  A session parked on the tmux transport is one of those failures: its wake
-  refuses and names `tbd terminal migrate`, which moves it to the holder, and
-  a wake after that resumes it.
+  Only sessions on the pty holder are woken. A session parked on the tmux
+  transport is left parked and not counted, because its wake would only be
+  refused: the daemon starts sessions only on the holder. **Move to Holder (No
+  tmux)** in the tab's menu, or `tbd terminal migrate`, moves it there, and a
+  wake after that resumes it.
 
 `--wake-only` runs just that last step against a daemon that is already new,
 for the case where an update finished but sessions were left parked.
@@ -286,8 +288,8 @@ notice.
 - `--no-app` — leave the running app alone, neither stopping it for the
   handover nor restarting it; hand the daemon over anyway.
 - `--no-wake` — install and hand over, but wake nothing.
-- `--wake-only` — wake every recovery-parked session against the running
-  daemon, and do nothing else.
+- `--wake-only` — wake every recovery-parked session on the pty holder
+  against the running daemon, and do nothing else.
 - `--remote <url>` — fetch from this URL instead of the resolved default.
 
 ## Running it from inside another project's dev shell
