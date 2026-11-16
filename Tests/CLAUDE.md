@@ -539,7 +539,7 @@ database ran the whole migration chain, pass 1 reported 111.7 s in 1a and
 pool stall below) is what keeps pass 1 clear of 120 s.
 
 One more thing a reader should not have to mine a log for: the **"72 known
-issues" pass 1 reports on every run, and the 10 in pass 2, are deliberate
+issues" pass 1 reports on every run, and the 9 in pass 2, are deliberate
 self-tests wrapped in `withKnownIssue`, not hidden failures.** Pass 1's are
 almost all `EventDrivenTestClockSelfTests` driving its own hang guards to their
 diagnostics, plus `BoundedGateWaitTests`' unsignalled gate and
@@ -547,7 +547,7 @@ diagnostics, plus `BoundedGateWaitTests`' unsignalled gate and
 records of the suites in `AppStatePublishFrequencyTests.swift`, plus one
 teardown self-test, and each lands in the half its suite's name selects:
 
-- **2a reports 5** – `DeltaIngestionTests` 4 and `NotificationDeltaTests` 1.
+- **2a reports 4** – `DeltaIngestionTests` 3 and `NotificationDeltaTests` 1.
 - **2b reports 5** – `TerminalPollTickTests` 2, `RemoteRefreshTests` 1,
   `SelectionCascadeTests` 1, and `UserDefaultsTestSupportTests`' "teardown
   records a refused name as a failure and leaves the suite alone" 1.
