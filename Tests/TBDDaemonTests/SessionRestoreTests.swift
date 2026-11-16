@@ -135,7 +135,8 @@ struct SessionRestoreTests {
     }
 
     /// A parked row, by default a holder row this startup parked for recovery.
-    /// It names no process, as a park leaves it.
+    /// It names no process, as a park leaves it. A tmux row carries the window
+    /// and pane ids an older build recorded for it.
     @discardableResult
     private func park(
         in fixture: Fixture,
@@ -149,7 +150,8 @@ struct SessionRestoreTests {
         let sessionID = "session-\(UUID().uuidString)"
         let terminal = try await fixture.db.terminals.create(
             worktreeID: (worktree ?? fixture.worktree).id,
-            tmuxWindowID: "", tmuxPaneID: "",
+            tmuxWindowID: transport == .tmux ? "@7" : "",
+            tmuxPaneID: transport == .tmux ? "%7" : "",
             label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: kind,
             transport: transport)
         if let transcriptPath {
@@ -415,8 +417,8 @@ struct SessionRestoreTests {
     /// A tmux row this startup parked for recovery, as reconcile parks one
     /// whose server is gone. It moves to the holder through `tbd terminal
     /// migrate`, and its wake is refused with `terminalOnTmux`, so the pass
-    /// neither wakes it nor counts it: selected, it would read as a failure
-    /// after every restart.
+    /// neither wakes it nor counts it: selected, it would read as a failure on
+    /// the restart that parked it.
     @Test("a tmux row parked for recovery stays parked and is not counted")
     func tmuxRowIsLeftOut() async throws {
         let fixture = try await makeFixture()
