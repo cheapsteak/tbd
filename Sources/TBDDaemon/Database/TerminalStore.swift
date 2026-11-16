@@ -2114,15 +2114,16 @@ public struct TerminalStore: Sendable {
     /// itself, no shell is left in the pane for a send to mis-execute, and the
     /// holder path answers for the row's liveness. So the row stays unstamped.
     ///
-    /// The stamp is Claude-tab-only (`Terminal.isClaudeTab`) for the same
-    /// reason. `SessionStart` records an id onto a shell row whose
-    /// hand-started Claude carries TBD's hook, so that Claude's `SessionEnd`
-    /// reaches the row too. The wake that would lift the stamp refuses a tab
-    /// that is not Claude's (`Terminal.claudeResumeDecision`), and a parked
-    /// pane shows a frozen snapshot, so a stamp there would cost the person
-    /// their shell until they closed the tab. Unstamped, the row stays the
-    /// live shell it is, and a send to it is a shell send like any other. A
-    /// stamp an earlier build left on such a tab is lifted at startup
+    /// The stamp is Claude-tab-only (`Terminal.isClaudeTab`), because on any
+    /// other tab no wake could lift it. `SessionStart` records an id onto a
+    /// shell row whose hand-started Claude carries TBD's hook, so that
+    /// Claude's `SessionEnd` reaches the row too. The wake that would lift the
+    /// stamp refuses a tab that is not Claude's
+    /// (`Terminal.claudeResumeDecision`), and a parked pane shows a frozen
+    /// snapshot, so a stamp there would cost the person their shell until they
+    /// closed the tab. Unstamped, the row stays the live shell it is, and a
+    /// send to it is a shell send like any other. A stamp an earlier build
+    /// left on such a tab is lifted at startup
     /// (`HibernationCoordinator.reconcileOnStartup`).
     ///
     /// `date` follows the one-shot stamp seam (CLAUDE.md, "Duration is behavior,

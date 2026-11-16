@@ -101,12 +101,14 @@ public enum WakeResult: Equatable, Sendable {
     /// the row stays as it was. Kept for compatibility with Claude-only callers.
     case notAClaudeTab(kind: TerminalKind)
     case inFlight        // a wake for this terminal is already respawning
-    /// The wake got past the row checks and then stopped without leaving the
-    /// session running under an un-parked row. Several causes share it, and
-    /// not all of them start anything:
+    /// The wake stopped without leaving the session running under an
+    /// un-parked row, for a cause that has no case of its own. Several causes
+    /// share it, and not all of them start anything:
     ///
-    /// - a Codex wake that cannot deliver its initial prompt, or whose resume
-    ///   could not be prepared;
+    /// - a Codex wake that carries an initial prompt, refused once the row is
+    ///   known to be a parked holder row with a resume plan, and before the
+    ///   worktree, condition, directory and profile checks;
+    /// - a Codex resume that could not be prepared;
     /// - a row that changed while the wake prepared or launched;
     /// - a holder spawn that failed or could not be attempted;
     /// - a running session, a replacement just started or a holder already

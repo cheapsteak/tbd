@@ -152,9 +152,10 @@ extension RPCRouter {
         case .notAClaudeTab(let kind):
             return RPCResponse(error: ClaudeResumeDecision.notAClaudeTabReason(kind))
         case .respawnFailed(let reason):
-            // The terminal row exists — the wake could not start the session
-            // (a holder that failed to spawn). Surface the real failure, never
-            // "Terminal not found".
+            // The terminal row exists, and the wake stopped for one of the
+            // causes `WakeResult.respawnFailed` lists: a holder spawn that
+            // failed, or a decline that started nothing. Surface the real
+            // cause, never "Terminal not found".
             return RPCResponse(error: reason)
         case .onTmux(let reason):
             return RPCResponse(error: reason, code: RPCErrorCode.terminalOnTmux.rawValue)
