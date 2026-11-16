@@ -124,20 +124,31 @@ no tmux binary for either. The server is gone only when both say so.
   every socket probe in the daemon reads them.
 - **The process table.** A tmux server keeps the command line of the client
   that started it, `tmux -u -L <server> …`. This signal says gone only when the
-  process table was read and no live process of this user whose executable is
-  named `tmux` (by `proc_pidpath`) names the server with `-L` in its argv (from
-  `KERN_PROCARGS2`). The argv is read as tmux's `getopt` reads it, so
-  `-L <server>`, `-L<server>` and a cluster such as `-uL <server>` all count.
-  "This user" is the daemon's `getuid()`, compared with each tmux process's
-  real user id (`proc_pidinfo` with `PROC_PIDT_SHORTBSDINFO`, which the kernel
-  answers for any user's process). tmux keeps each user's sockets under
-  `tmux-<uid>`, so another user's tmux cannot be a server this user's rows
-  name, and its argv is not read; the kernel would refuse it to a daemon that
-  is not root, and an unreadable argv would otherwise keep every server
-  running for as long as that user's tmux runs. A tmux process whose owner
-  cannot be read counts as this user's. One of this user's whose argv cannot
-  be read counts as running for every server, and so does a process table
-  that cannot be read.
+  process table was read and no live tmux process of this user names the
+  server with `-L` in its argv (from `KERN_PROCARGS2`). The argv is read as
+  tmux's `getopt` reads it, so `-L <server>`, `-L<server>` and a cluster such
+  as `-uL <server>` all count.
+  - **Which processes are tmux** – a process is tmux when its kernel command
+    name (`p_comm`, from the same `sysctl(KERN_PROC_ALL)` read that lists the
+    table) or the last component of its executable path (`proc_pidpath`) is
+    `tmux`, or is the name of the binary saved through the tmux path fallback
+    (`TmuxExecutableResolver`), which accepts any name. The kernel cuts a
+    command name to 16 bytes (`MAXCOMLEN`), so the saved name is cut the same
+    way before it is compared. The command name is what matters when a package
+    manager upgrades tmux: it deletes the old version's binary, a server
+    started from it keeps running, and `proc_pidpath` fails for that server
+    from then on, while its command name stays `tmux`. The path covers a
+    binary started through a link of another name.
+  - **Whose** – "this user" is the daemon's `getuid()`, compared with each
+    process's real user id (`p_ruid`, from the same table read). tmux keeps
+    each user's sockets under `tmux-<uid>`, so another user's tmux cannot be a
+    server this user's rows name, and nothing more is asked of it; the kernel
+    would refuse its argv to a daemon that is not root, and an unreadable argv
+    would otherwise keep every server running for as long as that user's tmux
+    runs.
+  - **What counts as running** – one of this user's tmux processes whose argv
+    cannot be read counts as running for every server, and so does a process
+    table that cannot be read.
 
 The socket cannot settle it alone, because its candidates are only as good as
 the environment and working directory they come from, and those are this
@@ -352,11 +363,16 @@ never unlinks it, and nothing TBD runs creates one any more.
   is gone; one whose argv cannot be read is running, for any server; another
   user's, with an argv that cannot be read, is gone; no tmux process is gone;
   a table that cannot be read is running; and a socket that answers is running
-  without the table being read. Another user's process is passed over even
-  when its argv names the server, and one whose owner cannot be read counts as
-  this user's. The lister, over injected lookups, never asks for another
-  user's argv. The `-L` matcher finds the separate, joined and clustered forms
-  and nothing else, and the argv reader stops before the environment.
+  without the table being read. A tmux whose binary was deleted, so its path
+  cannot be read, is still found by its command name and keeps the server it
+  names running. Another user's process is passed over even when its argv
+  names the server. The lister, over a literal table, finds tmux by command
+  name, by path, and by the saved binary's name cut to 16 bytes, asks for a
+  path only when the command name does not settle it, and asks nothing of
+  another user's process; against the real kernel, the table gives a started
+  process's command name and real user id. The `-L` matcher finds the
+  separate, joined and clustered forms and nothing else, and the argv reader
+  stops before the environment.
 - Reconcile parks a live resumable tmux row whose server is gone, keeping its
   session id, deletes a live shell row on such a server, leaves a row whose
   server may run live and untouched, never probes a parked row, and asks the

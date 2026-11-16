@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Testing
 import TestSupport
+import TBDShared
 @testable import TBDDaemonLib
 
 /// `LeftoverTmuxServerProbe` — whether a tmux server an earlier build started
@@ -429,45 +430,143 @@ struct LeftoverTmuxServerProbeTests {
 
     // MARK: - Which processes are tmux, and whose
 
-    /// The lister over a fake table: pid 10 is this user's tmux, 11 another
-    /// user's tmux, 12 a tmux whose owner cannot be read, 13 not tmux, and 14
-    /// a process whose path cannot be read. Only 10 and 12 have their command
-    /// lines asked for.
-    @Test("the lister reads the command line of every tmux process but another user's")
-    func theListerSkipsAnotherUsersCommandLine() {
+    /// Starts `path` with exactly `argv`, `argv[0]` included, and an empty
+    /// environment, and returns its pid. `endChild(_:)` ends and reaps it.
+    private static func spawnChild(path: String, argv: [String]) throws -> pid_t {
+        var pid: pid_t = 0
+        var arguments: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }
+        arguments.append(nil)
+        defer { for argument in arguments { free(argument) } }
+        var environment: [UnsafeMutablePointer<CChar>?] = [nil]
+        let code = posix_spawn(&pid, path, nil, nil, &arguments, &environment)
+        try #require(code == 0, "posix_spawn of \(path) failed with \(code)")
+        return pid
+    }
+
+    private static func endChild(_ pid: pid_t) {
+        kill(pid, SIGKILL)
+        var status: Int32 = 0
+        _ = waitpid(pid, &status, 0)
+    }
+
+    /// The case the command name exists for: a package manager upgraded tmux
+    /// and deleted the old version's binary, so `proc_pidpath` fails for the
+    /// server still running from it. Its kernel command name is still `tmux`,
+    /// and its command line still names the server.
+    @Test("every socket absent and a tmux whose binary was deleted, naming the server, reads as running")
+    func aTmuxWhoseBinaryWasDeletedReadsAsRunning() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        _ = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
+        let table = ProcessTableSnapshot(entries: [
+            4242: ProcessTableSnapshot.Entry(
+                parent: 1, startedAt: nil, command: "tmux", realUserID: getuid()),
+        ])
+        let raw = Self.procArgs(
+            argc: 4, path: "/opt/acme/Cellar/tmux/3.4/bin/tmux",
+            argv: ["/opt/acme/bin/tmux", "-u", "-L", "tbd-acme"], environment: [])
+        let probe = LeftoverTmuxServerProbe.production(
+            environment: [:],
+            fallbackRoot: "\(root)/fallback",
+            tmuxProcesses: { uid in
+                LeftoverTmuxServerProbe.tmuxProcesses(
+                    in: table, uid: uid, names: ["tmux"],
+                    executablePath: { _ in nil },
+                    procArgs: { _ in raw })
+            })
+
+        #expect(await probe.state("tbd-acme") == .running)
+        #expect(await probe.state("tbd-other") == .absent)
+    }
+
+    /// The lister over a literal table. With `acme-terminal-multiplexer` saved
+    /// as the tmux binary:
+    ///
+    /// - 10, this user's `tmux`, is listed by its command name.
+    /// - 11, another user's `tmux`, is passed over with nothing asked of it.
+    /// - 12, a `tmux` whose owner the table does not give, is listed.
+    /// - 13, this user's `zsh`, is not tmux.
+    /// - 14, this user's `tmux` whose binary was deleted, is listed by its
+    ///   command name, with no path to read.
+    /// - 15, run through a link named `acme-mux`, is listed by its path.
+    /// - 16, the saved binary, is listed by its command name, which the kernel
+    ///   cut to 16 bytes, with no path to read.
+    /// - 17, this user's `sleep` with no path to read, is not tmux.
+    ///
+    /// The path is asked for only when the command name does not settle it,
+    /// and a command line only for a listed process.
+    @Test("the lister finds tmux by command name or path, and passes over another user's processes")
+    func theListerFindsTmuxByCommandNameOrPath() {
         let uid = getuid()
+        let entry = { (command: String, owner: uid_t?) in
+            ProcessTableSnapshot.Entry(parent: 1, startedAt: nil, command: command, realUserID: owner)
+        }
+        let table = ProcessTableSnapshot(entries: [
+            10: entry("tmux", uid), 11: entry("tmux", Self.anotherUser), 12: entry("tmux", nil),
+            13: entry("zsh", uid), 14: entry("tmux", uid), 15: entry("acme-mux", uid),
+            16: entry("acme-terminal-mu", uid), 17: entry("sleep", uid),
+        ])
         let paths: [pid_t: String] = [
-            10: "/opt/acme/bin/tmux", 11: "/usr/local/bin/tmux",
-            12: "/opt/acme/bin/tmux", 13: "/bin/zsh",
+            10: "/opt/acme/bin/tmux", 11: "/usr/local/bin/tmux", 12: "/opt/acme/bin/tmux",
+            13: "/bin/zsh", 15: "/opt/acme/Cellar/tmux/3.4/bin/tmux",
         ]
-        let owners: [pid_t: uid_t] = [10: uid, 11: Self.anotherUser, 13: uid, 14: uid]
-        var asked: [pid_t] = []
+        var pathsAsked: [pid_t] = []
+        var argvAsked: [pid_t] = []
 
         let processes = LeftoverTmuxServerProbe.tmuxProcesses(
-            among: [10, 11, 12, 13, 14],
+            in: table,
             uid: uid,
-            executablePath: { paths[$0] },
-            owner: { owners[$0] },
+            names: LeftoverTmuxServerProbe.tmuxExecutableNames(
+                savedPath: "/opt/acme/bin/acme-terminal-multiplexer"),
+            executablePath: { pid in
+                pathsAsked.append(pid)
+                return paths[pid]
+            },
             procArgs: { pid in
-                asked.append(pid)
+                argvAsked.append(pid)
                 return Self.procArgs(argc: 3, path: "/opt/acme/bin/tmux",
                                      argv: ["tmux", "-L", "tbd-\(pid)"], environment: [])
             })
 
-        #expect(asked == [10, 12])
-        #expect(processes == [
-            LeftoverTmuxProcess(pid: 10, owner: uid, arguments: ["tmux", "-L", "tbd-10"]),
-            LeftoverTmuxProcess(pid: 11, owner: Self.anotherUser, arguments: nil),
-            LeftoverTmuxProcess(pid: 12, owner: nil, arguments: ["tmux", "-L", "tbd-12"]),
-        ])
+        #expect(pathsAsked == [13, 15, 17])
+        #expect(argvAsked == [10, 12, 14, 15, 16])
+        #expect(processes.map(\.pid) == [10, 12, 14, 15, 16])
+        #expect(processes.first == LeftoverTmuxProcess(
+            pid: 10, owner: uid, arguments: ["tmux", "-L", "tbd-10"]))
+        #expect(processes.dropFirst().first?.owner == nil)
     }
 
-    /// The real kernel call, against this process: the owner it reads is the
-    /// one `getuid()` reports.
-    @Test("the real user id read for this process is getuid()")
-    func realUserIDOfThisProcess() {
-        #expect(LeftoverTmuxServerProbe.realUserID(of: getpid()) == getuid())
-        #expect(LeftoverTmuxServerProbe.realUserID(of: 0) == nil)
+    @Test("the tmux names are tmux alone when no tmux path is saved")
+    func theTmuxNamesWithoutASavedPath() {
+        #expect(LeftoverTmuxServerProbe.tmuxExecutableNames(savedPath: nil) == ["tmux"])
+    }
+
+    /// A saved path can be a link: the binary runs under the link's name or
+    /// the name it resolves to, depending on how it was started, so both
+    /// count.
+    @Test("a saved tmux path adds its name and the name it resolves to")
+    func theTmuxNamesWithASavedLink() throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let binary = "\(root)/acme-mux-3.4"
+        #expect(FileManager.default.createFile(atPath: binary, contents: Data()))
+        try FileManager.default.createSymbolicLink(
+            atPath: "\(root)/acme-mux", withDestinationPath: binary)
+
+        #expect(LeftoverTmuxServerProbe.tmuxExecutableNames(savedPath: "\(root)/acme-mux")
+            == ["tmux", "acme-mux", "acme-mux-3.4"])
+    }
+
+    /// The real kernel read: a process this test starts appears in the table
+    /// under the command name it was executed as, owned by this user.
+    @Test("the process table gives a real process's command name and real user id")
+    func theTableGivesARealProcesssCommandNameAndOwner() throws {
+        let pid = try Self.spawnChild(path: "/bin/sleep", argv: ["sleep", "30"])
+        defer { Self.endChild(pid) }
+
+        let entry = try #require(ProcessTableSnapshot.read()?.entries[pid])
+        #expect(entry.command == "sleep")
+        #expect(entry.realUserID == getuid())
     }
 
     // MARK: - Which command lines name the server

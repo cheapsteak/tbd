@@ -17,11 +17,11 @@ enum LeftoverTmuxServerState: Sendable, Equatable {
 /// reads it.
 struct LeftoverTmuxProcess: Sendable, Equatable {
     let pid: pid_t
-    /// The process's real user id, or nil when the kernel would not give it.
+    /// The process's real user id, or nil when the process table did not give
+    /// it.
     let owner: uid_t?
     /// The process's argv, `argv[0]` included, or nil when the kernel would
-    /// not give it, or when it was not asked because the process belongs to
-    /// another user.
+    /// not give it.
     let arguments: [String]?
 }
 
@@ -71,13 +71,13 @@ struct LeftoverTmuxServerSighting: Sendable, Equatable {
 /// - **The socket.** A plain connect to every place this daemon can work out
 ///   the server's socket may be (`candidateSocketPaths`). Every candidate must
 ///   be positively absent.
-/// - **The process table.** No live process of this user whose executable is
-///   tmux may name the server with `-L`
-///   (`processState(server:processes:uid:)`). A tmux server keeps the command
-///   line of the client that started it, so a running server names itself
-///   there wherever its socket is. Another user's tmux processes are left out:
-///   tmux keeps each user's sockets under `tmux-<uid>`, so none of them can be
-///   a server this user's rows name.
+/// - **The process table.** No live tmux process of this user may name the
+///   server with `-L` (`processState(server:processes:uid:)`). A tmux server
+///   keeps the command line of the client that started it, so a running server
+///   names itself there wherever its socket is. A process is tmux by its
+///   kernel command name or its executable's name (`isTmux`). Another user's
+///   tmux processes are left out: tmux keeps each user's sockets under
+///   `tmux-<uid>`, so none of them can be a server this user's rows name.
 ///
 /// The socket alone cannot settle it, because the candidates come from this
 /// daemon's environment and working directory, and the daemon that started the
@@ -253,66 +253,89 @@ struct LeftoverTmuxServerProbe: Sendable {
         return false
     }
 
-    /// Every live process whose executable is tmux, with its owner and, unless
-    /// it belongs to a user other than `uid`, its command line; nil when the
-    /// process table could not be read.
+    /// Every live process of `uid`'s that is tmux, with its command line; nil
+    /// when the process table could not be read.
     ///
-    /// The table is one `sysctl(KERN_PROC_ALL)` (`ProcessTableSnapshot`), a
-    /// process's executable its `proc_pidpath` (`ProcessLiveness`), its owner
-    /// its real user id (`realUserID(of:)`), and its command line the argv in
-    /// its `KERN_PROCARGS2` buffer (`ProcessEnvironmentReader.procArgs`).
+    /// The table is one `sysctl(KERN_PROC_ALL)` (`ProcessTableSnapshot`),
+    /// which gives each process's real user id and command name. A process's
+    /// executable path is its `proc_pidpath` (`ProcessLiveness`), and its
+    /// command line the argv in its `KERN_PROCARGS2` buffer
+    /// (`ProcessEnvironmentReader.procArgs`).
     static func liveTmuxProcesses(uid: uid_t) -> [LeftoverTmuxProcess]? {
         guard let table = ProcessTableSnapshot.read() else { return nil }
         return tmuxProcesses(
-            among: table.entries.keys.sorted(),
+            in: table,
             uid: uid,
+            names: tmuxExecutableNames(savedPath: TmuxExecutableResolver().savedPath),
             executablePath: { ProcessLiveness.executablePath(pid: $0) },
-            owner: { realUserID(of: $0) },
             procArgs: { ProcessEnvironmentReader.procArgs(pid: $0) })
     }
 
-    /// The tmux processes among `pids`, each read through the given lookups.
+    /// The processes of `uid` in `table` that are tmux, by `isTmux`, each
+    /// with the command line `procArgs` gives.
     ///
-    /// A process whose executable path cannot be read is not counted as tmux.
-    /// The command line of a process another user owns is not asked for: it
-    /// cannot be one of `uid`'s servers, and the kernel would not give it to
-    /// a daemon that is not root anyway. A process whose owner cannot be read
-    /// is asked, as one of `uid`'s.
+    /// A process the table says another user owns is passed over before
+    /// anything else is asked of it: tmux keeps each user's sockets under
+    /// `tmux-<uid>`, so it cannot be one of `uid`'s servers, and the kernel
+    /// would not give its command line to a daemon that is not root anyway. A
+    /// process whose owner the table does not give counts as one of `uid`'s.
     static func tmuxProcesses(
-        among pids: [pid_t],
+        in table: ProcessTableSnapshot,
         uid: uid_t,
+        names: Set<String>,
         executablePath: (pid_t) -> String?,
-        owner: (pid_t) -> uid_t?,
         procArgs: (pid_t) -> [UInt8]?
     ) -> [LeftoverTmuxProcess] {
         var processes: [LeftoverTmuxProcess] = []
-        for pid in pids {
-            guard let path = executablePath(pid),
-                  (path as NSString).lastPathComponent == "tmux" else { continue }
-            let processOwner = owner(pid)
-            if let processOwner, processOwner != uid {
-                processes.append(LeftoverTmuxProcess(pid: pid, owner: processOwner, arguments: nil))
-                continue
-            }
+        for (pid, entry) in table.entries.sorted(by: { $0.key < $1.key }) {
+            if let owner = entry.realUserID, owner != uid { continue }
+            let tmux = isTmux(
+                command: entry.command, executablePath: executablePath(pid), names: names)
+            guard tmux else { continue }
             let argv = procArgs(pid).flatMap { Self.arguments(inProcArgs: $0) }
-            processes.append(LeftoverTmuxProcess(pid: pid, owner: processOwner, arguments: argv))
+            processes.append(LeftoverTmuxProcess(pid: pid, owner: entry.realUserID, arguments: argv))
         }
         return processes
     }
 
-    /// The real user id of the process holding `pid`, or nil when it is gone
-    /// or the kernel would not say.
+    /// The names a tmux binary runs under: `tmux`, which is what the daemon's
+    /// `PATH` lookup finds, and the last component of the path saved through
+    /// `TmuxExecutableResolver`'s fallback, which accepts a binary of any
+    /// name, both as saved and with its symlinks resolved.
+    static func tmuxExecutableNames(savedPath: String?) -> Set<String> {
+        var names: Set<String> = ["tmux"]
+        if let savedPath {
+            names.insert((savedPath as NSString).lastPathComponent)
+            if let resolved = resolvedPath(savedPath) {
+                names.insert((resolved as NSString).lastPathComponent)
+            }
+        }
+        names.remove("")
+        return names
+    }
+
+    /// Whether a process is tmux: its command name is one of `names` cut to
+    /// `MAXCOMLEN` bytes, as the kernel cuts it, or the last component of its
+    /// executable path is one of `names`.
     ///
-    /// Read with `PROC_PIDT_SHORTBSDINFO`, which the kernel answers for any
-    /// user's process. `PROC_PIDTBSDINFO` carries the same field but answers
-    /// only for the caller's own processes unless the caller is root, so it
-    /// could never say a process is someone else's.
-    static func realUserID(of pid: pid_t) -> uid_t? {
-        guard pid > 0 else { return nil }
-        var info = proc_bsdshortinfo()
-        let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
-        guard proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size else { return nil }
-        return info.pbsi_ruid
+    /// The command name comes first because it survives the binary being
+    /// deleted: a package manager that upgrades tmux removes the old version's
+    /// files, a server started from them keeps running, and from then on
+    /// `proc_pidpath` fails for it. The path is asked only when the command
+    /// name does not match, and covers a binary run through a link of another
+    /// name.
+    static func isTmux(
+        command: String?, executablePath: @autoclosure () -> String?, names: Set<String>
+    ) -> Bool {
+        if let command, names.contains(where: { commandName($0) == command }) { return true }
+        guard let path = executablePath() else { return false }
+        return names.contains((path as NSString).lastPathComponent)
+    }
+
+    /// `name` as the kernel keeps it for a process it was executed as: its
+    /// first `MAXCOMLEN` bytes. Nil when that cut splits a character.
+    static func commandName(_ name: String) -> String? {
+        String(bytes: name.utf8.prefix(Int(MAXCOMLEN)), encoding: .utf8)
     }
 
     /// The argv in a `KERN_PROCARGS2` buffer, `argv[0]` included, or nil when
