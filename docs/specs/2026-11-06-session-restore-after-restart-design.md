@@ -104,15 +104,16 @@ skipped.
 
 A row can also stop qualifying after the pass selects it. The pass selects once and takes about 90
 seconds, so during a gap the user can wake a row and park it again, or archive its worktree.
-Starting such a row would be wrong. For an `exited` row it would be destructive, because the wake is
-`respawn-window -k` and kills the idle shell the user is in. So the reason, the time limit and the
-worktree status are one predicate, `SessionRestoreCondition`. Selection uses it, and the pass hands
-it to each wake. `handleTerminalWake` passes it to `HibernationCoordinator.wake`, which evaluates it
-after its singleflight claim, on the row it has just read. A check in the pass would be too early,
-because the admission command can run for up to 10 seconds before the wake.
+Starting such a row would be wrong, because a wake starts a new holder running the agent's resume
+command: it would bring back a session the user parked on purpose, or start an agent in a worktree
+they archived. So the reason, the time limit and the worktree status are one predicate,
+`SessionRestoreCondition`. Selection uses it, and the pass hands it to each wake.
+`handleTerminalWake` passes it to `HibernationCoordinator.wake`, which evaluates it after its
+singleflight claim, on the row it has just read. A check in the pass would be too early, because the
+admission command can run for up to 10 seconds before the wake.
 
 On a mismatch the wake answers `.conditionNotMet`, starts nothing and changes nothing, and the pass
-counts the row as skipped. Every other caller names no condition and behaves as before.
+counts the row as skipped. Every other caller names no condition, and its wake evaluates none.
 
 An archive flips the worktree's status before it deletes the worktree's rows. A row whose status has
 flipped counts as skipped. A row already deleted answers `.notFound` and counts as failed, and the
@@ -262,7 +263,7 @@ Pass behavior, on a test clock:
   names no condition still wakes a `manual` row.
 - Each wake's actuation row names the `session-restore` rail.
 - A failed spawn leaves the row parked and the pass continues.
-- A wake names no size, so a window it recreates takes the default.
+- A wake names no size, so the holder it starts takes the default size.
 - A holder row is selected, and its wake takes the holder path and reaches no tmux.
 - The startup step starts no pass in mock mode, and starts one otherwise.
 
