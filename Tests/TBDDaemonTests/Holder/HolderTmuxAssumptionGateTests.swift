@@ -673,7 +673,7 @@ struct HolderTmuxAssumptionGateTests {
         let tmuxResult = await coordinator(db, tmux: TmuxManager(dryRun: true))
             .manualHibernate(terminalID: tmuxRow.id)
         #expect(
-            tmuxResult == .notEligible(reason: LeftoverTmuxSession.stillRunningRefusal(
+            tmuxResult == .onTmux(reason: LeftoverTmuxSession.stillRunningRefusal(
                 terminalID: tmuxRow.id, server: wt.tmuxServer)),
             "\(tmuxResult)")
         let holderResult = await coordinator(
@@ -700,7 +700,7 @@ struct HolderTmuxAssumptionGateTests {
 
         let result = await coordinator(db, tmux: deadWindowTmux(recorded))
             .manualHibernate(terminalID: terminal.id)
-        #expect(result == .notEligible(reason: LeftoverTmuxSession.stillRunningRefusal(
+        #expect(result == .onTmux(reason: LeftoverTmuxSession.stillRunningRefusal(
             terminalID: terminal.id, server: wt.tmuxServer)), "\(result)")
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before)

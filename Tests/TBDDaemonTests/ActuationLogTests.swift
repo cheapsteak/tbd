@@ -224,6 +224,8 @@ struct ActuationLogTests {
         #expect(ActuationOutcome.classify(HibernateResult.alreadyHibernated) == .refused(.noop))
         #expect(ActuationOutcome.classify(HibernateResult.notEligible(reason: "running"))
             == .refused(.notEligible))
+        #expect(ActuationOutcome.classify(HibernateResult.onTmux(reason: "still running in tmux"))
+            == .refused(.notEligible))
         #expect(ActuationOutcome.classify(HibernateResult.notFound) == .refused(.notFound))
 
         #expect(ActuationOutcome.classify(WakeResult.ok(sessionIncarnationID: nil)) == .dispatched)

@@ -54,7 +54,7 @@ public struct AutoHibernateOnMergeCoordinator: Sendable {
                     logger.debug("merge-park skipped \(terminal.id, privacy: .public): already hibernated")
                 case .notFound:
                     logger.debug("merge-park skipped \(terminal.id, privacy: .public): not found")
-                case .notEligible(let reason):
+                case .notEligible(let reason), .onTmux(let reason):
                     logger.debug("merge-park skipped \(terminal.id, privacy: .public): \(reason, privacy: .public)")
                 }
             }

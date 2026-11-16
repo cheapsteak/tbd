@@ -179,4 +179,43 @@ import TestSupport
                 "a refused wake changed the row")
     }
 
+    // MARK: - A park of a row still on tmux
+
+    /// `terminal.hibernate`, and the legacy `terminal.suspend` shim.
+    enum ParkVerb: Sendable {
+        case hibernate
+        case suspend
+
+        func request(_ terminalID: UUID) throws -> RPCRequest {
+            switch self {
+            case .hibernate:
+                return try RPCRequest(
+                    method: RPCMethod.terminalHibernate,
+                    params: TerminalHibernateParams(terminalID: terminalID))
+            case .suspend:
+                return try RPCRequest(
+                    method: RPCMethod.terminalSuspend,
+                    params: TerminalSuspendParams(terminalID: terminalID))
+            }
+        }
+    }
+
+    /// A park of a row live on tmux is refused like its wake: TBD can neither
+    /// reach nor stop that session, so the answer is the still-running advice
+    /// with `RPCErrorCode.terminalOnTmux`, and the row is left as it was.
+    @Test(arguments: [ParkVerb.hibernate, .suspend])
+    func aParkOfALiveTmuxRowIsRefusedWithTheTmuxCode(_ verb: ParkVerb) async throws {
+        let (router, db) = try makeRouter()
+        let terminal = try await makeTerminal(db, tag: "repoP", transport: .tmux)
+
+        let resp = await router.handle(try verb.request(terminal.id))
+
+        #expect(!resp.success, "a live tmux row's park reported success")
+        #expect(resp.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
+        #expect(resp.error
+            == LeftoverTmuxSession.stillRunningRefusal(terminalID: terminal.id, server: "s"))
+        #expect(try await db.terminals.get(id: terminal.id) == terminal,
+                "a refused park changed the row")
+    }
+
 }

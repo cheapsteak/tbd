@@ -9,6 +9,13 @@ public enum HibernateResult: Equatable, Sendable {
     case ok
     case alreadyHibernated
     case notEligible(reason: String)
+    /// The row is live on the tmux transport, which TBD no longer reaches or
+    /// stops (`liveTmuxParkRefusal`). Nothing was touched; `reason` says the
+    /// session may still be running in tmux and how to end it. Kept apart
+    /// from `notEligible` so the park RPCs can answer it with
+    /// `RPCErrorCode.terminalOnTmux`, as every other request such a row
+    /// refuses does. The actuation record calls it `not-eligible`.
+    case onTmux(reason: String)
     case notFound
 }
 
@@ -935,12 +942,12 @@ public actor HibernationCoordinator {
     /// for a holder row.
     ///
     /// TBD no longer drives tmux, so it can neither stop such a session nor
-    /// keep its identity across a stop. A live row is refused with the
-    /// still-running advice, which names the command that ends it; a row
-    /// already parked there answers `.alreadyHibernated`. The idle markers are
-    /// cleared either way, because the condition outlasts every later sweep. A
-    /// tmux row is parked only once its server is positively gone, and not by
-    /// this coordinator: see `WorktreeLifecycle.parkLeftoverTmuxRow`.
+    /// keep its identity across a stop. A live row is refused (`.onTmux`)
+    /// with the still-running advice, which names the command that ends it; a
+    /// row already parked there answers `.alreadyHibernated`. The idle markers
+    /// are cleared either way, because the condition outlasts every later
+    /// sweep. A tmux row is parked only once its server is positively gone,
+    /// and not by this coordinator: see `WorktreeLifecycle.parkLeftoverTmuxRow`.
     private func liveTmuxParkRefusal(_ terminal: Terminal) async -> HibernateResult? {
         guard terminal.transport != .holder else { return nil }
         idleSince[terminal.id] = nil
@@ -950,7 +957,7 @@ public actor HibernationCoordinator {
             return .notFound
         }
         logger.info("hibernate: refusing \(terminal.id, privacy: .public) — it is live on the tmux transport, which TBD no longer parks")
-        return .notEligible(reason: LeftoverTmuxSession.stillRunningRefusal(
+        return .onTmux(reason: LeftoverTmuxSession.stillRunningRefusal(
             terminalID: terminal.id, server: worktree.tmuxServer))
     }
 

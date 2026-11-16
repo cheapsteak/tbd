@@ -17,7 +17,8 @@ extension ActuationOutcome {
         switch result {
         case .ok: return .dispatched
         case .alreadyHibernated: return .refused(.noop)
-        case .notEligible: return .refused(.notEligible)
+        // A row live on tmux is declined like any other ineligible row.
+        case .notEligible, .onTmux: return .refused(.notEligible)
         case .notFound: return .refused(.notFound)
         }
     }
@@ -26,7 +27,7 @@ extension ActuationOutcome {
         switch result {
         case .ok: return nil
         case .alreadyHibernated: return "already parked"
-        case .notEligible(let reason): return reason
+        case .notEligible(let reason), .onTmux(let reason): return reason
         case .notFound: return "Terminal not found"
         }
     }

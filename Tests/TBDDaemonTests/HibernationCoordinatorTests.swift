@@ -320,7 +320,7 @@ struct HibernationCoordinatorTests {
 
         let result = await coord.manualHibernate(terminalID: terminalID)
 
-        #expect(result == .notEligible(reason: LeftoverTmuxSession.stillRunningRefusal(
+        #expect(result == .onTmux(reason: LeftoverTmuxSession.stillRunningRefusal(
             terminalID: terminalID, server: worktree.tmuxServer)),
                 "a live tmux row's park did not say it is still running: \(result)")
         #expect(try await db.terminals.get(id: terminalID) == before,
@@ -341,7 +341,7 @@ struct HibernationCoordinatorTests {
             sessionTitles: ClaudeSessionTitleStore(), actuationLog: ActuationLog(path: logPath))
 
         #expect(await coord.hibernateForMerge(terminalID: terminalID)
-            == .notEligible(reason: LeftoverTmuxSession.stillRunningRefusal(
+            == .onTmux(reason: LeftoverTmuxSession.stillRunningRefusal(
                 terminalID: terminalID, server: worktree.tmuxServer)))
         #expect(try await db.terminals.get(id: terminalID) == before,
                 "a refused merge-park changed the row")
@@ -357,7 +357,7 @@ struct HibernationCoordinatorTests {
         let worktree = try #require(try await db.worktrees.get(id: worktreeID))
 
         #expect(await coordinator(db).parkForProfileSwap(terminalID: terminalID)
-            == .notEligible(reason: LeftoverTmuxSession.stillRunningRefusal(
+            == .onTmux(reason: LeftoverTmuxSession.stillRunningRefusal(
                 terminalID: terminalID, server: worktree.tmuxServer)))
         #expect(try await db.terminals.get(id: terminalID) == before,
                 "a refused profile-swap park changed the row")
@@ -2264,6 +2264,7 @@ struct RPCRouterWakePromptDeliveryTests {
         #expect(resp.error == LeftoverTmuxSession.stillRunningRefusal(
             terminalID: terminal.id, server: "tbd-wake-prompt"),
                 "the RPC error is not the still-running advice: \(resp.error ?? "nil")")
+        #expect(resp.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
         #expect(recorded.snapshot().isEmpty,
                 "a refused wake must not touch tmux; got: \(recorded.snapshot())")
     }

@@ -2815,6 +2815,10 @@ extension RPCRouter {
         case .notEligible(let reason):
             logger.warning("inPlace swap: could not pause holder terminal \(oldTerminal.id, privacy: .public) for its account switch: \(reason, privacy: .public)")
             return (RPCResponse(error: reason), reason)
+        case .onTmux(let reason):
+            // Unreachable while the swap branches on the transport first;
+            // answered as every other tmux refusal is.
+            return (RPCResponse(error: reason, code: RPCErrorCode.terminalOnTmux.rawValue), reason)
         }
         guard let parkedRow = try await db.terminals.get(id: oldTerminal.id),
               parkedRow.isParked else {

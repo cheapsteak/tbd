@@ -40,6 +40,8 @@ extension RPCRouter {
             return .ok()
         case .notEligible(let reason):
             return RPCResponse(error: reason)
+        case .onTmux(let reason):
+            return RPCResponse(error: reason, code: RPCErrorCode.terminalOnTmux.rawValue)
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         }
