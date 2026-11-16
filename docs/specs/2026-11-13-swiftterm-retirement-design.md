@@ -37,8 +37,8 @@ fork of it. The work runs in four streams:
     SwiftTerm on CoreGraphics. #1443 removed the frame drops under bulk output.
   - **Soak** – the maintainer has used the engine daily since it shipped, and no app crash
     report from that time has libghostty frames.
-  - **Gaps** – the maintainer ruled that the remaining gaps (listed under A) are not
-    daily-use gaps.
+  - **Gaps** – the maintainer ruled that the remaining gaps and differences (listed under
+    A) are not daily-use gaps.
 - **Two engines cost more than one.** Each change to the viewer contract lands twice: the
   contract suites run against both engines, the handback has two writers, and the fork
   carries patches that upstream SwiftTerm lacks (public saved modes, a parser-boundary
@@ -75,7 +75,13 @@ fork of it. The work runs in four streams:
     is over it with Command held.
   - Link detection runs at mouse-down, so a Command-drag that starts on a URL opens it.
   - Faint text draws at reduced alpha, where SwiftTerm blended it with the background.
-  - libghostty leaves the kitty graphics query (`a=q`) unanswered. SwiftTerm answered it.
+- **A difference that stays** – libghostty leaves the kitty graphics query (`a=q`)
+  unanswered, where SwiftTerm answers `OK`. SwiftTerm's fork draws kitty images and
+  libghostty draws none, so an `OK` would tell a program that its images will show when
+  they will not. No answer is what any terminal without the protocol gives, and a program
+  that asks then carries on without images. The
+  [engine design](2026-11-07-libghostty-terminal-engine-design.md) makes the same choice
+  under "Kitty images", and the test `kittyGraphicsQueryGetsNoOK` pins it.
 
 ## B – tmux leaves
 
