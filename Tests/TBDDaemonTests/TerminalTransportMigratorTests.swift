@@ -719,8 +719,6 @@ struct TerminalTransportMigratorTests {
         #expect(try await fixture.db.terminals.get(id: row.id) == row)
     }
 
-    /// A park whose write failed is a refusal carrying the failure, not a
-    /// skip: nothing about the person's state has to change.
     /// A tab closed before the park could take it is reported as not found,
     /// not as a session that changed. Nothing is woken.
     @Test("a park that finds the tab closed is the not-found skip, with no wake")
@@ -736,6 +734,8 @@ struct TerminalTransportMigratorTests {
         #expect(await fixture.calls == [.sighting(row.id), .park(row.id)])
     }
 
+    /// A park whose write failed is a refusal carrying the failure, not a
+    /// skip: nothing about the person's state has to change.
     @Test("a park whose write fails is refused with its failure")
     func aParkWhoseWriteFailsIsRefused() async throws {
         let fixture = try await Self.makeFixture()
