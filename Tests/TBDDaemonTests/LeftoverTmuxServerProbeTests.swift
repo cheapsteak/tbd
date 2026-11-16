@@ -22,33 +22,77 @@ struct LeftoverTmuxServerProbeTests {
         return (root, { try? FileManager.default.removeItem(atPath: root) })
     }
 
+    /// Create `path` and every directory above it, and return it.
+    private func makeDirectory(_ path: String) throws -> String {
+        try FileManager.default.createDirectory(
+            atPath: path, withIntermediateDirectories: true)
+        return path
+    }
+
     // MARK: - Where tmux puts its socket
 
-    @Test("the socket path honours TMUX_TMPDIR and names tmux-<uid>/<server>")
-    func socketPathHonoursTMUXTMPDIR() {
-        let path = LeftoverTmuxServerProbe.socketPath(
-            server: "tbd-acme", environment: ["TMUX_TMPDIR": "/tmp/acme-tmux"], uid: 501)
-
-        #expect(path == "/tmp/acme-tmux/tmux-501/tbd-acme")
-    }
-
-    /// tmux's own fallback when `TMUX_TMPDIR` is unset — and an empty value is
+    /// tmux's own fallback when `TMUX_TMPDIR` is unset, and an empty value is
     /// unset to tmux too.
-    @Test("the socket path falls back to /private/tmp when TMUX_TMPDIR is unset or empty",
+    @Test("with TMUX_TMPDIR unset or empty, the only candidate is under the fallback root",
           arguments: [[:], ["TMUX_TMPDIR": ""]] as [[String: String]])
-    func socketPathFallsBack(environment: [String: String]) {
-        let path = LeftoverTmuxServerProbe.socketPath(
+    func candidatesWithoutTMUXTMPDIR(environment: [String: String]) {
+        let paths = LeftoverTmuxServerProbe.candidateSocketPaths(
             server: "tbd-acme", environment: environment, uid: 501)
 
-        #expect(path == "/private/tmp/tmux-501/tbd-acme")
+        #expect(paths == ["/private/tmp/tmux-501/tbd-acme"])
     }
 
-    @Test("the socket path names the daemon's own uid by default")
-    func socketPathNamesTheCurrentUID() {
-        let path = LeftoverTmuxServerProbe.socketPath(
-            server: "tbd-acme", environment: ["TMUX_TMPDIR": "/tmp/acme-tmux"])
+    @Test("a TMUX_TMPDIR that resolves comes first, resolved, and the fallback follows")
+    func candidatesHonourAResolvingTMUXTMPDIR() throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let configured = try makeDirectory("\(root)/configured")
+        let resolved = try #require(LeftoverTmuxServerProbe.resolvedPath(configured))
 
-        #expect(path == "/tmp/acme-tmux/tmux-\(getuid())/tbd-acme")
+        let paths = LeftoverTmuxServerProbe.candidateSocketPaths(
+            server: "tbd-acme", environment: ["TMUX_TMPDIR": configured],
+            fallbackRoot: "\(root)/fallback", uid: 501)
+
+        #expect(paths == [
+            "\(resolved)/tmux-501/tbd-acme",
+            "\(root)/fallback/tmux-501/tbd-acme",
+        ])
+    }
+
+    /// tmux resolves `TMUX_TMPDIR` with `realpath(3)` and falls back without
+    /// a word when that fails, so a value naming nothing is not a candidate.
+    @Test("a TMUX_TMPDIR that names a missing directory is dropped")
+    func candidatesDropAMissingTMUXTMPDIR() throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+
+        let paths = LeftoverTmuxServerProbe.candidateSocketPaths(
+            server: "tbd-acme", environment: ["TMUX_TMPDIR": "\(root)/missing"],
+            fallbackRoot: "\(root)/fallback", uid: 501)
+
+        #expect(paths == ["\(root)/fallback/tmux-501/tbd-acme"])
+    }
+
+    @Test("a TMUX_TMPDIR that resolves to the fallback root gives one candidate")
+    func candidatesAreNotDuplicated() throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let created = try makeDirectory("\(root)/fallback")
+        let fallback = try #require(LeftoverTmuxServerProbe.resolvedPath(created))
+
+        let paths = LeftoverTmuxServerProbe.candidateSocketPaths(
+            server: "tbd-acme", environment: ["TMUX_TMPDIR": "\(root)/fallback"],
+            fallbackRoot: fallback, uid: 501)
+
+        #expect(paths == ["\(fallback)/tmux-501/tbd-acme"])
+    }
+
+    @Test("the candidates name the daemon's own uid by default")
+    func candidatesNameTheCurrentUID() {
+        let paths = LeftoverTmuxServerProbe.candidateSocketPaths(
+            server: "tbd-acme", environment: [:])
+
+        #expect(paths == ["/private/tmp/tmux-\(getuid())/tbd-acme"])
     }
 
     // MARK: - What a real socket answers
@@ -109,22 +153,81 @@ struct LeftoverTmuxServerProbeTests {
         #expect(await LeftoverTmuxServerProbe.state(ofSocketAt: path) == .running)
     }
 
-    /// The production probe, end to end: it builds the path from the
-    /// environment it was given and asks the socket there.
+    /// The production probe, end to end: it builds the candidates from the
+    /// environment and fallback root it was given and asks the socket at each.
     @Test("the production probe asks the socket under the given TMUX_TMPDIR")
     func theProductionProbeAsksTheConfiguredSocket() async throws {
         let (root, cleanup) = try makeScratchRoot()
         defer { cleanup() }
-        let directory = "\(root)/tmux-\(getuid())"
-        try FileManager.default.createDirectory(
-            atPath: directory, withIntermediateDirectories: true)
+        let configured = try makeDirectory("\(root)/configured/tmux-\(getuid())")
         let fd = try #require(HolderRendezvousFixture.bind(
-            at: "\(directory)/tbd-acme", listening: true, backlog: 4))
+            at: "\(configured)/tbd-acme", listening: true, backlog: 4))
         defer { close(fd) }
-        let probe = LeftoverTmuxServerProbe.production(environment: ["TMUX_TMPDIR": root])
+        _ = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
+        let probe = LeftoverTmuxServerProbe.production(
+            environment: ["TMUX_TMPDIR": "\(root)/configured"],
+            fallbackRoot: "\(root)/fallback")
 
         #expect(await probe.state("tbd-acme") == .running)
         #expect(await probe.state("tbd-acme-other") == .absent)
+    }
+
+    /// The case the candidate list exists for: tmux falls back to `/tmp` when
+    /// `TMUX_TMPDIR` names a missing directory, so a server is listening there
+    /// and only the fallback can find it.
+    @Test("a listener under the fallback root reads as running when TMUX_TMPDIR names a missing directory")
+    func aListenerUnderTheFallbackReadsAsRunning() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let fallback = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
+        let fd = try #require(HolderRendezvousFixture.bind(
+            at: "\(fallback)/tbd-acme", listening: true, backlog: 4))
+        defer { close(fd) }
+        let probe = LeftoverTmuxServerProbe.production(
+            environment: ["TMUX_TMPDIR": "\(root)/missing"],
+            fallbackRoot: "\(root)/fallback")
+
+        #expect(await probe.state("tbd-acme") == .running)
+    }
+
+    /// A listener under a `TMUX_TMPDIR` that resolves is found even though
+    /// the fallback is empty, and a listener under the fallback is found even
+    /// though that `TMUX_TMPDIR` resolves: either one answering is running.
+    @Test("a listener at either candidate reads as running")
+    func aListenerAtEitherCandidateReadsAsRunning() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        _ = try makeDirectory("\(root)/configured/tmux-\(getuid())")
+        let fallback = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
+        let fd = try #require(HolderRendezvousFixture.bind(
+            at: "\(fallback)/tbd-acme", listening: true, backlog: 4))
+        defer { close(fd) }
+        let probe = LeftoverTmuxServerProbe.production(
+            environment: ["TMUX_TMPDIR": "\(root)/configured"],
+            fallbackRoot: "\(root)/fallback")
+
+        #expect(await probe.state("tbd-acme") == .running)
+    }
+
+    @Test("a server absent from every candidate reads as gone")
+    func aServerAbsentFromEveryCandidateReadsAsGone() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let configured = try makeDirectory("\(root)/configured/tmux-\(getuid())")
+        // A socket file a gone server left behind under one candidate, and
+        // nothing at all under the other.
+        #expect(HolderRendezvousFixture.bindAndAbandon(at: "\(configured)/tbd-acme"))
+        _ = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
+        let probe = LeftoverTmuxServerProbe.production(
+            environment: ["TMUX_TMPDIR": "\(root)/configured"],
+            fallbackRoot: "\(root)/fallback")
+
+        #expect(await probe.state("tbd-acme") == .absent)
+    }
+
+    @Test("an empty candidate list proves nothing and reads as running")
+    func anEmptyCandidateListReadsAsRunning() async {
+        #expect(await LeftoverTmuxServerProbe.state(ofSocketsAt: []) == .running)
     }
 
     // MARK: - How a failed connect is read
