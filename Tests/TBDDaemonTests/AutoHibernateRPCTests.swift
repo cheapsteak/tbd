@@ -66,46 +66,63 @@ import TestSupport
 
     // MARK: - terminal.wake honesty on a row that claims awake
 
-    /// Router whose tmux reports the pane as gone — the exact live-fleet state
-    /// where the DB says awake and no pane exists.
-    private func makeRouter(paneTarget: @escaping @Sendable (String, String) throws -> PaneSendTarget)
-        throws -> (RPCRouter, TBDDatabase) {
-        let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: paneTarget)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux,
-            startTime: Date(),
-            actuationLog: makeTestActuationLog()
-        )
-        return (router, db)
+    /// The two verbs that wake one terminal: `terminal.wake`, and the legacy
+    /// `terminal.resume` shim older CLI and app builds still call. Both route
+    /// through the same coordinator, so each answer below must come from both.
+    enum WakeVerb: Sendable, Equatable {
+        case wake
+        case resume
+
+        func request(_ terminalID: UUID, prompt: String? = nil) throws -> RPCRequest {
+            switch self {
+            case .wake:
+                return try RPCRequest(
+                    method: RPCMethod.terminalWake,
+                    params: TerminalWakeParams(terminalID: terminalID, prompt: prompt))
+            case .resume:
+                return try RPCRequest(
+                    method: RPCMethod.terminalResume,
+                    params: TerminalResumeParams(terminalID: terminalID))
+            }
+        }
     }
 
-    private func makeUnparkedTerminal(_ db: TBDDatabase, tag: String) async throws -> Terminal {
+    /// A pid above the kernel's `PID_MAX`: no process can have it, so the
+    /// process table says the job a holder row records is gone.
+    private static let goneChildPID = Int32.max
+
+    private func makeTerminal(
+        _ db: TBDDatabase, tag: String, transport: TerminalTransport,
+        childPID: Int32? = nil, parked: Bool = false
+    ) async throws -> Terminal {
         let repo = try await db.repos.create(
             path: "/tmp/\(tag)-\(UUID().uuidString)", displayName: tag, defaultBranch: "main")
         let wt = try await db.worktrees.create(
             repoID: repo.id, name: "w", branch: "b",
             path: "/tmp/\(tag)-w-\(UUID().uuidString)", tmuxServer: "s")
-        return try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: "sess-1", kind: .claude)
+        let holder = transport == .holder
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id,
+            tmuxWindowID: holder ? "" : "@0", tmuxPaneID: holder ? "" : "%0",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude,
+            transport: transport, childPID: childPID)
+        if parked {
+            try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-1")
+        }
+        return try #require(try await db.terminals.get(id: terminal.id))
     }
 
-    /// The reported failure, at the level it was actually hit: `terminal.wake`
-    /// on a row that claims awake but has no pane must NOT come back as a
-    /// successful no-op. It carries a machine-readable code so an autonomous
-    /// caller can branch without matching message text.
-    @Test func wakeOnUnparkedRowWithNoPaneIsAnErrorNotASilentNoOp() async throws {
-        let (router, db) = try makeRouter(paneTarget: { _, _ in .absent })
-        let terminal = try await makeUnparkedTerminal(db, tag: "repoW")
+    /// The reported failure, at the level it was hit: a wake of a row that
+    /// claims awake but whose job is gone must NOT come back as a successful
+    /// no-op. It carries a machine-readable code so an autonomous caller can
+    /// branch without matching message text.
+    @Test(arguments: [WakeVerb.wake, .resume])
+    func aWakeOfAnUnparkedHolderRowWhoseJobIsGoneIsAnError(_ verb: WakeVerb) async throws {
+        let (router, db) = try makeRouter()
+        let terminal = try await makeTerminal(
+            db, tag: "repoW", transport: .holder, childPID: Self.goneChildPID)
 
-        let req = try RPCRequest(
-            method: RPCMethod.terminalWake,
-            params: TerminalWakeParams(terminalID: terminal.id, prompt: "do the thing"))
-        let resp = await router.handle(req)
+        let resp = await router.handle(try verb.request(terminal.id, prompt: "do the thing"))
 
         #expect(!resp.success, "a wake that reached no live session must not report success")
         #expect(resp.errorCode == RPCErrorCode.terminalSessionGone.rawValue)
@@ -116,85 +133,50 @@ import TestSupport
         #expect(resp.error?.contains("tbd terminal conversation") == true)
     }
 
-    /// Pane-id reuse (#384) at the RPC level: a live pane answering with a
-    /// different terminal's id is a refusal, not evidence of health.
-    @Test func wakeOnUnparkedRowWhosePaneAnswersAsAnotherTerminalIsAnError() async throws {
-        let stranger = UUID().uuidString
-        let (router, db) = try makeRouter(paneTarget: { _, _ in .live(terminalID: stranger) })
-        let terminal = try await makeUnparkedTerminal(db, tag: "repoW3")
+    /// The other branch: a job the process table does not show gone keeps the
+    /// benign idempotent no-op — success, and for `terminal.wake`
+    /// `woken: false`. The test's own process stands in for the job: it is
+    /// alive and not provably the row's, and only a job positively gone
+    /// changes the answer.
+    @Test(arguments: [WakeVerb.wake, .resume])
+    func aWakeOfAnUnparkedHolderRowWhoseJobRunsStaysASuccessfulNoOp(
+        _ verb: WakeVerb
+    ) async throws {
+        let (router, db) = try makeRouter()
+        let terminal = try await makeTerminal(
+            db, tag: "repoW2", transport: .holder, childPID: getpid())
 
-        let req = try RPCRequest(
-            method: RPCMethod.terminalWake,
-            params: TerminalWakeParams(terminalID: terminal.id))
-        let resp = await router.handle(req)
+        let resp = await router.handle(try verb.request(terminal.id))
 
-        #expect(!resp.success)
-        #expect(resp.errorCode == RPCErrorCode.terminalSessionGone.rawValue)
-        #expect(resp.error?.contains(stranger) == true,
-                "the message should name the terminal that actually answered")
+        #expect(resp.success, "a live job's wake did not stay a no-op: \(resp.error ?? "nil")")
+        if verb == .wake {
+            let payload = try #require(resp.result?.data(using: .utf8))
+            let decoded = try JSONDecoder().decode(TerminalWakeResult.self, from: payload)
+            #expect(decoded.woken == false)
+        }
     }
 
-    /// The other branch: a live pane keeps the benign idempotent no-op —
-    /// success with `woken: false`, exactly as before.
-    @Test func wakeOnUnparkedRowWithLivePaneStaysASuccessfulNoOp() async throws {
-        let (router, db) = try makeRouter(paneTarget: { _, _ in .live(terminalID: nil) })
-        let terminal = try await makeUnparkedTerminal(db, tag: "repoW2")
+    /// A row still on tmux is refused by both verbs with
+    /// `RPCErrorCode.terminalOnTmux`, as every other request such a row
+    /// refuses is, so a caller can branch without matching the text. A live
+    /// row's refusal says its session may still be running in tmux and how to
+    /// end it; a parked row's names `tbd terminal migrate`. Nothing is woken
+    /// and the row is left as it was.
+    @Test(arguments: [WakeVerb.wake, .resume], [false, true])
+    func aWakeOfATmuxRowIsRefusedWithTheTmuxCode(_ verb: WakeVerb, parked: Bool) async throws {
+        let (router, db) = try makeRouter()
+        let terminal = try await makeTerminal(db, tag: "repoT", transport: .tmux, parked: parked)
 
-        let req = try RPCRequest(
-            method: RPCMethod.terminalWake,
-            params: TerminalWakeParams(terminalID: terminal.id))
-        let resp = await router.handle(req)
+        let resp = await router.handle(try verb.request(terminal.id, prompt: "do the thing"))
 
-        #expect(resp.success)
-        let payload = try #require(resp.result?.data(using: .utf8))
-        let decoded = try JSONDecoder().decode(TerminalWakeResult.self, from: payload)
-        #expect(decoded.woken == false)
-    }
-
-    /// The legacy `terminal.resume` shim (still reachable from older CLI and
-    /// app builds) must give the same honest answer as `terminal.wake` — it
-    /// routes through the same coordinator, so a silent no-op here would be the
-    /// original bug surviving at the other entry point.
-    @Test func legacyResumeOnUnparkedRowWithNoPaneIsAnErrorNotASilentNoOp() async throws {
-        let (router, db) = try makeRouter(paneTarget: { _, _ in .absent })
-        let terminal = try await makeUnparkedTerminal(db, tag: "repoW5")
-
-        let req = try RPCRequest(
-            method: RPCMethod.terminalResume,
-            params: TerminalResumeParams(terminalID: terminal.id))
-        let resp = await router.handle(req)
-
-        #expect(!resp.success, "terminal.resume must not report success into a dead session")
-        #expect(resp.errorCode == RPCErrorCode.terminalSessionGone.rawValue)
-        #expect(resp.error?.contains("tbd terminal conversation") == true)
-    }
-
-    /// The benign arm of the same shim: a live pane keeps `terminal.resume`'s
-    /// historical success.
-    @Test func legacyResumeOnUnparkedRowWithLivePaneStaysSuccessful() async throws {
-        let (router, db) = try makeRouter(paneTarget: { _, _ in .live(terminalID: nil) })
-        let terminal = try await makeUnparkedTerminal(db, tag: "repoW6")
-
-        let req = try RPCRequest(
-            method: RPCMethod.terminalResume,
-            params: TerminalResumeParams(terminalID: terminal.id))
-        #expect(await router.handle(req).success)
-    }
-
-    /// Fail-closed at the RPC level too: a probe that threw keeps the benign
-    /// successful no-op rather than reporting a dead terminal.
-    @Test func wakeOnUnparkedRowWithUnreadablePaneStaysASuccessfulNoOp() async throws {
-        let (router, db) = try makeRouter(paneTarget: { _, _ in
-            throw TmuxError.timedOut(command: "tmux list-panes", timeout: .seconds(15))
-        })
-        let terminal = try await makeUnparkedTerminal(db, tag: "repoW4")
-
-        let req = try RPCRequest(
-            method: RPCMethod.terminalWake,
-            params: TerminalWakeParams(terminalID: terminal.id))
-        let resp = await router.handle(req)
-
-        #expect(resp.success, "an unreadable probe must not be reported as a dead terminal")
+        #expect(!resp.success, "a tmux row's wake reported success")
+        #expect(resp.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
+        let expected = parked
+            ? HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: terminal.id)
+            : LeftoverTmuxSession.stillRunningRefusal(terminalID: terminal.id, server: "s")
+        #expect(resp.error == expected)
+        #expect(try await db.terminals.get(id: terminal.id) == terminal,
+                "a refused wake changed the row")
     }
 
 }

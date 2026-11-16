@@ -78,9 +78,11 @@ extension RPCRouter {
             return RPCResponse(error: ClaudeResumeDecision.notAClaudeTabReason(kind))
         case .respawnFailed(let reason):
             // The terminal row exists — the wake could not start the session
-            // (a holder that failed to spawn, or a row still on tmux).
-            // Surface the real failure, never "Terminal not found".
+            // (a holder that failed to spawn). Surface the real failure, never
+            // "Terminal not found".
             return RPCResponse(error: reason)
+        case .onTmux(let reason):
+            return RPCResponse(error: reason, code: RPCErrorCode.terminalOnTmux.rawValue)
         case .worktreeMissing(let path):
             return RPCResponse(error: "Worktree directory missing on disk: \(path). Restore the directory (or relocate the repo), then retry — the session stays parked and resumable.")
         case .profileMissing(let profileID):
@@ -166,9 +168,10 @@ extension RPCRouter {
         //
         // A row parked on tmux never wakes where it is, and its refusal names
         // `tbd terminal migrate`. When nothing woke, the call answers with the
-        // first such refusal, so that advice reaches the caller instead of
-        // only the actuation log. A resume that woke another session still
-        // succeeds, as it does when any other row fails.
+        // first such refusal and its `terminalOnTmux` code, so that advice
+        // reaches the caller instead of only the actuation log. A resume that
+        // woke another session still succeeds, as it does when any other row
+        // fails.
         var firstHold: RPCResponse?
         var firstTmuxRefusal: String?
         var wokeAny = false
@@ -189,8 +192,7 @@ extension RPCRouter {
             switch result {
             case .ok:
                 wokeAny = true
-            case .respawnFailed(let reason)
-                where reason == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: terminal.id):
+            case .onTmux(let reason):
                 firstTmuxRefusal = firstTmuxRefusal ?? reason
             default:
                 break
@@ -198,7 +200,9 @@ extension RPCRouter {
         }
 
         if let firstHold { return firstHold }
-        if !wokeAny, let firstTmuxRefusal { return RPCResponse(error: firstTmuxRefusal) }
+        if !wokeAny, let firstTmuxRefusal {
+            return RPCResponse(error: firstTmuxRefusal, code: RPCErrorCode.terminalOnTmux.rawValue)
+        }
         return .ok()
     }
 }

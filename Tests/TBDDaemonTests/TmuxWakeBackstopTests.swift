@@ -126,8 +126,8 @@ struct TmuxWakeBackstopTests {
         _ result: WakeResult, row: Terminal, _ f: Fixture,
         session: String? = sessionID
     ) async throws {
-        guard case .respawnFailed(let reason) = result else {
-            Issue.record("expected a refusal, got \(result)")
+        guard case .onTmux(let reason) = result else {
+            Issue.record("expected the tmux refusal, got \(result)")
             return
         }
         #expect(reason == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: row.id))
@@ -224,7 +224,7 @@ struct TmuxWakeBackstopTests {
 
         let result = await f.coordinator.wake(terminalID: row.id, initialPrompt: "acme prompt")
 
-        #expect(result == .respawnFailed(reason: LeftoverTmuxSession.stillRunningRefusal(
+        #expect(result == .onTmux(reason: LeftoverTmuxSession.stillRunningRefusal(
             terminalID: row.id, server: f.worktree.tmuxServer)),
                 "a live tmux row's wake did not say it is still running: \(result)")
         #expect(try await f.db.terminals.get(id: row.id) == row,
@@ -269,6 +269,7 @@ struct TmuxWakeBackstopTests {
 
         #expect(!response.success, "a resume that woke nothing reported success")
         #expect(response.error == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: row.id))
+        #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
         #expect(try await f.db.terminals.get(id: row.id)?.isParked == true)
         #expect(f.holder.launches.isEmpty, "a tmux row's wake started a holder")
     }

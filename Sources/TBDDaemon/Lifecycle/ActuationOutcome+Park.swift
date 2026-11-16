@@ -34,9 +34,12 @@ extension ActuationOutcome {
     static func classify(_ result: WakeResult) -> ActuationOutcome {
         switch result {
         case .ok: return .dispatched
-        // The respawn reached tmux and tmux failed — the one wake path that is
-        // a transport failure rather than a decline.
+        // The holder spawn was tried and failed — the one wake path that is a
+        // transport failure rather than a decline.
         case .respawnFailed: return .transportFailed
+        // The row is on tmux, which TBD no longer drives. Declined with
+        // nothing touched, as a send to such a row is.
+        case .onTmux: return .refused(.notEligible)
         // Waking something that was never parked is the wake's idempotent
         // no-op, not a decline.
         case .notHibernated: return .refused(.noop)
@@ -71,6 +74,7 @@ extension ActuationOutcome {
         case .noSessionID: return "No session ID to resume"
         case .notAClaudeTab(let kind): return ClaudeResumeDecision.notAClaudeTabReason(kind)
         case .respawnFailed(let reason): return reason
+        case .onTmux(let reason): return reason
         case .worktreeMissing(let path): return "Worktree directory missing on disk: \(path)"
         case .sessionGone(let paneID, let detail):
             switch detail {

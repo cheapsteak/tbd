@@ -408,7 +408,7 @@ actor TerminalTransportMigrator {
         switch result {
         case .ok:
             return nil
-        case .respawnFailed(let reason):
+        case .respawnFailed(let reason), .onTmux(let reason):
             return reason
         case .inFlight:
             return "another wake for this session was already running; it resumes on the pty holder"

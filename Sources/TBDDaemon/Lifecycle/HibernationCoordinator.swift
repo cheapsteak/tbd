@@ -94,11 +94,21 @@ public enum WakeResult: Equatable, Sendable {
     /// the row stays as it was. Kept for compatibility with Claude-only callers.
     case notAClaudeTab(kind: TerminalKind)
     case inFlight        // a wake for this terminal is already respawning
-    /// The wake could not start the session: the holder spawn failed, or the
-    /// row is on the tmux transport (`tmuxWakeRefusal`). The row stays as it
-    /// was so a later retry can wake it; `reason` names the real failure
-    /// instead of the misleading "Terminal not found".
+    /// The wake could not start the session: the holder spawn failed. The row
+    /// stays as it was so a later retry can wake it; `reason` names the real
+    /// failure instead of the misleading "Terminal not found".
     case respawnFailed(reason: String)
+    /// The row is on the tmux transport, which TBD no longer starts, reaches
+    /// or stops sessions on (`tmuxWakeRefusal`). Nothing was touched and an
+    /// `initialPrompt` was not delivered. `reason` says what to do: a parked
+    /// row's names `tbd terminal migrate`, and a live row's says the session
+    /// is still running in tmux and how to end it.
+    ///
+    /// A refusal rather than a failed start, so no retry helps: the wake RPCs
+    /// answer it with `RPCErrorCode.terminalOnTmux`, as every other request a
+    /// tmux row refuses does, and the actuation record calls it
+    /// `not-eligible`.
+    case onTmux(reason: String)
     /// The worktree row exists but its directory is gone from disk — respawn
     /// would silently land in $HOME. Carries the missing path so callers can
     /// surface an actionable message instead of a generic "not found".
@@ -1025,23 +1035,23 @@ public actor HibernationCoordinator {
     /// `tbd terminal migrate`. A live row is running in tmux as far as this
     /// daemon knows — reconcile parks a row once its tmux server is gone — and
     /// this daemon can neither reach nor stop it, so the refusal says so and
-    /// how to end it. Both are `.respawnFailed`, the answer a wake gives when
-    /// it could not start the session. No probe runs here: reconcile, Check
-    /// Again and the migration are where a row's server is looked at.
+    /// how to end it. Both are `.onTmux`, a refusal rather than a failed
+    /// start. No probe runs here: reconcile, Check Again and the migration are
+    /// where a row's server is looked at.
     private func tmuxWakeRefusal(_ terminal: Terminal) async -> WakeResult {
         if terminal.isParked {
             // `.notice`, not `.error`: a retrying focus-wake reaches this on
             // every attempt, and a state the person can act on is not a daemon
             // fault.
             logger.notice("wake: terminal \(terminal.id, privacy: .public) is parked on the tmux transport; refusing and leaving it parked")
-            return .respawnFailed(
+            return .onTmux(
                 reason: Self.tmuxWakeUnavailableReason(terminalID: terminal.id))
         }
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
         }
         logger.notice("wake: terminal \(terminal.id, privacy: .public) is live on the tmux transport; refusing — TBD can no longer reach it")
-        return .respawnFailed(reason: LeftoverTmuxSession.stillRunningRefusal(
+        return .onTmux(reason: LeftoverTmuxSession.stillRunningRefusal(
             terminalID: terminal.id, server: worktree.tmuxServer))
     }
 

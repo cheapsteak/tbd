@@ -1589,7 +1589,7 @@ struct HolderTmuxAssumptionGateTests {
 
         let result = await coordinator(db, tmux: tmux, signaller: signaller)
             .wake(terminalID: terminal.id)
-        #expect(result == .respawnFailed(
+        #expect(result == .onTmux(
             reason: HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: terminal.id)))
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(after.isParked, "a refused tmux wake un-parked the row")

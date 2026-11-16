@@ -93,7 +93,7 @@ extension RPCRouter {
             // stop meeting it, and no spawn happened here either.
             return TerminalWakeResult(woken: false)
         case .sessionGone, .notFound, .noSessionID, .notAClaudeTab, .respawnFailed,
-            .worktreeMissing, .profileMissing:
+            .onTmux, .worktreeMissing, .profileMissing:
             // RPC errors, not results — the caller-facing switch in
             // handleTerminalWake maps each to its own RPCResponse(error:).
             // Named explicitly (not `default:`) so a new WakeResult case must
@@ -151,9 +151,11 @@ extension RPCRouter {
             return RPCResponse(error: ClaudeResumeDecision.notAClaudeTabReason(kind))
         case .respawnFailed(let reason):
             // The terminal row exists — the wake could not start the session
-            // (a holder that failed to spawn, or a row still on tmux).
-            // Surface the real failure, never "Terminal not found".
+            // (a holder that failed to spawn). Surface the real failure, never
+            // "Terminal not found".
             return RPCResponse(error: reason)
+        case .onTmux(let reason):
+            return RPCResponse(error: reason, code: RPCErrorCode.terminalOnTmux.rawValue)
         case .worktreeMissing(let path):
             return RPCResponse(error: "Worktree directory missing on disk: \(path). Restore the directory (or relocate the repo), then retry — the session stays parked and resumable.")
         case .profileMissing(let profileID):

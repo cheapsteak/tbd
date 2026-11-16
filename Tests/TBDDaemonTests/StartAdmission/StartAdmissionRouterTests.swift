@@ -374,11 +374,12 @@ struct StartAdmissionRouterTests {
         }
 
         #expect(fixture.stub.requests.isEmpty, "admission was asked about a wake that starts nothing")
-        #expect(response.errorCode != RPCErrorCode.startHeld.rawValue)
+        #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
         #expect(response.error
             == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: terminal.id))
         let outcome = try #require(try rows(at: fixture.logPath).last)
-        #expect(outcome["reason"] as? String != "held")
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-eligible")
         let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(row.startHeldReason == nil)
         #expect(row.startHeldAt == nil)
