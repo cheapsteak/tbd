@@ -7,9 +7,9 @@ import TestSupport
 /// `terminal.migrateTransport` — the wire surface over the transport migrator.
 ///
 /// The migrator's own composition is proved in `TerminalTransportMigratorTests`;
-/// these tests drive it through the router with its three operations replaced,
-/// so what they prove is the handler: what it forwards, what it reports, and
-/// what it broadcasts.
+/// these tests drive it through the router with its operations replaced, so
+/// what they prove is the handler: what it forwards, what it reports, and what
+/// it broadcasts.
 @Suite("terminal.migrateTransport RPC")
 struct TerminalMigrateTransportRPCTests {
 
@@ -49,9 +49,43 @@ struct TerminalMigrateTransportRPCTests {
         }
     }
 
+    static let server = "tbd-test"
+
     /// Operations whose park parks the row for real (so the compare-and-set can
-    /// succeed) and whose wake always succeeds. `canSpawnHolder` is a knob for
-    /// the refusal path, and `wakeResult` for the moved-but-not-resumed one.
+    /// succeed) and whose wake always answers `wakeResult`. `serverState`
+    /// answers the tmux-server sighting for each live row; `canSpawnHolder` is
+    /// the knob for the unspawnable refusal.
+    private static func operations(
+        db: TBDDatabase,
+        canSpawnHolder: Bool = true,
+        serverState: @escaping @Sendable (Terminal) async -> LeftoverTmuxServerState = { _ in .absent },
+        wakeResult: WakeResult = .ok(sessionIncarnationID: nil)
+    ) -> TerminalTransportMigrator.Operations {
+        TerminalTransportMigrator.Operations(
+            canSpawnHolder: { canSpawnHolder },
+            tmuxServerSighting: { terminal in
+                LeftoverTmuxServerSighting(server: server, state: await serverState(terminal))
+            },
+            parkLeftover: { terminal in
+                try await db.terminals.setHibernated(
+                    id: terminal.id, sessionID: "acme-session", reason: .recovery)
+                return try await db.terminals.get(id: terminal.id)
+            },
+            wake: { _ in wakeResult },
+            // The move's own composition is proved in
+            // `RunningShellTransportMoveTests`; here it only has to land the
+            // row on the holder, which is what the handler reads back and
+            // broadcasts.
+            moveRunningShell: { terminal in
+                _ = try? await db.terminals.moveRunningShellToHolder(
+                    id: terminal.id,
+                    expectedState: TerminalReplacementSnapshot(terminal: terminal),
+                    incarnationID: UUID(),
+                    holderPID: 9201, childPID: 9202, startedAt: Date())
+                return .moved
+            })
+    }
+
     private func makeFixture(
         canSpawnHolder: Bool = true,
         wakeResult: WakeResult = .ok(sessionIncarnationID: nil)
@@ -79,49 +113,26 @@ struct TerminalMigrateTransportRPCTests {
             tmux: TmuxManager(dryRun: true),
             subscriptions: subs,
             actuationLog: ActuationLog(path: actuationLogPath))
-        router.transportMigratorOperationsOverride = TerminalTransportMigrator.Operations(
-            canSpawnHolder: { canSpawnHolder },
-            park: { id in
-                try? await db.terminals.setHibernated(
-                    id: id, sessionID: "acme-session", reason: .manual)
-                return .ok
-            },
-            wake: { _ in wakeResult },
-            paneBusyRefusal: { _ in nil },
-            retireWindow: { _ in },
-            // The move's own composition is proved in
-            // `RunningShellTransportMoveTests`; here it only has to land the
-            // row on the holder, which is what the handler reads back and
-            // broadcasts.
-            moveRunningShell: { terminal in
-                _ = try? await db.terminals.moveRunningShellToHolder(
-                    id: terminal.id,
-                    expectedState: TerminalReplacementSnapshot(terminal: terminal),
-                    incarnationID: UUID(),
-                    holderPID: 9201, childPID: 9202, startedAt: Date())
-                return .moved
-            })
+        router.transportMigratorOperationsOverride = Self.operations(
+            db: db, canSpawnHolder: canSpawnHolder, wakeResult: wakeResult)
 
         let repo = try await db.repos.create(
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         let worktree = try await db.worktrees.create(
             repoID: repo.id, name: "wt", branch: "tbd/wt",
-            path: "/tmp/acme-wt-\(UUID().uuidString)", tmuxServer: "tbd-test")
+            path: "/tmp/acme-wt-\(UUID().uuidString)", tmuxServer: Self.server)
         return Fixture(
             router: router, db: db, worktreeID: worktree.id, deltas: deltas,
             actuationLogPath: actuationLogPath)
     }
 
     private func tmuxRow(
-        _ f: Fixture, kind: TerminalKind = .claude, parked: Bool = false,
-        activity: TerminalActivityState = .idle
+        _ f: Fixture, kind: TerminalKind = .claude, parked: Bool = false
     ) async throws -> Terminal {
         let created = try await f.db.terminals.create(
             worktreeID: f.worktreeID, tmuxWindowID: "@7", tmuxPaneID: "%7",
             label: "acme", claudeSessionID: kind == .claude ? "acme-session" : nil,
             kind: kind, transport: .tmux)
-        try await f.db.terminals.setActivityState(
-            id: created.id, activityState: activity, source: .derived)
         if parked {
             try await f.db.terminals.setHibernated(
                 id: created.id, sessionID: "acme-session", reason: .manual)
@@ -163,19 +174,47 @@ struct TerminalMigrateTransportRPCTests {
     func aFleetCallCarriesEveryReasonBack() async throws {
         let f = try await makeFixture()
         let parked = try await tmuxRow(f, parked: true)
-        let working = try await tmuxRow(f, activity: .working)
+        // A Codex tab naming no thread has nothing to move.
+        let codex = try await tmuxRow(f, kind: .codex)
+        let stillRunning = try await tmuxRow(f)
         let onHolder = try await f.db.terminals.create(
             worktreeID: f.worktreeID, tmuxWindowID: "", tmuxPaneID: "",
             label: "acme", claudeSessionID: "acme-session", kind: .claude,
             transport: .holder, holderPID: 9101, childPID: 9102)
+        let runningID = stillRunning.id
+        f.router.transportMigratorOperationsOverride = Self.operations(
+            db: f.db, serverState: { $0.id == runningID ? .running : .absent })
 
         let result = try await call(f, terminalID: nil)
 
         #expect(result.migrated == [parked.id])
         #expect(result.skipped == [TerminalMigrationSkip(
-            terminalID: working.id, reason: "Session is actively running")])
-        #expect(result.refused.isEmpty)
+            terminalID: codex.id, reason: TransportMigrationEligibility.codexSkip)])
+        #expect(result.refused == [TerminalMigrationSkip(
+            terminalID: stillRunning.id,
+            reason: LeftoverTmuxSession.stillRunningRefusal(
+                terminalID: stillRunning.id, server: Self.server))])
         #expect(result.alreadyHolder == [onHolder.id])
+    }
+
+    /// A live session whose tmux server may still be running cannot be moved:
+    /// TBD can neither reach nor stop it. The refusal carries the command that
+    /// ends the server, the row is untouched, and nothing is published.
+    @Test("a live session whose tmux server may still run is refused with the way forward")
+    func aLiveSessionOnARunningServerIsRefused() async throws {
+        let f = try await makeFixture()
+        let row = try await tmuxRow(f)
+        f.router.transportMigratorOperationsOverride = Self.operations(
+            db: f.db, serverState: { _ in .running })
+
+        let result = try await call(f, terminalID: row.id)
+
+        #expect(result.migrated.isEmpty && result.skipped.isEmpty)
+        #expect(result.refused == [TerminalMigrationSkip(
+            terminalID: row.id,
+            reason: LeftoverTmuxSession.stillRunningRefusal(terminalID: row.id, server: Self.server))])
+        #expect(try await f.db.terminals.get(id: row.id) == row)
+        #expect(replacedRows(f).isEmpty, "a row that did not move was published")
     }
 
     @Test("a refusal lands in refused, not skipped")
@@ -191,7 +230,8 @@ struct TerminalMigrateTransportRPCTests {
     }
 
     /// The most likely way to get this wrong is to copy the swap handler's
-    /// requirement that a row be a Claude session.
+    /// requirement that a row be a Claude session. A live shell whose tmux
+    /// server is gone is started again on the holder.
     @Test("a shell migrates: no Claude session id is required")
     func aShellMigrates() async throws {
         let f = try await makeFixture()
@@ -217,7 +257,9 @@ struct TerminalMigrateTransportRPCTests {
     func everyMigratedRowIsBroadcast() async throws {
         let f = try await makeFixture()
         let parked = try await tmuxRow(f, parked: true)
-        _ = try await tmuxRow(f, activity: .working)
+        _ = try await tmuxRow(f)
+        f.router.transportMigratorOperationsOverride = Self.operations(
+            db: f.db, serverState: { _ in .running })
 
         _ = try await call(f, terminalID: nil)
 
@@ -229,10 +271,10 @@ struct TerminalMigrateTransportRPCTests {
 
     // MARK: - A row that moved and did not resume
 
-    /// The outcome the handler used to render as a refusal and never publish:
-    /// the rewrite landed, the wake did not. A client that never heard about it
-    /// keeps caching `tmux` and the window id this migration retired, and the
-    /// person is told a session "can't be moved" that has in fact moved.
+    /// The rewrite landed, the wake did not. Reported as a refusal and left
+    /// unpublished, a client would keep caching `tmux` and the window id the
+    /// rewrite blanked, and the person would be told a session "can't be
+    /// moved" that has in fact moved.
     @Test("a wake that fails after the rewrite is reported apart from the refusals")
     func aWakeThatFailsAfterTheRewriteIsItsOwnOutcome() async throws {
         let f = try await makeFixture(wakeResult: .notHibernated)
@@ -260,35 +302,32 @@ struct TerminalMigrateTransportRPCTests {
                 "the rewritten row was not published, so clients keep a stale transport")
         #expect(replaced.first?.transport == .holder)
         #expect(replaced.first?.tmuxWindowID.isEmpty == true,
-                "the published row still names the retired window")
+                "the published row still names a tmux window")
     }
 
     /// Per row, inside the loop. A fleet run's broadcasts landing only after
-    /// the whole run leaves every mounted pane attached to a window the
-    /// migration already killed, for the length of the run.
+    /// the whole run leaves every mounted pane reading a transport its session
+    /// has left, for the length of the run.
     ///
-    /// Observed from inside each row's own move, and stated without assuming
-    /// which row the list order puts first: whichever one goes second must
-    /// already see the other's replacement published, and must not see its own.
+    /// Observed from inside each row's own move — the sighting is its first
+    /// step — and stated without assuming which row the list order puts
+    /// first: whichever one goes second must already see the other's
+    /// replacement published, and must not see its own.
     @Test("a fleet run publishes each row before it moves the next one")
     func aFleetRunPublishesEachRowAsItFinishes() async throws {
         let f = try await makeFixture()
-        _ = try await tmuxRow(f, parked: true)
-        _ = try await tmuxRow(f, parked: true)
+        _ = try await tmuxRow(f)
+        _ = try await tmuxRow(f)
         let observations = PublicationObservations()
         let published = f.deltas
-        f.router.transportMigratorOperationsOverride = TerminalTransportMigrator.Operations(
-            canSpawnHolder: { true },
-            park: { _ in .ok },
-            wake: { _ in .ok(sessionIncarnationID: nil) },
-            paneBusyRefusal: { terminal in
+        f.router.transportMigratorOperationsOverride = Self.operations(
+            db: f.db,
+            serverState: { terminal in
                 await observations.record(terminal.id, published.all.compactMap {
                     if case .terminalReplaced(let t) = $0 { return t.id } else { return nil }
                 })
-                return nil
-            },
-            retireWindow: { _ in },
-            moveRunningShell: { _ in .moved })
+                return .absent
+            })
 
         _ = try await call(f, terminalID: nil)
 
@@ -311,7 +350,9 @@ struct TerminalMigrateTransportRPCTests {
     func aFleetRunWritesOneRowPerSession() async throws {
         let f = try await makeFixture()
         let parked = try await tmuxRow(f, parked: true)
-        let working = try await tmuxRow(f, activity: .working)
+        let stillRunning = try await tmuxRow(f)
+        f.router.transportMigratorOperationsOverride = Self.operations(
+            db: f.db, serverState: { _ in .running })
 
         _ = try await call(f, terminalID: nil)
 
@@ -319,10 +360,10 @@ struct TerminalMigrateTransportRPCTests {
         let requests = rows.filter { $0["method"] as? String == RPCMethod.terminalMigrateTransport }
         #expect(requests.count == 2, "the run wrote \(requests.count) rows for 2 sessions")
         let named = requests.compactMap { ($0["target"] as? [String: Any])?["terminal"] as? String }
-        #expect(Set(named) == [parked.id.uuidString, working.id.uuidString],
+        #expect(Set(named) == [parked.id.uuidString, stillRunning.id.uuidString],
                 "a row named no session: \(named)")
-        // And each one's outcome: the moved session dispatched, the busy one
-        // refused as not-eligible with the rail's reason.
+        // And each one's outcome: the moved session dispatched, the one whose
+        // tmux server may still run refused as not-eligible with its reason.
         func outcome(for terminalID: UUID) throws -> [String: Any] {
             let request = try #require(requests.first {
                 ($0["target"] as? [String: Any])?["terminal"] as? String == terminalID.uuidString
@@ -333,15 +374,16 @@ struct TerminalMigrateTransportRPCTests {
         }
         let dispatched = try outcome(for: parked.id)
         #expect(dispatched["result"] as? String == "dispatched")
-        let refused = try outcome(for: working.id)
+        let refused = try outcome(for: stillRunning.id)
         #expect(refused["result"] as? String == "refused")
         #expect(refused["reason"] as? String == "not-eligible")
-        #expect(refused["error"] as? String == "Session is actively running")
+        #expect(refused["error"] as? String == LeftoverTmuxSession.stillRunningRefusal(
+            terminalID: stillRunning.id, server: Self.server))
     }
 
     /// A row that moved and did not resume is a transport failure, not a
     /// refusal: a refusal asserts the daemon stopped before acting, and this
-    /// one rewrote the row and retired its window.
+    /// one parked and rewrote the row.
     @Test("a move whose wake failed is recorded as a transport failure")
     func aMoveWhoseWakeFailedIsRecordedAsATransportFailure() async throws {
         let f = try await makeFixture(wakeResult: .notHibernated)

@@ -253,8 +253,7 @@ struct SessionRestoreTests {
             transport: .holder)
         let parkedSince = Date()
         try await fixture.lifecycle.reconcile(
-            repoID: repo.id, actuationLog: ActuationLog(path: fixture.logPath),
-            reapSharedScratchTmuxResources: true)
+            repoID: repo.id, actuationLog: ActuationLog(path: fixture.logPath))
         let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(parked.isParked)
         #expect(parked.hibernateReason == .recovery)

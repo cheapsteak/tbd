@@ -878,8 +878,7 @@ import Testing
         var reconciler = lifecycle
         reconciler.holderRegistry = nil
         try await reconciler.reconcile(
-            repoID: repo.id, actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            repoID: repo.id, actuationLog: makeTestActuationLog())
         #expect(try await db.worktrees.get(id: pending.id)?.status == .active,
                 "reconcile archived the worktree whose checkout lives at the retried path")
         #expect(try await db.terminals.list(worktreeID: pending.id).isEmpty == false,

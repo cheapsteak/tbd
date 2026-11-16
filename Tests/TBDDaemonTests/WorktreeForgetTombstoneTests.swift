@@ -53,7 +53,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
             "forget must insert a tombstone for the worktree path")
 
     // The directory is still on disk AND still registered with git.
-    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     let active = try await db.worktrees.list(repoID: repo.id, status: .active)
     #expect(!active.contains { $0.localPath == wt.localPath },
@@ -84,9 +84,9 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     let uncommitted = (wtPath as NSString).appendingPathComponent("uncommitted.txt")
     try "work in progress".write(toFile: uncommitted, atomically: true, encoding: .utf8)
 
-    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
     // A second pass must not change the answer.
-    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     let all = try await db.worktrees.list()
     #expect(!all.contains { $0.localPath == wtPath },
@@ -114,7 +114,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     try await shell("git worktree add -b forgotten-stray-branch '\(wtPath)'", at: repoDir)
     try await db.forgottenWorktrees.insert(path: wtPath, repoID: repo.id)
 
-    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 
     #expect(!(try await db.worktrees.list()).contains { $0.localPath == wtPath })
     #expect(FileManager.default.fileExists(atPath: wtPath))

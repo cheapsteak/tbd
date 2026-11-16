@@ -184,6 +184,11 @@ public struct WorktreeLifecycle: Sendable {
     /// exactly as it did before dev servers existed.
     var devServerOperations: DevServerOperations?
 
+    /// Whether the tmux server behind a live tmux row is still running, read
+    /// off its socket. A transition measure with a replacement date; see
+    /// `LeftoverTmuxServerProbe`. Tests replace it so no real socket is asked.
+    var leftoverTmuxProbe: LeftoverTmuxServerProbe = .production()
+
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -271,20 +276,10 @@ public struct WorktreeLifecycle: Sendable {
             .appendingPathComponent("projects", isDirectory: true)
     }
 
-    /// The agent reaper composed from the injected tmux + signaller seams.
+    /// The agent reaper composed from the injected signaller seam.
     var reaper: AgentReaper {
-        AgentReaper(tmux: tmux, signaller: processSignaller,
+        AgentReaper(signaller: processSignaller,
                     graceAttempts: reaperGraceAttempts, pollInterval: reaperPollInterval)
-    }
-
-    /// Kill a tmux window, then confirm the pane process actually died and
-    /// escalate (SIGTERM→SIGKILL) if it survived the SIGHUP (wedged agent).
-    /// Returns the kill error description after still attempting escalation.
-    @discardableResult
-    func killWindowAndReap(
-        server: String, windowID: String, paneID: String
-    ) async -> String? {
-        await tearDownWindow(server: server, windowID: windowID, paneID: paneID).killFailure
     }
 
     /// What `tearDownWindow` did to one window.
@@ -304,9 +299,11 @@ public struct WorktreeLifecycle: Sendable {
         }
     }
 
-    /// `killWindowAndReap`, reporting what it did: the pane's process is read,
-    /// the window killed, and the process escalated against even when the kill
-    /// threw, since it may still be alive.
+    /// Kill a tmux window, then confirm the pane process actually died and
+    /// escalate (SIGTERM→SIGKILL) if it survived the SIGHUP (wedged agent),
+    /// reporting what it did: the pane's process is read, the window killed,
+    /// and the process escalated against even when the kill threw, since it
+    /// may still be alive.
     func tearDownWindow(
         server: String, windowID: String, paneID: String
     ) async -> WindowTeardown {
@@ -426,7 +423,7 @@ public struct WorktreeLifecycle: Sendable {
         }
     }
 
-    /// The holder-transport counterpart of `killWindowAndReap`, for the
+    /// The holder-transport counterpart of `tearDownWindow`, for the
     /// teardown paths that delete a terminal's row: stop the daemon's reader,
     /// tell the holder to let go of the pty master, and kill the job it forked.
     /// Returns a description of what was left running, or nil.

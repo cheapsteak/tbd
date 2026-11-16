@@ -92,13 +92,14 @@ import Testing
             == .skip(reason: TransportMigrationEligibility.codexSkip))
     }
 
-    /// A RUNNING Codex tab is skipped even when it names a thread: no park
-    /// takes it, so the only move left would replace it with a bare shell.
-    @Test func aRunningCodexTabThatNamesAThreadIsStillSkipped() {
+    /// A live Codex tab that names a thread is not skipped: once its tmux
+    /// server is gone the migration parks it with the thread kept, exactly as
+    /// reconcile would, and wakes it on the holder.
+    @Test func aLiveCodexTabThatNamesAThreadIsNotSkipped() {
         let t = makeTerminal(
             kind: .codex, label: TerminalLabel.codex, claudeSessionID: "acme-thread")
-        #expect(TransportMigrationEligibility.decide(t)
-            == .skip(reason: TransportMigrationEligibility.codexSkip))
+        #expect(TransportMigrationEligibility.nothingToResumeSkip(t) == nil)
+        #expect(TransportMigrationEligibility.decide(t) == .eligible)
     }
 
     /// A PARKED Codex tab that names a thread is eligible: the move only

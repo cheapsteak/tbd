@@ -46,8 +46,7 @@ import Foundation
 
         try await makeLifecycle(db: db).reconcile(
             repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: makeTestActuationLog())
 
         let after = try #require(try await db.worktrees.get(id: remote.id))
         #expect(after.status == .active, "reconcile archived a remote row")
@@ -66,8 +65,7 @@ import Foundation
 
         try await makeLifecycle(db: db).reconcile(
             repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: makeTestActuationLog())
 
         let after = try #require(try await db.worktrees.get(id: remote.id))
         #expect(after.tmuxServer == "", "reconcile canonicalized a remote row's tmux server")
