@@ -66,6 +66,28 @@ struct AttachRPCStubTests {
         #expect(!response.success)
     }
 
+    /// Naming a terminal is not enough: the row's transport is the gate, so a
+    /// tmux-backed row named in an `attach.ready` is refused as naming no
+    /// holder-backed terminal. Only the message can say which branch ran —
+    /// sent down the holder path, the same request fails as well, on this
+    /// router's missing holder registry.
+    @Test("attach.ready naming a tmux-backed row fails as naming no holder-backed terminal")
+    func readyNamingATmuxRowFails() async throws {
+        let (router, db) = try makeRouterAndDB()
+        let worktreeID = try await makeWorktree(in: db)
+        let tmuxRow = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@7", tmuxPaneID: "%7")
+        let request = try RPCRequest(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(
+                worktreeID: worktreeID, paneID: "%7", generation: 1, terminalID: tmuxRow.id))
+        let response = await router.handle(request)
+        #expect(!response.success)
+        #expect(
+            response.error == "attach.ready names no holder-backed terminal",
+            "a tmux-backed row was sent down the holder path; the row's transport is the gate")
+    }
+
     @Test("pane.detach accepts the detach")
     func detachRoundTrip() async throws {
         let (router, db) = try makeRouterAndDB()
