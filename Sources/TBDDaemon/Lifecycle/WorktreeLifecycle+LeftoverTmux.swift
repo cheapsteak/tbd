@@ -68,6 +68,7 @@ extension WorktreeLifecycle {
             logger.info("leftover tmux park: terminal \(terminal.id, privacy: .public) changed before it could be parked; left as it is")
             return .leftAlone
         }
+        await leftoverParkBetweenHalvesForTesting?(terminal.id)
         let fenced: UUID?
         do {
             fenced = try await db.terminals.finalizeHibernatedShellRespawn(

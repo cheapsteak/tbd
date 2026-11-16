@@ -185,9 +185,16 @@ public struct WorktreeLifecycle: Sendable {
     var devServerOperations: DevServerOperations?
 
     /// Whether the tmux server behind a live tmux row is still running, read
-    /// off its socket. A transition measure with a replacement date; see
-    /// `LeftoverTmuxServerProbe`. Tests replace it so no real socket is asked.
+    /// off its socket and the process table. A transition measure with a
+    /// replacement date; see `LeftoverTmuxServerProbe`. Tests replace it so no
+    /// real socket or process is asked.
     var leftoverTmuxProbe: LeftoverTmuxServerProbe = .production()
+
+    /// Runs between the two halves of `parkLeftoverTmuxRow(_:)` with the row's
+    /// id; nil outside tests. A test-only seam: it opens the window a wake or
+    /// a close can land in between the park and its fence, so a test can land
+    /// one there.
+    var leftoverParkBetweenHalvesForTesting: (@Sendable (UUID) async -> Void)?
 
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {

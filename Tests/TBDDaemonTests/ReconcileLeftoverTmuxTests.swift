@@ -1,5 +1,6 @@
 import Foundation
 import DaemonTestSupport
+import GRDB
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -306,6 +307,80 @@ struct ReconcileLeftoverTmuxTests {
 
         #expect(try await lifecycle.parkLeftoverTmuxRow(asRead) == .closed)
         #expect(try await db.terminals.get(id: rows.claude.id) == nil)
+    }
+
+    /// A park whose two halves straddle `between`, run on the row's id once
+    /// the park is written and before its fence. Returns the outcome and the
+    /// row as it reads afterwards.
+    private func parkAcrossAnInterlude(
+        _ between: @escaping @Sendable (TBDDatabase, UUID) async -> Void
+    ) async throws -> (LeftoverTmuxParkOutcome, Terminal?) {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        var lifecycle = makeLifecycle(
+            db: db, probe: RecordingLeftoverTmuxProbe(answer: { _ in .absent }))
+        lifecycle.leftoverParkBetweenHalvesForTesting = { id in await between(db, id) }
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let rows = try await seedTerminals(db: db, worktree: main)
+        let asRead = try #require(try await db.terminals.get(id: rows.claude.id))
+
+        let outcome = try await lifecycle.parkLeftoverTmuxRow(asRead)
+        return (outcome, try await db.terminals.get(id: rows.claude.id))
+    }
+
+    /// A wake between the halves clears the pending incarnation the fence
+    /// expects, so the fence finds nothing to finish: the park was written,
+    /// and the wake decides what the row is now.
+    @Test("a park whose row is woken between its halves is superseded, and the wake stands")
+    func parkLeftoverWokenBetweenTheHalvesIsSuperseded() async throws {
+        let (outcome, after) = try await parkAcrossAnInterlude { db, id in
+            do {
+                try await db.terminals.clearHibernated(id: id)
+            } catch {
+                Issue.record("the interlude's wake failed: \(error)")
+            }
+        }
+
+        #expect(outcome == .superseded)
+        let row = try #require(after)
+        #expect(!row.isParked, "the park's fence overrode the wake")
+    }
+
+    /// A row unparked between the halves with its incarnation untouched makes
+    /// the fence itself refuse ("not parked"); that is the same supersession,
+    /// not a failure.
+    @Test("a park whose row is unparked between its halves, incarnation kept, is superseded")
+    func parkLeftoverUnparkedBetweenTheHalvesIsSuperseded() async throws {
+        let (outcome, after) = try await parkAcrossAnInterlude { db, id in
+            do {
+                try await db.writerForTests.write { connection in
+                    try connection.execute(
+                        sql: "UPDATE terminal SET hibernatedAt = NULL, suspendedAt = NULL WHERE id = ?",
+                        arguments: [id.uuidString])
+                }
+            } catch {
+                Issue.record("the interlude's unpark failed: \(error)")
+            }
+        }
+
+        #expect(outcome == .superseded)
+        let row = try #require(after)
+        #expect(!row.isParked)
+    }
+
+    @Test("a park whose row is closed between its halves is closed, without throwing")
+    func parkLeftoverClosedBetweenTheHalvesIsClosed() async throws {
+        let (outcome, after) = try await parkAcrossAnInterlude { db, id in
+            do {
+                try await db.terminals.delete(id: id)
+            } catch {
+                Issue.record("the interlude's close failed: \(error)")
+            }
+        }
+
+        #expect(outcome == .closed)
+        #expect(after == nil)
     }
 
     @Test("parkLeftoverTmuxRow reports a park it made as parked, with the row")

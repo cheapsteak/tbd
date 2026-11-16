@@ -208,6 +208,46 @@ struct ActuationLogSweepWiringTests {
         #expect(try await db.terminals.get(id: terminalID) == nil)
     }
 
+    /// A park that was written and then superseded before its fence is
+    /// recorded as dispatched, with a note saying so, and never as refused.
+    @Test("reconcile records a park superseded between its halves as dispatched, with a note")
+    func reconcileRecordsASupersededParkAsDispatched() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "acme", defaultBranch: "main")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
+            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+        let terminal = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
+        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
+        // A wake lands between the park and its fence.
+        lifecycle.leftoverParkBetweenHalvesForTesting = { id in
+            do {
+                try await db.terminals.clearHibernated(id: id)
+            } catch {
+                Issue.record("the interlude's wake failed: \(error)")
+            }
+        }
+
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
+
+        let parks = try requests(at: logPath).filter { $0["kind"] as? String == "hibernate" }
+        let request = try #require(parks.first, "the park was never attempted")
+        let outcome = try #require(
+            try outcomes(at: logPath).first { $0["confirms"] as? String == request["id"] as? String })
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(outcome["reason"] == nil)
+        #expect((outcome["error"] as? String)?.contains("changed again") == true)
+        #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
+    }
+
     @Test("an unwritable record skips the recovery park — the row stays unparked")
     func unwritableRecordSkipsRecoveryPark() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
