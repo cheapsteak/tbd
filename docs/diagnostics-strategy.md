@@ -110,7 +110,7 @@ participate):
 |---------------------|------------------------------------------------------------------|
 | `worktrees`         | Create / list / rename / delete, git worktree shellouts          |
 | `terminals`         | Terminal lifecycle as a *feature*: create/destroy, send/output, what the user asked for |
-| `tmux`              | tmux as a *transport*: TmuxManager/TmuxBridge protocol traffic, libtmux command/response |
+| `tmux`              | tmux as a *transport*: TmuxManager command/response traffic |
 | `notifications`     | MacNotificationManager, daemon→app notification fanout           |
 | `notes`             | Note CRUD, persistence                                           |
 | `pr-status`         | PR polling, gh shellouts                                         |

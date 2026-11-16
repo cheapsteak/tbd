@@ -33,7 +33,13 @@ struct MergedTransitionPrecedenceTests {
             .filter { $0["confirms"] == nil }
     }
 
-    private func makeDeps() throws -> Deps {
+    /// Holder and child pids that name no process: far above any pid darwin
+    /// issues, and scripted dead in `makeDeps`' process table. Every fixture
+    /// terminal records this pair.
+    private static let endedHolderPID: Int32 = 1_900_000_601
+    private static let endedChildPID: Int32 = 1_900_000_602
+
+    private func makeDeps() async throws -> Deps {
         let db = try TBDDatabase(inMemory: true)
         let subs = StateSubscriptionManager()
         let lifecycle = WorktreeLifecycle(
@@ -50,16 +56,27 @@ struct MergedTransitionPrecedenceTests {
         let archive = AutoArchiveOnMergeCoordinator(
             db: db, lifecycle: lifecycle, subscriptions: subs,
             actuationLog: ActuationLog(path: logPath))
+        // Every fixture terminal is a holder row whose holder and job are
+        // both gone, so a park the rails allow finishes on the ended-session
+        // path without a live holder.
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[Self.endedHolderPID] = .init(aliveInitially: false)
+        signaller.behaviors[Self.endedChildPID] = .init(aliveInitially: false)
         let hibernation = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
-            subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+            subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(),
+            signaller: signaller,
+            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        await hibernation.setHolderRegistry(makeHolderRegistryDouble(launch: FakeHolderLaunch()))
+        await hibernation.setHolderProcessIsLive { _ in false }
         let hibernate = AutoHibernateOnMergeCoordinator(db: db, hibernation: hibernation, subscriptions: subs)
         let dispatcher = MergedTransitionDispatcher(archive: archive, hibernate: hibernate)
         return Deps(dispatcher: dispatcher, archive: archive, db: db,
                     actuationLogPath: logPath)
     }
 
-    /// Create an active worktree with a single idle Claude terminal.
+    /// Create an active worktree with a single idle Claude terminal, on the
+    /// holder transport with its holder and job gone.
     private func makeWorktreeWithTerminal(
         _ db: TBDDatabase, parentID: UUID? = nil
     ) async throws -> (wtID: UUID, terminalID: UUID) {
@@ -70,8 +87,10 @@ struct MergedTransitionPrecedenceTests {
             path: "/tmp/repoMTP/w-\(UUID().uuidString)", tmuxServer: "s",
             parentWorktreeID: parentID)
         let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: "sess-1", kind: .claude)
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude, transport: .holder,
+            holderPID: Self.endedHolderPID, childPID: Self.endedChildPID,
+            holderChildStartedAt: Date())
         try await db.terminals.setActivityState(id: terminal.id, activityState: .idle, source: .derived)
         return (wt.id, terminal.id)
     }
@@ -79,7 +98,7 @@ struct MergedTransitionPrecedenceTests {
     // MARK: - Precedence via the dispatcher
 
     @Test func bothArmedArchivesAndDoesNotPark() async throws {
-        let deps = try makeDeps()
+        let deps = try await makeDeps()
         let (wtID, terminalID) = try await makeWorktreeWithTerminal(deps.db)
         try await deps.db.worktrees.setAutoArchiveOnMerge(id: wtID, value: true)
         try await deps.db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
@@ -94,7 +113,7 @@ struct MergedTransitionPrecedenceTests {
     @Test func archiveBlockedByChildrenStillParks() async throws {
         // The important asymmetry: archive is armed but BLOCKED by active
         // children, so the worktree survives — its idle sessions ARE parked.
-        let deps = try makeDeps()
+        let deps = try await makeDeps()
         let (parentID, parentTerminalID) = try await makeWorktreeWithTerminal(deps.db)
         _ = try await makeWorktreeWithTerminal(deps.db, parentID: parentID)  // active child
         try await deps.db.worktrees.setAutoArchiveOnMerge(id: parentID, value: true)
@@ -109,7 +128,7 @@ struct MergedTransitionPrecedenceTests {
     }
 
     @Test func onlyHibernateArmedParksNotArchived() async throws {
-        let deps = try makeDeps()
+        let deps = try await makeDeps()
         let (wtID, terminalID) = try await makeWorktreeWithTerminal(deps.db)
         try await deps.db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
 
@@ -120,7 +139,7 @@ struct MergedTransitionPrecedenceTests {
     }
 
     @Test func onlyArchiveArmedArchives() async throws {
-        let deps = try makeDeps()
+        let deps = try await makeDeps()
         let (wtID, terminalID) = try await makeWorktreeWithTerminal(deps.db)
         try await deps.db.worktrees.setAutoArchiveOnMerge(id: wtID, value: true)
 
@@ -142,7 +161,7 @@ struct MergedTransitionPrecedenceTests {
     /// twice, these two tests are what catches it.
     @Test("firing the fan-out twice archives once and notifies once")
     func doubledFanOutArchivesOnce() async throws {
-        let deps = try makeDeps()
+        let deps = try await makeDeps()
         let (wtID, _) = try await makeWorktreeWithTerminal(deps.db)
         try await deps.db.worktrees.setAutoArchiveOnMerge(id: wtID, value: true)
         try await deps.db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
@@ -163,7 +182,7 @@ struct MergedTransitionPrecedenceTests {
     func doubledFanOutParksOnce() async throws {
         // Archive armed but blocked by an active child, so BOTH fan-outs reach
         // the hibernate arm — the harder half of the idempotency claim.
-        let deps = try makeDeps()
+        let deps = try await makeDeps()
         let (parentID, terminalID) = try await makeWorktreeWithTerminal(deps.db)
         _ = try await makeWorktreeWithTerminal(deps.db, parentID: parentID)
         try await deps.db.worktrees.setAutoArchiveOnMerge(id: parentID, value: true)
@@ -201,7 +220,7 @@ struct MergedTransitionPrecedenceTests {
     /// `PRPollReconcileTests.onePassFansOutOnceForBothEdges`.
     @Test("one poll pass firing both trigger paths archives once and notifies once")
     func realTriggerBothPathsInOnePassActsOnce() async throws {
-        let deps = try makeDeps()
+        let deps = try await makeDeps()
         let (wtID, _) = try await makeWorktreeWithTerminal(deps.db)
         try await deps.db.worktrees.setAutoArchiveOnMerge(id: wtID, value: true)
         try await deps.db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
@@ -240,7 +259,7 @@ struct MergedTransitionPrecedenceTests {
     // MARK: - Direct Bool contract on the archive coordinator
 
     @Test func archiveReturnsTrueOnlyWhenItBeganArchiving() async throws {
-        let deps = try makeDeps()
+        let deps = try await makeDeps()
 
         // Armed + no children → began archiving → true.
         let (armedID, _) = try await makeWorktreeWithTerminal(deps.db)

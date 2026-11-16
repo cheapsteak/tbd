@@ -37,7 +37,7 @@ struct AgentReaperHolderLegTests {
         records: [HolderChildRecord]
     ) -> AgentReaper {
         AgentReaper(
-            tmux: FakeTmuxQuerier(), signaller: signaller,
+            signaller: signaller,
             graceAttempts: 3, pollInterval: .milliseconds(1),
             holderSessions: { records })
     }
@@ -79,8 +79,8 @@ struct AgentReaperHolderLegTests {
     // MARK: - The leg carries no gate of its own
 
     /// `AgentReaper` has no switch, and neither does its holder leg: an
-    /// orphaned job is reclaimed on the ordinary sweep, exactly as the tmux leg
-    /// reclaims an orphaned pane process. Nothing here arms anything.
+    /// orphaned job is reclaimed on the ordinary sweep. Nothing here arms
+    /// anything.
     @Test func theLegReapsAnOrphanWithNothingArmed() async {
         let signaller = orphanSignaller()
         await reaper(signaller, records: [Self.record()]).sweepHolderChildren()
@@ -93,7 +93,7 @@ struct AgentReaperHolderLegTests {
         let signaller = orphanSignaller()
         let enumerated = Enumerated()
         let reaper = AgentReaper(
-            tmux: FakeTmuxQuerier(), signaller: signaller,
+            signaller: signaller,
             graceAttempts: 3, pollInterval: .milliseconds(1),
             holderSessions: {
                 enumerated.hit()
@@ -263,7 +263,7 @@ struct AgentReaperHolderLegTests {
         signaller.behaviors[Self.childPID] = .init(
             aliveInitially: true, aliveAfterTerminate: true, aliveAfterKill: false)
         let reaper = AgentReaper(
-            tmux: FakeTmuxQuerier(), signaller: signaller,
+            signaller: signaller,
             graceAttempts: 2, pollInterval: .milliseconds(1),
             holderSessions: { [Self.record()] })
 

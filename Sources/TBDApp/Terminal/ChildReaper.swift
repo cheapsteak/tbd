@@ -12,7 +12,7 @@ private let reaperLogger = Logger(subsystem: "com.tbd.app", category: "childReap
 /// teardown reap, both on the main queue and again on the reaper thread.
 ///
 /// Serialization note. The *writer* side runs on main for TWO independent
-/// reasons, and both must be kept in mind. First: both TBD call sites pass
+/// reasons, and both must be kept in mind. First: the TBD call site passes
 /// `dispatchQueue: .main` explicitly — keep it that way — and the
 /// `DispatchSourceProcess` is created with `queue: dispatchQueue`
 /// (`directDelivery` moves only data delivery onto the IO thread; it does not
@@ -21,15 +21,14 @@ private let reaperLogger = Logger(subsystem: "com.tbd.app", category: "childReap
 /// `activate()`, and upstream documents that `activate()` can invoke the
 /// handler SYNCHRONOUSLY for an already-exited child — on that path the handler
 /// runs on the activating thread rather than being dispatched to
-/// `dispatchQueue`. That is still main here, because both call sites start the
-/// process from main-isolated code — `TerminalPanelRepresentable.Coordinator`'s
-/// `startTmuxClient(engine:bridge:server:windowID:panelID:)` and
+/// `dispatchQueue`. That is still main here, because the call site starts the
+/// process from main-isolated code —
 /// `LocalPTYTerminalRepresentable.Coordinator.start(engine:argv:environment:)`,
-/// both `@MainActor` — so do not "simplify" either call site off the main
-/// actor without revisiting this. (Both `Coordinator`s are nested in the
-/// `NSViewRepresentable`, not in the `View`/file of the same name.) The *reader* side: both `cleanup()` implementations are
-/// `@MainActor`, so the compiler enforces it — this is a guarantee, not the
-/// `dismantleNSView` convention it used to rest on.
+/// which is `@MainActor` — so do not "simplify" it off the main actor without
+/// revisiting this. (The `Coordinator` is nested in the
+/// `NSViewRepresentable`, not in the `View`/file of the same name.) The
+/// *reader* side: its `cleanup()` is `@MainActor`, so the compiler enforces
+/// it — this is a guarantee, not a `dismantleNSView` convention.
 ///
 /// The lock is still not decorative, on two independent grounds. It is what
 /// makes the flag safe to read from `ChildReaper`'s own reaper thread, which
@@ -98,7 +97,7 @@ final class ChildExitObservation: Sendable {
 /// loser can then steal that unrelated child's exit status. Three things keep
 /// SwiftTerm's monitor from being that other waiter.
 ///
-/// - Each call site releases its `LocalProcess` inside `cleanup()`, so `deinit`
+/// - The call site releases its `LocalProcess` inside `cleanup()`, so `deinit`
 ///   cancels `childMonitor` at a known moment rather than whenever ARC gets
 ///   round to it.
 /// - `ChildExitObservation` carries the monitor's claim to both of `reap`'s
@@ -112,12 +111,9 @@ final class ChildExitObservation: Sendable {
 ///   its `waitpid` while `shellPid` is 0.
 ///
 /// **The third point is a property of the pinned SwiftTerm, not of this type,
-/// and it is load-bearing.** The panel path seldom enters that window:
-/// `TmuxBridge.cleanupSession` kills the tmux session from a *detached* task,
-/// so the attach client normally exits after `cleanup()` has already cancelled
-/// the monitor. `LocalPTYTerminalRepresentable`'s `cleanup()` can enter it on
-/// every teardown, because it signals its child before `terminate()` cancels
-/// the monitor. A revision that stopped zeroing `shellPid` ahead of that check
+/// and it is load-bearing.** `LocalPTYTerminalRepresentable`'s `cleanup()` can
+/// enter that window on every teardown, because it signals its child before
+/// `terminate()` cancels the monitor. A revision that stopped zeroing `shellPid` ahead of that check
 /// would reopen a real double wait, so re-verify it on every bump along with
 /// the single `waitpid` call site.
 ///

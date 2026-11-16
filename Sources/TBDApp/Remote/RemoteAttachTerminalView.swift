@@ -88,10 +88,9 @@ struct RemoteAttachTerminalView: View {
 
     /// The child environment for a provider `attach`.
     ///
-    /// Strips TMUX/TMUX_PANE like `TerminalPanelView.makeViewerEnvironment`
-    /// does — the provider may itself exec tmux on the far side, and a
-    /// nested-attach guard failure there is the same failure mode a nested
-    /// LOCAL tmux attach hits.
+    /// Strips TMUX/TMUX_PANE through `TerminalPanelView.makeViewerEnvironment`
+    /// — the provider may itself exec tmux, and tmux's nested-attach guard
+    /// refuses a client that inherited them.
     ///
     /// `docs/remote-provider-contract.md` normatively requires
     /// `TBD_CONTRACT_VERSION` on EVERY invocation — `ProviderRunner` and

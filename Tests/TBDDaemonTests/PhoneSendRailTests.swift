@@ -13,8 +13,9 @@ import TBDShared
 /// by the existing gate and types nothing. A phone send carries no keys and
 /// never reaches a shell.
 ///
-/// Tier 2: the router runs in full over an in-memory database and a dry-run
-/// tmux, and the actuation log is a real file under the run's scratch dir.
+/// Tier 2: the router runs in full over an in-memory database and a recording
+/// holder courier, and the actuation log is a real file under the run's
+/// scratch dir.
 @Suite("phone send rail")
 struct PhoneSendRailTests {
 
@@ -28,7 +29,7 @@ struct PhoneSendRailTests {
             deviceID: device)
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(harness.tmux.pastedBodies == ["hi"])
+        #expect(harness.delivered.pastedBodies == ["hi"])
 
         let logPath = await harness.router.actuationLog.path
         let rows = ActuationRecordReader(activePath: logPath).readRows()
@@ -54,7 +55,7 @@ struct PhoneSendRailTests {
 
         #expect(!response.success)
         #expect(try #require(response.error).contains("Allow Bash(rm -rf)?"))
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
     }
 
     /// `verify` is stripped, never honored: a suppressed send carries no
@@ -69,7 +70,7 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(harness.tmux.pastedBodies == ["hi"])
+        #expect(harness.delivered.pastedBodies == ["hi"])
     }
 
     @Test func aPairedPhoneSendIntoAPromptIsRefusedAndTypesNothing() async throws {
@@ -84,7 +85,7 @@ struct PhoneSendRailTests {
 
         #expect(!response.success)
         #expect(try #require(response.error).contains("Allow Bash(rm -rf)?"))
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
     }
 
     /// Keys are not part of a phone's message, so the rail drops them. A send
@@ -99,8 +100,8 @@ struct PhoneSendRailTests {
 
         #expect(!response.success)
         #expect(try #require(response.error).contains("needs a payload"))
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
         let logPath = await harness.router.actuationLog.path
         let rows = ActuationRecordReader(activePath: logPath).readRows()
         #expect(!rows.contains { $0.method == RPCMethod.terminalSend })
@@ -117,14 +118,14 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(harness.tmux.pastedBodies == ["hi"])
-        #expect(!harness.tmux.sentKeys.contains("Escape"))
+        #expect(harness.delivered.pastedBodies == ["hi"])
+        #expect(!harness.delivered.sentKeys.contains("Escape"))
     }
 
     /// Shells are hidden from the phone, and a shell runs what is typed into
     /// it, so the rail refuses one before anything is typed. Without the
-    /// refusal this send would reach the pane: a shell has no agent for the
-    /// foreground rail to look for, and no prompt for the gate to find.
+    /// refusal this send would reach the shell: it has no prompt for the gate
+    /// to find.
     @Test func aPairedPhoneSendToAShellIsRefusedAndTypesNothing() async throws {
         let harness = try await SendHarness.make(kind: .shell)
 
@@ -135,8 +136,8 @@ struct PhoneSendRailTests {
 
         #expect(response.error == RPCRouter.phoneShellSendRefusal)
         #expect(response.errorCode == nil, "only the phone message rule's refusals carry a code here")
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
     }
 
     /// The core's shape check runs before the phone's refusals, so a payload
@@ -155,8 +156,8 @@ struct PhoneSendRailTests {
 
         #expect(response.error == shapeError, "a malformed payload gets the core's shape error")
         #expect(response.error != RPCRouter.phoneShellSendRefusal)
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
         let logPath = await harness.router.actuationLog.path
         let sendRows = ActuationRecordReader(activePath: logPath).readRows()
             .filter { row in row.method == RPCMethod.terminalSend }
@@ -175,8 +176,8 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(response.error == RPCRouter.phoneShellSendRefusal)
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
     }
 
     /// A row with no recorded kind that carries a Claude session id is
@@ -190,7 +191,7 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(harness.tmux.pastedBodies == ["hi"])
+        #expect(harness.delivered.pastedBodies == ["hi"])
     }
 
     /// An image part names a path on the laptop, which a phone cannot know.
@@ -205,8 +206,8 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(response.error == RPCRouter.phoneNonTextPartRefusal)
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
     }
 
     /// A refusal of a well-formed send is an act the daemon declined, so it is
@@ -243,7 +244,7 @@ struct PhoneSendRailTests {
             error: RPCRouter.phoneNonTextPartRefusal)
     }
 
-    /// An empty message with submit would reach the pane as a bare Enter and
+    /// An empty message with submit would reach the session as a bare Enter and
     /// submit whatever draft the person left in the laptop's composer, so the
     /// rail refuses it before anything is typed or pressed. Empty text is a
     /// well-formed send the daemon declined, so it is recorded as refused.
@@ -258,8 +259,8 @@ struct PhoneSendRailTests {
         #expect(response.error == PhoneMessageText.emptyRefusal.text)
 
         #expect(response.errorCode == RPCErrorCode.messageEmpty.rawValue)
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
         try await harness.expectRecordedRefusal(
             device: device, message: "", error: PhoneMessageText.emptyRefusal.text)
     }
@@ -294,8 +295,8 @@ struct PhoneSendRailTests {
         #expect(
             textBesidePartsResponse.error == textBesidePartsRefusal,
             "text beside parts gets the core's refusal")
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
         let logPath = await harness.router.actuationLog.path
         let requests = ActuationRecordReader(activePath: logPath).readRows()
             .filter { $0.method == RPCMethod.terminalSend }
@@ -331,10 +332,10 @@ struct PhoneSendRailTests {
         #expect(textResponse.errorCode == RPCErrorCode.messageEmpty.rawValue)
         try await textHarness.expectRecordedRefusal(
             device: device, message: text, error: PhoneMessageText.emptyRefusal.text)
-        #expect(textHarness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(textHarness.tmux.sentKeys.isEmpty, "no key may be pressed")
-        #expect(partsHarness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(partsHarness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(textHarness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(textHarness.delivered.sentKeys.isEmpty, "no key may be pressed")
+        #expect(partsHarness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(partsHarness.delivered.sentKeys.isEmpty, "no key may be pressed")
         if coreSeesNoContent {
             #expect(
                 partsResponse.error
@@ -362,7 +363,7 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(harness.tmux.pastedBodies == ["a\u{200B}b"])
+        #expect(harness.delivered.pastedBodies == ["a\u{200B}b"])
     }
 
     /// A zero width joiner inside an emoji sequence is part of a visible
@@ -376,11 +377,11 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(harness.tmux.pastedBodies == [text])
+        #expect(harness.delivered.pastedBodies == [text])
     }
 
-    /// The rail drops keys, but text can carry a key's byte. A pane whose
-    /// child has bracketed paste off reads ESC as Escape, so a message holding
+    /// The rail drops keys, but text can carry a key's byte. A child with
+    /// bracketed paste off reads ESC as Escape, so a message holding
     /// a control character is refused before anything is typed. It is a
     /// well-formed send the daemon declined, so it is recorded as refused.
     @Test func aPairedPhoneSendWithAnEscapeIsRefusedAndTypesNothing() async throws {
@@ -394,8 +395,8 @@ struct PhoneSendRailTests {
         #expect(response.error == PhoneMessageText.controlCharacterRefusal.text)
 
         #expect(response.errorCode == RPCErrorCode.messageControlCharacter.rawValue)
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
         try await harness.expectRecordedRefusal(
             device: device, message: "a\u{1b}b", error: PhoneMessageText.controlCharacterRefusal.text)
     }
@@ -413,8 +414,8 @@ struct PhoneSendRailTests {
         #expect(response.error == PhoneMessageText.controlCharacterRefusal.text)
 
         #expect(response.errorCode == RPCErrorCode.messageControlCharacter.rawValue)
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
     }
 
     /// A phone can end its lines with CRLF. The rail makes each CRLF a bare
@@ -433,12 +434,12 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(textResponse.success, "error was: \(textResponse.error ?? "none")")
-        #expect(textHarness.tmux.pastedBodies == ["a\nb"])
+        #expect(textHarness.delivered.pastedBodies == ["a\nb"])
         #expect(partsResponse.success, "error was: \(partsResponse.error ?? "none")")
-        #expect(partsHarness.tmux.pastedBodies == ["c\nd"])
+        #expect(partsHarness.delivered.pastedBodies == ["c\nd"])
     }
 
-    /// A tab and a newline are text, not keys, so they reach the pane as
+    /// A tab and a newline are text, not keys, so they reach the session as
     /// written.
     @Test func aPairedPhoneSendKeepsATabAndANewline() async throws {
         let harness = try await SendHarness.make()
@@ -448,7 +449,7 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(harness.tmux.pastedBodies == ["a\tb\nc"])
+        #expect(harness.delivered.pastedBodies == ["a\tb\nc"])
     }
 
     /// A terminal with no row is not the shell check's to judge: the send core
@@ -462,7 +463,7 @@ struct PhoneSendRailTests {
             deviceID: UUID())
 
         #expect(response.error == "Terminal not found: \(missing)")
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
     }
 
     /// The phone's refusals judge only a target the send core would record.
@@ -482,7 +483,7 @@ struct PhoneSendRailTests {
 
         #expect(response.error == "Terminal not found: \(deleted)")
         #expect(response.error != RPCRouter.phoneNonTextPartRefusal)
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
         let logPath = await harness.router.actuationLog.path
         let sendRows = ActuationRecordReader(activePath: logPath).readRows()
             .filter { row in row.method == RPCMethod.terminalSend }
@@ -503,8 +504,8 @@ struct PhoneSendRailTests {
 
         #expect(response.error == "Worktree not found for terminal: \(remote.id)")
         #expect(response.error != RPCRouter.phoneShellSendRefusal)
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.sentKeys.isEmpty, "no key may be pressed")
         let logPath = await harness.router.actuationLog.path
         let sendRows = ActuationRecordReader(activePath: logPath).readRows()
             .filter { row in row.method == RPCMethod.terminalSend }
@@ -512,13 +513,13 @@ struct PhoneSendRailTests {
     }
 
     /// The queued prompt now runs through the shared rail, and still reaches
-    /// the pane with no envelope in front of it.
+    /// the session with no envelope in front of it.
     @Test func theQueuedPromptRailStillSuppresses() async throws {
         let harness = try await SendHarness.make()
 
         #expect(await harness.router.sendQueuedPromptVerbatim(
             terminalID: harness.terminal.id, text: "q", submit: true))
-        #expect(harness.tmux.pastedBodies == ["q"])
+        #expect(harness.delivered.pastedBodies == ["q"])
     }
 
     /// The phone's checks stay on the phone's rail. The queued prompt shares
@@ -529,7 +530,7 @@ struct PhoneSendRailTests {
 
         #expect(await harness.router.sendQueuedPromptVerbatim(
             terminalID: harness.terminal.id, text: "a\rb", submit: true))
-        #expect(harness.tmux.pastedBodies == ["a\rb"])
+        #expect(harness.delivered.pastedBodies == ["a\rb"])
     }
 }
 
@@ -567,12 +568,13 @@ private extension SendHarness {
         #expect(outcome.error == error)
     }
 
-    /// A second terminal in the harness's worktree whose row predates the
-    /// `kind` column: no kind recorded, and the given Claude session id.
+    /// A second holder-backed terminal in the harness's worktree whose row
+    /// predates the `kind` column: no kind recorded, and the given Claude
+    /// session id.
     func addKindlessTerminal(claudeSessionID: String?) async throws -> TBDShared.Terminal {
         try await db.terminals.create(
-            worktreeID: terminal.worktreeID, tmuxWindowID: "@4", tmuxPaneID: "%8",
-            claudeSessionID: claudeSessionID, kind: nil)
+            worktreeID: terminal.worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            claudeSessionID: claudeSessionID, kind: nil, transport: .holder, childPID: 4243)
     }
 
     /// A terminal of `kind` in a remote worktree of the harness's repo: a

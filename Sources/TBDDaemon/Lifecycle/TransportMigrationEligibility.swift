@@ -9,35 +9,26 @@ import TBDShared
 ///
 /// Four rows are turned away for having nothing to resume, because the only
 /// move available to each of them would start a bare login shell where
-/// something else belongs: a running Codex tab, a Claude tab whose session has
-/// not begun, and a hook tab of either kind — `pre-session` or `setup`. Each
-/// gets its own reason, because each has a different thing for the person to
-/// do about it. A PARKED Codex tab is not among them: it is only rewritten,
-/// and its next wake resumes the Codex thread on the holder.
+/// something else belongs: a Codex tab with no thread, a Claude tab whose
+/// session has not begun, and a hook tab of either kind — `pre-session` or
+/// `setup`. Each gets its own reason, because each has a different thing for
+/// the person to do about it. A Codex tab that names a thread is not among
+/// them: its thread is resumed on the holder.
 ///
-/// It also makes no judgement a later rail will make. The park's own rails
-/// decide — a turn in flight, a permission prompt, a transcript mid-write;
-/// repeating them here would give one question two answers.
-/// And it judges only what the ROW says: a shell's busy-ness lives in the
-/// process table, which this cannot read, so the coordinator's own rail asks
-/// that question (`HibernationCoordinator.moveRunningShellToHolder`).
+/// It judges only what the ROW says. Whether a live row's tmux server is
+/// still running is the migrator's question, asked before this one
+/// (`TerminalTransportMigrator`).
 enum TransportMigrationEligibility: Equatable {
     case eligible
     case alreadyHolder
     case skip(reason: String)
 
-    /// The skip a RUNNING Codex tab gets. Named so the CLI, the app's report
-    /// and the tests all quote one wording. The others below are named for the
-    /// same reason.
-    ///
-    /// It tells the person to close the tab rather than to hibernate it first,
-    /// because nothing parks a running Codex tab: a manual hibernate is
-    /// Claude-only (`HibernationCoordinator.parkRefusal`), and the only parks
-    /// that take a Codex row are the ones for a tab whose window has already
-    /// gone — startup recovery's and a window recreate's.
+    /// The skip a Codex tab with no thread gets. Named so the CLI, the app's
+    /// report and the tests all quote one wording. The others below are named
+    /// for the same reason.
     static let codexSkip =
-        "A running Codex session cannot be moved; close the tab and open a new one, "
-        + "which starts on the pty holder."
+        "This Codex tab names no thread to resume, so nothing can be moved; close the tab and "
+        + "open a new one, which starts on the pty holder."
 
     /// The skip a Claude tab with no conversation yet gets.
     static let claudeWithoutConversationSkip =
@@ -72,26 +63,19 @@ enum TransportMigrationEligibility: Equatable {
     }
 
     /// The skip `decide` gives a row it turns away for having nothing to
-    /// resume — a hook tab, a running Codex tab, a Claude tab with no
+    /// resume — a hook tab, a Codex tab with no thread, a Claude tab with no
     /// conversation — or nil for any other row.
     ///
     /// Each of those reasons tells the person what to do instead of migrating,
-    /// because no run of the migration will ever move the row. So another
-    /// refusal that would otherwise name `tbd terminal migrate` asks this
-    /// first, and names no migration for these rows: a window recreate
-    /// (`RPCRouter.tmuxRecreateRefusal(for:)`). That refusal words its own
-    /// advice, because these reasons describe a row whose window is alive.
-    /// The busy skips in `decide` are not among them: they clear when the
-    /// turn ends.
+    /// because no run of the migration will ever move the row. The busy skips
+    /// in `decide` are not among them: they clear when the turn ends.
     ///
     /// Judges the row whatever its transport; `decide` asks the transport
     /// first.
     static func nothingToResumeSkip(_ terminal: Terminal) -> String? {
         // A pre-session hook tab is a shell with no session id, so without this
-        // it is eligible — and a fleet run during a worktree creation would kill
-        // the hook mid-run, which `waitForPreSessionCompletion` reports as
-        // `.paneKilled` and the person meets as a hook failure with the hook's
-        // work lost.
+        // it would be moved as a shell while the creation flow may still be
+        // waiting on its hook.
         //
         // Unconditional, deliberately. The tab is transient, so skipping it
         // costs nothing even once the hook has finished, and a row-only view
@@ -99,12 +83,8 @@ enum TransportMigrationEligibility: Equatable {
         if terminal.label == TerminalLabel.preSession {
             return preSessionSkip
         }
-        // A `setup` hook tab is skipped for a reason the process-table busy
-        // rail cannot see. A setup hook that FAILED has `exec $SHELL`'d, so the
-        // tab somebody deliberately kept open to read the failure holds an idle
-        // shell: the rail finds nothing running, the row is eligible, and the
-        // move kills its window with no Closed Terminals capture — destroying
-        // exactly the output the tab exists to show.
+        // A `setup` hook tab exists to show its hook's output, and a fresh
+        // shell in its place would show nothing of it.
         //
         // Unconditional, like the pre-session skip, and for a cheaper reason:
         // the tab is TBD-created and closing it is what one does with it, so
@@ -114,31 +94,22 @@ enum TransportMigrationEligibility: Equatable {
         if terminal.label == TerminalLabel.setup {
             return setupSkip
         }
-        // A RUNNING Codex tab cannot be moved. The park is Claude-only, so the
-        // only move left for it is the running-shell one, which would replace
-        // the Codex session with a bare login shell in place.
-        //
-        // A PARKED Codex tab can, and must be able to: startup reconcile parks
-        // a Codex row whose window died, and the wake refuses every row parked
-        // on tmux, so without this the session could never come back. Nothing
-        // is launched during the move — a parked row is only rewritten — and
-        // the rewrite keeps the thread id and the recorded launch options, from
-        // which the holder wake does Codex's own resume preparation. So it is
-        // eligible exactly when the row names a Codex thread to resume, the
-        // same plan the wake reads (`Terminal.recoveryResumePlan`).
+        // A Codex tab moves exactly when it names a Codex thread to resume,
+        // the same plan the wake reads (`Terminal.recoveryResumePlan`): the
+        // rewrite keeps the thread id and the recorded launch options, from
+        // which the holder wake does Codex's own resume preparation. One with
+        // no thread has nothing to resume, and the shell move would replace it
+        // with a bare login shell in place.
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
-            let parkedWithAThread = terminal.isParked
-                && terminal.recoveryResumePlan?.identity.agentKind == .codex
-            guard parkedWithAThread else {
+            guard terminal.recoveryResumePlan?.identity.agentKind == .codex else {
                 return codexSkip
             }
         }
-        // A Claude tab whose agent is still starting up, or whose session hook
-        // never fired, names no conversation either — and that happens in the
-        // field. Without this it would reach the running-shell move and have a
-        // live agent killed and replaced by a bare login shell in a tab still
-        // reading Claude. The shell move is for shells, and this is the line
-        // that keeps it so.
+        // A Claude tab whose session hook never fired names no conversation
+        // either — and that happens in the field. Without this it would reach
+        // the shell move and become a bare login shell in a tab still reading
+        // Claude. The shell move is for shells, and this is the line that
+        // keeps it so.
         //
         // A nil `kind` reads as a shell, the same `(kind ?? .shell)` idiom the
         // rest of the daemon uses for a row written before kinds existed.

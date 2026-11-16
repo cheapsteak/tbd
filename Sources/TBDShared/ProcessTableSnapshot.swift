@@ -2,8 +2,8 @@ import Darwin
 import Foundation
 import TBDKernel
 
-/// One read of the kernel's process table: every live pid's parent, and when it
-/// started.
+/// One read of the kernel's process table: every live pid's parent, when it
+/// started, its command name and its real user id.
 ///
 /// **One read answers a whole question.** A caller that asks "which of these
 /// processes descends from which of those" takes one snapshot and walks it, so
@@ -21,10 +21,24 @@ public struct ProcessTableSnapshot: Sendable, Equatable {
         public let parent: pid_t
         /// Nil when the kernel reported no start time for it.
         public let startedAt: Date?
+        /// The command name the kernel keeps for it (`p_comm`), as the bytes
+        /// the kernel holds: the last component of the path it was executed
+        /// from, cut to `MAXCOMLEN` bytes. The cut can split a character, so
+        /// the bytes are not decoded. Kept by the kernel, so it outlives the
+        /// executable's file being deleted, unlike `proc_pidpath`. Nil in a
+        /// literal table that does not name one.
+        public let command: [UInt8]?
+        /// The real user id it runs as (`p_ruid`). Nil in a literal table that
+        /// does not name one.
+        public let realUserID: uid_t?
 
-        public init(parent: pid_t, startedAt: Date?) {
+        public init(
+            parent: pid_t, startedAt: Date?, command: [UInt8]? = nil, realUserID: uid_t? = nil
+        ) {
             self.parent = parent
             self.startedAt = startedAt
+            self.command = command
+            self.realUserID = realUserID
         }
     }
 
@@ -101,7 +115,11 @@ public struct ProcessTableSnapshot: Sendable, Equatable {
                 guard Int32(info.kp_proc.p_stat) != SZOMB else { continue }
                 entries[pid] = Entry(
                     parent: info.kp_eproc.e_ppid,
-                    startedAt: ProcessStartTime.startTime(of: info))
+                    startedAt: ProcessStartTime.startTime(of: info),
+                    command: withUnsafeBytes(of: info.kp_proc.p_comm) { bytes in
+                        Array(bytes.prefix(while: { $0 != 0 }))
+                    },
+                    realUserID: info.kp_eproc.e_pcred.p_ruid)
             }
             return ProcessTableSnapshot(entries: entries)
         }

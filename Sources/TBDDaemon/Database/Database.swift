@@ -205,6 +205,33 @@ public final class TBDDatabase: Sendable {
         }
     }
 
+    /// Delete a live tmux row and its tab only while the row is still what
+    /// the caller read: still on tmux, still unparked, and matching
+    /// `expectedState`. False means it changed first and nothing was deleted.
+    ///
+    /// Reconcile's delete of a row whose tmux server is gone. A
+    /// `terminal.migrate` that moved the row to the holder after reconcile read
+    /// it has changed its transport, its tmux coordinates and its session
+    /// incarnation, so the row survives the stale read.
+    func deleteLeftoverTmuxTerminalAndTab(
+        id: UUID, expectedState: TerminalReplacementSnapshot
+    ) async throws -> Bool {
+        let deleted = try await writer.write { db -> Bool in
+            guard let current = try TerminalRecord.fetchOne(db, key: id.uuidString)?.toModel(),
+                  current.transport == .tmux, !current.isParked,
+                  expectedState.matches(current) else {
+                return false
+            }
+            let removed = try TerminalRecord.deleteOne(db, key: id.uuidString)
+            _ = try TabRecord.deleteOne(db, key: id.uuidString)
+            return removed
+        }
+        if deleted {
+            await terminals.deletions.notifyDeleted([id])
+        }
+        return deleted
+    }
+
     /// Best-effort pre-migration snapshot. Failures are logged, not thrown —
     /// the migration must still be allowed to proceed even if e.g. the disk
     /// is full or the parent directory isn't writable.

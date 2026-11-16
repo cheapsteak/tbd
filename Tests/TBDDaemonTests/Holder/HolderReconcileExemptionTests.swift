@@ -5,15 +5,17 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The tmux liveness sweep, and the rows it must not judge on tmux's evidence.
+/// The tmux arm of the reconcile sweep, and the rows it must not judge on
+/// tmux's evidence.
 ///
-/// `reconcileTerminalsWhileLocked` probes `windowExists` for every unparked
-/// tmux row and then parks the resumable Claude ones and deletes the rest. A
-/// holder-backed session has no tmux coordinate at all — its `tmuxWindowID` is
-/// `""`, and the repo's tmux server may never have been started — so that probe
-/// can only ever answer "gone". Without the transport fork the sweep destroys a
-/// live holder session on the next daemon start, which is precisely the event
-/// the holder transport exists to survive.
+/// `reconcileTerminalsWhileLocked` asks whether the worktree's tmux server is
+/// still running (`LeftoverTmuxServerProbe`) and, once it is gone, parks the
+/// resumable rows and deletes the rest. A holder-backed session does not run
+/// in tmux at all — its `tmuxWindowID` is `""`, and the repo's tmux server may
+/// never have been started — so that probe can only ever answer "gone".
+/// Without the transport fork the sweep destroys a live holder session on the
+/// next daemon start, which is precisely the event the holder transport exists
+/// to survive.
 ///
 /// A holder row now has an arm of its own, judged on the holder inventory
 /// (`HolderReconcileInventoryTests`). This suite pins the half that arm must
@@ -33,18 +35,17 @@ import Testing
 @Suite("Holder rows and the tmux reconcile")
 struct HolderReconcileExemptionTests {
 
-    private func makeLifecycle(db: TBDDatabase, tmux: TmuxManager) -> WorktreeLifecycle {
-        WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
-    }
-
-    /// Dry-run tmux with every window reported dead.
+    /// A lifecycle whose leftover-tmux probe reports every server gone.
     ///
-    /// That is the same state a holder row produces against a real server:
-    /// `windowExists("")` cannot succeed, and a server that was never created
-    /// answers the same way. Reaching it through the hook rather than through a
-    /// missing server keeps the fixture from depending on a live tmux.
-    private func deadWindowTmux() -> TmuxManager {
-        TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true })
+    /// That is the answer a holder row's worktree gets from a real socket: a
+    /// server that was never started has no socket to connect to. Injecting
+    /// it keeps the fixture from depending on what the machine's tmux
+    /// directory holds.
+    private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
+        return lifecycle
     }
 
     /// A real git repo plus its main worktree row — the shape the sweep accepts
@@ -66,7 +67,7 @@ struct HolderReconcileExemptionTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, tmux: deadWindowTmux())
+        let lifecycle = makeLifecycle(db: db)
         let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
 
         // Empty tmux coordinates are not a degenerate fixture: they are what
@@ -81,8 +82,7 @@ struct HolderReconcileExemptionTests {
 
         try await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: makeTestActuationLog())
 
         let survivingClaude = try #require(
             try await db.terminals.get(id: claude.id),
@@ -97,15 +97,15 @@ struct HolderReconcileExemptionTests {
     }
 
     /// The tmux arm is unchanged by the holder exemption above: a tmux row
-    /// whose window is gone is still parked (resumable Claude) or deleted
+    /// whose server is gone is still parked (resumable Claude) or deleted
     /// (everything else).
-    @Test("a tmux-backed row whose window is gone is still parked or deleted")
+    @Test("a tmux-backed row whose server is gone is still parked or deleted")
     func tmuxRowStillReconciledNormally() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, tmux: deadWindowTmux())
+        let lifecycle = makeLifecycle(db: db)
         let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
 
         let claude = try await db.terminals.create(
@@ -116,8 +116,7 @@ struct HolderReconcileExemptionTests {
 
         try await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: makeTestActuationLog())
 
         let parked = try #require(
             try await db.terminals.get(id: claude.id),

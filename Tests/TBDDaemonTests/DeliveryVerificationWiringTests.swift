@@ -32,8 +32,8 @@ private final class CountingObservationSource: DeliveryObservationSource, @unche
     }
 }
 
-/// Tier 2 — an in-memory database, a dry-run tmux, a real (temp-directory)
-/// actuation log and an `EventDrivenTestClock`. Proves the two branches of
+/// Tier 2 — an in-memory database, a recording holder courier, a real
+/// (temp-directory) actuation log and an `EventDrivenTestClock`. Proves the two branches of
 /// `delivery_verification_enabled` at the wiring seam, and — with the verifier
 /// really wired to a router — that an ordinary send costs no transcript read
 /// and that a verified one joins its observation to its own request row.
@@ -49,12 +49,16 @@ struct DeliveryVerificationWiringTests {
         let pastes: PasteRecorder
     }
 
+    /// The message each courier write carried. With no mode reading the holder
+    /// writes the body bare, its submitting `\r` last, so the body is the write
+    /// less that one byte.
     final class PasteRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var _pastes: [String] = []
         var pastes: [String] { lock.withLock { _pastes } }
         func record(_ bytes: Data) {
-            lock.withLock { _pastes.append(String(decoding: bytes, as: UTF8.self)) }
+            let body = bytes.last == HolderSendComposition.submitByte ? bytes.dropLast() : bytes
+            lock.withLock { _pastes.append(String(decoding: body, as: UTF8.self)) }
         }
     }
 
@@ -64,10 +68,7 @@ struct DeliveryVerificationWiringTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let logPath = directory.appendingPathComponent("actuations.jsonl").path
         let pastes = PasteRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
-            dryRunPasteBytes: { _, _, bytes in pastes.record(bytes) })
+        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
         let log = ActuationLog(path: logPath)
         let router = RPCRouter(
@@ -77,6 +78,10 @@ struct DeliveryVerificationWiringTests {
             tmux: tmux,
             startTime: Date(),
             actuationLog: log)
+        router.holderInjectionCourier = HolderInjectionCourier(
+            sendFrame: { _ in },
+            viewerAttachment: { _ in nil },
+            writeDirectly: { _, bytes in pastes.record(bytes) })
         let repo = try await db.repos.create(
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         let worktree = try await db.worktrees.create(
@@ -84,7 +89,8 @@ struct DeliveryVerificationWiringTests {
             path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
         // An agent terminal: the envelope rides sends to agents, not to shells.
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7", kind: .claude)
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+            transport: .holder, childPID: 4242)
         return Fixture(
             db: db, router: router, terminal: terminal, logPath: logPath, log: log,
             pastes: pastes)
@@ -285,7 +291,7 @@ struct DeliveryVerificationWiringTests {
 
         #expect(!response.success)
         #expect(response.error?.contains("Restart the daemon") == true)
-        // Nothing reached the pane, and the record shows the near-miss.
+        // Nothing reached the session, and the record shows the near-miss.
         #expect(fixture.pastes.pastes.isEmpty)
         let outcome = try #require(rows(at: fixture.logPath).last)
         #expect(outcome.result == .synchronous(.refused))

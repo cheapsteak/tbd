@@ -46,8 +46,8 @@ final class RawPTYPair {
         guard s >= 0 else { Darwin.close(m); throw Failure.openFailed(errno) }
         // **Close-on-exec, and the session end is where it is load-bearing.**
         // Sibling suites in this same process keep long-lived children alive
-        // for the whole run — `QuietIngestTests` holds a `/bin/sleep 120`,
-        // `TerminalTeardownReapTests` its own — and a `fork`/`posix_spawn`
+        // for the whole run — `TerminalTeardownReapTests` holds
+        // `/bin/sleep 120` probes — and a `fork`/`posix_spawn`
         // hands a child every descriptor that is not `FD_CLOEXEC`. A child
         // holding an inherited copy of the session end keeps the line
         // discipline connected, so `closeSessionEnd()` stops making the master

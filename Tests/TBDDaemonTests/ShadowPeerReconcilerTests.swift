@@ -61,7 +61,6 @@ private final class FakeSignaller: ProcessSignaller, @unchecked Sendable {
         alivePIDs.remove(pid)
     }
 
-    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
     func commandLine(_ pid: Int32) -> String? { nil }
     func stat(_ pid: Int32) -> String? { nil }
     /// The shadow-peer reconciler identifies its helper by the record it

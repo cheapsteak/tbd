@@ -116,6 +116,14 @@ extension RPCRouter {
     /// first by transcript modification time, a file that cannot be read last.
     /// The activity columns cannot supply the order, because parking overwrites
     /// them.
+    ///
+    /// Only rows on the pty holder. A row on tmux moves to the holder through
+    /// `tbd terminal migrate`, not a wake: its wake is refused with
+    /// `terminalOnTmux`. Reconcile parks a tmux row for recovery once, on the
+    /// startup that finds its server gone, so selecting it would count a
+    /// failure and log an error on that restart; a later restart finds the
+    /// park older than its time limit. `update.sh`'s wake sweep leaves it out
+    /// the same way.
     private func sessionsToRestore(_ condition: SessionRestoreCondition) async -> [UUID] {
         do {
             let worktreeStatuses = Dictionary(
@@ -124,6 +132,7 @@ extension RPCRouter {
                 .filter { terminal in
                     guard let status = worktreeStatuses[terminal.worktreeID] else { return false }
                     return condition.isMet(by: terminal, worktreeStatus: status)
+                        && terminal.transport == .holder
                         && terminal.recoveryResumePlan != nil
                 }
                 .map { (id: $0.id, modified: Self.transcriptModified($0.transcriptPath)) }

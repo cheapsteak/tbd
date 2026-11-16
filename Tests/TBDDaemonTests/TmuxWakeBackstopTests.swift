@@ -1,15 +1,18 @@
 import Foundation
 import Testing
+import GRDB
 import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// A parked tmux row never wakes: TBD starts sessions only on the pty holder.
-/// The refusal names the migration gesture, leaves the row parked with its
-/// session id, and touches nothing — whether or not tmux is installed. A
-/// parked holder row wakes as before. `worktree.resume` hands the refusal to
-/// its caller when it woke nothing.
+/// A tmux row never wakes: TBD starts sessions only on the pty holder. A
+/// parked one is refused with the migration gesture, before anything else
+/// about it is asked, and stays parked with its session id; a live one is
+/// refused as still running in tmux and left exactly as it was. Either way
+/// nothing is touched, whether or not tmux is installed. A parked holder row
+/// wakes as before. `worktree.resume` hands the refusal to its caller when it
+/// woke nothing.
 @Suite("Tmux wake backstop")
 struct TmuxWakeBackstopTests {
     private static let sessionID = "sess-backstop"
@@ -68,18 +71,35 @@ struct TmuxWakeBackstopTests {
     }
 
     private static func parkedRow(
-        _ f: Fixture, transport: TerminalTransport, session: String = sessionID
+        _ f: Fixture, transport: TerminalTransport, session: String = sessionID,
+        kind: TerminalKind = .claude
     ) async throws -> Terminal {
         let created = try await f.db.terminals.create(
             worktreeID: f.worktree.id,
             tmuxWindowID: transport == .holder ? "" : "@3",
             tmuxPaneID: transport == .holder ? "" : "%3",
-            label: TerminalLabel.claudeCode,
+            label: kind == .codex ? TerminalLabel.codex : TerminalLabel.claudeCode,
             claudeSessionID: session,
-            kind: .claude,
+            kind: kind,
             transport: transport)
         try await f.db.terminals.setHibernated(
             id: created.id, sessionID: session, reason: .auto)
+        return try #require(try await f.db.terminals.get(id: created.id))
+    }
+
+    /// An awake tmux row: what a session an earlier build started looks like
+    /// while its tmux server may still be running it.
+    private static func liveTmuxRow(_ f: Fixture) async throws -> Terminal {
+        let created = try await f.db.terminals.create(
+            worktreeID: f.worktree.id,
+            tmuxWindowID: "@3",
+            tmuxPaneID: "%3",
+            label: TerminalLabel.claudeCode,
+            claudeSessionID: Self.sessionID,
+            kind: .claude,
+            transport: .tmux)
+        try await f.db.terminals.setActivityState(
+            id: created.id, activityState: .idle, source: .derived)
         return try #require(try await f.db.terminals.get(id: created.id))
     }
 
@@ -103,10 +123,11 @@ struct TmuxWakeBackstopTests {
     /// The refusal, and that it changed nothing: the row is still parked on
     /// tmux with its session id, and no holder was started for it.
     private static func expectRefused(
-        _ result: WakeResult, row: Terminal, _ f: Fixture
+        _ result: WakeResult, row: Terminal, _ f: Fixture,
+        session: String? = sessionID
     ) async throws {
-        guard case .respawnFailed(let reason) = result else {
-            Issue.record("expected a refusal, got \(result)")
+        guard case .onTmux(let reason) = result else {
+            Issue.record("expected the tmux refusal, got \(result)")
             return
         }
         #expect(reason == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: row.id))
@@ -117,7 +138,7 @@ struct TmuxWakeBackstopTests {
                 "the refusal does not name the session to migrate: \(reason)")
         let after = try #require(try await f.db.terminals.get(id: row.id))
         #expect(after.isParked, "the refusal must leave the row parked")
-        #expect(after.claudeSessionID == Self.sessionID)
+        #expect(after.claudeSessionID == session)
         #expect(after.transport == .tmux)
         #expect(after.tmuxWindowID == "@3")
         #expect(f.holder.launches.isEmpty, "a tmux row's wake started a holder")
@@ -145,6 +166,72 @@ struct TmuxWakeBackstopTests {
         try await Self.expectRefused(result, row: row, f)
         #expect(f.tmuxCommands.snapshot.isEmpty,
                 "a refused wake ran tmux: \(f.tmuxCommands.snapshot)")
+    }
+
+    /// The refusal comes before every other question the wake would ask. A
+    /// Codex row handed a prompt would otherwise be told the prompt cannot be
+    /// delivered — advice that changes nothing, since the row cannot wake on
+    /// tmux with or without one.
+    @Test func aParkedTmuxCodexRowGivenAPromptIsToldToMigrate() async throws {
+        let f = try await Self.makeFixture(tmuxResolvable: true)
+        defer { f.tearDown() }
+        let row = try await Self.parkedRow(f, transport: .tmux, kind: .codex)
+        // The precondition that makes this discriminate: on a holder row, this
+        // plan and this prompt are refused by the Codex check.
+        #expect(row.recoveryResumePlan?.identity.agentKind == .codex)
+
+        let result = await f.coordinator.wake(terminalID: row.id, initialPrompt: "acme prompt")
+
+        try await Self.expectRefused(result, row: row, f)
+        #expect(f.tmuxCommands.snapshot.isEmpty,
+                "a refused wake ran tmux: \(f.tmuxCommands.snapshot)")
+    }
+
+    /// The same order for a parked tmux row with no session id: it is told to
+    /// migrate rather than that it has nothing to resume, because migrating is
+    /// what the person can do about a tmux row and the answer it would
+    /// otherwise get is a holder row's.
+    @Test func aParkedTmuxRowWithNoSessionIDIsToldToMigrate() async throws {
+        let f = try await Self.makeFixture(tmuxResolvable: true)
+        defer { f.tearDown() }
+        var row = try await Self.parkedRow(f, transport: .tmux)
+        let rowID = row.id
+        try await f.db.writerForTests.write { db in
+            try db.execute(
+                sql: "UPDATE terminal SET claudeSessionID = NULL WHERE id = ?",
+                arguments: [rowID.uuidString])
+        }
+        row = try #require(try await f.db.terminals.get(id: row.id))
+        #expect(row.isParked && row.recoveryResumePlan == nil,
+                "the fixture is not a parked row with nothing to resume")
+
+        let result = await f.coordinator.wake(terminalID: row.id)
+
+        try await Self.expectRefused(result, row: row, f, session: nil)
+    }
+
+    /// A LIVE tmux row is running in tmux as far as this daemon knows — a row
+    /// is parked once its server is gone — and TBD can neither reach nor stop
+    /// it. So a wake says so, with the command that ends it, instead of
+    /// answering "already awake" for a session TBD cannot reach. No tmux
+    /// command is run, the prompt is not delivered, and the row is left
+    /// exactly as it was.
+    @Test(arguments: [false, true])
+    func aLiveTmuxRowRefusesItsWakeAsStillRunning(tmuxResolvable: Bool) async throws {
+        let f = try await Self.makeFixture(tmuxResolvable: tmuxResolvable)
+        defer { f.tearDown() }
+        let row = try await Self.liveTmuxRow(f)
+
+        let result = await f.coordinator.wake(terminalID: row.id, initialPrompt: "acme prompt")
+
+        #expect(result == .onTmux(reason: LeftoverTmuxSession.stillRunningRefusal(
+            terminalID: row.id, server: f.worktree.tmuxServer)),
+                "a live tmux row's wake did not say it is still running: \(result)")
+        #expect(try await f.db.terminals.get(id: row.id) == row,
+                "a refused wake changed the row")
+        #expect(f.tmuxCommands.snapshot.isEmpty,
+                "a refused wake ran tmux: \(f.tmuxCommands.snapshot)")
+        #expect(f.holder.launches.isEmpty, "a tmux row's wake started a holder")
     }
 
     /// The other branch of the backstop: a parked holder row wakes on the
@@ -182,6 +269,7 @@ struct TmuxWakeBackstopTests {
 
         #expect(!response.success, "a resume that woke nothing reported success")
         #expect(response.error == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: row.id))
+        #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
         #expect(try await f.db.terminals.get(id: row.id)?.isParked == true)
         #expect(f.holder.launches.isEmpty, "a tmux row's wake started a holder")
     }

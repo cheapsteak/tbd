@@ -137,8 +137,8 @@ struct KeepAliveEvictionTests {
             // A worktree that is ONLY pinned (not selected, not working) is NOT
             // protected by the pager keep-alive set: PinnedTerminalDock already
             // keeps its pinned terminal's view alive, and protecting it here too
-            // would double-mount the shared `tbd-view-<id>` tmux session. So it
-            // is evictable once it ages past the cap.
+            // would mount a second panel fighting over the session's one holder
+            // attach. So it is evictable once it ages past the cap.
             let pinnedWT = UUID()
             state.terminals = [pinnedWT: [terminal(worktreeID: pinnedWT, pinnedAt: Date())]]
             state.touchVisitedWorktree(pinnedWT)

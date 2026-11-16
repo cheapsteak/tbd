@@ -1,6 +1,6 @@
 # Bounded terminal recovery — design
 
-Status: **implemented**.
+Status: **retired.** The app's bounded recovery of tmux viewer sessions is retired: its implementation has been removed, and this document is kept as the design record.
 
 ## Problem
 

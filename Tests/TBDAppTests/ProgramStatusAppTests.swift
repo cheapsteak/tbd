@@ -360,8 +360,8 @@ struct ProgramStatusAppTests {
     // MARK: - The view: probe answer
 
     @Test("with the gate on, the probe is answered with ESC ] 7501 ; ? BEL")
-    func probeAnsweredWhenGateOn() async {
-        let harness = makeCoordinatorHarness()
+    func probeAnsweredWhenGateOn() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let spy = SendRecordingDelegate()
         harness.terminalView.terminalDelegate = spy
@@ -373,8 +373,8 @@ struct ProgramStatusAppTests {
     }
 
     @Test("a probe terminated by ST is answered too")
-    func probeWithSTAnswered() async {
-        let harness = makeCoordinatorHarness()
+    func probeWithSTAnswered() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let spy = SendRecordingDelegate()
         harness.terminalView.terminalDelegate = spy
@@ -386,8 +386,8 @@ struct ProgramStatusAppTests {
     }
 
     @Test("with the gate off, the probe goes unanswered")
-    func probeSilentWhenGateOff() async {
-        let harness = makeCoordinatorHarness()
+    func probeSilentWhenGateOff() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let spy = SendRecordingDelegate()
         harness.terminalView.terminalDelegate = spy
@@ -404,8 +404,8 @@ struct ProgramStatusAppTests {
     }
 
     @Test("the probe reply precedes the DA1 reply queued behind it")
-    func replyPrecedesDA1() async {
-        let harness = makeCoordinatorHarness()
+    func replyPrecedesDA1() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let spy = SendRecordingDelegate()
         harness.terminalView.terminalDelegate = spy
@@ -419,8 +419,8 @@ struct ProgramStatusAppTests {
     }
 
     @Test("a probe fed while OSC observation is suspended for replay goes unanswered")
-    func probeSilentWhileSuspended() async {
-        let harness = makeCoordinatorHarness()
+    func probeSilentWhileSuspended() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         // The spy, not the coordinator, so the coordinator's own ingest guard
         // in `send` is not what keeps this silent — the view's mute is.
@@ -443,8 +443,8 @@ struct ProgramStatusAppTests {
     // MARK: - The view: reports
 
     @Test("a live report reaches onProgramStatusReport with its exact payload; a probe does not")
-    func reportDelivered() async {
-        let harness = makeCoordinatorHarness()
+    func reportDelivered() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let spy = SendRecordingDelegate()
         harness.terminalView.terminalDelegate = spy
@@ -461,8 +461,8 @@ struct ProgramStatusAppTests {
     }
 
     @Test("with the gate off, a live report is not delivered")
-    func reportNotDeliveredWhenGateOff() async {
-        let harness = makeCoordinatorHarness()
+    func reportNotDeliveredWhenGateOff() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         let reports = ReportBox()
         harness.coordinator.onProgramStatusReport = { payload, _ in reports.payloads.append(payload) }
@@ -480,8 +480,8 @@ struct ProgramStatusAppTests {
     }
 
     @Test("a snapshot carrying a probe and a report sends nothing and forwards nothing")
-    func snapshotIsSilent() async {
-        let harness = makeCoordinatorHarness()
+    func snapshotIsSilent() async throws {
+        let harness = try await makeCoordinatorHarness()
         defer { harness.tearDown() }
         harness.terminalView.programStatusGate.set(true)
         let reports = ReportBox()
@@ -491,11 +491,11 @@ struct ProgramStatusAppTests {
         harness.coordinator.feedSnapshot(
             Data((Self.probe + Self.report).utf8), into: harness.engine)
         await harness.settle()
-        #expect(harness.sentBytes.isEmpty, "a replayed probe's reply reached the child")
+        #expect(harness.sentBytes.isEmpty, "a replayed probe's reply reached the session's pty")
         #expect(reports.payloads.isEmpty, "a replayed report was forwarded")
 
         // Positive control: live, on the production wiring, the probe's reply
-        // reaches the child and the report is delivered.
+        // reaches the session's pty and the report is delivered.
         harness.terminalView.feed(text: Self.probe + Self.report)
         let answered = await harness.waitUntil { !harness.sentBytes.isEmpty }
         let delivered = await harness.waitUntil { reports.payloads.count == 1 }

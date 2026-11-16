@@ -4,136 +4,13 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "limitResume")
 
-/// The tmux surface the actuator needs. `TmuxManager` conforms; tests fake it.
-/// All sends go through the SAME methods `handleTerminalSend` uses — never
-/// raw tmux invocations (spec constraint) — and, since this actuator types
-/// without a user gesture, behind the SAME target consultation
-/// (`paneSendTarget`) that `handleTerminalSend` runs before it types.
-public protocol ResumeSendingTmux: Sendable {
-    func windowExists(server: String, windowID: String) async -> Bool
-    func paneInMode(server: String, paneID: String) async throws -> Bool
-    func panePID(server: String, paneID: String) async throws -> String
-    func paneSendTarget(server: String, paneID: String) async throws -> PaneSendTarget
-    func sendKeys(server: String, paneID: String, text: String) async throws
-    func sendKey(server: String, paneID: String, key: String) async throws
-}
-
-extension TmuxManager: ResumeSendingTmux {}
-
-/// Finds the pane's foreground agent process. `#{pane_current_command}`
-/// reports `zsh` on macOS, so we walk the pane PID's process tree and check
-/// `ps -o stat=` for the `+` (foreground process group) flag instead
-/// (spec §Actuation 3).
-public protocol PaneProcessInspecting: Sendable {
-    /// PID of the process that owns the pane's tty foreground group and whose
-    /// command line contains `agentName`, or nil when no such process is
-    /// foreground (bare shell, editor, an agent that exited, …).
-    ///
-    /// The name is a substring match on the lowercased command line, which is
-    /// how the Claude question has always been asked; passing "codex" asks the
-    /// same question about a Codex session.
-    func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32?
-
-    /// PID of the process that owns the pane's tty foreground process group,
-    /// whatever it is — no name to match. An idle interactive shell answers
-    /// with the pane's OWN pid; anything the person started under it answers
-    /// with that child's. Nil when nothing in the pane's tree claims the
-    /// foreground group, which is the same "nothing answered" a caller must
-    /// treat as no evidence either way.
-    ///
-    /// Separate from `foregroundAgentPID` because the question is different:
-    /// that one asks "is THIS agent running here" and is answered by the send
-    /// rail, this one asks "is ANYTHING running here" and is answered by the
-    /// wake rail before it respawns a pane out from under a live process.
-    func paneForegroundPID(panePID: Int32) -> Int32?
-}
-
-extension PaneProcessInspecting {
-    /// The Claude-shaped question, unchanged for every caller that only ever
-    /// asks it: the limit-resume actuator.
-    public func foregroundClaudePID(panePID: Int32) -> Int32? {
-        foregroundAgentPID(panePID: panePID, matching: "claude")
-    }
-}
-
-public struct ProductionPaneProcessInspector: PaneProcessInspecting {
-    private let signaller: any ProcessSignaller
-
-    public init(signaller: any ProcessSignaller = ProductionProcessSignaller()) {
-        self.signaller = signaller
-    }
-
-    public func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32? {
-        // Candidates, cheapest first: the pane PID itself (zsh may have exec'd
-        // into the agent) and its direct children, which one `ps` table scan
-        // answers together.
-        let children = signaller.children(ofServerPID: panePID)
-        if let match = firstForegroundAgent(in: [panePID] + children, matching: agentName) {
-            return match
-        }
-
-        // Grandchildren (wrapper-shell spawns) cost a FULL `ps -axo pid=,ppid=`
-        // scan each, so they are walked only after the cheap candidates came up
-        // empty — which is exactly the case this rail is asked about on the
-        // interactive send path, where the ordinary answer is the pane pid or one
-        // of its children. Scanning order is unchanged: a grandchild could only
-        // ever have won after every child lost anyway.
-        for child in children {
-            if let match = firstForegroundAgent(
-                in: signaller.children(ofServerPID: child), matching: agentName) {
-                return match
-            }
-        }
-        return nil
-    }
-
-    public func paneForegroundPID(panePID: Int32) -> Int32? {
-        // Same candidate ladder as `foregroundAgentPID`, cheapest first and for
-        // the same reason: the pane pid itself, then its children, then — only
-        // once those came up empty — the grandchildren a wrapper shell spawns.
-        // The pane pid comes first deliberately: an idle shell holds the
-        // foreground group itself, so the common case costs one `ps`.
-        let children = signaller.children(ofServerPID: panePID)
-        if let match = firstForeground(in: [panePID] + children) { return match }
-        for child in children {
-            if let match = firstForeground(in: signaller.children(ofServerPID: child)) {
-                return match
-            }
-        }
-        return nil
-    }
-
-    /// The first pid in `pids` whose `ps -o stat=` carries the `+` that means
-    /// "in the controlling terminal's foreground process group". No name is
-    /// matched — the caller wants whatever is there.
-    private func firstForeground(in pids: [Int32]) -> Int32? {
-        for pid in pids where signaller.stat(pid)?.contains("+") == true {
-            return pid
-        }
-        return nil
-    }
-
-    /// The first pid in `pids` that owns its tty's foreground process group and
-    /// whose command line names the agent. Two `ps` invocations per candidate,
-    /// so callers pass the cheapest candidate set they have.
-    private func firstForegroundAgent(in pids: [Int32], matching agentName: String) -> Int32? {
-        for pid in pids {
-            guard let stat = signaller.stat(pid), stat.contains("+"),
-                  let command = signaller.commandLine(pid)?.lowercased(),
-                  command.contains(agentName)
-            else { continue }
-            return pid
-        }
-        return nil
-    }
-}
-
 /// Runs one actuation attempt for a scheduled resume: eligibility checks, the
-/// send — tmux's Escape/text/Enter key sequence, or the holder transport's
-/// three writes (Escape, text, carriage return) — and post-send verification,
-/// which is the same for both because it reads the activity column — written
-/// from the agent's own OSC 7501 reports — and the transcript rather than
-/// anything the transport can see.
+/// send — three writes to the holder session's pty (Escape, text, carriage
+/// return) — and post-send verification, which reads the activity column —
+/// written from the agent's own OSC 7501 reports — and the transcript rather
+/// than anything the transport can see.
+///
+/// A row still on tmux is not typed at: TBD no longer types into tmux panes.
 public struct LimitResumeActuator: LimitResumeActuating {
 
     // MARK: - Timing constants (spec §Actuation 5-6)
@@ -161,15 +38,24 @@ public struct LimitResumeActuator: LimitResumeActuating {
     static let holderInputPathMissing = "this daemon has no holder input path"
 
     /// The failure for a write the holder input path took and could not
-    /// deliver. Distinct from the two refusals above: the rail tried.
+    /// deliver. Distinct from the refusals: the rail tried.
     static let holderWriteRefused =
         "the resume could not be written to the holder-backed session"
 
-    /// The first of the holder arm's three writes: `ESC`, alone — one byte.
+    /// The refusal for a live row still on the tmux transport. Its agent may
+    /// still be running in a tmux server an earlier build started, which is how
+    /// it could arm a resume at all, and this version of TBD cannot type into
+    /// it. Failed by name rather than cancelled silently, so the person hears
+    /// that the resume did not happen. Written to complete the daemon's
+    /// sentence, like `holderInputPathMissing`.
+    static let tmuxSessionNotTyped =
+        "this session runs in tmux, which this version of TBD can no longer type into"
+
+    /// The first of the rail's three writes: `ESC`, alone — one byte.
     ///
     /// The whole send is `ESC`, `interKeyPause`, `holderContinueTextPayload`,
-    /// `interKeyPause`, `holderSubmitPayload` — the tmux arm's
-    /// Escape/pause/text/pause/Enter shape expressed in raw bytes. There is no
+    /// `interKeyPause`, `holderSubmitPayload` — Escape, pause, text, pause,
+    /// Enter, expressed in raw bytes. There is no
     /// named-key table on this transport (the child-as-contract-party design,
     /// `docs/specs/2026-09-05-child-as-contract-party-design.md`, is where one
     /// comes from: choosing bytes for a named key needs the child's cursor-key
@@ -182,11 +68,11 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// in one read is CSI A (cursor up), which leaves the composer holding
     /// `utomatic: …`. Either way the text is mangled deterministically on
     /// every attempt, which is why the retry in `actuate` could not recover
-    /// it. The pause goes through the same `waiter` seam as the tmux arm's, so
-    /// tests advance it virtually and only production sleeps.
+    /// it. The pause goes through the `waiter` seam, so tests advance it
+    /// virtually and only production sleeps.
     static let holderEscapePayload = Data([0x1B])
 
-    /// The second of the holder arm's three writes: the text, with no carriage
+    /// The second of the rail's three writes: the text, with no carriage
     /// return.
     ///
     /// **Why the carriage return is its own write.** Claude Code's stdin
@@ -195,8 +81,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// This text is 110 bytes. Measured on Claude Code 2.1.301 in an isolated
     /// tmux pane with this exact text: text and carriage return in one write
     /// left the text unsent in the composer; `ESC`, 150 ms, text, 150 ms, a
-    /// lone carriage return submitted it. So the holder arm has exactly the
-    /// tmux arm's shape, expressed in bytes.
+    /// lone carriage return submitted it.
     ///
     /// **Why not bracketed-paste wrapping**, which is what `terminal.send`'s
     /// `HolderSendComposition` does: it is correct only when the child has
@@ -210,7 +95,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// empty composer, which does nothing.
     static let holderContinueTextPayload = Data(continueMessage.utf8)
 
-    /// The third of the holder arm's three writes: the carriage return that
+    /// The third of the rail's three writes: the carriage return that
     /// submits the text, alone. `holderContinueTextPayload` says why it is not
     /// appended to the text.
     static let holderSubmitPayload = Data([0x0D])
@@ -219,8 +104,6 @@ public struct LimitResumeActuator: LimitResumeActuating {
     static let verifyPolls = 20   // ~20s window
 
     private let db: TBDDatabase
-    private let tmux: any ResumeSendingTmux
-    private let inspector: any PaneProcessInspecting
     private let readTranscript: @Sendable (String) -> Data?
     /// Transcript mtime, kept separate from `readTranscript` so the
     /// early-cancel pre-filter is testable without touching the filesystem.
@@ -233,16 +116,15 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// Writes bytes to one holder-backed session's pty, answering whether they
     /// were delivered. Production passes `HolderInjectionCourier.deliver`,
     /// which routes by who owns the pty; `nil` means this daemon has no holder
-    /// input path at all (mock mode, or no holder registry), which the holder
-    /// arm refuses by name rather than by pretending the transport is the
-    /// problem.
+    /// input path at all (mock mode, or no holder registry), which the rail
+    /// refuses by name rather than by pretending the transport is the problem.
     ///
     /// The seam is the courier reduced to what this rail needs — bytes in, a
     /// yes/no out — so the actuator neither imports the holder subsystem nor
     /// has to fake an actor to be tested.
     private let holderSend: (@Sendable (UUID, Data) async -> Bool)?
     /// Whether the holder session behind a terminal has ended, as the daemon's
-    /// registry last heard it — this transport's answer to `windowExists`.
+    /// registry last heard it.
     ///
     /// Production passes "the last status this registry recorded is `.exited`
     /// or `.exitedStatusUnknown`", which is a POSITIVE report from the holder
@@ -256,13 +138,10 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// session really is gone.
     private let holderSessionEnded: (@Sendable (UUID) async -> Bool)?
 
-    /// `holderSend` and `holderSessionEnded` default to `nil` so every existing
-    /// call site — and every test that has no holder row in it — constructs the
-    /// actuator unchanged.
+    /// `holderSend` and `holderSessionEnded` default to `nil`: mock mode and a
+    /// daemon with no holder registry have neither.
     public init(
         db: TBDDatabase,
-        tmux: any ResumeSendingTmux,
-        inspector: any PaneProcessInspecting,
         readTranscript: @escaping @Sendable (String) -> Data?,
         transcriptModifiedAt: @escaping @Sendable (String) -> Date?,
         waiter: @escaping @Sendable (Duration) async -> Void,
@@ -271,8 +150,6 @@ public struct LimitResumeActuator: LimitResumeActuating {
         holderSessionEnded: (@Sendable (UUID) async -> Bool)? = nil
     ) {
         self.db = db
-        self.tmux = tmux
-        self.inspector = inspector
         self.readTranscript = readTranscript
         self.transcriptModifiedAt = transcriptModifiedAt
         self.waiter = waiter
@@ -282,7 +159,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
     }
 
     /// Early-cancel probe (see `LimitResumeActuating.userAlreadyContinued`).
-    /// Read-only: no tmux calls, no writes, and — thanks to the mtime
+    /// Read-only: no writes, and — thanks to the mtime
     /// pre-filter in `transcriptContinuation` — usually no file read either.
     /// A terminal that has vanished answers `false`; cancelling for THAT
     /// reason is fire time's job (`.terminalGone`), not this probe's.
@@ -345,7 +222,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
             // Re-run eligibility (spec §Actuation "one retry of steps 1-5")
             // on every attempt except the first, which already ran it above.
             // State can change during a prior attempt's ~20s verify window:
-            // copy-mode entered, the user typed manually, the terminal died.
+            // the user typed manually, the session ended, the row was cancelled.
             if attempt > 1 {
                 switch await checkEligibility(resume) {
                 case .eligible(let ctx): context = ctx
@@ -366,41 +243,23 @@ public struct LimitResumeActuator: LimitResumeActuating {
                 return .failed("could not record the resume in the actuation log")
             }
 
-            switch context.delivery {
-            case .tmux(let server, let paneID):
-                do {
-                    try await Self.sendContinueSequence(
-                        tmux: tmux, server: server, paneID: paneID, waiter: waiter)
-                    await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
-                } catch {
-                    await actuationLog.appendOutcome(
-                        confirms: actuationID, result: .transportFailed, error: "\(error)")
-                    // Treat a thrown send like a failed verification: retry
-                    // (with a fresh eligibility re-check) rather than failing
-                    // instantly — only give up after attempt 2 also fails.
-                    logger.warning("actuate: send threw on attempt \(attempt, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    continue
-                }
-            case .holder(let send):
-                // Not retried, unlike a thrown tmux send. A wedged tmux server
-                // is a transient the next attempt may find recovered; the
-                // courier has already exhausted its own routes by the time it
-                // answers no — viewer, then the daemon's own descriptor — so a
-                // second identical write would take the same route to the same
-                // answer, ~20s of verification later. Any write answering no
-                // ends the actuation the same way: half a send is not a send.
-                guard await sendHolderContinue(send: send, terminalID: context.terminalID) else {
-                    await actuationLog.appendOutcome(
-                        confirms: actuationID, result: .transportFailed,
-                        error: Self.holderWriteRefused)
-                    logger.warning("""
-                        actuate: the holder input path took nothing for terminal \
-                        \(context.terminalID.uuidString, privacy: .public)
-                        """)
-                    return .failed(Self.holderWriteRefused)
-                }
-                await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
+            // Not retried on a refused write: the courier has already
+            // exhausted its own routes by the time it answers no — viewer, then
+            // the daemon's own descriptor — so a second identical write would
+            // take the same route to the same answer, ~20s of verification
+            // later. Any write answering no ends the actuation the same way:
+            // half a send is not a send.
+            guard await sendHolderContinue(send: context.send, terminalID: context.terminalID) else {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .transportFailed,
+                    error: Self.holderWriteRefused)
+                logger.warning("""
+                    actuate: the holder input path took nothing for terminal \
+                    \(context.terminalID.uuidString, privacy: .public)
+                    """)
+                return .failed(Self.holderWriteRefused)
             }
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
             if await verifyResumed(terminalID: context.terminalID,
                                    transcriptPath: context.transcriptPath,
                                    preSize: preSize) {
@@ -419,19 +278,9 @@ public struct LimitResumeActuator: LimitResumeActuating {
         case notEligible(ResumeActuationOutcome)
     }
 
-    /// How an eligible pass will put the resume into the session.
-    ///
-    /// Typed rather than a transport flag plus optional coordinates, so the
-    /// holder arm cannot reach for a pane id that a holder row does not have
-    /// and the tmux arm cannot reach for a seam that may be nil: whichever
-    /// case a pass produced carries exactly what its send needs.
-    private enum ResumeDelivery {
-        case tmux(server: String, paneID: String)
-        case holder(send: @Sendable (UUID, Data) async -> Bool)
-    }
-
     private struct EligibilityContext {
-        let delivery: ResumeDelivery
+        /// The holder input path the send writes through.
+        let send: @Sendable (UUID, Data) async -> Bool
         let terminalID: UUID
         let worktreeID: UUID
         let transcriptPath: String?
@@ -441,19 +290,16 @@ public struct LimitResumeActuator: LimitResumeActuating {
         let preSendTranscriptData: Data?
     }
 
-    /// Runs eligibility steps 1-4 (spec §Actuation), in order: terminal
-    /// alive → user-already-continued → Claude foreground → copy-mode.
-    /// The transport branches between the terminal lookup and everything else,
-    /// because every one of those steps addresses a tmux pane and a
-    /// holder-backed row has none — see `holderEligibility` for what that arm
-    /// keeps and what it drops.
-    /// Foreground is checked before copy-mode so a dead/backgrounded shell
-    /// classifies `.failed` rather than endlessly rescheduling on a stale
-    /// copy-mode flag. Two additional checks (0a the row's own limitType-aware toggle, 1b row
-    /// status) run on every pass too — they aren't in the spec's numbered
-    /// list but close the same "state changed during a prior attempt's ~20s
-    /// verify window" gap the spec's steps 1-4 already cover for the other
-    /// cancellation reasons.
+    /// Runs the eligibility checks on every pass, in order: the row's own
+    /// limitType-aware toggle (0a), the terminal present and not parked (1),
+    /// then the holder checks in `holderEligibility` — the session's liveness,
+    /// the row's own status (1b), user-already-continued (2) and an input
+    /// path. 0a and 1b are not in the spec's numbered list but close the same
+    /// "state changed during a prior attempt's ~20s verify window" gap.
+    ///
+    /// The spec's foreground (3) and copy-mode (4) steps asked a tmux pane and
+    /// have no counterpart on the pty holder, whose child is the agent and has
+    /// no mode for typing to land in. A row still on tmux is not typed at.
     private func checkEligibility(_ resume: ScheduledResume) async -> EligibilityCheckResult {
         // 0a. Toggle-off-mid-flight: the row's own gate — autoResumeOnApiError
         //     for api_error rows, autoResumeOnLimitReset for everything else
@@ -467,159 +313,42 @@ public struct LimitResumeActuator: LimitResumeActuating {
             return .notEligible(.cancelledExternally)
         }
 
-        // 1. Terminal alive AND not parked. Under the unified park model a
-        //    parked session's pane has been respawned to a bare shell (its
-        //    claude process is gone) and is marked via `hibernatedAt`
-        //    (authoritative) or a legacy `suspendedAt` — either way `isParked`.
-        //    Never fire keys into a parked pane: parking already cancels the
-        //    pending row (spec §Cancellation), so this is the fire-time backstop
-        //    for a park that raced the scheduler. Classify as `.terminalGone`
-        //    (cancel silently), same as a dead window.
+        // 1. Terminal present. A row that has gone cancels silently.
         guard let terminal = ((try? await db.terminals.get(id: resume.terminalID)) ?? nil)
         else { return .notEligible(.terminalGone) }
 
-        // Transport, ahead of every remaining check — including the parked rail
-        // and the worktree lookup, which exists only to name a tmux server this
-        // row does not have. EVERY step below this point addresses a tmux pane:
-        // `windowExists`, the pane-identity consultation, `panePID`, copy-mode,
-        // and finally the keys themselves. A holder row's `tmuxWindowID` and
-        // `tmuxPaneID` are the empty string by construction, so without this
-        // branch the rail exited at step 1 with `.terminalGone` — silently
-        // cancelling the user's armed auto-resume on a session that is
-        // perfectly alive, and recording "the terminal is gone" for a row that
-        // is not.
-        //
-        // That accident was also fragile rather than safe: it rested entirely
-        // on `TmuxManager.windowExists` swallowing its error and answering
-        // `false` for an empty window id. Any future change to that answer
-        // would have sent this rail on to type "continue" at whatever pane the
-        // empty coordinate resolved to.
-        //
-        // Served rather than refused: the transport has an input path
-        // (`holderSend`), and whatever gates the tmux rail gates this one and
-        // nothing more.
-        if terminal.transport == .holder {
-            return await holderEligibility(resume, terminal: terminal)
-        }
+        // Parked: the fire-time backstop for a park that raced the scheduler —
+        // parking already cancels the pending row. Cancelled silently,
+        // whatever the transport: nothing runs behind a parked row.
+        guard !terminal.isParked else { return .notEligible(.terminalGone) }
 
-        guard !terminal.isParked,
-              let worktree = ((try? await db.worktrees.getLocal(id: terminal.worktreeID)) ?? nil)
-        else { return .notEligible(.terminalGone) }
-        let server = worktree.tmuxServer
-        guard await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) else {
-            return .notEligible(.terminalGone)
+        guard terminal.transport == .holder else {
+            logger.info("""
+                actuate: terminal \(terminal.id.uuidString, privacy: .public) runs on tmux, \
+                which this version of TBD no longer types into — typing nothing
+                """)
+            return .notEligible(.failed(Self.tmuxSessionNotTyped))
         }
-
-        // 1a. Ask the pane who it is, before any key is typed into it.
-        //     `windowExists` above proves a window id resolves to SOME window;
-        //     it cannot prove the pane still belongs to THIS terminal. tmux
-        //     reuses pane ids, so a stale `tmuxPaneID` names a live stranger
-        //     that passes every remaining check — window alive, Claude
-        //     foreground, not in copy-mode — and then gets "continue" typed
-        //     into it. That is issue #384 as it was actually observed: this
-        //     actuator, not a human's `terminal.send`, was the thing typing.
-        //
-        //     Same rule as the send path: refusal requires POSITIVE
-        //     disagreement. A pane that answers with no identity is sent to
-        //     exactly as before, so panes predating the stamp do not regress.
-        switch await paneTargetVerdict(server: server, terminal: terminal) {
-        case .proceed:
-            break
-        case .notEligible(let outcome):
-            return .notEligible(outcome)
-        }
-
-        // 1b. Explicit-cancel-mid-flight: the row itself can be cancelled
-        //     (`cancelPending`/`cancelAllPending`) while a prior attempt's
-        //     verify window is running — e.g. the user clicked "Cancel
-        //     scheduled resume". Re-checking the row's own status here
-        //     (same every-call guarantee as 0a) closes that gap too. Placed
-        //     after the terminal-alive check (not at the very top) so a
-        //     terminal/row that was never persisted at all (defensive
-        //     callers, tests) still classifies via step 1's `.terminalGone`
-        //     rather than this row lookup.
-        guard ((try? await db.scheduledResumes.get(id: resume.id)) ?? nil)?.status == .pending else {
-            return .notEligible(.cancelledExternally)
-        }
-
-        // 2. User already continued? Any transcript record newer than the
-        //    detection instant means yes — send nothing. Same predicate the
-        //    scheduler's early pass runs (`transcriptContinuation`), but
-        //    ungated: keep this read around as the pre-send baseline for
-        //    growth verification — a fresh read later would race ahead of
-        //    the baseline on a fast-growing transcript and make growth
-        //    undetectable.
-        let continuation = transcriptContinuation(
-            path: terminal.transcriptPath, since: resume.createdAt, mtimeGated: false)
-        if continuation.alreadyContinued {
-            return .notEligible(.userAlreadyContinued)
-        }
-        let preSendTranscriptData = continuation.data
-
-        // 3. Claude must be the pane's FOREGROUND process (+ flag). Never
-        //    type into a bare shell.
-        guard let panePIDString = try? await tmux.panePID(server: server, paneID: terminal.tmuxPaneID),
-              let panePID = Int32(panePIDString),
-              inspector.foregroundClaudePID(panePID: panePID) != nil
-        else {
-            return .notEligible(.failed("Claude is not the pane's foreground process"))
-        }
-
-        // 4. Copy-mode: typing would go to the mode; cancelling copy-mode
-        //    would yank the user out of scrollback. Reschedule instead.
-        if (try? await tmux.paneInMode(server: server, paneID: terminal.tmuxPaneID)) == true {
-            return .notEligible(.paneInCopyMode)
-        }
-
-        return .eligible(EligibilityContext(
-            delivery: .tmux(server: server, paneID: terminal.tmuxPaneID),
-            terminalID: terminal.id,
-            worktreeID: terminal.worktreeID,
-            transcriptPath: terminal.transcriptPath, preSendTranscriptData: preSendTranscriptData))
+        return await holderEligibility(resume, terminal: terminal)
     }
 
-    /// Eligibility for a holder-backed row: the transport-agnostic rails of
-    /// `checkEligibility`, with every tmux-shaped step dropped.
+    /// Eligibility for a holder-backed, unparked row.
     ///
-    /// Dropped, and why each one is tmux's alone:
+    /// The write is addressed to the terminal id itself, which nothing reuses,
+    /// so there is no coordinate to go stale and no pane to ask who it is. The
+    /// holder's child IS the agent, so there is no shell in front of it to be
+    /// foreground instead of it.
     ///
-    /// - **`windowExists` and the worktree lookup.** Both name a tmux server
-    ///   and window this row does not have. A holder session's liveness is its
-    ///   child process, and the courier addresses it by terminal id — so the
-    ///   liveness question is not dropped, it is asked of a different oracle:
-    ///   `holderSessionEnded`, in the same position and with the same silent
-    ///   `.terminalGone` cancel.
-    /// - **The pane-identity consultation (step 1a).** It exists because tmux
-    ///   reuses pane ids, so a stale coordinate can name a live stranger. There
-    ///   is no coordinate here to go stale: a holder row's pane id is `""` by
-    ///   construction, and the write is addressed to the terminal id itself,
-    ///   which nothing reuses.
-    /// - **`panePID` and the foreground check (step 3).** Both walk the process
-    ///   tree under a pane's shell. The holder's child IS the agent — there is
-    ///   no shell in front of it to be foreground instead of it.
-    /// - **Copy-mode (step 4).** tmux's scrollback mode. A holder session's
-    ///   scrollback belongs to whichever emulator is reading it, and there is
-    ///   no mode for typing to land in.
-    ///
-    /// Kept, because none of them was ever about tmux: the parked
-    /// backstop, the row's own cancellation status (1b), and the
-    /// user-already-continued check (2) — which also produces the pre-send
-    /// growth baseline `verifyResumed` compares against, so skipping it would
-    /// leave `preSize == 0` and make any later read look like a resume.
+    /// The user-already-continued check (2) also produces the pre-send growth
+    /// baseline `verifyResumed` compares against, so skipping it would leave
+    /// `preSize == 0` and make any later read look like a resume.
     private func holderEligibility(
         _ resume: ScheduledResume, terminal: Terminal
     ) async -> EligibilityCheckResult {
-        // Parked: the same fire-time backstop as the tmux path, and the same
-        // silent cancel. Parking already cancels the pending row; this catches
-        // a park that raced the scheduler.
-        guard !terminal.isParked else { return .notEligible(.terminalGone) }
-
-        // Liveness, in the position `windowExists` occupies on the tmux arm and
-        // with the same silent `.terminalGone` cancel. Without it the holder
-        // arm had no liveness answer at all: a row whose child exited without
-        // anything parking it would be typed at, and the write would land on a
-        // pty nobody is reading — an armed resume reported as delivered on a
-        // session that is over.
+        // Liveness, with a silent `.terminalGone` cancel. Without it a row
+        // whose child exited without anything parking it would be typed at,
+        // and the write would land on a pty nobody is reading — an armed
+        // resume reported as delivered on a session that is over.
         //
         // The evidence has to be positive, which is why the seam asks about the
         // holder's reported STATUS rather than about the daemon's reader.
@@ -637,15 +366,23 @@ public struct LimitResumeActuator: LimitResumeActuating {
             return .notEligible(.terminalGone)
         }
 
-        // 1b, unchanged: the row itself can be cancelled while a prior
-        // attempt's ~20s verify window runs.
+        // 1b. Explicit-cancel-mid-flight: the row itself can be cancelled
+        //     (`cancelPending`/`cancelAllPending`) while a prior attempt's
+        //     verify window is running — e.g. the user clicked "Cancel
+        //     scheduled resume". Re-checked here on every pass, as 0a is.
         guard ((try? await db.scheduledResumes.get(id: resume.id)) ?? nil)?.status == .pending else {
             return .notEligible(.cancelledExternally)
         }
 
-        // 2, unchanged — and ahead of the input-path check below on purpose:
-        // a session that has already moved on wants the silent cancel, not a
-        // notification saying auto-resume failed on it.
+        // 2. User already continued? Any transcript record newer than the
+        //    detection instant means yes — send nothing. Same predicate the
+        //    scheduler's early pass runs (`transcriptContinuation`), but
+        //    ungated: this read is kept as the pre-send baseline for growth
+        //    verification — a fresh read later would race ahead of the
+        //    baseline on a fast-growing transcript and make growth
+        //    undetectable. Ahead of the input-path check below on purpose: a
+        //    session that has already moved on wants the silent cancel, not a
+        //    notification saying auto-resume failed on it.
         let continuation = transcriptContinuation(
             path: terminal.transcriptPath, since: resume.createdAt, mtimeGated: false)
         if continuation.alreadyContinued {
@@ -661,130 +398,25 @@ public struct LimitResumeActuator: LimitResumeActuating {
         }
 
         return .eligible(EligibilityContext(
-            delivery: .holder(send: send),
+            send: send,
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
             transcriptPath: terminal.transcriptPath,
             preSendTranscriptData: continuation.data))
     }
 
-    /// What the pane consultation concluded for step 1a.
-    private enum PaneTargetVerdict {
-        case proceed
-        case notEligible(ResumeActuationOutcome)
-    }
-
-    /// Classify one `paneSendTarget` consultation into an eligibility verdict.
+    /// The send: Escape, pause, text, pause, carriage return, as three writes.
     ///
-    /// The outcomes mirror how this actuator already treats the same facts:
-    /// a pane that is gone or whose process has exited is the `windowExists`
-    /// case one level finer, so it cancels silently as `.terminalGone`. A pane
-    /// that answers with a DIFFERENT terminal is not "gone" and not a
-    /// transient state to retry — the row's coordinate is stale and will stay
-    /// stale until something respawns the window, so retrying would only aim
-    /// at the same stranger again. It fails the row with a message naming both
-    /// ids, the way step 3's not-foreground check fails a row a retry cannot
-    /// help either.
-    private func paneTargetVerdict(
-        server: String, terminal: Terminal
-    ) async -> PaneTargetVerdict {
-        let target: PaneSendTarget
-        do {
-            target = try await tmux.paneSendTarget(server: server, paneID: terminal.tmuxPaneID)
-        } catch {
-            // The consultation could not be RUN (a wedged tmux tripping the
-            // subprocess timeout) — not an answer about the pane. Step 3's
-            // `panePID` treats the same wedged server as `.failed`, and typing
-            // into a pane we could not look at is exactly what this check
-            // exists to stop.
-            return .notEligible(.failed("could not verify the target pane: \(error)"))
-        }
-
-        switch target {
-        case .absent:
-            logger.info("""
-                actuate: pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
-                \(terminal.id.uuidString, privacy: .public) no longer exists — cancelling
-                """)
-            return .notEligible(.terminalGone)
-        case .unreachable:
-            // The consultation reached no server, so nothing is known about the
-            // pane. `.terminalGone` would CANCEL the scheduled resume on the
-            // strength of a failed read; `.failed` leaves the row for a later
-            // attempt, matching the throwing branch above.
-            logger.warning("""
-                actuate: could not reach tmux server \(server, privacy: .public) to consult \
-                pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
-                \(terminal.id.uuidString, privacy: .public) — not cancelling on a failed read
-                """)
-            return .notEligible(.failed(
-                "could not reach tmux server \(server) to verify the target pane"))
-        case .dead:
-            logger.info("""
-                actuate: pane \(terminal.tmuxPaneID, privacy: .public) for terminal \
-                \(terminal.id.uuidString, privacy: .public) is dead — cancelling
-                """)
-            return .notEligible(.terminalGone)
-        case .live(let paneTerminalID):
-            guard let paneTerminalID else {
-                // Absence is not disagreement: a pane spawned before TBD
-                // stamped identities carries none, and refusing on nothing
-                // would break auto-resume for every such session.
-                logger.debug("""
-                    actuate: pane \(terminal.tmuxPaneID, privacy: .public) claims no terminal \
-                    identity; proceeding without verifying it is terminal \
-                    \(terminal.id.uuidString, privacy: .public)
-                    """)
-                return .proceed
-            }
-            guard paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame
-            else { return .proceed }
-            logger.warning("""
-                actuate: pane \(terminal.tmuxPaneID, privacy: .public) belongs to terminal \
-                \(paneTerminalID, privacy: .public), not \
-                \(terminal.id.uuidString, privacy: .public) — typing nothing
-                """)
-            return .notEligible(.failed("""
-                tmux pane \(terminal.tmuxPaneID) now belongs to terminal \(paneTerminalID), \
-                not the scheduled terminal \(terminal.id.uuidString) — nothing was sent \
-                (tmux reuses pane ids, so this coordinate is stale)
-                """))
-        }
-    }
-
-    /// The exact production send sequence for the tmux arm (spec §Actuation 5);
-    /// the holder arm's raw-bytes equivalent is `sendHolderContinue`:
     /// Escape first — at the limit, newer Claude Code opens the
     /// `/rate-limit-options` menu whose highlighted default can be "Upgrade
-    /// your plan"; a blind Enter can confirm a paid upgrade. Escape
-    /// dismisses and can never select. 150ms pauses — Claude's TUI drops
-    /// keys during UI transitions ("ontinue"), and the pause after Escape also
-    /// keeps it from combining with the text's leading `[` into a CSI
-    /// sequence (`ESC` `[` `A` is cursor up), so Escape keeps its own
-    /// keystroke and pause. Enter as a separate
-    /// named-key call — text+Enter in one send-keys is treated as a
-    /// bracketed paste (literal newline, nothing submits).
-    ///
-    /// Static + seam-typed so the live tmux test drives this very code path.
-    public static func sendContinueSequence(
-        tmux: any ResumeSendingTmux, server: String, paneID: String,
-        waiter: (Duration) async -> Void
-    ) async throws {
-        try await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
-        await waiter(interKeyPause)
-        try await tmux.sendKeys(server: server, paneID: paneID, text: continueMessage)
-        await waiter(interKeyPause)
-        try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
-    }
-
-    /// The holder arm's counterpart to `sendContinueSequence`: the same
-    /// Escape/pause/text/pause/submit shape, written as bytes.
-    ///
-    /// Three writes with `interKeyPause` between each — `holderEscapePayload`
-    /// says why the first pause is load-bearing rather than cosmetic, and
-    /// `holderContinueTextPayload` says why the carriage return is its own
-    /// write. The pauses run on the same injected `waiter` the tmux arm uses,
-    /// so a test advances them and only production sleeps.
+    /// your plan", and a blind Enter can confirm a paid upgrade. Escape
+    /// dismisses and can never select. 150 ms pauses — Claude's TUI drops keys
+    /// during UI transitions ("ontinue"), and the pause after Escape also keeps
+    /// it from combining with the text's leading `[` into a CSI sequence.
+    /// `holderEscapePayload` says why that first pause is load-bearing rather
+    /// than cosmetic, and `holderContinueTextPayload` says why the carriage
+    /// return is its own write. The pauses run on the injected `waiter`, so a
+    /// test advances them and only production sleeps.
     ///
     /// Answers whether the whole sequence was delivered. A `false` from any
     /// write stops the sequence with no further writes: nothing is gained by

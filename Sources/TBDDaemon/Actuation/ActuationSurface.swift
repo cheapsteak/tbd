@@ -18,7 +18,7 @@ import TBDShared
 // Two layers write, and only two: the **RPC handler** for anything a caller
 // asked for, and a **rail's own entry point** for anything the daemon started
 // by itself. The shared lifecycle internals in between — `captureThenKillWindow`,
-// `killWindowAndReap`, `performHibernate`, `closeScratchTerminals` — stay
+// `tearDownWindow`, `performHibernate`, `closeScratchTerminals` — stay
 // silent, because both `worktree.archive` and the boot-time reconcile sweep
 // reach them and a row down there would double-count every archive. Reconcile
 // is an entry point in its own right (boot is what invoked it), so its rows are
@@ -82,8 +82,9 @@ enum ActuationSurface: CaseIterable, Sendable {
     case worktreeSuspend
     /// Fan-out shim: one row per terminal it wakes, at that terminal's own act moment.
     case worktreeResume
-    /// Respawns a terminal's window and process. Its dead-window re-park branch
-    /// acts too, and acts differently — see `ActuationBranch`.
+    /// Named for respawning a terminal's window and process. Every act it
+    /// logs goes through its leftover-tmux park branch, which acts differently
+    /// — see `ActuationBranch`.
     case terminalRecreateWindow
     case terminalSwapProfile
     /// Parks a session, rewrites its transport and wakes it on the pty holder.
@@ -207,13 +208,12 @@ enum ActuationSurface: CaseIterable, Sendable {
 
 /// A branch of a wired surface whose act is not the one its surface names.
 ///
-/// `terminal.recreateWindow` is the only such door today. It normally respawns
-/// a window and its process — a `spawn` — but when the terminal is a resumable
-/// Claude whose window is gone it kills that window and parks the session
-/// instead, which is the recovery park `reconcile` performs and therefore a
-/// `hibernate`. One surface still names one door, so the second act is spelled
-/// here rather than as a second `ActuationSurface` case claiming the same
-/// method.
+/// `terminal.recreateWindow` is the only such door today. Its surface names a
+/// `spawn`, but what the door does is park a row still live on tmux once every
+/// place its server's socket can be is gone, when the row has a conversation to
+/// keep — the park `reconcile` performs for such a row, and therefore a
+/// `hibernate`. One surface still names one door, so that act is spelled here
+/// rather than as a second `ActuationSurface` case claiming the same method.
 ///
 /// A closed enum rather than a `kind:` argument at the call site, for the
 /// reason the two switches above exist: a handler may select a sanctioned
@@ -221,9 +221,9 @@ enum ActuationSurface: CaseIterable, Sendable {
 /// both a door and an act, and the whole wired set — surfaces and their
 /// alternate acts — stays readable in this one file.
 enum ActuationBranch: CaseIterable, Sendable {
-    /// The dead-window re-park: `terminal.recreateWindow` kills the window it
-    /// read as already gone — a read that can be stale — and parks the session,
-    /// preserving the identity `wake()` resumes from.
+    /// The leftover-tmux park: `terminal.recreateWindow` parks a row live on
+    /// tmux whose server the probe found gone, preserving the identity a wake
+    /// resumes from once the row has moved to the pty holder.
     case recreateWindowRepark
 
     /// The door this branch still came through.

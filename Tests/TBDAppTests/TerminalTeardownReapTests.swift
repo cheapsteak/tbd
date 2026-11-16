@@ -5,14 +5,14 @@ import Testing
 @testable import TBDApp
 import TestSupport
 
-/// Tier 2: drives the two terminal coordinators' real `cleanup()` against a
-/// real SwiftTerm `LocalProcess` and a real forked child. No tmux server, no
-/// daemon, no `~/tbd` — a bare `Coordinator()` with only `localProcess` set
-/// takes every other branch of `cleanup()` as a nil no-op.
+/// Tier 2: drives `LocalPTYTerminalRepresentable.Coordinator`'s real
+/// `cleanup()` against a real SwiftTerm `LocalProcess` and a real forked
+/// child. No daemon, no `~/tbd` — a bare `Coordinator()` with only
+/// `localProcess` set takes every other branch of `cleanup()` as a nil no-op.
 ///
 /// **This is the suite that pins the bug.** `ChildReaperTests` proves the
 /// helper reaps, but it would stay green if someone deleted the
-/// `ChildReaper.reap` call from `cleanup()`. These two tests reproduce the
+/// `ChildReaper.reap` call from `cleanup()`. These tests reproduce the
 /// production sequence end to end — spawn a child that will not exit on its
 /// own, tear the coordinator down, and require the child to be gone — so they
 /// go red if either half of the fix is removed: the reap call itself, or the
@@ -62,8 +62,8 @@ import TestSupport
 /// `drainPendingReaps(within:)` in `ChildReapDrainSupport.swift` races the
 /// drain against a 30 s guard, reports a stuck reap with its observed state,
 /// and each call site SIGKILLs and reaps its own child on that path. That guard
-/// is what the nightly ledger recorded firing in all four tests here, night
-/// after night, when the reaper still ran on a private concurrent dispatch
+/// is what the nightly ledger recorded firing in every test of this suite,
+/// night after night, when the reaper still ran on a private concurrent dispatch
 /// queue: with the process's ~64 constrained workers all parked by other
 /// suites' subprocess reads, neither the reap nor the drain could start. The
 /// reaper now runs each reap on a thread of its own and calls back from it, so
@@ -93,8 +93,7 @@ import TestSupport
 /// is a live `sleep 120` and an unreaped pid for the *rest of the run*, on
 /// every failing iteration, in a process that already runs ~4500 tests. That
 /// is worth ordering correctly on its own; it is not the launchd-orphan story.
-/// (`cleanup()` also appends a line to `/tmp/tbd-bridge.log` via the
-/// production `debugLog`; no TBD-owned store is touched.)
+/// No TBD-owned store is touched.
 @Suite("Terminal teardown reaps its PTY child", .fastPassBounded)
 struct TerminalTeardownReapTests {
 
@@ -399,43 +398,6 @@ struct TerminalTeardownReapTests {
         return Int(value)
     }
 
-    /// The panel path does not itself kill the child, so this test asserts what
-    /// the fix actually claims: **a child that exits after teardown is reaped,
-    /// not left `<defunct>`.** The child outlives `cleanup()` and then exits on
-    /// its own, which is the exact sequence that leaked in the field — by the
-    /// time it exits, `cleanup()` has released the `LocalProcess`, and that
-    /// deinit cancelled the only monitor that would have `waitpid`ed it.
-    ///
-    /// Two things this deliberately does NOT assert, both measured here rather
-    /// than assumed. Teardown on this path does not reliably *end* the child:
-    /// `deinit`'s `io?.close()` is a graceful close, and `startProcess` leaves a
-    /// read outstanding, so the cleanup handler that actually closes the master
-    /// fd does not run while that read is pending — a silent child never sees
-    /// the SIGHUP at all (a `sleep 120` child was still running 5 s after
-    /// `cleanup()`). What ends the attach client in production is
-    /// `tmuxBridge.cleanupSession`'s `tmux kill-session`, which needs a real
-    /// server and belongs to tier 3. Reaping is the part that is ours, and it
-    /// is the part under test.
-    @Test("an exiting PTY child is reaped by TerminalPanelView teardown, not left <defunct>")
-    func panelCleanupReapsChild() async throws {
-        // Every main-isolated step in one hop — see the suite comment. The
-        // coordinator is constructed inside it too: since the SwiftTerm 2.0
-        // migration, `TerminalViewDelegate` is `@MainActor` and the
-        // coordinator class inherits that isolation.
-        let child = await MainActor.run { () -> StartedChild in
-            let coordinator = TerminalPanelRepresentable.Coordinator()
-            // Outlives cleanup(), then exits on its own — see the doc comment.
-            let child = startChild(delegate: coordinator, lifetime: "0.4") {
-                coordinator.localProcess = $0
-            }
-            coordinator.cleanup()
-            return child
-        }
-        try requirePIDs([("teardown child", child)])
-
-        try await requireDrainedAndReaped(child.pid)
-    }
-
     /// Awaits the barrier, then asserts the child is gone. A barrier that did
     /// not fire is its own named failure — reported instead of the reap
     /// assertion, which it would make unsound: with a reap still parked, "the
@@ -502,7 +464,7 @@ struct TerminalTeardownReapTests {
     /// stalls holds the main thread inside `cleanup()` until the child exits
     /// on its own. Measured: in a serial CI pass (`swift test --no-parallel`,
     /// run 40151483724) this test passed after 120.022 s, the child's entire
-    /// lifetime, while its three siblings took 0.009–0.032 s. That is why
+    /// lifetime, while the suite's other reap tests took 0.009–0.032 s. That is why
     /// `cleanup()` signals before calling `terminate()`, and why this bound
     /// exists: the drain and reap assertions cannot tell a natural exit from a
     /// kill. The measurement brackets the synchronous call alone, inside the
@@ -513,9 +475,9 @@ struct TerminalTeardownReapTests {
     /// master fd, which SwiftTerm's IO threads do as they exit once
     /// `terminate()` or `deinit` stops them, hangs up the child's controlling
     /// terminal, and `sleep` dies of that SIGHUP as promptly as of SIGTERM.
-    /// The panel tests send no signal at all, and in that same pass they
-    /// reaped their 0.4 s children within 0.009–0.032 s by exactly that route. Removing either SIGTERM leaves this test green while the
-    /// other routes still fire. Removing the early one reddens it only on a run
+    /// Tests that sent no signal at all reaped their 0.4 s children within
+    /// 0.009–0.032 s in that same pass by exactly that route. Removing either
+    /// SIGTERM leaves this test green while the other routes still fire. Removing the early one reddens it only on a run
     /// where the join stalls — once in the serial pass, and in none of the
     /// parallel-pass timings examined.
     @Test("LocalPTYTerminalRepresentable teardown kills AND reaps its child")
@@ -544,70 +506,28 @@ struct TerminalTeardownReapTests {
 
     // MARK: - cleanup() is one-shot
     //
-    // The `guard !isTornDown` / `guard !tornDown` guards make `cleanup()`
-    // idempotent. **What these tests can and cannot pin, stated plainly:** with
-    // the current code a second call is *already* harmless without the guard —
-    // the first call nils `localProcess`, so the pid capture yields 0 and
-    // `shouldReap` rejects it, and every other branch of `cleanup()` is a nil
-    // no-op. A test that merely called `cleanup()` twice would therefore stay
-    // green with the guard deleted, i.e. pin nothing at all.
+    // The `guard !tornDown` guard makes `cleanup()` idempotent. **What this
+    // test can and cannot pin, stated plainly:** with the current code a second
+    // call is *already* harmless without the guard — the first call nils
+    // `localProcess`, so the pid capture yields 0 and `shouldReap` rejects it,
+    // and every other branch of `cleanup()` is a nil no-op. A test that merely
+    // called `cleanup()` twice would therefore stay green with the guard
+    // deleted, i.e. pin nothing at all.
     //
-    // So these drive the guard's actual semantics — "once torn down, this
+    // So this drives the guard's actual semantics — "once torn down, this
     // coordinator does no further teardown work" — by handing it fresh state
     // and requiring the second call to leave that state completely alone.
     // Production never re-assigns a coordinator after dismantle; the fresh
     // `LocalProcess` is a probe for the guard, not an endorsement of reuse.
-    // Deleting either guard reds these: the second `cleanup()` releases the
-    // probe, and on the remote path SIGTERMs its child as well.
-
-    @Test("a second TerminalPanelView cleanup() tears nothing down")
-    func panelCleanupIsOneShot() async throws {
-        let run = await MainActor.run { () -> OneShotRun in
-            // Coordinator constructed in the single main hop — MainActor
-            // isolation inherited from `TerminalViewDelegate` since the
-            // SwiftTerm 2.0 migration.
-            let coordinator = TerminalPanelRepresentable.Coordinator()
-            let first = startChild(delegate: coordinator, lifetime: "0.4") {
-                coordinator.localProcess = $0
-            }
-            coordinator.cleanup()
-            // Fresh state for the second call to (not) act on.
-            let probe = startChild(delegate: coordinator, lifetime: "120") {
-                coordinator.localProcess = $0
-            }
-            coordinator.cleanup()
-            let stillHeld = coordinator.localProcess != nil
-            // Release the probe's `LocalProcess` here, in the same hop —
-            // `localProcess` is MainActor state now, and its deinit does not
-            // end the child (no SIGTERM; the pending read swallows the
-            // SIGHUP — see the suite comment), so `probeAlive` below still
-            // observes only what the second cleanup() did.
-            coordinator.localProcess = nil
-            return OneShotRun(first: first, probe: probe, stillHeld: stillHeld)
-        }
-        // Observe, then dispose, then assert — in that order, with nothing that
-        // can throw in between. See the suite comment: a `defer` registered
-        // after a throwing `#require` never runs, and the probe is a `sleep 120`.
-        let drain = await drainPendingReaps()
-        let probeAlive = processExists(run.probe.pid)
-        disposeProbe(pid: run.probe.pid)
-        try requireDrained(drain, teardownChild: run.first.pid)
-
-        try requirePIDs([("teardown child", run.first), ("probe child", run.probe)])
-        #expect(run.stillHeld,
-                "a second cleanup() must not release state it never set up")
-        #expect(probeAlive,
-                "a second cleanup() must not reap or signal anything")
-
-        // The real teardown must still have reaped its own child.
-        try requireReaped(run.first.pid)
-    }
+    // Deleting the guard reds it: the second `cleanup()` releases the probe and
+    // SIGTERMs its child as well.
 
     @Test("a second LocalPTYTerminalRepresentable cleanup() tears nothing down")
     func localPTYCleanupIsOneShot() async throws {
         let timed = await MainActor.run { () -> TimedOneShotRun in
             // Constructed and released in the single main hop — see the
-            // sibling test above for both rationales.
+            // suite comment, and `localPTYCleanupReapsChild` for the
+            // coordinator's MainActor isolation.
             let coordinator = LocalPTYTerminalRepresentable.Coordinator()
             let first = startChild(
                 delegate: coordinator, lifetime: String(Self.killedChildLifetimeSeconds)
@@ -630,16 +550,18 @@ struct TerminalTeardownReapTests {
                 firstCleanupTook: firstCleanupTook)
         }
         let run = timed.run
-        // Observe, then dispose, then assert — see the sibling test above.
+        // Observe, then dispose, then assert, with nothing that can throw in
+        // between. See the suite comment: a `defer` registered after a
+        // throwing `#require` never runs, and the probe is a `sleep 120`.
         let drain = await drainPendingReaps()
         let probeAlive = processExists(run.probe.pid)
         disposeProbe(pid: run.probe.pid)
         try requireDrained(drain, teardownChild: run.first.pid)
 
         try requirePIDs([("teardown child", run.first), ("probe child", run.probe)])
-        // Sharper here than on the panel path: without the guard this second
-        // call reaches `localProcess?.terminate()`, so the probe would be
-        // SIGTERMed as well as released.
+        // Without the guard this second call reaches
+        // `localProcess?.terminate()`, so the probe would be SIGTERMed as well
+        // as released.
         #expect(run.stillHeld,
                 "a second cleanup() must not release state it never set up")
         #expect(probeAlive,

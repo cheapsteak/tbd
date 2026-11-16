@@ -4,48 +4,24 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+Terminals")
 
-enum AutomaticTerminalRecreationClaim: Equatable {
-    case alreadyInFlight
-    case terminalUnavailable
-    case claimed(attempt: Int)
-    case budgetExhausted
-}
-
 enum ManualTerminalRecreationClaim: Equatable {
     case alreadyInFlight
     case terminalUnavailable
     case claimed
 }
 
-enum AutomaticTerminalRecreationOutcome: Equatable {
-    case alreadyInFlight
-    case terminalUnavailable
-    case recreated(attempt: Int)
-    /// `refusal` is what the daemon said when it declined the recreate, or nil
-    /// when the attempt failed for another reason, such as a lost connection.
-    case failed(attempt: Int, refusal: TerminalRecreationRefusal? = nil)
-    case budgetExhausted
-}
-
-/// What the daemon said when it refused a window recreate: its own sentence,
-/// and whether the row is still on the tmux transport. Such a row's sentence
-/// says what to do — migrate it, or close the tab and open a new one — and no
-/// retry of the same request can succeed.
-///
-/// Decided from the refusal's code, never its text
-/// (`RPCErrorCode.terminalOnTmux`), so the daemon can reword the sentence
-/// without changing what the panel offers.
+/// What the daemon said when it refused a window recreate, in its own
+/// sentence. For a row whose tmux server is still running
+/// (`RPCErrorCode.terminalOnTmux`) that sentence says how to end the server;
+/// `LeftoverTmuxSessionNotice` shows it under its notice.
 struct TerminalRecreationRefusal: Equatable, Sendable {
     let message: String
-    let rowIsOnTmux: Bool
 
     /// The refusal `error` carries, or nil when the daemon did not write one —
     /// a dropped connection, a timeout, an unreadable answer.
     static func from(_ error: any Error) -> TerminalRecreationRefusal? {
-        guard case DaemonClientError.rpcError(let message, let code) = error else { return nil }
-        return TerminalRecreationRefusal(
-            message: message,
-            rowIsOnTmux: code == RPCErrorCode.terminalOnTmux.rawValue)
+        guard case DaemonClientError.rpcError(let message, _) = error else { return nil }
+        return TerminalRecreationRefusal(message: message)
     }
 }
 
@@ -313,13 +289,11 @@ extension AppState {
         }
     }
 
-    /// Adopt a terminal returned by an explicit creation operation. Unlike a
-    /// snapshot/event merge, this is positive evidence that a newly created
-    /// UUID is new and may clear stale recovery history.
+    /// Adopt a terminal returned by an explicit creation operation, under the
+    /// same deletion guards as a merge.
     func adoptCreatedTerminal(_ terminal: Terminal, date: Date = Date()) {
         guard !terminalDeletionsAwaitingRecreationCompletion.contains(terminal.id),
               !wasTerminalRecentlyDeleted(terminal.id, date: date) else { return }
-        terminalRecoveryBudget.reset(for: terminal.id)
         mergeCreatedTerminal(terminal, date: date)
     }
 
@@ -349,7 +323,7 @@ extension AppState {
     /// authoritative deletion to resurrect that terminal locally, or a list
     /// begun before a provider-replacement delta to restore its source row.
     /// Snapshot absence itself is observational only because responses may be
-    /// unordered; it must not alter deletion or recovery-budget state.
+    /// unordered; it must not alter deletion state.
     func adoptTerminalSnapshot(
         _ snapshots: [Terminal],
         worktreeID: UUID,
@@ -571,14 +545,15 @@ extension AppState {
         // memory is reclaimed. Memory only, and safe: the row is gone above.
         forgetComposerState(for: terminalID)
         // An already-dispatched recreation RPC cannot be unsent. Keep its
-        // in-flight claim intact so no second request can race it, and defer
-        // budget cleanup until its `finishTerminalRecreation` runs.
+        // in-flight claim intact so no second request can race it; its
+        // `finishTerminalRecreation` releases the claim.
         recordTerminalRemoval(terminalID: terminalID, date: date)
         reconcileTabs(worktreeID: worktreeID, terminals: terminals[worktreeID] ?? [])
     }
 
-    /// Preserve an active recreation claim across removal; otherwise discard
-    /// recovery history immediately. Shared by terminal and worktree removal.
+    /// Preserve an active recreation claim across removal, so the recreation's
+    /// late response cannot bring the row back. Shared by terminal and
+    /// worktree removal.
     func recordTerminalRemoval(terminalID: UUID, date: Date = Date()) {
         terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
         terminalReplacementObservedGeneration.removeValue(forKey: terminalID)
@@ -594,8 +569,6 @@ extension AppState {
         recentlyDeletedTerminalIDs[terminalID] = date
         if recreatingTerminalIDs.contains(terminalID) {
             terminalDeletionsAwaitingRecreationCompletion.insert(terminalID)
-        } else {
-            terminalRecoveryBudget.reset(for: terminalID)
         }
     }
 
@@ -623,31 +596,12 @@ extension AppState {
         }
     }
 
-    func claimAutomaticTerminalRecreation(
-        terminalID: UUID
-    ) -> AutomaticTerminalRecreationClaim {
-        guard !recreatingTerminalIDs.contains(terminalID) else { return .alreadyInFlight }
-        // A pane failing to attach mid-move is attaching to the window the
-        // migration retires on purpose; recreating it would fight the move.
-        guard switchingAccountTerminals[terminalID]?.isTransportMove != true else {
-            return .alreadyInFlight
-        }
-        guard containsTerminal(terminalID) else { return .terminalUnavailable }
-        guard let attempt = terminalRecoveryBudget.claimAttempt(for: terminalID) else {
-            logger.error("Automatic terminal recovery budget exhausted for \(terminalID, privacy: .public)")
-            return .budgetExhausted
-        }
-        recreatingTerminalIDs.insert(terminalID)
-        logger.info("Claimed automatic terminal recovery attempt \(attempt, privacy: .public) for \(terminalID, privacy: .public)")
-        return .claimed(attempt: attempt)
-    }
-
     func claimManualTerminalRecreation(
         terminalID: UUID
     ) -> ManualTerminalRecreationClaim {
         guard !recreatingTerminalIDs.contains(terminalID) else { return .alreadyInFlight }
-        // The recovery banner's Retry button reaches this, and can be clicked
-        // while a move has the pane attached to the window it retires.
+        // A transport move owns the row until it lands; a recreate would race
+        // the move for it.
         guard switchingAccountTerminals[terminalID]?.isTransportMove != true else {
             return .alreadyInFlight
         }
@@ -658,52 +612,14 @@ extension AppState {
 
     func finishTerminalRecreation(terminalID: UUID) {
         recreatingTerminalIDs.remove(terminalID)
-        if terminalDeletionsAwaitingRecreationCompletion.remove(terminalID) != nil {
-            terminalRecoveryBudget.reset(for: terminalID)
-        }
+        terminalDeletionsAwaitingRecreationCompletion.remove(terminalID)
     }
 
-    func terminalViewerDidStart(terminalID: UUID) {
-        guard containsTerminal(terminalID),
-              !terminalDeletionsAwaitingRecreationCompletion.contains(terminalID) else { return }
-        terminalRecoveryBudget.reset(for: terminalID)
-        logger.info("Reset automatic terminal recovery budget after attachment for \(terminalID, privacy: .public)")
-    }
-
-    func requestAutomaticTerminalRecreation(
-        terminalID: UUID
-    ) async -> AutomaticTerminalRecreationOutcome {
-        switch claimAutomaticTerminalRecreation(terminalID: terminalID) {
-        case .alreadyInFlight:
-            return .alreadyInFlight
-        case .terminalUnavailable:
-            return .terminalUnavailable
-        case .budgetExhausted:
-            return .budgetExhausted
-        case .claimed(let attempt):
-            defer { finishTerminalRecreation(terminalID: terminalID) }
-            do {
-                try await performTerminalRecreation(terminalID: terminalID)
-                guard containsTerminal(terminalID),
-                      !terminalDeletionsAwaitingRecreationCompletion.contains(terminalID) else {
-                    return .terminalUnavailable
-                }
-                return .recreated(attempt: attempt)
-            } catch {
-                guard containsTerminal(terminalID),
-                      !terminalDeletionsAwaitingRecreationCompletion.contains(terminalID) else {
-                    return .terminalUnavailable
-                }
-                logger.error("Automatic terminal recreation attempt \(attempt, privacy: .public) failed for \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                handleConnectionError(error)
-                return .failed(attempt: attempt, refusal: TerminalRecreationRefusal.from(error))
-            }
-        }
-    }
-
-    /// User-triggered recreation is independent of the automatic recovery budget.
+    /// Asks the daemon to recreate a terminal's window: for a row on tmux,
+    /// the leftover notice's Check Again, which parks the row once its tmux
+    /// server has stopped.
     ///
-    /// Returns the daemon's refusal when it declined, so the panel that asked
+    /// Returns the daemon's refusal when it declined, so the view that asked
     /// can show what it said; nil when the recreate went through, was already
     /// in flight, or failed for a reason the daemon did not write.
     @discardableResult

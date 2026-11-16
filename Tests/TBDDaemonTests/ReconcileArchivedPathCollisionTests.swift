@@ -52,8 +52,7 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     try await shell("git worktree add -b stray-branch '\(stray)'", at: repoDir)
 
     try await lifecycle.reconcile(
-        repoID: repo.id, actuationLog: makeTestActuationLog(),
-        reapSharedScratchTmuxResources: true
+        repoID: repo.id, actuationLog: makeTestActuationLog()
     )
 
     let atPath = try await db.worktrees.list().filter { $0.localPath == path }

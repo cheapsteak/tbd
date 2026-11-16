@@ -4,48 +4,20 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 — dry-run tmux, a real (temp-directory) actuation log, an in-memory
-/// database, and an `EventDrivenTestClock` for the key pacing.
+/// Tier 2 — a holder-backed row with a recording courier, a real
+/// (temp-directory) actuation log, an in-memory database, and an
+/// `EventDrivenTestClock` for the key pacing.
 ///
 /// `terminal.send` grew a payload vocabulary (`--text` or `--keys`), a dispatch
 /// envelope on every non-empty text payload, and an opt-in delivery
 /// acknowledgement behind a default-off flag. These prove the composed bytes
-/// that reach the pane, what the record stores about them, which shapes are
+/// that reach the session, what the record stores about them, which shapes are
 /// refused and on which side of the row, and that the observation is armed for
 /// exactly one kind of send and never for any other.
 @Suite("terminal.send payloads, envelope and verification", .clockDriven)
 struct TerminalSendDispatchTests {
 
     // MARK: - Fixture
-
-    /// Thread-safe collector for tmux argv lists invoked during dryRun.
-    private final class ArgvRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _calls: [[String]] = []
-        var calls: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return _calls
-        }
-        func record(_ args: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            _calls.append(args)
-        }
-    }
-
-    /// Collects the payloads handed to `pasteText` — the argv cannot carry
-    /// them, since the real path passes the body through a temp file.
-    private final class PasteRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _pastes: [String] = []
-        var pastes: [String] {
-            lock.lock(); defer { lock.unlock() }
-            return _pastes
-        }
-        func record(_ bytes: Data) {
-            lock.lock(); defer { lock.unlock() }
-            _pastes.append(String(decoding: bytes, as: UTF8.self))
-        }
-    }
 
     /// Stands in for the verifier that will fill `RPCRouter.deliveryVerifier`.
     /// Records every arming, so "exactly once" and "never" are both assertable.
@@ -74,14 +46,14 @@ struct TerminalSendDispatchTests {
         }
     }
 
-    /// The error a `.transportFails` fixture's paste fails with.
-    private struct PaneVanished: Error {}
+    /// The error the failing fixture's courier write fails with.
+    private struct CourierWriteFailed: Error {}
 
     private struct Fixture {
         let router: RPCRouter
         let terminal: Terminal
-        let recorder: ArgvRecorder
-        let pastes: PasteRecorder
+        /// Every courier write, read back as pasted bodies and pressed keys.
+        let delivered: SendHarness.DeliveryDouble
         let verifier: RecordingVerifier
         let logPath: String
     }
@@ -91,26 +63,20 @@ struct TerminalSendDispatchTests {
         try await makeFixture(kind: .shell)
     }
 
+    /// `writeFails` makes every courier write throw, for the transport-failure
+    /// branch: the courier reports `.notDelivered`, which the handler
+    /// classifies as a transport failure.
     private func makeFixture(
-        clock: (any Clock<Duration>)? = nil, kind: TerminalKind = .claude
+        clock: (any Clock<Duration>)? = nil, kind: TerminalKind = .claude,
+        writeFails: Bool = false
     ) async throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-send-dispatch-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let logPath = directory.appendingPathComponent("actuations.jsonl").path
 
-        let recorder = ArgvRecorder()
-        let pastes = PasteRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.record($0) },
-            // `.live(terminalID: nil)` — alive, carrying no identity — is the
-            // branch that proceeds, so the target check is not what these are
-            // about. `TerminalSendTargetCheckTests` owns that.
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
-            dryRunPasteBytes: { _, _, bytes in
-                pastes.record(bytes)
-            })
+        let delivered = SendHarness.DeliveryDouble()
+        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
@@ -119,6 +85,15 @@ struct TerminalSendDispatchTests {
             tmux: tmux,
             startTime: Date(),
             actuationLog: ActuationLog(path: logPath))
+        // A viewer that is never attached, so every delivery takes the direct
+        // write, which lands in `delivered` instead of a pty.
+        router.holderInjectionCourier = HolderInjectionCourier(
+            sendFrame: { _ in },
+            viewerAttachment: { _ in nil },
+            writeDirectly: { _, bytes in
+                if writeFails { throw CourierWriteFailed() }
+                delivered.record(bytes)
+            })
         let verifier = RecordingVerifier()
         router.deliveryVerifier = verifier
         if let clock {
@@ -131,50 +106,10 @@ struct TerminalSendDispatchTests {
             path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
         // Agent by default: the envelope rides sends to agents, not to shells.
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7", kind: kind)
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "", kind: kind,
+            transport: .holder, childPID: 4242)
         return Fixture(
-            router: router, terminal: terminal, recorder: recorder, pastes: pastes,
-            verifier: verifier, logPath: logPath)
-    }
-
-    /// A fixture whose paste always throws, for the transport-failure branch.
-    private func makeFailingPasteFixture() async throws -> Fixture {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-send-fail-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let logPath = directory.appendingPathComponent("actuations.jsonl").path
-
-        let recorder = ArgvRecorder()
-        let pastes = PasteRecorder()
-        // A dry-run TmuxManager cannot be made to fail a paste, so the failure
-        // is staged one layer out: the pane consultation throws, which the
-        // handler classifies as a transport failure. Same branch, same question
-        // — does a failed send arm an observation?
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.record($0) },
-            dryRunPaneSendTarget: { _, _ in throw PaneVanished() },
-            dryRunPasteBytes: { _, _, bytes in pastes.record(bytes) })
-        let db = try TBDDatabase(inMemory: true)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux,
-            startTime: Date(),
-            actuationLog: ActuationLog(path: logPath))
-        let verifier = RecordingVerifier()
-        router.deliveryVerifier = verifier
-        let repo = try await db.repos.create(
-            path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
-        let worktree = try await db.worktrees.create(
-            repoID: repo.id, name: "acme-wt", branch: "main",
-            path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
-        // An agent terminal: the envelope rides sends to agents, not to shells.
-        let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%7", kind: .claude)
-        return Fixture(
-            router: router, terminal: terminal, recorder: recorder, pastes: pastes,
+            router: router, terminal: terminal, delivered: delivered,
             verifier: verifier, logPath: logPath)
     }
 
@@ -224,7 +159,7 @@ struct TerminalSendDispatchTests {
         #expect(try await send(fixture, text: "rebase onto main", submit: true).success)
 
         let rowID = try #require(try requestRow(at: fixture.logPath)["id"] as? String)
-        #expect(fixture.pastes.pastes == [
+        #expect(fixture.delivered.pastedBodies == [
             "<tbd-dispatch id=\"\(rowID)\" from=\"anonymous\"/>\nrebase onto main"
         ])
     }
@@ -232,15 +167,15 @@ struct TerminalSendDispatchTests {
     /// A shell is not a reader of envelopes. It has no transcript to join back
     /// to, and `--submit` would run the tag as a command line of its own before
     /// the caller's text ever ran — so a `tbd terminal send --text "ls"
-    /// --submit` into a shell pane would execute a syntax error first. Sending
+    /// --submit` into a shell would execute a syntax error first. Sending
     /// into a plain shell is a supported thing to do, so this is a real target.
     @Test("a shell target receives the caller's text with no envelope")
     func shellTargetGetsNoEnvelope() async throws {
         let fixture = try await makeShellFixture()
         #expect(try await send(fixture, text: "ls -la", submit: true).success)
 
-        #expect(fixture.pastes.pastes == ["ls -la"])
-        #expect(fixture.pastes.pastes.allSatisfy { !$0.contains("tbd-dispatch") })
+        #expect(fixture.delivered.pastedBodies == ["ls -la"])
+        #expect(fixture.delivered.pastedBodies.allSatisfy { !$0.contains("tbd-dispatch") })
     }
 
     /// And a shell cannot be verified at all: with no transcript, the re-check
@@ -253,7 +188,7 @@ struct TerminalSendDispatchTests {
 
         #expect(!response.success)
         #expect(response.error?.contains("shell session") == true)
-        #expect(fixture.pastes.pastes.isEmpty)
+        #expect(fixture.delivered.pastedBodies.isEmpty)
         #expect(fixture.verifier.armings.isEmpty)
         let outcome = try lastOutcome(at: fixture.logPath)
         #expect(outcome["result"] as? String == "refused")
@@ -268,7 +203,7 @@ struct TerminalSendDispatchTests {
         #expect(try await send(fixture, text: "status?", submit: true).success)
 
         let rowID = try #require(try requestRow(at: fixture.logPath)["id"] as? String)
-        #expect(fixture.pastes.pastes == [
+        #expect(fixture.delivered.pastedBodies == [
             "<tbd-dispatch id=\"\(rowID)\" from=\"anonymous\"/>\nstatus?"
         ])
     }
@@ -285,7 +220,7 @@ struct TerminalSendDispatchTests {
 
         #expect(!response.success)
         #expect(response.error?.contains("only") == true)
-        #expect(fixture.pastes.pastes.isEmpty)
+        #expect(fixture.delivered.pastedBodies.isEmpty)
         #expect(fixture.verifier.armings.isEmpty)
         let outcome = try lastOutcome(at: fixture.logPath)
         #expect(outcome["result"] as? String == "refused")
@@ -297,7 +232,7 @@ struct TerminalSendDispatchTests {
     /// `redeliverVerifiedPayload` is what the verifier's injected seam actually
     /// calls, and every verifier test fakes it — so its guards need exercising
     /// here or nowhere. It re-checks eligibility and the addressed conversation,
-    /// not just the pane, because the gap between the observation and the paste
+    /// not just the target, because the gap between the observation and the paste
     /// spans a DB write, two reads and a serializer queue.
     @Test("the retry re-pastes the identical bytes when the target still qualifies")
     func redeliveryPastesWhenEligible() async throws {
@@ -309,13 +244,13 @@ struct TerminalSendDispatchTests {
             submit: true)
 
         #expect(outcome == .dispatched)
-        #expect(fixture.pastes.pastes == [
+        #expect(fixture.delivered.pastedBodies == [
             "<tbd-dispatch id=\"abc\" from=\"anonymous\"/>\nstatus?"
         ])
     }
 
     /// A `/clear` between the observation and the retry rebinds the terminal to
-    /// a new conversation while keeping its pane. The payload is an instruction
+    /// a new conversation while keeping its tab. The payload is an instruction
     /// addressed to the session that is no longer there.
     @Test("the retry refuses a terminal rebound to another session, and types nothing")
     func redeliveryRefusesARebindingSession() async throws {
@@ -329,7 +264,7 @@ struct TerminalSendDispatchTests {
             payload: "status?", submit: true)
 
         #expect(outcome == .refused(.targetMismatch))
-        #expect(fixture.pastes.pastes.isEmpty)
+        #expect(fixture.delivered.pastedBodies.isEmpty)
     }
 
     /// Tier 2. The same conversation, still there, still named: the check the
@@ -348,7 +283,7 @@ struct TerminalSendDispatchTests {
             payload: "status?", submit: true)
 
         #expect(outcome == .dispatched)
-        #expect(fixture.pastes.pastes == ["status?"])
+        #expect(fixture.delivered.pastedBodies == ["status?"])
     }
 
     /// Tier 2. A payload dispatched into a terminal whose session id was not yet
@@ -371,7 +306,7 @@ struct TerminalSendDispatchTests {
             payload: "status?", submit: true)
 
         #expect(outcome == .dispatched)
-        #expect(fixture.pastes.pastes == ["status?"])
+        #expect(fixture.delivered.pastedBodies == ["status?"])
     }
 
     /// And a target that stopped being verifiable — a row that now reads as a
@@ -387,7 +322,7 @@ struct TerminalSendDispatchTests {
             submit: true)
 
         #expect(outcome == .refused(.notEligible))
-        #expect(fixture.pastes.pastes.isEmpty)
+        #expect(fixture.delivered.pastedBodies.isEmpty)
     }
 
     /// `from` is the row's own actor, not a constant: the receiving agent sees
@@ -400,7 +335,7 @@ struct TerminalSendDispatchTests {
             actor: .daemon(rail: "limit-resume")).success)
 
         let rowID = try #require(try requestRow(at: fixture.logPath)["id"] as? String)
-        #expect(fixture.pastes.pastes == [
+        #expect(fixture.delivered.pastedBodies == [
             "<tbd-dispatch id=\"\(rowID)\" from=\"daemon:limit-resume\"/>\ncontinue"
         ])
     }
@@ -413,7 +348,7 @@ struct TerminalSendDispatchTests {
         #expect(try await send(fixture, text: "note to self").success)
 
         let rowID = try #require(try requestRow(at: fixture.logPath)["id"] as? String)
-        #expect(fixture.pastes.pastes == [
+        #expect(fixture.delivered.pastedBodies == [
             "<tbd-dispatch id=\"\(rowID)\" from=\"anonymous\"/>\nnote to self"
         ])
     }
@@ -440,20 +375,15 @@ struct TerminalSendDispatchTests {
         let fixture = try await makeFixture()
         #expect(try await send(fixture, text: "", submit: true).success)
 
-        #expect(fixture.pastes.pastes.isEmpty)
-        #expect(!fixture.recorder.calls.contains { $0.contains("load-buffer") })
-        #expect(!fixture.recorder.calls.contains { $0.contains("paste-buffer") })
-        #expect(fixture.recorder.calls.contains {
-            $0.contains("send-keys") && $0.contains("Enter")
-        })
+        #expect(fixture.delivered.pastedBodies.isEmpty)
+        #expect(fixture.delivered.sentKeys == ["Enter"])
     }
 
     @Test("empty text without submit types nothing at all")
     func emptyTextNoSubmitTypesNothing() async throws {
         let fixture = try await makeFixture()
         #expect(try await send(fixture, text: "").success)
-        #expect(fixture.pastes.pastes.isEmpty)
-        #expect(fixture.recorder.calls.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
     }
 
     // MARK: - Keys
@@ -474,13 +404,12 @@ struct TerminalSendDispatchTests {
             by: PacedKeySender.interKeyPause, timeout: Self.keyPacingArming)
         #expect(try await response.success)
 
-        let sent = fixture.recorder.calls
-            .filter { $0.contains("send-keys") }
-            .compactMap(\.last)
-        #expect(sent == ["Escape", "C-c", "Enter"])
+        // One write per key, each exactly that key's bytes.
+        #expect(fixture.delivered.writes.count == 3)
+        #expect(fixture.delivered.sentKeys == ["Escape", "C-c", "Enter"])
         // Keys carry no envelope: a key sequence has nowhere to put a line of
         // text, and typing one ahead of an interrupt would itself be an act.
-        #expect(fixture.pastes.pastes.isEmpty)
+        #expect(fixture.delivered.pastedBodies.isEmpty)
     }
 
     @Test("a keys row records the keys verbatim, with submit and verify absent")
@@ -512,7 +441,7 @@ struct TerminalSendDispatchTests {
         let response = try await send(fixture, keys: overCap)
         #expect(!response.success)
         #expect(response.error?.contains("32") == true)
-        #expect(fixture.recorder.calls.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
         #expect(try rows(at: fixture.logPath).isEmpty)
     }
 
@@ -526,7 +455,7 @@ struct TerminalSendDispatchTests {
         let fixture = try await makeFixture()
         let response = try await send(fixture, keys: "   ")
         #expect(!response.success)
-        #expect(fixture.recorder.calls.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
         #expect(try rows(at: fixture.logPath).isEmpty)
     }
 
@@ -542,7 +471,7 @@ struct TerminalSendDispatchTests {
         let response = try await send(fixture, text: "hi", keys: "Enter")
         #expect(!response.success)
         #expect(response.error?.contains("not both") == true)
-        #expect(fixture.recorder.calls.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
         #expect(try rows(at: fixture.logPath).isEmpty)
     }
 
@@ -551,7 +480,7 @@ struct TerminalSendDispatchTests {
         let fixture = try await makeFixture()
         let response = try await send(fixture)
         #expect(!response.success)
-        #expect(fixture.recorder.calls.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
         #expect(try rows(at: fixture.logPath).isEmpty)
     }
 
@@ -561,7 +490,7 @@ struct TerminalSendDispatchTests {
         let response = try await send(fixture, keys: "Enter", verify: true)
         #expect(!response.success)
         #expect(response.error?.contains("transcript") == true)
-        #expect(fixture.recorder.calls.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
         #expect(try rows(at: fixture.logPath).isEmpty)
     }
 
@@ -571,7 +500,7 @@ struct TerminalSendDispatchTests {
         let response = try await send(fixture, keys: "Escape", submit: true)
         #expect(!response.success)
         #expect(response.error?.contains("Enter is itself a key") == true)
-        #expect(fixture.recorder.calls.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
         #expect(try rows(at: fixture.logPath).isEmpty)
     }
 
@@ -581,7 +510,7 @@ struct TerminalSendDispatchTests {
         let response = try await send(fixture, text: "hi", verify: true)
         #expect(!response.success)
         #expect(response.error?.contains("--submit") == true)
-        #expect(fixture.recorder.calls.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
         #expect(try rows(at: fixture.logPath).isEmpty)
     }
 
@@ -592,7 +521,7 @@ struct TerminalSendDispatchTests {
         let fixture = try await makeFixture()
         let response = try await send(fixture, text: "", submit: true, verify: true)
         #expect(!response.success)
-        #expect(fixture.recorder.calls.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
         #expect(try rows(at: fixture.logPath).isEmpty)
     }
 
@@ -611,8 +540,8 @@ struct TerminalSendDispatchTests {
         #expect(response.error?.contains("delivery_verification_enabled") == true)
 
         // Nothing typed.
-        #expect(fixture.recorder.calls.isEmpty)
-        #expect(fixture.pastes.pastes.isEmpty)
+        #expect(fixture.delivered.writes.isEmpty)
+        #expect(fixture.delivered.pastedBodies.isEmpty)
         // But a row and a refusal outcome, so the morning shows the near-miss.
         let written = try rows(at: fixture.logPath)
         #expect(written.count == 2)
@@ -646,7 +575,7 @@ struct TerminalSendDispatchTests {
         #expect(arming.submit)
         #expect(arming.deliveredPayload
             == "<tbd-dispatch id=\"\(rowID)\" from=\"anonymous\"/>\nstatus?")
-        #expect(arming.deliveredPayload == fixture.pastes.pastes.first)
+        #expect(arming.deliveredPayload == fixture.delivered.pastedBodies.first)
     }
 
     /// An ordinary send must cost nothing the verification path costs — the
@@ -677,7 +606,7 @@ struct TerminalSendDispatchTests {
     /// one would put an act on the observation ladder that never got dispatched.
     @Test("a transport failure arms no observation")
     func transportFailureArmsNothing() async throws {
-        let fixture = try await makeFailingPasteFixture()
+        let fixture = try await makeFixture(writeFails: true)
         try await fixture.router.db.config.setDeliveryVerification(enabled: true)
 
         let response = try await send(fixture, text: "status?", submit: true, verify: true)
@@ -707,11 +636,10 @@ struct TerminalSendDispatchTests {
         #expect(request["verify"] == nil)
         #expect(try lastOutcome(at: fixture.logPath)["result"] as? String == "dispatched")
 
-        // Same tmux commands as ever: bracketed paste, then a separate Enter.
-        let calls = fixture.recorder.calls
-        #expect(calls.contains { $0.contains("load-buffer") })
-        #expect(calls.contains { $0.contains("paste-buffer") })
-        #expect(calls.contains { $0.contains("send-keys") && $0.contains("Enter") })
+        // The text, behind its envelope, then the Enter.
+        #expect(fixture.delivered.pastedBodies.count == 1)
+        #expect(fixture.delivered.pastedBodies.first?.hasSuffix("\nrebase onto main") == true)
+        #expect(fixture.delivered.sentKeys == ["Enter"])
         #expect(fixture.verifier.armings.isEmpty)
     }
 
@@ -725,7 +653,8 @@ struct TerminalSendDispatchTests {
 
         #expect(await fixture.router.handle(
             RPCRequest(method: RPCMethod.terminalSend, params: json)).success)
-        #expect(!fixture.recorder.calls.contains { $0.contains("send-keys") })
+        #expect(fixture.delivered.pastedBodies.count == 1)
+        #expect(fixture.delivered.sentKeys.isEmpty)
         #expect(try requestRow(at: fixture.logPath)["submit"] as? Bool == false)
     }
 

@@ -17,7 +17,8 @@ extension ActuationOutcome {
         switch result {
         case .ok: return .dispatched
         case .alreadyHibernated: return .refused(.noop)
-        case .notEligible: return .refused(.notEligible)
+        // A row live on tmux is declined like any other ineligible row.
+        case .notEligible, .onTmux: return .refused(.notEligible)
         case .notFound: return .refused(.notFound)
         }
     }
@@ -26,7 +27,7 @@ extension ActuationOutcome {
         switch result {
         case .ok: return nil
         case .alreadyHibernated: return "already parked"
-        case .notEligible(let reason): return reason
+        case .notEligible(let reason), .onTmux(let reason): return reason
         case .notFound: return "Terminal not found"
         }
     }
@@ -34,9 +35,17 @@ extension ActuationOutcome {
     static func classify(_ result: WakeResult) -> ActuationOutcome {
         switch result {
         case .ok: return .dispatched
-        // The respawn reached tmux and tmux failed — the one wake path that is
-        // a transport failure rather than a decline.
+        // Every wake that stopped for a cause with no case of its own: a
+        // failed or refused holder spawn, but also declines that start
+        // nothing — the Codex prompt refusal, which comes before the worktree,
+        // condition, directory and profile checks, a Codex resume that could
+        // not be prepared, a row that changed under the wake, and the answers
+        // that keep a row parked over a live holder. All of them are recorded
+        // as transport failures.
         case .respawnFailed: return .transportFailed
+        // The row is on tmux, which TBD no longer drives. Declined with
+        // nothing touched, as a send to such a row is.
+        case .onTmux: return .refused(.notEligible)
         // Waking something that was never parked is the wake's idempotent
         // no-op, not a decline.
         case .notHibernated: return .refused(.noop)
@@ -52,18 +61,10 @@ extension ActuationOutcome {
             case .paneBelongsToAnotherTerminal: return .refused(.targetMismatch)
             case .paneMissing, .processExited: return .refused(.notFound)
             }
-        // The pane could not be READ — no tmux server answered. No refusal
-        // reason can say that without asserting something false about the
-        // target, and `notFound` in particular would put "the terminal is gone"
-        // on the permanent record on the strength of a failed read.
-        case .paneUnreadable: return .transportFailed
         // The row is there but cannot be woken as asked: nothing to resume, a
         // tab that is not Claude's, or the profile it was pinned to no longer
         // exists.
         case .noSessionID, .notAClaudeTab, .profileMissing: return .refused(.notEligible)
-        // The row is exit-stamped and its pane is busy: a well-formed wake the
-        // daemon declines, and nothing was respawned.
-        case .paneBusy: return .refused(.notEligible)
         // The row is parked, but no longer the one the caller chose. Declined
         // with nothing touched.
         case .conditionNotMet: return .refused(.notEligible)
@@ -79,6 +80,7 @@ extension ActuationOutcome {
         case .noSessionID: return "No session ID to resume"
         case .notAClaudeTab(let kind): return ClaudeResumeDecision.notAClaudeTabReason(kind)
         case .respawnFailed(let reason): return reason
+        case .onTmux(let reason): return reason
         case .worktreeMissing(let path): return "Worktree directory missing on disk: \(path)"
         case .sessionGone(let paneID, let detail):
             switch detail {
@@ -87,11 +89,8 @@ extension ActuationOutcome {
             case .paneBelongsToAnotherTerminal(let actual):
                 return "Pane \(paneID) answers with a different terminal: \(actual)"
             }
-        case .paneUnreadable(let paneID, let server):
-            return "Could not reach tmux server \(server) to check pane \(paneID)"
         case .profileMissing(let profileID):
             return "Profile no longer exists: \(profileID.uuidString)"
-        case .paneBusy(let pid): return HibernationCoordinator.paneBusyRefusal(pid: pid)
         case .conditionNotMet: return "the row no longer meets this wake's condition"
         }
     }

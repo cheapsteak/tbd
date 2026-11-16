@@ -1873,12 +1873,12 @@ public struct TerminalStore: Sendable {
     /// legacy semantics (the row is still eligible for wake-on-focus).
     ///
     /// Park sites whose process is already replaced use this complete
-    /// transition. `HibernationCoordinator.performHibernate` instead uses the
-    /// staged begin/finalize pair below so a failed first tmux replacement can
-    /// retain a still-running agent's token. Both paths cancel any scheduled
-    /// auto-resume atomically with their park intent: while a row is parked, a
-    /// resume must not type into either the outgoing agent or its replacement
-    /// shell. Wake (`clearHibernated`) deliberately does not resurrect the
+    /// transition. The holder park (`HibernationCoordinator.performHibernate`)
+    /// instead uses the staged begin/finalize pair below, so a park that fails
+    /// before its agent has ended keeps that agent's token. Both paths cancel
+    /// any scheduled auto-resume atomically with their park intent: while a
+    /// row is parked, a resume must not type into either the outgoing agent or
+    /// its replacement shell. Wake (`clearHibernated`) deliberately does not resurrect the
     /// cancelled row.
     public func setHibernated(id: UUID, sessionID: String, snapshot: String? = nil, reason: HibernateReason? = nil, at date: Date = Date()) async throws {
         _ = try await persistHibernatedState(
@@ -1890,13 +1890,13 @@ public struct TerminalStore: Sendable {
             at: date)
     }
 
-    /// Record the hibernation intent before replacing the live agent. The
-    /// current process token remains intact until tmux has replaced that
-    /// process with an inert pane, so startup reconciliation can safely unpark
-    /// a still-running agent after a crash or failed respawn. A pending token
-    /// makes process-bound hook writes inert during this interval; finalize
-    /// promotes it once replacement is confirmed. A process-incarnation
-    /// mismatch rejects without writing and returns nil.
+    /// Record the hibernation intent before ending the live agent. The
+    /// current process token remains intact until the agent is confirmed
+    /// ended, so startup reconciliation can safely unpark a still-running
+    /// agent after a crash or a failed park. A pending token makes
+    /// process-bound hook writes inert during this interval; finalize promotes
+    /// it once the agent is confirmed ended. A process-incarnation mismatch
+    /// rejects without writing and returns nil.
     func beginHibernatedShellRespawn(
         id: UUID,
         expectedState: TerminalHibernationSnapshot,
@@ -1927,9 +1927,10 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Fence the process that tmux has already replaced with an inert pane.
-    /// The returned token belongs to the hibernated shell launched next; all
-    /// ordering and activity evidence from the former agent clears atomically.
+    /// Fence the agent process the park has confirmed ended (or, for a
+    /// leftover tmux row, the one that ended with its tmux server). The
+    /// returned token belongs to whatever the row runs next; all ordering and
+    /// activity evidence from the former agent clears atomically.
     /// A process-incarnation mismatch rejects without writing and returns nil.
     func finalizeHibernatedShellRespawn(
         id: UUID,
@@ -2109,21 +2110,20 @@ public struct TerminalStore: Sendable {
     /// unchecked report.
     ///
     /// The stamp is tmux-only. On a holder-backed row the Claude process IS the
-    /// holder's whole job: there is no shell left in the pane for a send to
-    /// mis-execute, and the hibernation coordinator's wake respawns into a tmux
-    /// window, which cannot bring a holder session back. Parking such a row
-    /// would leave a park nothing can wake and no reconciler reclaims, so the
-    /// row stays unstamped and the holder path answers for its own liveness.
+    /// holder's whole job: when it leaves, the holder reports its job's exit
+    /// itself, no shell is left in the pane for a send to mis-execute, and the
+    /// holder path answers for the row's liveness. So the row stays unstamped.
     ///
-    /// The stamp is Claude-tab-only (`Terminal.isClaudeTab`) for the same
-    /// reason. `SessionStart` records an id onto a shell row whose
-    /// hand-started Claude carries TBD's hook, so that Claude's `SessionEnd`
-    /// reaches the row too. The wake that would lift the stamp refuses a tab
-    /// that is not Claude's (`Terminal.claudeResumeDecision`), and a parked
-    /// pane shows a frozen snapshot, so a stamp there would cost the person
-    /// their shell until they closed the tab. Unstamped, the row stays the
-    /// live shell it is, and a send to it is a shell send like any other. A
-    /// stamp an earlier build left on such a tab is lifted at startup
+    /// The stamp is Claude-tab-only (`Terminal.isClaudeTab`), because on any
+    /// other tab no wake could lift it. `SessionStart` records an id onto a
+    /// shell row whose hand-started Claude carries TBD's hook, so that
+    /// Claude's `SessionEnd` reaches the row too. The wake that would lift the
+    /// stamp refuses a tab that is not Claude's
+    /// (`Terminal.claudeResumeDecision`), and a parked pane shows a frozen
+    /// snapshot, so a stamp there would cost the person their shell until they
+    /// closed the tab. Unstamped, the row stays the live shell it is, and a
+    /// send to it is a shell send like any other. A stamp an earlier build
+    /// left on such a tab is lifted at startup
     /// (`HibernationCoordinator.reconcileOnStartup`).
     ///
     /// `date` follows the one-shot stamp seam (CLAUDE.md, "Duration is behavior,

@@ -56,7 +56,7 @@ struct PeerRegistryRecord: Decodable, Equatable, Sendable {
     /// component is the tmux *session* name, not the server socket: every TBD
     /// repo server has a session called `main`, and so does a user's own
     /// default server. The pane alone is therefore not a machine-wide unique
-    /// key, which is why the pane join below is paired with a `cwd` match.
+    /// key, so it is listed and never joined on.
     let tmux: String?
     let procStart: String?
     let version: String?
@@ -78,9 +78,8 @@ struct PeerRegistryRecord: Decodable, Equatable, Sendable {
     ///
     /// Nil when the record carries no tmux coordinates — a plain-terminal
     /// `claude`, a `cloud` row, a shadow peer — and nil again when the value is
-    /// not shaped like a pane id. A field that has changed shape must read as
-    /// "no pane", never as a pane nothing can match: the first leaves a row
-    /// unjoined and visible, the second is a join that quietly stops working.
+    /// not shaped like a pane id, so a field that has changed shape lists as
+    /// "no pane" rather than as whatever it now holds.
     var tmuxPaneID: String? {
         guard let tmux, let pane = tmux.split(separator: ".").last, !pane.isEmpty else {
             return nil
@@ -114,10 +113,10 @@ struct PeerRegistryScan: Equatable, Sendable {
 /// The pure join keys, shared by the reader and the classifier.
 ///
 /// A caseless enum rather than statics on a type, so nothing has to reason
-/// about isolation to use them. These deliberately mirror the daemon's
-/// `RosterJoinKeys`: the two subsystems join the same registry against the same
-/// TBD rows, and a listing that joined differently from the roster would
-/// describe a fleet the roster does not act on.
+/// about isolation to use them. The pid key deliberately mirrors the daemon's
+/// `RosterJoinKeys`: the two subsystems read the same registry, and a
+/// listing that read it differently from the roster would describe a fleet the
+/// roster does not act on.
 enum PeerJoinKeys {
     /// The pid a record filename names, or nil when the file is not a record.
     ///
@@ -134,7 +133,8 @@ enum PeerJoinKeys {
         return value
     }
 
-    /// A pane id with its `%`, whichever way it was written.
+    /// A pane id with its `%`, whichever way it was written. For listing only:
+    /// no join reads a pane.
     static func normalizedPaneID(_ pane: String) -> String {
         pane.hasPrefix("%") ? pane : "%\(pane)"
     }
@@ -235,9 +235,6 @@ enum PeerJoinMethod: String, Encodable, Sendable {
     /// The Claude session id TBD captured at `SessionStart` names the
     /// terminal. The strongest join, because TBD wrote both sides of it.
     case sessionID
-    /// The pane in the record's `tmux` field, paired with its working
-    /// directory, names a tmux-transport terminal.
-    case tmuxPane
     /// The process descends from a live holder-backed terminal's job — the
     /// shell, launcher or agent that terminal's holder started
     /// (`HolderDescentIndex`).
@@ -253,8 +250,8 @@ enum PeerJoinMethod: String, Encodable, Sendable {
 /// its own cannot say whether a session is outside TBD or inside a TBD tab
 /// that another session already answers for.
 enum PeerUnjoinedReason: String, Encodable, Sendable {
-    /// No captured session id names it, no tmux pane matches it, and it
-    /// descends from no live holder-backed terminal's job.
+    /// No captured session id names it, and it descends from no live
+    /// holder-backed terminal's job.
     case noTerminal
     /// The process table could not be read, so descent was not checked.
     case processTableUnreadable
@@ -319,11 +316,11 @@ struct PeerRow: Encodable, Equatable, Sendable {
     /// transport. A shadow has none: it stands in for a session on another
     /// machine and deliberately carries no local coordinates.
     let terminalID: UUID?
-    /// The tmux pane, a legacy coordinate. On a joined row it is the terminal's
-    /// own pane, which only a tmux-transport terminal has — nil for a
-    /// holder-backed one. On an unjoined row it is whatever pane the record
-    /// claims, which may belong to a tmux server TBD does not run, so a
-    /// non-nil value is not evidence of a TBD terminal.
+    /// The tmux pane, a legacy coordinate, listed and never joined on. On a
+    /// joined row it is the terminal's own pane, which only a tmux-transport
+    /// terminal has — nil for a holder-backed one. On an unjoined row it is
+    /// whatever pane the record claims, which may belong to a tmux server TBD
+    /// does not run, so a non-nil value is not evidence of a TBD terminal.
     let tmuxPane: String?
     /// Which join placed a `local` or `shadow` row. Nil on every other row.
     let joinedBy: PeerJoinMethod?
@@ -535,16 +532,10 @@ func composePeerListing(
 /// The joins, over TBD's own rows.
 private struct PeerFleetIndex {
     private let reachable: Bool
-    /// Claude session id → the terminal TBD captured it for. The stronger of
-    /// the two local joins, because TBD wrote both sides of it.
+    /// Claude session id → the terminal TBD captured it for. The join TBD
+    /// recorded itself, because it wrote both sides of it.
     private let terminalsBySessionID: [String: Terminal]
-    /// Normalised worktree path → the worktree row. Paired with the pane join
-    /// below, because a pane id is unique per tmux *server* and TBD runs one
-    /// server per repository alongside whatever servers the user runs.
-    private let worktreesByPath: [String: Worktree]
     private let worktreesByID: [UUID: Worktree]
-    /// (worktree, normalised pane) → terminal.
-    private let terminalsByWorktreeAndPane: [PaneKey: Terminal]
     /// Helper pid → the shadow-peer ledger row filed under it. **This is the
     /// whole of how a shadow is recognised**, and it is TBD's own durable
     /// bookkeeping rather than an inference: a shadow's record carries no field
@@ -581,8 +572,8 @@ private struct PeerFleetIndex {
     }
 
     /// A join TBD recorded that the process tree contradicts: the record's
-    /// captured id (or pane) names one terminal, while its process runs
-    /// inside another holder tab's job.
+    /// captured id names one terminal, while its process runs inside another
+    /// holder tab's job.
     ///
     /// The recorded join is kept — that precedence is the design, because
     /// TBD wrote both sides of it — but a consumer that takes this join as a
@@ -592,16 +583,15 @@ private struct PeerFleetIndex {
     struct Disagreement: Equatable {
         let pid: pid_t
         let joinedTerminalID: UUID
-        let method: PeerJoinMethod
         let insideTerminalID: UUID
 
         var warning: String {
-            let how = method == .sessionID ? "its captured session id" : "its tmux pane"
-            return """
-                peer pid \(pid) is joined to terminal \(shortPeerID(joinedTerminalID)) by \
-                \(how), but its process runs inside terminal \(shortPeerID(insideTerminalID)). \
-                The recorded join is kept; one of the two rows names a session it is not running.
-                """
+            """
+            peer pid \(pid) is joined to terminal \(shortPeerID(joinedTerminalID)) by \
+            its captured session id, but its process runs inside terminal \
+            \(shortPeerID(insideTerminalID)). The recorded join is kept; one of the two \
+            rows names a session it is not running.
+            """
         }
     }
 
@@ -609,11 +599,6 @@ private struct PeerFleetIndex {
     struct Joins {
         var answers: [pid_t: Join] = [:]
         var disagreements: [Disagreement] = []
-    }
-
-    private struct PaneKey: Hashable {
-        let worktreeID: UUID
-        let pane: String
     }
 
     private struct ProviderSessionKey: Hashable {
@@ -630,27 +615,18 @@ private struct PeerFleetIndex {
         }
 
         var bySessionID: [String: Terminal] = [:]
-        var byWorktreeAndPane: [PaneKey: Terminal] = [:]
         for terminal in fleet.terminals {
             if !terminal.isCodexTerminal,
                let sessionID = nonEmptyPeerField(terminal.claudeSessionID),
                bySessionID[sessionID] == nil {
                 bySessionID[sessionID] = terminal
             }
-            let key = PaneKey(
-                worktreeID: terminal.worktreeID,
-                pane: PeerJoinKeys.normalizedPaneID(terminal.tmuxPaneID))
-            if byWorktreeAndPane[key] == nil { byWorktreeAndPane[key] = terminal }
         }
         self.terminalsBySessionID = bySessionID
-        self.terminalsByWorktreeAndPane = byWorktreeAndPane
 
-        var byPath: [String: Worktree] = [:]
         var byID: [UUID: Worktree] = [:]
         var byProviderSession: [ProviderSessionKey: Worktree] = [:]
         for worktree in fleet.worktrees {
-            let path = PeerJoinKeys.normalizedPath(worktree.localPath)
-            if byPath[path] == nil { byPath[path] = worktree }
             byID[worktree.id] = worktree
             if let binding = worktree.providerBinding {
                 let key = ProviderSessionKey(
@@ -658,7 +634,6 @@ private struct PeerFleetIndex {
                 if byProviderSession[key] == nil { byProviderSession[key] = worktree }
             }
         }
-        self.worktreesByPath = byPath
         self.worktreesByID = byID
         self.remoteWorktreesByProviderSession = byProviderSession
 
@@ -683,8 +658,8 @@ private struct PeerFleetIndex {
     ///      link still publishes are in that index, so a pid matched here is
     ///      one the daemon vouches for right now; a record at a not-live row's
     ///      pid falls through and lists as whatever it actually is.
-    ///   2. The joins TBD recorded itself — the captured session id, then the
-    ///      tmux pane paired with the working directory (`capturedJoin`).
+    ///   2. The join TBD recorded itself — the captured session id
+    ///      (`capturedJoin`).
     ///   3. Descent from a live holder-backed terminal's job, for what is
     ///      left. A session the first two placed is never moved by this one,
     ///      a terminal one of them already answers for is never handed to a
@@ -709,13 +684,13 @@ private struct PeerFleetIndex {
         for entry in entries {
             if let row = shadowRowsByPID[entry.pid] {
                 answers[entry.pid] = .shadow(row)
-            } else if let (terminal, method) = capturedJoin(for: entry.record) {
-                answers[entry.pid] = .local(terminal, method)
-                if method == .sessionID { heldBySessionID.insert(terminal.id) }
+            } else if let terminal = capturedJoin(for: entry.record) {
+                answers[entry.pid] = .local(terminal, .sessionID)
+                heldBySessionID.insert(terminal.id)
                 if let inside = descent?.descent(of: entry.pid),
                    inside.terminalID != terminal.id {
                     disagreements.append(Disagreement(
-                        pid: entry.pid, joinedTerminalID: terminal.id, method: method,
+                        pid: entry.pid, joinedTerminalID: terminal.id,
                         insideTerminalID: inside.terminalID))
                 }
             } else if let descent {
@@ -856,26 +831,16 @@ private struct PeerFleetIndex {
             linkState: linkState)
     }
 
-    /// The joins TBD recorded itself, in the same two steps and the same order
-    /// the roster admits on: the session id TBD captured through its
-    /// `SessionStart` hook, then the worktree directory paired with the
-    /// terminal's pane.
+    /// The join TBD recorded itself, the one the roster admits on: the session
+    /// id TBD captured through its `SessionStart` hook.
     ///
-    /// Both fail closed. What neither places falls to the holder-descent join,
-    /// which reaches only holder-backed terminals; a tmux session whose hook
-    /// never fired and whose worktree row has moved on still lists as
-    /// `external`, which understates what TBD knows rather than inventing a
-    /// terminal for it.
-    private func capturedJoin(for record: PeerRegistryRecord) -> (Terminal, PeerJoinMethod)? {
-        if let sessionID = nonEmptyPeerField(record.sessionID),
-           let terminal = terminalsBySessionID[sessionID] {
-            return (terminal, .sessionID)
-        }
-        guard let cwd = nonEmptyPeerField(record.cwd), let pane = record.tmuxPaneID,
-              let worktree = worktreesByPath[PeerJoinKeys.normalizedPath(cwd)],
-              let terminal = terminalsByWorktreeAndPane[PaneKey(worktreeID: worktree.id, pane: pane)]
-        else { return nil }
-        return (terminal, .tmuxPane)
+    /// It fails closed. What it does not place falls to the holder-descent
+    /// join, which reaches only holder-backed terminals; a tmux session whose
+    /// hook never fired lists as `external`, which understates what TBD knows
+    /// rather than inventing a terminal for it.
+    private func capturedJoin(for record: PeerRegistryRecord) -> Terminal? {
+        guard let sessionID = nonEmptyPeerField(record.sessionID) else { return nil }
+        return terminalsBySessionID[sessionID]
     }
 }
 

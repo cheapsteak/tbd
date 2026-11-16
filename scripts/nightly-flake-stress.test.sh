@@ -564,18 +564,18 @@ test_every_target_names_an_issue_and_a_floor() {
     [[ "$issue" =~ ^[0-9]+$ ]] || { echo "     non-numeric issue: $spec"; bad=$((bad + 1)); }
   done
   assert_eq "every stress target carries a numeric floor and an issue number" "0" "$bad"
-  assert_eq "and there are the three targets the ledger names" "3" "${#TARGETS[@]}"
+  assert_eq "and there are the two targets the ledger names" "2" "${#TARGETS[@]}"
 }
 
 test_targets_reference_only_open_ledger_issues() {
-  # The issues this loop comments on are #961, #496 and #962, asserted here so
+  # The issues this loop comments on are #961 and #962, asserted here so
   # the target list and the ledger's issue set cannot drift apart silently.
   local spec issue seen=""
   for spec in "${TARGETS[@]}"; do
     issue="$(printf '%s' "$spec" | cut -d'|' -f4)"
     case " $seen " in *" $issue "*) ;; *) seen="$seen $issue" ;; esac
   done
-  assert_eq "the loop attaches to exactly the documented issue set" " 961 496 962" "$seen"
+  assert_eq "the loop attaches to exactly the documented issue set" " 961 962" "$seen"
 }
 
 # ---------------------------------------------------------------------------

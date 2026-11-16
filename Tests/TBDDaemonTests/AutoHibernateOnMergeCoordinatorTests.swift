@@ -19,8 +19,18 @@ private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
 @Suite("AutoHibernateOnMergeCoordinator")
 struct AutoHibernateOnMergeCoordinatorTests {
 
+    /// Holder and child pids that name no process — far above any pid darwin
+    /// issues — for `makeDeps`' terminal and for a second one a test adds.
+    /// `makeDeps` scripts all four dead.
+    private static let endedPIDs: (holder: Int32, child: Int32) = (1_900_000_501, 1_900_000_502)
+    private static let secondEndedPIDs: (holder: Int32, child: Int32) = (1_900_000_503, 1_900_000_504)
+
     /// In-memory DB + coordinator + a repo + one active worktree with a single
     /// idle Claude terminal. Returns the pieces each test flips.
+    ///
+    /// The terminal is on the holder transport, the only one TBD parks, and
+    /// its holder and job are both gone, so a park the rails allow finishes
+    /// on the ended-session path without a live holder.
     private func makeDeps(
         activityState: TerminalActivityState = .idle,
         keepWarm: Bool = false,
@@ -32,11 +42,19 @@ struct AutoHibernateOnMergeCoordinatorTests {
     ) async throws -> (AutoHibernateOnMergeCoordinator, TBDDatabase, wtID: UUID, terminalID: UUID) {
         let db = try TBDDatabase(inMemory: true)
         let subs = StateSubscriptionManager()
+        let signaller = FakeProcessSignaller()
+        for pid in [Self.endedPIDs.holder, Self.endedPIDs.child,
+                    Self.secondEndedPIDs.holder, Self.secondEndedPIDs.child] {
+            signaller.behaviors[pid] = .init(aliveInitially: false)
+        }
         let hibernation = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             subscriptions: subs, configDirManager: isolatedConfigDirManager(),
+            signaller: signaller,
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: logPath.map { ActuationLog(path: $0) } ?? makeTestActuationLog())
+        await hibernation.setHolderRegistry(makeHolderRegistryDouble(launch: FakeHolderLaunch()))
+        await hibernation.setHolderProcessIsLive { _ in false }
         let coord = AutoHibernateOnMergeCoordinator(
             db: db, hibernation: hibernation, subscriptions: subs)
 
@@ -45,8 +63,10 @@ struct AutoHibernateOnMergeCoordinatorTests {
         let wt = try await db.worktrees.create(repoID: repo.id, name: "w", branch: "b",
             path: "/tmp/repoAH/w-\(UUID().uuidString)", tmuxServer: "s")
         let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: sessionID, kind: kind)
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", claudeSessionID: sessionID, kind: kind, transport: .holder,
+            holderPID: Self.endedPIDs.holder, childPID: Self.endedPIDs.child,
+            holderChildStartedAt: Date())
         if activityState != .unknown {
             try await db.terminals.setActivityState(
                 id: terminal.id, activityState: activityState, source: .derived,
@@ -190,8 +210,10 @@ struct AutoHibernateOnMergeCoordinatorTests {
 
         // Add a SECOND idle Claude terminal on the same worktree.
         let terminal2 = try await db.terminals.create(
-            worktreeID: wtID, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude2", claudeSessionID: "sess-2", kind: .claude)
+            worktreeID: wtID, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude2", claudeSessionID: "sess-2", kind: .claude, transport: .holder,
+            holderPID: Self.secondEndedPIDs.holder, childPID: Self.secondEndedPIDs.child,
+            holderChildStartedAt: Date())
         try await db.terminals.setActivityState(id: terminal2.id, activityState: .idle, source: .derived)
 
         await coord.handleMergedTransition(worktreeID: wtID, prNumber: 11)
@@ -231,8 +253,10 @@ struct AutoHibernateOnMergeCoordinatorTests {
 
         // A second, keep-warm terminal: armed, but the rails refuse it.
         let keptWarm = try await db.terminals.create(
-            worktreeID: wtID, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude2", claudeSessionID: "sess-2", kind: .claude)
+            worktreeID: wtID, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude2", claudeSessionID: "sess-2", kind: .claude, transport: .holder,
+            holderPID: Self.secondEndedPIDs.holder, childPID: Self.secondEndedPIDs.child,
+            holderChildStartedAt: Date())
         try await db.terminals.setActivityState(id: keptWarm.id, activityState: .idle, source: .derived)
         try await db.terminals.setKeepWarm(id: keptWarm.id, keepWarm: true)
 

@@ -224,10 +224,19 @@ struct ActuationLogTests {
         #expect(ActuationOutcome.classify(HibernateResult.alreadyHibernated) == .refused(.noop))
         #expect(ActuationOutcome.classify(HibernateResult.notEligible(reason: "running"))
             == .refused(.notEligible))
+        #expect(ActuationOutcome.classify(HibernateResult.onTmux(reason: "still running in tmux"))
+            == .refused(.notEligible))
         #expect(ActuationOutcome.classify(HibernateResult.notFound) == .refused(.notFound))
 
         #expect(ActuationOutcome.classify(WakeResult.ok(sessionIncarnationID: nil)) == .dispatched)
-        #expect(ActuationOutcome.classify(WakeResult.respawnFailed(reason: "tmux")) == .transportFailed)
+        #expect(ActuationOutcome.classify(WakeResult.respawnFailed(reason: "the holder spawn failed"))
+            == .transportFailed)
+        // A row on tmux is declined with nothing touched, as a send to one is:
+        // no transport was tried, so it is not a transport failure.
+        #expect(ActuationOutcome.classify(WakeResult.onTmux(reason: "still running in tmux"))
+            == .refused(.notEligible))
+        #expect(ActuationOutcome.detail(WakeResult.onTmux(reason: "still running in tmux"))
+            == "still running in tmux")
         #expect(ActuationOutcome.classify(WakeResult.notHibernated) == .refused(.noop))
         #expect(ActuationOutcome.classify(WakeResult.inFlight) == .refused(.inFlight))
         #expect(ActuationOutcome.classify(WakeResult.notFound) == .refused(.notFound))

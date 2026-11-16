@@ -832,7 +832,9 @@ actor DaemonClient {
         )
     }
 
-    /// Recreate a dead tmux window for an existing terminal (preserves terminal ID).
+    /// Ask the daemon to recreate a terminal's window (preserves terminal ID).
+    /// For a row on tmux this probes the row's tmux server: the daemon parks
+    /// the row once that server has stopped, and refuses while it runs.
     func recreateTerminalWindow(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalRecreateWindow,
@@ -841,23 +843,13 @@ actor DaemonClient {
         )
     }
 
-    /// Tell the daemon the app's main terminal area has been resized so it
-    /// can `tmux resize-window` every tracked window. Used to keep detached
-    /// panes' cell dims sane; attached panes get overwritten by SwiftTerm.
+    /// Tell the daemon the app's main terminal area has been resized, so
+    /// sessions no panel is attached to keep sane cell dims; an attached
+    /// panel sets its own session's size.
     func setMainAreaSize(cols: Int, rows: Int) async throws {
         try await callVoidAsync(
             method: RPCMethod.setMainAreaSize,
             params: SetMainAreaSizeParams(cols: cols, rows: rows)
-        )
-    }
-
-    /// Update COLORFGBG environment variable in all known tmux servers.
-    /// This notifies running shells that the terminal color scheme has changed,
-    /// allowing tools like vim, less, fzf to auto-adjust their output.
-    func updateAppearanceColorFgBg(value: String) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.appearanceUpdateColorFgBg,
-            params: AppearanceUpdateColorFgBgParams(value: value)
         )
     }
 

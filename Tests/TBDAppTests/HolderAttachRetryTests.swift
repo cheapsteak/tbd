@@ -521,9 +521,7 @@ struct HolderAttachRetryTests {
         // Through the production entry point, which is where the attach task
         // `cleanup()` cancels is started.
         let attaching = Task { @MainActor in
-            await fixture.coordinator.startTmuxClient(
-                engine: fixture.engine, bridge: fixture.state.tmuxBridge,
-                server: "", windowID: "", panelID: fixture.coordinator.panelID)
+            await fixture.coordinator.startSessionClient(engine: fixture.engine)
             finished.isSet = true
         }
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)

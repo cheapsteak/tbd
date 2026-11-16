@@ -41,7 +41,6 @@ struct HookTabTransportGateTests {
         func isAlive(_ pid: Int32) -> Bool { false }
         func terminate(_ pid: Int32) {}
         func forceKill(_ pid: Int32) {}
-        func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
         func commandLine(_ pid: Int32) -> String? { nil }
         func stat(_ pid: Int32) -> String? { nil }
         func startTime(_ pid: Int32) -> Date? { nil }

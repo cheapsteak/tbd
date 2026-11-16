@@ -43,12 +43,6 @@ struct HolderReconcileInventoryTests {
             listTerminals: { [] })
     }
 
-    /// Dry-run tmux with every window reported dead — the state a holder row
-    /// produces against a real server, since `windowExists("")` cannot succeed.
-    private func deadWindowTmux() -> TmuxManager {
-        TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true })
-    }
-
     private func seedRepo(db: TBDDatabase, at repoPath: String) async throws -> (Repo, Worktree) {
         let repo = try await db.repos.create(
             path: repoPath, displayName: "acme", defaultBranch: "main")
@@ -74,9 +68,13 @@ struct HolderReconcileInventoryTests {
         clock: any Clock<Duration> = ContinuousClock()
     ) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: deadWindowTmux(), hooks: HookResolver(),
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             processSignaller: signaller, clock: clock)
         lifecycle.holderRegistry = registry
+        // Every tmux server reads as gone — the answer a holder row's worktree
+        // gets from a real socket, since a server that was never started has
+        // none — so a holder row that reached the tmux arm would be reclaimed.
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         return lifecycle
     }
 
@@ -123,8 +121,7 @@ struct HolderReconcileInventoryTests {
 
         try await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: makeTestActuationLog())
 
         let parked = try #require(
             try await db.terminals.get(id: claude.id),
@@ -170,8 +167,7 @@ struct HolderReconcileInventoryTests {
 
         try await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: makeTestActuationLog())
 
         let parked = try #require(
             try await db.terminals.get(id: claude.id),
@@ -210,8 +206,7 @@ struct HolderReconcileInventoryTests {
 
         try await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: makeTestActuationLog())
 
         let survivingClaude = try #require(
             try await db.terminals.get(id: claude.id),
@@ -239,8 +234,7 @@ struct HolderReconcileInventoryTests {
             transport: .holder, holderPID: 4244, childPID: 4245)
         let logPath = tempDir.appendingPathComponent("recovery.jsonl").path
         try await lifecycle.reconcile(
-            repoID: repo.id, actuationLog: ActuationLog(path: logPath),
-            reapSharedScratchTmuxResources: true)
+            repoID: repo.id, actuationLog: ActuationLog(path: logPath))
         try await expectRecoveryPark(db: db, before: codex, logPath: logPath)
         #expect(try await db.terminals.get(id: unidentified.id) == nil)
     }
@@ -254,8 +248,7 @@ struct HolderReconcileInventoryTests {
         let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
         let codex = try await seedRecoveryTerminal(db: db, worktreeID: main.id, transport: .holder)
         try await lifecycle.reconcile(
-            repoID: repo.id, actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            repoID: repo.id, actuationLog: makeTestActuationLog())
         #expect(try await db.terminals.get(id: codex.id) == codex)
     }
 
@@ -581,8 +574,7 @@ struct HolderReconcileInventoryTests {
 
         try await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: makeTestActuationLog())
 
         // The pass really did the work the budget bounds, so a recorded sleep
         // is not a sleep from some other pass that judged nothing.
@@ -627,8 +619,7 @@ struct HolderReconcileInventoryTests {
 
         try await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: makeTestActuationLog())
 
         #expect(try await db.terminals.get(id: shell.id) == nil)
         #expect(

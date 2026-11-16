@@ -443,10 +443,15 @@ struct ArchiveRemovesSessionDirectoriesTests {
         let db = try TBDDatabase(
             inMemory: true,
             terminalHistoryDir: home.appendingPathComponent("history", isDirectory: true).path)
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "archrec"),
             sessionsDir: sessionsDir)
+        // The worktree the first sweep leaves active reaches the leftover-tmux
+        // arm too. A server that may still be running keeps that arm off its
+        // rows, so the only thing this test changes between sweeps is whether
+        // every kill could be recorded.
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .running }
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         // A row whose path git does not list: the vanished checkout reconcile
@@ -467,8 +472,7 @@ struct ArchiveRemovesSessionDirectoriesTests {
             repoID: repo.id,
             actuationLog: Self.actuationLog(
                 failingWritesNaming: unrecorded.id,
-                path: home.appendingPathComponent("actuations.jsonl").path),
-            reapSharedScratchTmuxResources: true)
+                path: home.appendingPathComponent("actuations.jsonl").path))
 
         #expect(try await db.worktrees.get(id: wt.id)?.status == .active,
                 "the fixture never made one kill unrecordable")
@@ -477,8 +481,7 @@ struct ArchiveRemovesSessionDirectoriesTests {
         #expect(Self.hasDraft(sessionsDir, sessionID: "sess-unrecorded"))
 
         try await lifecycle.reconcile(
-            repoID: repo.id, actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
+            repoID: repo.id, actuationLog: makeTestActuationLog())
 
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
         #expect(!FileManager.default.fileExists(

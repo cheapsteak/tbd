@@ -121,11 +121,12 @@ these steps in order.
 
 ## What happens to your sessions
 
-Sessions live in tmux, not in the daemon or the app, so neither restarting the
-app nor replacing the daemon ends a session. What has hurt in the past is the
-new daemon's startup reconcile: it probes every tmux window, and on a machine
-still digesting a build a slow probe used to be treated the same as a missing
-one, parking live sessions wholesale. Four things make the handover safe.
+Sessions live in pty holders — one `TBDHolder` process per session — not in
+the daemon or the app, so neither restarting the app nor replacing the daemon
+ends a session: the outgoing daemon lets go of each holder and the new one
+adopts it again. The risk is the new daemon's startup reconcile. One that read
+a slow answer on a machine still digesting a build as a missing session would
+park live sessions wholesale. Four things make the handover safe.
 
 - **The successor claims the pid file first.** It starts with
   `TBD_HANDOVER_FROM_PID` naming its predecessor, writes its own pid over the
@@ -136,18 +137,26 @@ one, parking live sessions wholesale. Four things make the handover safe.
   replaces the daemon through this same handover. There is a brief window with
   no socket, the same window every restart has always had, in which CLI calls
   fail and retry.
-- **Reconcile no longer parks on an ambiguous answer.** The tmux probes report
-  `alive`, `absent` or `unknown`, and only `absent` — tmux itself answering
-  that the window is gone — parks a Claude row or deletes a non-Claude one. A
-  timeout, a spawn failure or an unparseable answer leaves the row alone.
+- **Reconcile parks only on positive evidence.** A holder row is parked only
+  when its holder's exit probe answers that the holder is gone; a round trip
+  that merely failed leaves the row alone. A row still on tmux is parked only
+  when every place this daemon can find its tmux server's socket is missing
+  or refuses connections and no tmux process of this user names that server;
+  any other answer, a timeout included, leaves it live; see
+  [the design](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update).
 - **A second un-park pass runs after reconcile.** The first pass runs before
   reconcile, so it cannot repair a park the same boot creates. The second one
-  can, and it clears any park whose pane demonstrably still runs Claude.
+  can, and it undoes any park left over a holder child that is still running.
 - **What is left gets woken, paced.** Whatever is still parked with reason
   `recovery` after the handover began is genuinely gone and needs a respawn.
   The script wakes those three at a time, two seconds apart, because N
   simultaneous `claude --resume` respawns have taken a machine down before
   (issues #284 and #367). The counts land in the summary, failures included.
+  Only sessions on the pty holder are woken. A session parked on the tmux
+  transport is left parked and not counted, because its wake would only be
+  refused: the daemon starts sessions only on the holder. **Move to Holder (No
+  tmux)** in the tab's menu, or `tbd terminal migrate`, moves it there, and a
+  wake after that resumes it.
 
 `--wake-only` runs just that last step against a daemon that is already new,
 for the case where an update finished but sessions were left parked.
@@ -280,8 +289,8 @@ notice.
 - `--no-app` — leave the running app alone, neither stopping it for the
   handover nor restarting it; hand the daemon over anyway.
 - `--no-wake` — install and hand over, but wake nothing.
-- `--wake-only` — wake every recovery-parked session against the running
-  daemon, and do nothing else.
+- `--wake-only` — wake every recovery-parked session on the pty holder
+  against the running daemon, and do nothing else.
 - `--remote <url>` — fetch from this URL instead of the resolved default.
 
 ## Running it from inside another project's dev shell

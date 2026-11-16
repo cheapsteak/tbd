@@ -374,11 +374,12 @@ struct StartAdmissionRouterTests {
         }
 
         #expect(fixture.stub.requests.isEmpty, "admission was asked about a wake that starts nothing")
-        #expect(response.errorCode != RPCErrorCode.startHeld.rawValue)
+        #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
         #expect(response.error
             == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: terminal.id))
         let outcome = try #require(try rows(at: fixture.logPath).last)
-        #expect(outcome["reason"] as? String != "held")
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-eligible")
         let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(row.startHeldReason == nil)
         #expect(row.startHeldAt == nil)
@@ -481,20 +482,24 @@ struct StartAdmissionRouterTests {
         var parked: [UUID] { lock.withLock { ids } }
     }
 
-    /// Replaces the migrator's operations: the park parks the row for real, so
-    /// an admitted move can finish, and records that it ran.
+    /// Replaces the migrator's operations: every tmux server reads as gone, and
+    /// the park parks the row for real, so an admitted move can finish, and
+    /// records that it ran.
     private func overrideMigrator(_ fixture: Fixture, parks: ParkLog) {
         let db = fixture.db
         fixture.router.transportMigratorOperationsOverride = TerminalTransportMigrator.Operations(
             canSpawnHolder: { true },
-            park: { id in
-                parks.append(id)
-                try? await db.terminals.setHibernated(id: id, sessionID: "session-1", reason: .manual)
-                return .ok
+            tmuxServerSighting: { _ in
+                LeftoverTmuxServerSighting(server: "tbd-acme", state: .absent)
+            },
+            parkLeftover: { terminal in
+                parks.append(terminal.id)
+                try await db.terminals.setHibernated(
+                    id: terminal.id, sessionID: terminal.claudeSessionID ?? "session-1",
+                    reason: .recovery)
+                return .parked(try await db.terminals.get(id: terminal.id))
             },
             wake: { _ in .ok(sessionIncarnationID: nil) },
-            paneBusyRefusal: { _ in nil },
-            retireWindow: { _ in },
             moveRunningShell: { _ in .moved })
     }
 
@@ -572,17 +577,25 @@ struct StartAdmissionRouterTests {
                 claudeSessionID: session, kind: kind,
                 hibernatedAt: parked ? Date() : nil, transport: transport)
         }
+        // A live tmux row with a conversation is parked and woken on the
+        // holder once its server is gone: Claude, or Codex with a thread.
         #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .claude, session: "s")) == .claude)
         #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: nil, session: "s")) == .claude)
+        #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .codex, session: "t")) == .codex)
         // A parked row is only rewritten; a shell restarts as a shell.
         #expect(RPCRouter.startAdmissionAgent(
             forMigrating: row(kind: .claude, session: "s", parked: true)) == nil)
+        #expect(RPCRouter.startAdmissionAgent(
+            forMigrating: row(kind: .codex, session: "t", parked: true)) == nil)
         #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .shell, session: nil)) == nil)
         #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .shell, session: "s")) == nil)
         // The migrator skips these, so they start nothing.
         #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .claude, session: nil)) == nil)
         #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .codex, session: nil)) == nil)
+        // A holder row is already where the move would put it.
         #expect(RPCRouter.startAdmissionAgent(
             forMigrating: row(kind: .claude, session: "s", transport: .holder)) == nil)
+        #expect(RPCRouter.startAdmissionAgent(
+            forMigrating: row(kind: .codex, session: "t", transport: .holder)) == nil)
     }
 }

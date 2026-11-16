@@ -7,8 +7,8 @@ import Foundation
 /// gesture stopped must not have to tell them apart by their detail strings.
 ///
 /// `movedNotResumed` is the one outcome that is neither a dispatch nor a
-/// decline: the rewrite landed — the daemon did touch the row and retire its
-/// window — and the resume that follows it failed. That is a transport failure,
+/// decline: the rewrite landed — the daemon did touch the row — and the resume
+/// that follows it failed. That is a transport failure,
 /// the same classification the wake's own `respawnFailed` gets, and emphatically
 /// not a refusal: a refusal asserts the daemon stopped before acting.
 extension ActuationOutcome {

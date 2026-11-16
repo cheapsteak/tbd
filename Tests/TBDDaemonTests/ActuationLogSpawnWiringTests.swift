@@ -214,7 +214,14 @@ struct ActuationLogSpawnWiringTests {
 
     // MARK: - The merge-park rail
 
-    /// In-memory DB + repo + worktree + one idle Claude terminal.
+    /// Holder and child pids that name no process: far above any pid darwin
+    /// issues, and scripted dead in `makeCoordinator`'s process table.
+    private static let endedHolderPID: Int32 = 1_900_000_301
+    private static let endedChildPID: Int32 = 1_900_000_302
+
+    /// In-memory DB + repo + worktree + one idle Claude terminal on the holder
+    /// transport whose holder and job are both gone. A park the rails allow
+    /// then finishes on the ended-session path, which needs no live holder.
     private func makeParkable(
         keepWarm: Bool = false
     ) async throws -> (db: TBDDatabase, worktreeID: UUID, terminalID: UUID) {
@@ -228,8 +235,10 @@ struct ActuationLogSpawnWiringTests {
             repoID: repo.id, name: "acme-wt", branch: "main",
             path: directory.path, tmuxServer: "tbd-acme")
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude,
+            transport: .holder, holderPID: Self.endedHolderPID, childPID: Self.endedChildPID,
+            holderChildStartedAt: Date())
         try await db.terminals.setActivityState(id: terminal.id, activityState: .idle, source: .derived)
         if keepWarm {
             try await db.terminals.setKeepWarm(id: terminal.id, keepWarm: true)
@@ -237,26 +246,36 @@ struct ActuationLogSpawnWiringTests {
         return (db, worktree.id, terminal.id)
     }
 
+    /// A coordinator that can park a `makeParkable` row: the holder spawn
+    /// double as its registry, and a process table and holder-liveness check
+    /// in which the row's holder and job are gone.
     private func makeCoordinator(
         db: TBDDatabase, logPath: String
-    ) -> HibernationCoordinator {
+    ) async -> HibernationCoordinator {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-merge-park-claude-\(UUID().uuidString)", isDirectory: true)
-        return HibernationCoordinator(
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[Self.endedHolderPID] = .init(aliveInitially: false)
+        signaller.behaviors[Self.endedChildPID] = .init(aliveInitially: false)
+        let coordinator = HibernationCoordinator(
             db: db,
             tmux: TmuxManager(dryRun: true),
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)),
+            signaller: signaller,
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: ActuationLog(path: logPath))
+        await coordinator.setHolderRegistry(makeHolderRegistryDouble(launch: FakeHolderLaunch()))
+        await coordinator.setHolderProcessIsLive { _ in false }
+        return coordinator
     }
 
     @Test("merge-park writes its own rail row, with no method and a rail-named actor")
     func mergeParkWritesRailRow() async throws {
         let fixture = try await makeParkable()
         let logPath = try makeLogPath()
-        let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
+        let coordinator = await makeCoordinator(db: fixture.db, logPath: logPath)
 
         let result = await coordinator.hibernateForMerge(terminalID: fixture.terminalID)
         #expect(result == .ok)
@@ -280,7 +299,7 @@ struct ActuationLogSpawnWiringTests {
     func mergeParkRefusedByRailWritesNothing() async throws {
         let fixture = try await makeParkable(keepWarm: true)
         let logPath = try makeLogPath()
-        let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
+        let coordinator = await makeCoordinator(db: fixture.db, logPath: logPath)
 
         let result = await coordinator.hibernateForMerge(terminalID: fixture.terminalID)
         #expect(result == .notEligible(reason: "Terminal is pinned keep-warm"))
@@ -290,7 +309,7 @@ struct ActuationLogSpawnWiringTests {
     @Test("an unwritable record skips the merge park — the session stays live")
     func unwritableRecordSkipsMergePark() async throws {
         let fixture = try await makeParkable()
-        let coordinator = makeCoordinator(db: fixture.db, logPath: try makeUnwritablePath())
+        let coordinator = try await makeCoordinator(db: fixture.db, logPath: makeUnwritablePath())
 
         let result = await coordinator.hibernateForMerge(terminalID: fixture.terminalID)
         guard case .notEligible(let reason) = result else {

@@ -83,14 +83,15 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `LegacyHookScanner.swift` — detects legacy globally-installed `tbd` hook entries in user/repo settings.json
 
 ### Lifecycle/
-- `WorktreeLifecycle.swift` (+`Create`/`Archive`/`Reconcile`/`Adopt`/`Forget`/`PreSession`/`Recovery`) — worktree create/archive/revive/adopt/reconcile orchestration; `+Forget` untracks without deleting from disk, `+PreSession` runs pre-session hook terminals, `+Recovery` resolves rows stuck in `.creating` on restart
+- `WorktreeLifecycle.swift` (+`Create`/`Archive`/`Reconcile`/`Adopt`/`Forget`/`PreSession`/`Recovery`/`LeftoverTmux`) — worktree create/archive/revive/adopt/reconcile orchestration; `+Forget` untracks without deleting from disk, `+PreSession` runs pre-session hook terminals, `+Recovery` resolves rows stuck in `.creating` on restart, `+LeftoverTmux` parks a live tmux row once its tmux server is gone
+- `LeftoverTmuxServerProbe.swift` — whether a tmux row's server is still running, read from one `AF_UNIX` connect to its socket (no tmux binary); asked by reconcile, Check Again and the transport migration, never on a timer. A transition measure, replaced by parking on sight on 2027-01-15
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
 - `TmuxManager+WorktreeServerLock.swift` — `withWorktreeServerLock`: locks a worktree's current tmux server and re-reads its row after waiting, retrying if the server changed
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
-- `HibernationCoordinator.swift` (+`Holder`) — parks Claude sessions on both transports and wakes them on the pty holder (a session parked on tmux refuses to wake, naming `tbd terminal migrate`): manual hibernate, the idle sweep, park-on-merge, and the parks the profile swap and the transport migration compose
+- `HibernationCoordinator.swift` (+`Holder`) — parks Claude sessions on the pty holder and wakes them there (it refuses to park a live tmux row, and a session parked on tmux refuses to wake, naming `tbd terminal migrate`): manual hibernate, the idle sweep, park-on-merge, and the park the profile swap composes
 - `HibernationGate.swift` / `HibernationSafetyChecks.swift` — idle-sweep and park-on-merge eligibility; the transcript-tail check every park but the profile swap's honours
 - `PluginDirWriter.swift` — writes the TBD Claude Code plugin to Application Support: skills always, the session mod's `hooks/` and `types/` only while a session-mod flag is on; called after the database opens and on each flag change
-- `ComposerDraftParkGate.swift` — the park decision the session mod answers (proceed or skip, per policy), and the tmux signal ending every tmux park uses
+- `ComposerDraftParkGate.swift` — the park decision the session mod answers (proceed or skip, per policy)
 - `SkillFileWriter.swift` — writes the failsafe copy of the skill body
 - `RetiredRuntimeFiles.swift` — at daemon startup, removes files under `~/tbd/runtime` that no current build writes (a statusline tee script, its capture files, a lease-credential directory), matched by exact name or shape; skipped in mock mode
 - `RetiredLaunchAgent.swift` — at daemon startup, off the socket-bind path, boots out (`launchctl bootout gui/<uid>/com.nightwatch-tick`) and deletes `~/Library/LaunchAgents/com.nightwatch-tick.plist`, the job Nightwatch's removed scheduler installed, only when its label and `…/skills/nightwatch/scripts/tick-cron.sh` program match and that script is gone; `launchctl` runs through the `LaunchctlRunning` seam; skipped in mock mode
@@ -124,7 +125,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `EnvOverrideResolver.swift` — merges free-form env overrides across scopes (global → repo → profile) with precedence
 
 ### Process/
-- `AgentReaper.swift` — detects and reaps orphaned agent child processes
+- `AgentReaper.swift` — reaps the orphaned children of dead pty holders, by each session's recorded child pid (`sweepHolderChildren`), and escalates a hung-up child to SIGKILL for window teardown (`escalateAfterHangup`)
 - `ProcessSignaller.swift` — injectable protocol wrapping OS process operations (signals, liveness checks)
 - `BoundedProcessRunner.swift` — `runBoundedProcess`: runs a subprocess under a deadline that a dedicated watchdog thread enforces; git, tmux, GC and remote-provider subprocesses run through it
 - `PipeDataAccumulator.swift` — thread-safe pipe reader that drains without waiting for EOF, so a grandchild holding the write end leaks nothing
@@ -132,13 +133,13 @@ The bottom folder: code that several daemon folders share and that uses no other
 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references
-- `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, Appearance (terminal COLORFGBG), ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
+- `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
 - `SocketServer.swift` — NIO Unix-socket RPC server
 - `RepoSerializer.swift` — repo serialization for RPC results
 
 ### Git/ Tmux/ SSH/ Keychain/ AskUserQuestion/
 - `Git/GitManager.swift` — all git operations
-- `Tmux/TmuxManager.swift` — tmux server/window lifecycle, sendKeys/capture
+- `Tmux/TmuxManager.swift` — per-repo tmux server names and the window kill that tears a tmux row down; TBD opens no tmux window
 - `SSH/SSHAgentResolver.swift` — `~/.ssh/tbd-agent.sock` symlink maintenance
 - `Keychain/ModelProfileKeychain.swift` — stores apiKey profile secrets (0600 token files)
 - `AskUserQuestion/PendingPromptStore.swift` — in-memory store of open Claude Code dialogs: AskUserQuestion captures from the pre-tool hook, and the prompts the session mod reports open for answering from the transcript
@@ -162,7 +163,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `Sidebar/Native/Cells/` — one `NSTableCellView` per row kind (`WorktreeRowCell`, `RemoteSessionRowCell`, `SectionHeaderCell`, `ProviderHeaderCell`, `GroupHeaderCell`, `ScratchPromptCell`, `AddRepositoryCell`), `SidebarRowView` / `SidebarRowHighlight` (hover and selection highlight), `SidebarGuideLine` (hierarchy guide lines), `SidebarRenameEditor` (inline rename), `SidebarCellKit` (shared label and image factories)
 - `WindowChrome/` — the main window's AppKit split and toolbar: `MainWindowSplitView` (the representable `ContentView` mounts; hosts `SidebarView` and the detail area and installs the toolbar), `MainSplitViewController` (sidebar and content items, collapse), `MainToolbarController` (+`Items`; the `NSToolbar`'s delegate and only editor), `MainToolbarLayout` / `MainToolbarSnapshot` (item order and contents as values), `ServersToolbarMenu` (the Servers menu's entries), `ToolbarIconButton` (borderless icon button with a full-frame hover square), `ToolbarTitleCluster` (the worktree title and notes button)
 - `Remote/RemoteProviderStatusPresentation.swift` — a provider's health summary for its sidebar header and detail pane
-- `Terminal/` — TmuxBridge, TBDTerminalView, panels, split layout, LayoutNode, PaneContent, pinned dock, appearance/color schemes, WorktreePager; custom/importable terminal themes: `ThemeStore`, `UserTerminalTheme`, `AlacrittyImporter` (TOML), `ThemeDirectoryWatcher`
+- `Terminal/` — TBDTerminalView, `LeftoverTmuxSessionNotice` (shown in place of a live tmux row: the `kill-server` command and Check Again), panels, split layout, LayoutNode, PaneContent, pinned dock, appearance/color schemes, WorktreePager; custom/importable terminal themes: `ThemeStore`, `UserTerminalTheme`, `AlacrittyImporter` (TOML), `ThemeDirectoryWatcher`
 - `Panes/` — code viewer, note, webview, history, `ViewerRouting` (routes file clicks to reuse/split the code viewer), `Transcript/` (per-tool cards with body/header split files, chat bubbles, context-usage badge, markdown; file-preview overlay: `TranscriptOverlayView`, `TranscriptOverlayCoordinator`, `TranscriptOverlayEnvironment`, `OverlayFileView`, `OverlayFileLinkAction`, `LocalFileLinker`)
 - `Panes/Transcript/Table/` — the #129 transcript renderer, and the only one: `NSTableView`-based (`TableTranscriptPaneView`/`TableTranscriptView`) with per-row cells (`TranscriptBubbleCellView`, `ActivityRowCellView`, `ActivityRowPresentation`) and an explicit row-height cache. Its supporting types sit one level up in `Panes/Transcript/` (siblings of `Table/`, not inside it): `TranscriptCardContext` (per-pane card environment), `TranscriptStreamPlan` (classifies each poll as noop/append/updateLast/rebuild), `TranscriptCardAttachment`/`TranscriptCardSizing` (inline SwiftUI card attachments + sizing math — reachable only from `MarkdownAttributedRenderer.render`, now a test seam)
 - `Panes/Transcript/Renderer/` — Markdown → `NSAttributedString` (`MarkdownAttributedRenderer`), fenced code blocks (`MarkdownCodeBlock`), GFM tables (`MarkdownTable`/`TranscriptTableView`), visual spec (`TranscriptTextTheme`)

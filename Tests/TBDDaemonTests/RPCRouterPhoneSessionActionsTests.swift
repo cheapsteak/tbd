@@ -307,7 +307,7 @@ struct RPCRouterPhoneSessionActionsTests {
 
         #expect(!response.success)
         #expect(try #require(response.error).contains("Allow Bash(rm -rf)?"))
-        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.delivered.pastedBodies.isEmpty, "nothing may be typed")
 
         let logPath = await harness.router.actuationLog.path
         let request = try #require(

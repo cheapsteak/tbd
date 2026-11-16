@@ -42,7 +42,6 @@ struct SocketServerPeerPIDTests {
         func startTime(_ pid: Int32) -> Date? { SocketServerPeerPIDTests.recordedStart }
         func commandLine(_ pid: Int32) -> String? { SocketServerPeerPIDTests.recordedCommand }
         func stat(_ pid: Int32) -> String? { nil }
-        func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
         func terminate(_ pid: Int32) {}
         func forceKill(_ pid: Int32) {}
     }
@@ -58,7 +57,7 @@ struct SocketServerPeerPIDTests {
     }
 
     /// One send over one fresh connection, with the recorded sidecar identity
-    /// claiming `recordedPID`. Returns what reached the pane.
+    /// claiming `recordedPID`. Returns what reached the session.
     ///
     /// The request is the first and only line the connection ever carries, so a
     /// context that arrived late — after `channelRead` had already dispatched —
@@ -106,10 +105,10 @@ struct SocketServerPeerPIDTests {
         // already happened by here; the bounded wait covers the write itself
         // racing the recorder rather than any part of the decision.
         try await waitFor(
-            "the send to reach the pane",
-            observed: { "\(harness.tmux.pastedBodies.count) pastes" }
-        ) { !harness.tmux.pastedBodies.isEmpty }
-        return harness.tmux.pastedBodies
+            "the send to reach the session",
+            observed: { "\(harness.delivered.pastedBodies.count) pastes" }
+        ) { !harness.delivered.pastedBodies.isEmpty }
+        return harness.delivered.pastedBodies
     }
 
     /// The positive row: the recorded sidecar identity is this process, and the

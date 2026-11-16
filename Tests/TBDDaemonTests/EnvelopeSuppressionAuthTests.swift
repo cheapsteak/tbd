@@ -25,7 +25,6 @@ struct EnvelopeSuppressionAuthTests {
         func startTime(_ pid: Int32) -> Date? { startedAt }
         func commandLine(_ pid: Int32) -> String? { command }
         func stat(_ pid: Int32) -> String? { nil }
-        func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
         func terminate(_ pid: Int32) {}
         func forceKill(_ pid: Int32) {}
     }
@@ -65,7 +64,7 @@ struct EnvelopeSuppressionAuthTests {
             connection: RPCConnectionContext(peerPID: Self.appPID))
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(harness.tmux.pastedBodies == ["hi"])
+        #expect(harness.delivered.pastedBodies == ["hi"])
     }
 
     // MARK: - The load-bearing negatives
@@ -82,7 +81,7 @@ struct EnvelopeSuppressionAuthTests {
             actor: .app,
             connection: RPCConnectionContext(peerPID: 4321))
 
-        #expect(try #require(harness.tmux.pastedBodies.first).hasPrefix("<tbd-dispatch"))
+        #expect(try #require(harness.delivered.pastedBodies.first).hasPrefix("<tbd-dispatch"))
     }
 
     /// An unreadable peer pid is not an app connection. It is "not established",
@@ -95,7 +94,7 @@ struct EnvelopeSuppressionAuthTests {
                 envelope: .suppressed),
             actor: .app,
             connection: RPCConnectionContext(peerPID: nil))
-        #expect(try #require(harness.tmux.pastedBodies.first).hasPrefix("<tbd-dispatch"))
+        #expect(try #require(harness.delivered.pastedBodies.first).hasPrefix("<tbd-dispatch"))
     }
 
     /// No context at all — every non-socket caller of `handleRaw`, and the HTTP
@@ -108,7 +107,7 @@ struct EnvelopeSuppressionAuthTests {
                 envelope: .suppressed),
             actor: .app,
             connection: nil)
-        #expect(try #require(harness.tmux.pastedBodies.first).hasPrefix("<tbd-dispatch"))
+        #expect(try #require(harness.delivered.pastedBodies.first).hasPrefix("<tbd-dispatch"))
     }
 
     /// The sidecar has no client: nothing was recorded, so there is nothing the
@@ -121,7 +120,7 @@ struct EnvelopeSuppressionAuthTests {
                 envelope: .suppressed),
             actor: .app,
             connection: RPCConnectionContext(peerPID: Self.appPID))
-        #expect(try #require(harness.tmux.pastedBodies.first).hasPrefix("<tbd-dispatch"))
+        #expect(try #require(harness.delivered.pastedBodies.first).hasPrefix("<tbd-dispatch"))
     }
 
     /// **Pid reuse.** The pid matches what was recorded and the process at that
@@ -149,7 +148,7 @@ struct EnvelopeSuppressionAuthTests {
                 actor: .app,
                 connection: RPCConnectionContext(peerPID: Self.appPID))
             #expect(
-                try #require(harness.tmux.pastedBodies.first).hasPrefix("<tbd-dispatch"),
+                try #require(harness.delivered.pastedBodies.first).hasPrefix("<tbd-dispatch"),
                 "\(name) must keep the envelope")
         }
     }
@@ -167,7 +166,7 @@ struct EnvelopeSuppressionAuthTests {
                 envelope: .suppressed),
             actor: ActuationActor.session(worktree: "W", terminal: "T"),
             connection: RPCConnectionContext(peerPID: Self.appPID))
-        #expect(authenticated.tmux.pastedBodies == ["hi"])
+        #expect(authenticated.delivered.pastedBodies == ["hi"])
 
         let stranger = try await harness()
         _ = try await stranger.send(
@@ -176,7 +175,7 @@ struct EnvelopeSuppressionAuthTests {
                 envelope: .suppressed),
             actor: .app,
             connection: RPCConnectionContext(peerPID: 4321))
-        #expect(try #require(stranger.tmux.pastedBodies.first).hasPrefix("<tbd-dispatch"))
+        #expect(try #require(stranger.delivered.pastedBodies.first).hasPrefix("<tbd-dispatch"))
     }
 
     // MARK: - The shape the composer actually sends
@@ -190,33 +189,31 @@ struct EnvelopeSuppressionAuthTests {
         let response = try await harness.send(
             TerminalSendParams(
                 terminalID: harness.terminal.id, submit: true,
-                parts: [.text("look at "), .imagePath("/tmp/a.png"), .text(" and tell me")],
+                parts: [.text("look at this and tell me")],
                 envelope: .suppressed),
             actor: .app,
             connection: RPCConnectionContext(peerPID: Self.appPID))
 
         #expect(response.success, "error was: \(response.error ?? "none")")
-        #expect(harness.tmux.pastedBodies == ["look at ", "'/tmp/a.png'", " and tell me"])
+        #expect(harness.delivered.pastedBodies == ["look at this and tell me"])
     }
 
     /// The negative for the same shape: a stranger's connection asking for
-    /// suppression gets the envelope on the first TEXT part, exactly as an
-    /// unasked parts send does.
-    @Test func aStrangersPartsSendKeepsTheEnvelopeOnTheFirstTextPart() async throws {
+    /// suppression gets the envelope on its text part, exactly as an unasked
+    /// parts send does.
+    @Test func aStrangersPartsSendKeepsTheEnvelopeOnItsTextPart() async throws {
         let harness = try await harness()
         _ = try await harness.send(
             TerminalSendParams(
                 terminalID: harness.terminal.id, submit: true,
-                parts: [.text("look at "), .imagePath("/tmp/a.png")],
+                parts: [.text("look at this")],
                 envelope: .suppressed),
             actor: .app,
             connection: RPCConnectionContext(peerPID: 4321))
 
-        let bodies = harness.tmux.pastedBodies
-        try #require(bodies.count == 2)
-        #expect(try #require(bodies.first).hasPrefix("<tbd-dispatch"))
-        #expect(try #require(bodies.first).hasSuffix("\nlook at "))
-        #expect(bodies[1] == "'/tmp/a.png'")
+        let body = try #require(harness.delivered.pastedBodies.first)
+        #expect(body.hasPrefix("<tbd-dispatch"))
+        #expect(body.hasSuffix("\nlook at this"))
     }
 
     /// A send that does not ASK for suppression never pays for the identity
@@ -228,7 +225,7 @@ struct EnvelopeSuppressionAuthTests {
             TerminalSendParams(terminalID: harness.terminal.id, text: "hi", submit: true),
             actor: .app,
             connection: RPCConnectionContext(peerPID: Self.appPID))
-        #expect(try #require(harness.tmux.pastedBodies.first).hasPrefix("<tbd-dispatch"))
+        #expect(try #require(harness.delivered.pastedBodies.first).hasPrefix("<tbd-dispatch"))
     }
 }
 

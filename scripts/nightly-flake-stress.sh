@@ -73,7 +73,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # against the runner.
 #
 # Measured 2026-07-27 on this tree (swift 6.3.3, unloaded):
-#   GitManagerTimeout   6 tests      AppearanceDebounce  7 tests
+#   GitManagerTimeout   6 tests
 #   whole fast pass  4308 tests
 #
 # The floors sit BELOW those, following test.yml's precedent: they exist to fire
@@ -87,7 +87,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # iteration on a box whose owner lowered that bound.
 TARGETS=(
   "GitManagerTimeout|--no-parallel --filter ^TBDDaemonLiveTests\\.GitManagerTimeoutTests|3|961|60s hang under load: polled clock handshake starved (#870 moved it to EventDrivenTestClock)"
-  "AppearanceDebounce|--parallel --filter AppearanceDebounceTests|4|496|clock-driven wedge: megaYield at background QoS"
   "FastPassWhole|--parallel --skip ^TBDDaemonLiveTests\\.|3000|962|whole fast pass under load: catch-all until failures are split per test"
 )
 

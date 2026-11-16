@@ -10,22 +10,21 @@ public enum ResumeActuationOutcome: Equatable, Sendable {
     case sent
     /// Transcript grew after the limit record — user continued manually.
     case userAlreadyContinued
-    /// Terminal deleted/suspended/window dead — cancel silently.
+    /// Terminal deleted or parked, or its session ended — cancel silently.
     case terminalGone
-    /// `#{pane_in_mode}` was set; typing would land in copy-mode and
-    /// cancelling copy-mode would yank the user out of scrollback.
-    case paneInCopyMode
     /// The global toggle was switched off, or this row was explicitly
     /// cancelled (`cancelPending`/`cancelAllPending`), while an actuation
     /// was in-flight — caught by `checkEligibility`'s toggle/row-status
     /// re-check between attempts (spec §Cancellation). Cancel silently,
     /// same handling as `.terminalGone`.
     case cancelledExternally
-    /// Hard failure (Claude not foreground, send verify timed out, …).
+    /// Hard failure (the session cannot be typed to, send verify timed out,
+    /// …).
     case failed(String)
 }
 
-/// Seam between the scheduler (timing) and the actuator (tmux side effects).
+/// Seam between the scheduler (timing) and the actuator (what reaches the
+/// session).
 public protocol LimitResumeActuating: Sendable {
     func actuate(_ resume: ScheduledResume) async -> ResumeActuationOutcome
 
@@ -64,12 +63,10 @@ public enum LimitResumeOutcome: Equatable, Sendable {
 /// at once). Spec §Scheduler, §State.
 public actor LimitResumeScheduler {
 
-    // MARK: - Constants (spec §Scheduler / §Actuation 4)
+    // MARK: - Constants (spec §Scheduler)
 
     public static let slack: TimeInterval = 60
     public static let jitterMax: TimeInterval = 30
-    public static let copyModeRetryDelay: TimeInterval = 120
-    public static let maxCopyModeAttempts = 15
 
     /// Cap on any single sleep while a row is pending, so the loop runs an
     /// early-cancel pass (`cancelResumesAlreadyContinued`) at least this
@@ -335,31 +332,6 @@ public actor LimitResumeScheduler {
             }
             logger.info("fire: cancelled (\(String(describing: outcome), privacy: .public)) for terminal \(row.terminalID.uuidString, privacy: .public)")
 
-        case .paneInCopyMode:
-            let attempts = row.attemptCount + 1
-            if attempts >= Self.maxCopyModeAttempts {
-                if await setStatusWithRetry(id: row.id, status: .failed, terminalID: row.terminalID, context: "copy-mode cap") {
-                    inFlightOrFired.remove(row.id)
-                }
-                logger.warning("fire: copy-mode retry cap hit for terminal \(row.terminalID.uuidString, privacy: .public)")
-                await onOutcome(row, .failed("pane stayed in copy-mode/scrollback for ~30 minutes"))
-            } else {
-                // Don't cancel their scroll — retry in 2 minutes (spec §Actuation 4).
-                let nextFire = clock.now().addingTimeInterval(Self.copyModeRetryDelay)
-                if let rescheduled = await rescheduleWithRetry(id: row.id, fireAt: nextFire, attemptCount: attempts, terminalID: row.terminalID) {
-                    if rescheduled {
-                        logger.info("fire: pane in copy-mode; rescheduled attempt \(attempts, privacy: .public) for terminal \(row.terminalID.uuidString, privacy: .public)")
-                    } else {
-                        logger.debug("fire: row no longer pending, dropping (terminal \(row.terminalID.uuidString, privacy: .public))")
-                    }
-                    // Either the row is intentionally still pending (future
-                    // fireAt — remove so the future attempt can fire) or it's
-                    // gone for good (also safe to remove). Only a write
-                    // failure (nil) should leave the ID latched.
-                    inFlightOrFired.remove(row.id)
-                }
-            }
-
         case .failed(let reason):
             if await setStatusWithRetry(id: row.id, status: .failed, terminalID: row.terminalID, context: "failed") {
                 inFlightOrFired.remove(row.id)
@@ -391,27 +363,5 @@ public actor LimitResumeScheduler {
             }
         }
         return false
-    }
-
-    /// Retry a `reschedule` write up to `writeRetryAttempts` times, sleeping
-    /// `writeRetryDelay` seconds (via the injected clock) between attempts.
-    /// Returns the store's own Bool (true = rescheduled, false = row no
-    /// longer pending) once a write succeeds, or nil once retries are
-    /// exhausted (double-fire protection — see `inFlightOrFired`).
-    private func rescheduleWithRetry(
-        id: UUID, fireAt: Date, attemptCount: Int, terminalID: UUID
-    ) async -> Bool? {
-        for attempt in 1...Self.writeRetryAttempts {
-            do {
-                return try await store.reschedule(id: id, fireAt: fireAt, attemptCount: attemptCount)
-            } catch {
-                if attempt < Self.writeRetryAttempts {
-                    try? await clock.sleep(until: clock.now().addingTimeInterval(Self.writeRetryDelay))
-                } else {
-                    logger.error("fire: reschedule failed after \(Self.writeRetryAttempts, privacy: .public) attempts for terminal \(terminalID.uuidString, privacy: .public), row \(id.uuidString, privacy: .public): \(String(describing: error), privacy: .public). Leaving row marked in-flight for this process lifetime to prevent double-fire; a daemon restart re-evaluates from DB truth.")
-                }
-            }
-        }
-        return nil
     }
 }

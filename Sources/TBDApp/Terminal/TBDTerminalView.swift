@@ -61,7 +61,7 @@ class TBDTerminalView: TerminalView {
     private var appearanceCancellable: AnyCancellable?
 
     /// Called once when the view has been laid out with non-zero bounds.
-    /// Used to start the tmux client as soon as the terminal has real dimensions.
+    /// Used to attach the session as soon as the terminal has real dimensions.
     var onReady: (() -> Void)?
     private var didFireReady = false
 

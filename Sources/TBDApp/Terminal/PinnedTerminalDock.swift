@@ -152,16 +152,31 @@ private struct PinnedTerminalCell: View {
             Divider()
 
             // Terminal content
-            if let worktree {
+            if let worktree, TerminalPanePresentation.showsLeftoverTmuxNotice(for: terminal) {
+                LeftoverTmuxSessionNotice(terminalID: terminal.id, server: worktree.tmuxServer)
+            } else if let worktree, TerminalPanePresentation.dockShowsParkedSnapshot(for: terminal) {
+                // Parked on tmux: the frozen snapshot, as the main pane draws
+                // it, with a notice that says how to move the row from here.
+                // A suspended panel never attaches, so it cannot contend for a
+                // session.
                 TerminalPanelView(
                     terminalID: terminal.id,
-                    tmuxServer: worktree.tmuxServer,
-                    tmuxWindowID: terminal.tmuxWindowID,
-                    tmuxBridge: appState.tmuxBridge,
                     worktreePath: worktree.path,
-                    onMissingWindow: {
-                        await appState.requestAutomaticTerminalRecreation(terminalID: terminal.id)
-                    }
+                    initialSnapshot: terminal.suspendedSnapshot,
+                    isSuspendedSnapshot: true,
+                    parkedNoticeMessage: TerminalPanePresentation.dockParkedNoticeMessage(
+                        for: terminal)
+                )
+                // The identity the main pane gives a parked pane.
+                .id(TerminalPanePresentation.identity(
+                    for: terminal, switching: nil,
+                    attachEpoch: appState.terminalAttachEpochs[terminal.id] ?? 0,
+                    attachRetry: appState.terminalAttachRetries[terminal.id] ?? 0,
+                    engineOverride: appState.terminalEngineOverrides[terminal.id]))
+            } else if let worktree {
+                TerminalPanelView(
+                    terminalID: terminal.id,
+                    worktreePath: worktree.path
                 )
                 // The identity every terminal host shares, so the attach-failed
                 // placard's Retry, an account switch's wake, and an engine

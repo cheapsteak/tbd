@@ -185,9 +185,9 @@ struct HolderDetachHandbackTests {
             sessionEnd = pair[1]
             // **Close-on-exec on both ends, at creation.** Every test target in
             // this package links into one process and Swift Testing runs their
-            // suites in parallel, and two suites in this very target keep
+            // suites in parallel, and a suite in this very target keeps
             // `/bin/sleep 120` children alive for the rest of the run
-            // (`TerminalTeardownReapTests`, `QuietIngestTests`). A `socketpair`
+            // (`TerminalTeardownReapTests`). A `socketpair`
             // is inheritable, `startProcess` is a `forkpty` that closes nothing,
             // and the attach's own `fcntl` cannot run until this initializer has
             // returned and the attach has been scheduled — so a fixture that

@@ -9,7 +9,7 @@ import TBDShared
 ///
 /// Each mounted tab item owns exactly one live PTY connection to a remote
 /// machine (`RemoteAttachTerminalView` → `LocalProcess`) — unlike a local
-/// worktree's tmux attach, this is a real, potentially concurrency/cost-
+/// worktree's holder attach, this is a real, potentially concurrency/cost-
 /// bounded resource (SSM/ssh). `mounts` (driven by
 /// `AppState.attachedRemoteMountKeys`) is the ONLY mount set this pager
 /// ever renders; anything that falls out of it gets torn down

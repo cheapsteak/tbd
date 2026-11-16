@@ -4,12 +4,6 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "reaper")
 
-/// The two tmux queries AgentReaper needs. TmuxManager conforms; tests inject a fake.
-public protocol TmuxProcessQuerying: Sendable {
-    func serverPID(server: String) async -> Int32?
-    func livePanePIDs(server: String) async -> Set<Int32>
-}
-
 /// One holder-transport session, reduced to what the reaper's holder leg needs
 /// to decide whether its job is an orphan.
 ///
@@ -60,8 +54,10 @@ public enum HolderChildDecision: Sendable, Equatable {
     case reap
 }
 
+/// Reaps agent processes nothing else will end: a holder session's job whose
+/// holder is gone (`sweepHolderChildren`, every 60 seconds), and a pane
+/// process that survives a window teardown (`escalateAfterHangup`).
 public struct AgentReaper: Sendable {
-    let tmux: TmuxProcessQuerying
     let signaller: ProcessSignaller
     /// Number of liveness polls before escalating / giving up.
     let graceAttempts: Int
@@ -70,8 +66,8 @@ public struct AgentReaper: Sendable {
     /// The holder-transport sessions to sweep, with their recorded pids.
     /// Injected as a closure so the reaper stays a database-free value type —
     /// the same division of labor `HolderRendezvousCollector` keeps with
-    /// `OrphanGC`. Defaulted to empty so every existing call site and test is
-    /// unchanged by the leg's arrival.
+    /// `OrphanGC`. Defaulted to empty for the callers that only escalate a
+    /// teardown.
     let holderSessions: @Sendable () async -> [HolderChildRecord]
     /// How far a child's start time may sit from its record's identity anchor
     /// (`HolderChildRecord.createdAt`) and still be believed to be that
@@ -79,14 +75,12 @@ public struct AgentReaper: Sendable {
     let holderIdentityWindow: TimeInterval
 
     public init(
-        tmux: TmuxProcessQuerying,
         signaller: ProcessSignaller,
         graceAttempts: Int = 30,
         pollInterval: Duration = .milliseconds(100),
         holderSessions: @escaping @Sendable () async -> [HolderChildRecord] = { [] },
         holderIdentityWindow: TimeInterval = AgentReaper.defaultHolderIdentityWindow
     ) {
-        self.tmux = tmux
         self.signaller = signaller
         self.graceAttempts = graceAttempts
         self.pollInterval = pollInterval
@@ -100,35 +94,6 @@ public struct AgentReaper: Sendable {
     /// with the same window.
     public static let defaultHolderIdentityWindow: TimeInterval = HolderChildIdentity.startWindow
 
-    /// Children of the server process that are not any live pane's pane_pid.
-    /// Structural: no pane references them, so the UI cannot reach them.
-    func findStructuralOrphans(server: String) async -> [Int32] {
-        guard let serverPID = await tmux.serverPID(server: server) else { return [] }
-        let children = Set(signaller.children(ofServerPID: serverPID))
-        let panes = await tmux.livePanePIDs(server: server)
-        return Array(children.subtracting(panes))
-    }
-
-    /// Defense-in-depth ownership check before any signal: true when the process
-    /// is a TBD-spawned agent (claude/codex) or carries a TBD spawn marker.
-    ///
-    /// `sweep`/`reapServerChildren` only ever see children of a known tbd-* server,
-    /// so parentage already establishes ownership; this gate additionally avoids
-    /// reaping a non-agent process a user detached inside a TBD shell pane (e.g.
-    /// `nohup make`, `node script.js`). We recognize the agent binary by the last
-    /// path component of argv[0] so a path merely containing "claude" won't match.
-    func isTBDOwned(_ pid: Int32) -> Bool {
-        isTBDOwned(commandLine: signaller.commandLine(pid))
-    }
-
-    /// Ownership check against an already-fetched command line, so callers that
-    /// also need the command line (e.g. `sweep`'s log) can avoid a second `ps`.
-    func isTBDOwned(commandLine cmd: String?) -> Bool {
-        guard let cmd else { return false }
-        if cmd.contains("claude-overlay.json") || cmd.contains("/TBD/plugin") { return true }
-        return Self.isAgentBinary(cmd)
-    }
-
     /// True if the command line's argv[0] basename is `claude` or `codex`.
     static func isAgentBinary(_ commandLine: String) -> Bool {
         guard let arg0 = commandLine.split(whereSeparator: { $0 == " " || $0 == "\t" }).first else {
@@ -139,7 +104,7 @@ public struct AgentReaper: Sendable {
     }
 
     /// SIGTERM → poll for `graceAttempts × pollInterval` → SIGKILL if still alive.
-    /// Used by the sweep (no prior SIGHUP) and by `escalateAfterHangup`.
+    /// Used by `escalateAfterHangup` once the hangup's grace has run out.
     func reap(_ pid: Int32) async {
         signaller.terminate(pid)
         for _ in 0..<graceAttempts {
@@ -165,20 +130,6 @@ public struct AgentReaper: Sendable {
         guard signaller.isAlive(pid) else { return }
         logger.warning("reaper: agent pid \(pid, privacy: .public) survived kill-window SIGHUP — escalating")
         await reap(pid)
-    }
-
-    /// Reap every structural orphan (gated by ownership) across the given servers.
-    public func sweep(servers: [String]) async {
-        for server in servers {
-            for pid in await findStructuralOrphans(server: server) {
-                // Fetch the command line once: used for both the ownership gate
-                // and the log line below.
-                let cmd = signaller.commandLine(pid)
-                guard isTBDOwned(commandLine: cmd) else { continue }
-                logger.info("reaper: sweeping orphan pid \(pid, privacy: .public) on \(server, privacy: .public) [\(cmd?.prefix(60) ?? "", privacy: .public)]")
-                await reap(pid)
-            }
-        }
     }
 
     // MARK: - Holder transport
@@ -270,11 +221,10 @@ public struct AgentReaper: Sendable {
     /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
     /// "Reconciliation").
     ///
-    /// `sweep` above walks the children of tmux server pids, and a holder's job
-    /// is not one: when the holder dies the job re-parents to launchd, so no
-    /// enumeration rooted at a tmux server can ever reach it. This leg walks
-    /// the other way — from each holder session's **recorded child pid** — and
-    /// so is the only thing that can see a job the daemon was down for.
+    /// When a holder dies its job re-parents to launchd, so no enumeration
+    /// rooted at a parent process can reach it. This leg walks the other way —
+    /// from each holder session's **recorded child pid** — and so is the only
+    /// thing that can see a job the daemon was down for.
     ///
     /// It is the **backstop**, not the prompt path: a holder death observed by
     /// a running daemon is handled by the daemon's own holder-connection watch,
@@ -300,9 +250,8 @@ public struct AgentReaper: Sendable {
     /// `HolderSpawner`'s type comment states the same gap from the creation
     /// side; the two must stay in agreement.
     ///
-    /// Unflagged, like the tmux leg: `AgentReaper` carries no switch of its
-    /// own, and holder-ness is a transport property rather than a separate
-    /// opt-in. An installation with no holder sessions has no records to walk,
+    /// Unflagged: `AgentReaper` carries no switch of its own, and holder-ness
+    /// is a transport property rather than a separate opt-in. An installation with no holder sessions has no records to walk,
     /// so the leg costs nothing where it has nothing to do.
     public func sweepHolderChildren() async {
         for record in await holderSessions() {
@@ -383,15 +332,5 @@ public struct AgentReaper: Sendable {
         reaper: holder child \(pid, privacy: .public) survived SIGTERM — sending SIGKILL
         """)
         signaller.forceKill(pid)
-    }
-
-    /// Reap the server's owned child processes before the server itself is
-    /// killed, so they don't reparent to launchd and escape.
-    public func reapServerChildren(server: String) async {
-        guard let serverPID = await tmux.serverPID(server: server) else { return }
-        for pid in signaller.children(ofServerPID: serverPID) where isTBDOwned(pid) {
-            logger.info("reaper: reaping child pid \(pid, privacy: .public) before kill-server \(server, privacy: .public)")
-            await reap(pid)
-        }
     }
 }

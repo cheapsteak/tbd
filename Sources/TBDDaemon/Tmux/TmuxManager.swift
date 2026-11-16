@@ -15,9 +15,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "TmuxManager"
 /// and `-L <name>` can resolve to a different socket file — the second case
 /// happens in the field, and reporting it as absence refuses sends to (and,
 /// worse, parks) perfectly live sessions. Affirmative evidence of absence is
-/// what `docs/specs/2026-08-11-bounded-terminal-recovery-design.md` requires;
-/// the app layer already honours it (`TmuxPreparationFailure.windowMissing`
-/// versus `.commandFailed`).
+/// what `docs/specs/2026-08-11-bounded-terminal-recovery-design.md` requires.
 public enum PaneSendTarget: Sendable, Equatable {
     /// tmux answered about a reachable server and this pane is not on it — it,
     /// or its window, is gone. Positive evidence of absence.
@@ -362,8 +360,7 @@ public struct TmuxManager: Sendable {
 
     /// Advertise the `hyperlinks` terminal-feature for TERM=xterm-256color so
     /// tmux forwards OSC 8 hyperlink escape sequences to normal (non-control-mode)
-    /// attach clients instead of stripping them. The grouped-sessions attach
-    /// client (see `TerminalPanelView.makeViewerEnvironment`) runs with
+    /// attach clients instead of stripping them. An attach client runs with
     /// TERM=xterm-256color, so the feature is keyed to that TERM to match.
     ///
     /// Uses `set -ga` (append) rather than `set -g` (replace): `-g` would
@@ -690,8 +687,7 @@ public struct TmuxManager: Sendable {
     }
 
     /// Keep a window's pane around (marked dead) after its process exits,
-    /// instead of destroying the window. Same option TmuxBridge sets
-    /// app-side when a viewer attaches.
+    /// instead of destroying the window.
     public static func setRemainOnExitCommand(server: String, windowID: String) -> [String] {
         ["-L", server, "set-option", "-wt", windowID, "remain-on-exit", "on"]
     }
@@ -1867,5 +1863,3 @@ public enum TmuxError: Error, Sendable, CustomStringConvertible, LocalizedError 
             .trimmingCharacters(in: .whitespacesAndNewlines) + "…"
     }
 }
-
-extension TmuxManager: TmuxProcessQuerying {}

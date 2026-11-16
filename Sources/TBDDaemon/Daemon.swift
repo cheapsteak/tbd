@@ -460,8 +460,7 @@ public final class Daemon: Sendable {
                 do {
                     try await lifecycle.reconcile(
                         repoID: repo.id,
-                        actuationLog: actuationLog,
-                        reapSharedScratchTmuxResources: true)
+                        actuationLog: actuationLog)
                 } catch {
                     reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
@@ -469,13 +468,12 @@ public final class Daemon: Sendable {
         } catch {
             reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
         }
-        // Scratch spaces have no repo row and deliberately share one tmux
-        // server. Reconcile them independently so this still runs when there
-        // are zero registered repos and catches recycled pane coordinates.
+        // Scratch spaces have no repo row, so no per-repo pass reaches their
+        // terminals. Reconcile them independently so this still runs when
+        // there are zero registered repos.
         do {
             try await lifecycle.reconcileScratchTerminals(
-                actuationLog: actuationLog,
-                reapOrphanTmuxResources: true)
+                actuationLog: actuationLog)
         } catch {
             reconcileLogger.warning("Failed to reconcile scratch terminals: \(error.localizedDescription, privacy: .public)")
         }
@@ -488,8 +486,8 @@ public final class Daemon: Sendable {
     }
 
     /// Run one pass of the hourly orphan-maintenance cadence. Scratch terminal
-    /// reconciliation shares this pass so tmux coordinate reuse is repaired
-    /// while the daemon remains alive, not only at startup.
+    /// reconciliation shares this pass so a scratch session nothing can reach
+    /// is parked while the daemon remains alive, not only at startup.
     static func performOrphanMaintenance(
         orphanGC: OrphanGC,
         lifecycle: WorktreeLifecycle,
@@ -504,8 +502,7 @@ public final class Daemon: Sendable {
         _ = await orphanGC.sweep()
         do {
             try await lifecycle.reconcileScratchTerminals(
-                actuationLog: actuationLog,
-                reapOrphanTmuxResources: false)
+                actuationLog: actuationLog)
         } catch {
             reconcileLogger.warning("Failed to reconcile scratch terminals during orphan maintenance: \(error.localizedDescription, privacy: .public)")
         }
@@ -1488,11 +1485,9 @@ public final class Daemon: Sendable {
         // migration or marker is needed. Best-effort, never blocks startup.
         await database.notes.exportContentColumnToFiles()
 
-        // 8d. Reconcile parked state and durable tmux ownership before any
-        // listener accepts an RPC. Full startup recovery may destructively
-        // reap shared scratch servers; once serving begins, a terminal-create
-        // RPC can have created and stamped a window whose DB row has not yet
-        // landed, so that full sweep is no longer safe.
+        // 8d. Reconcile parked state and the terminal rows before any
+        // listener accepts an RPC, so the sweep sees every session a request
+        // could have started and none is half-recorded under it.
         //
         // The moment is taken first because it is what the restore pass (step
         // 15) reads `hibernatedAt` against: every park at or after it is this
@@ -1509,13 +1504,14 @@ public final class Daemon: Sendable {
         }
 
         // 8d-ii. Un-park a second time, AFTER the reconcile pass. The first run
-        // has to precede reconcile so the destructive scratch-server reaping
-        // works from a consistent view, but that ordering also means it cannot
-        // repair anything the same boot parks. This run can: it re-examines the
-        // parked rows and clears every one whose pane demonstrably still runs
-        // Claude. Cheap — it only looks at parked rows — and it is the repair
-        // half of the tri-state reconcile probes, which stop the parks that are
-        // pure guesswork rather than the ones that merely raced.
+        // precedes reconcile so the sweep works from a consistent view of the
+        // parked rows, but that ordering also means it cannot repair anything
+        // the same boot parks. This run can: it re-examines the parked holder
+        // rows and clears every one whose holder child demonstrably still
+        // runs. Cheap — it only looks at parked rows — and it is the repair
+        // half of reconcile's rule of parking only on positive evidence, which
+        // stops the parks that are pure guesswork rather than the ones that
+        // merely raced.
         if mockMode == nil {
             await rpcRouter.hibernationCoordinator.reconcileOnStartup()
         }
@@ -1661,7 +1657,7 @@ public final class Daemon: Sendable {
 
         // 8h. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
         // app). Failure is non-fatal to the daemon: holder attaches fail at the
-        // vend, and tmux-backed tabs, which attach without it, are unaffected.
+        // vend.
         //
         // **Before the RPC socket, never after it.** The app connects its
         // sidecar exactly once, straight after its first RPC is answered
@@ -1741,11 +1737,11 @@ public final class Daemon: Sendable {
             actuationLog: actuationLog)
 
         if mockMode == nil {
-            // 11a-reaper. Reap orphaned/wedged agent processes: sweep now, then periodically.
-            // The holder leg's ground truth: every holder-transport row that
-            // recorded the pid of the job its holder forked. Rows on the tmux
-            // transport are the other leg's business, and a holder row with no
-            // recorded child pid names nothing to reap.
+            // 11a-reaper. Reap orphaned agent processes: sweep now, then periodically.
+            // The ground truth: every holder-transport row that recorded the
+            // pid of the job its holder forked. A tmux row names no process TBD
+            // can reach, and a holder row with no recorded child pid names
+            // nothing to reap.
             let holderSessions: @Sendable () async -> [HolderChildRecord] = { [database] in
                 guard let terminals = try? await database.terminals.list() else { return [] }
                 return terminals.compactMap { terminal in
@@ -1768,21 +1764,15 @@ public final class Daemon: Sendable {
                 }
             }
             let reaper = AgentReaper(
-                tmux: tmux, signaller: ProductionProcessSignaller(),
+                signaller: ProductionProcessSignaller(),
                 holderSessions: holderSessions)
-            let ownedServers: () async -> [String] = { [database] in
-                guard let repos = try? await database.repos.list() else { return [] }
-                return Array(Set(repos.map { TmuxManager.serverName(forRepoPath: $0.path) }))
-            }
             self.reaperTask = Task {
                 // Sweep once immediately (cold recovery), then every 60s.
-                await reaper.sweep(servers: await ownedServers())
                 await reaper.sweepHolderChildren()
                 while !Task.isCancelled {
                     // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: .seconds(60))
                     guard !Task.isCancelled else { break }
-                    await reaper.sweep(servers: await ownedServers())
                     await reaper.sweepHolderChildren()
                 }
             }
@@ -1903,7 +1893,7 @@ public final class Daemon: Sendable {
             self.shadowPeerReconcilerTask = Task { await shadowPeerReconciler.run() }
 
             // 11a-gc. Orphan maintenance: reap abandoned agent worktrees + scratchpads
-            // and reconcile scratch terminals against their shared tmux server
+            // and reconcile scratch terminals against their holder sessions
             // (event-driven cleanup already runs via `lifecycle.onWorktreeRemoved`
             // above; this periodic sweep catches everything else — worktrees
             // orphaned outside a TBD-initiated remove, e.g. manual `rm -rf`).
@@ -2152,8 +2142,6 @@ public final class Daemon: Sendable {
             // (covers Mac sleep and multi-day weekly-limit waits).
             let resumeActuator = LimitResumeActuator(
                 db: database,
-                tmux: tmux,
-                inspector: ProductionPaneProcessInspector(),
                 readTranscript: { path in FileManager.default.contents(atPath: path) },
                 transcriptModifiedAt: { path in
                     (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
@@ -2189,8 +2177,7 @@ public final class Daemon: Sendable {
                     }
                     return send
                 },
-                // The rail's liveness answer for a holder-backed row, and this
-                // transport's counterpart to `windowExists`. A positive exit
+                // The rail's liveness answer for a holder-backed row. A positive exit
                 // report from the holder is the only evidence admitted: the
                 // absence of a daemon reader says nothing about the child, since
                 // the registry keeps its reader across an attach and hands out

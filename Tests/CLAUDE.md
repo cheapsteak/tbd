@@ -1372,9 +1372,8 @@ recorder's guard as well — a two-step chain then costs at most two guards,
 
 Worked examples, by shape:
 
-- **`@MainActor` debouncers** – `AppearanceDebounceTests` and
-  `SearchQueryDebouncerTests`, which reproduced the polling starvation in a
-  full-suite soak.
+- **`@MainActor` debouncers** – `SearchQueryDebouncerTests`, which
+  reproduced the polling starvation in a full-suite soak.
 - **Poller chains** – `GatedIntervalSleepTests`, whose chains on the polling
   helpers each paid five wall-clock guards (225 s) and on the strict waits
   cost at most one.

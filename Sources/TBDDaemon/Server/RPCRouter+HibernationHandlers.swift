@@ -40,27 +40,8 @@ extension RPCRouter {
             """
     }
 
-    /// The message for a wake whose pane consultation could not reach the tmux
-    /// server. Shared by `terminal.wake` and `terminal.resume` for the same
-    /// reason `unparkedWakeMessage` is.
-    ///
-    /// Deliberately says nothing about whether the session is alive, and
-    /// carries no `terminalSessionGone` code: that code's contract is a pane
-    /// that POSITIVELY disagreed, and this is a read that never happened. The
-    /// text is retryable on purpose — the failure mode this exists to stop is a
-    /// caller reading a failed read as a dead session and giving up on live
-    /// work.
-    static func unreadablePaneWakeMessage(paneID: String, server: String) -> String {
-        """
-        Could not reach tmux server \(server) to check pane \(paneID), so nothing was woken \
-        and any prompt was NOT delivered. This is a failed read, not a missing session — the \
-        terminal may well be running. Retry; if it persists, check that the daemon and your \
-        shell resolve the same tmux socket.
-        """
-    }
-
-    /// `terminal.hibernate` — manually hibernate one Claude terminal (kill its
-    /// process, keep the tmux window). Honors the running/permission rails. It
+    /// `terminal.hibernate` — manually hibernate one Claude terminal (end its
+    /// process, keep its row resumable). Honors the running/permission rails. It
     /// does not wait for the session mod to vouch for an unsent draft: a
     /// manual park of a session whose mod is not confirmed goes ahead.
     func handleTerminalHibernate(
@@ -86,6 +67,8 @@ extension RPCRouter {
             return .ok()
         case .notEligible(let reason):
             return RPCResponse(error: reason)
+        case .onTmux(let reason):
+            return RPCResponse(error: reason, code: RPCErrorCode.terminalOnTmux.rawValue)
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         }
@@ -111,8 +94,8 @@ extension RPCRouter {
             // Not an error: a caller that names a condition expects some rows to
             // stop meeting it, and no spawn happened here either.
             return TerminalWakeResult(woken: false)
-        case .sessionGone, .paneUnreadable, .notFound, .noSessionID, .notAClaudeTab, .respawnFailed,
-            .worktreeMissing, .profileMissing, .paneBusy:
+        case .sessionGone, .notFound, .noSessionID, .notAClaudeTab, .respawnFailed,
+            .onTmux, .worktreeMissing, .profileMissing:
             // RPC errors, not results — the caller-facing switch in
             // handleTerminalWake maps each to its own RPCResponse(error:).
             // Named explicitly (not `default:`) so a new WakeResult case must
@@ -162,12 +145,6 @@ extension RPCRouter {
             return RPCResponse(
                 error: RPCRouter.unparkedWakeMessage(paneID: paneID, detail: detail),
                 code: RPCErrorCode.terminalSessionGone.rawValue)
-        case .paneUnreadable(let paneID, let server):
-            // An error, so the caller knows its prompt went nowhere — but
-            // pointedly NOT `terminalSessionGone`, which claims the session is
-            // gone. Nothing established that.
-            return RPCResponse(
-                error: RPCRouter.unreadablePaneWakeMessage(paneID: paneID, server: server))
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         case .noSessionID:
@@ -175,17 +152,19 @@ extension RPCRouter {
         case .notAClaudeTab(let kind):
             return RPCResponse(error: ClaudeResumeDecision.notAClaudeTabReason(kind))
         case .respawnFailed(let reason):
-            // The terminal row exists — the tmux respawn/recreate failed.
-            // Surface the real failure, never "Terminal not found".
+            // The terminal row exists, and the wake stopped for one of the
+            // causes `WakeResult.respawnFailed` lists: a holder spawn that
+            // failed, or a decline that started nothing. Surface the real
+            // cause, never "Terminal not found".
             return RPCResponse(error: reason)
+        case .onTmux(let reason):
+            return RPCResponse(error: reason, code: RPCErrorCode.terminalOnTmux.rawValue)
         case .worktreeMissing(let path):
             return RPCResponse(error: "Worktree directory missing on disk: \(path). Restore the directory (or relocate the repo), then retry — the session stays parked and resumable.")
         case .profileMissing(let profileID):
             return RPCResponse(
                 error: "This session was pinned to an account profile (\(profileID.uuidString)) that no longer exists. It stays parked and resumable — wake it on your default account, or restore the profile and retry.",
                 code: RPCErrorCode.profileMissing.rawValue)
-        case .paneBusy(let pid):
-            return RPCResponse(error: HibernationCoordinator.paneBusyRefusal(pid: pid))
         case .ok, .notHibernated, .inFlight, .conditionNotMet:
             // Unreachable: `wakeResultPayload` returns non-nil for exactly
             // these cases and this function already returned above.

@@ -698,8 +698,12 @@ extension RPCRouter {
         // as `worktree.create` asks it: a daemon that cannot start a pty
         // holder can open none of the revived worktree's tabs, so the person
         // is told that, not a hold reason for a start that could never run.
-        // The lifecycle asks again for its other callers.
-        if case .failure(let refusal) = TerminalSpawnTransport.decide(registry: holderRegistry) {
+        // The lifecycle asks again for its other callers. Asked only when the
+        // lifecycle would ask it: a retry that opens no tab needs no holder,
+        // and refusing it here would strand a revive the lifecycle finishes.
+        if try await lifecycle.reviveAsksSpawnGate(
+               worktreeID: params.worktreeID, preferred: preferred),
+           case .failure(let refusal) = TerminalSpawnTransport.decide(registry: holderRegistry) {
             return RPCResponse(error: refusal.message)
         }
         let actuationID = try await beginActuation(

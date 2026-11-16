@@ -62,8 +62,7 @@ extension RPCRouter {
                                               branch: defaultBranch, path: path, tmuxServer: tmuxServer)
         try? await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: actuationLog,
-            reapSharedScratchTmuxResources: false)
+            actuationLog: actuationLog)
         subscriptions.broadcast(delta: .repoAdded(RepoDelta(
             repoID: repo.id, path: repo.path, displayName: repo.displayName)))
         return repo

@@ -5,38 +5,39 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-// Tier 3 (docs/specs/2026-07-24-test-hardening-design.md §3): the five
-// reconcile tests below build a REAL-mode `TmuxManager` and call `ensureServer`,
-// so each one starts an actual tmux server on a unique socket. That external
-// process is what makes them tier 3 — the rest of `WorktreeLifecycleTests`
-// stays in `TBDDaemonTests` because it runs against `TmuxManager(dryRun: true)`
-// and touches nothing outside the process.
+// Tier 3 (docs/specs/2026-07-24-test-hardening-design.md §3): the reconcile
+// test below builds a REAL-mode `TmuxManager` and calls `ensureServer`, so it
+// starts an actual tmux server on a unique socket. That external process is
+// what makes it tier 3 — the rest of `WorktreeLifecycleTests` stays in
+// `TBDDaemonTests` because it injects the leftover-tmux probe and touches
+// nothing outside the process.
 
-/// Reboot path (whole tmux server gone) driven end-to-end through
-/// `reconcile(repoID:)`. Proves the #284 fix: terminals are PARKED as
-/// suspended (resumable Claude) or deleted (plain shell) — NOT eagerly
-/// recreated. Recovery is the on-demand Resume button (see #285), so reconcile
-/// must leave the dead server dead.
+/// A tmux server an earlier build started, judged end to end through
+/// `reconcile(repoID:)` and the production socket probe
+/// (`LeftoverTmuxServerProbe`), against a real tmux server's real socket.
 ///
-/// This needs a REAL `TmuxManager`: `TmuxManager(dryRun: true)` always reports
-/// `serverExists → true`, so it cannot model the post-reboot `serverExists →
-/// false` state this test depends on. We start a real server, capture live
-/// window/pane IDs, then kill the server to simulate the reboot.
+/// While the server runs, reconcile leaves its rows live: TBD can neither
+/// reach nor stop those sessions. Once the server is gone (a reboot, or
+/// `tmux kill-server`), the rows are PARKED (resumable Claude) or deleted
+/// (plain shell) — never recreated, and the dead server stays dead (#284).
+///
+/// This is the one test that proves the probe's socket path is where tmux
+/// really puts its socket: the daemon and the tmux client share an
+/// environment, so both resolve `TMUX_TMPDIR` the same way.
 @Test func testReconcileRebootParksClaudeAndDeletesShell() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
     let realTmux = TmuxManager()
+    // The production probe, as the daemon builds it.
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
     )
 
     let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
+        path: repoDir.path, displayName: "acme", defaultBranch: "main"
     )
-    // reconcile derives the server name from the repo path, so the worktree row
-    // must use the same name for the serverExists probe to match.
     let serverName = TmuxManager.serverName(forRepoPath: repo.path)
 
     // A worktree whose path == the repo path is reported by `git worktree
@@ -47,7 +48,7 @@ import Testing
     )
 
     // Start a real server + two real windows, recording their actual IDs so the
-    // terminal rows look exactly like a pre-reboot live state.
+    // terminal rows look exactly like a session an earlier build left running.
     _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
     let claudeWindow = try await realTmux.createWindow(
         server: serverName, session: "main", cwd: repoDir.path, shellCommand: "sleep 60"
@@ -67,13 +68,28 @@ import Testing
         tmuxWindowID: shellWindow.windowID, tmuxPaneID: shellWindow.paneID
     )
 
-    // Simulate the reboot: the whole server is gone, so serverExists → false.
+    // The server is running: both rows stay live and untouched.
+    do {
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+    } catch {
+        try? await realTmux.killServer(server: serverName)
+        throw error
+    }
+    let claudeWhileRunning = try await db.terminals.get(id: claudeTerminal.id)
+    let shellWhileRunning = try await db.terminals.get(id: shellTerminal.id)
+    #expect(claudeWhileRunning?.isParked == false,
+            "a session whose tmux server is running must not be parked")
+    #expect(shellWhileRunning != nil,
+            "a shell whose tmux server is running must not be deleted")
+
+    // Simulate the reboot: the whole server is gone. tmux leaves its socket
+    // file behind, so the probe reads a refused connect, not a missing path.
     try await realTmux.killServer(server: serverName)
     let aliveAfterKill = await realTmux.serverExists(server: serverName)
     #expect(!aliveAfterKill, "precondition: server must be gone to model a reboot")
 
     do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
     } catch {
         try? await realTmux.killServer(server: serverName)
         throw error
@@ -88,9 +104,8 @@ import Testing
     // Resumable Claude session: parked, not recreated, not deleted.
     #expect(claudeAfter != nil, "claude terminal must NOT be deleted on reboot")
     #expect(claudeAfter?.isParked == true, "claude terminal must be parked (resumable via wake)")
+    #expect(claudeAfter?.hibernateReason == .recovery)
     #expect(claudeAfter?.claudeSessionID == sessionID, "session ID must be preserved for on-demand resume")
-    // The window/pane IDs must NOT have been replaced — reconcile does not spawn
-    // a new window on the reboot path anymore.
     #expect(claudeAfter?.tmuxWindowID == claudeWindow.windowID,
             "reboot must not recreate the claude window (no eager `claude --resume`)")
 
@@ -101,217 +116,4 @@ import Testing
     // server to recreate windows. No mass `claude --resume` storm on reboot.
     #expect(!serverAliveAfter,
             "reconcile must leave the dead server dead — no eager mass-recreate (#284)")
-}
-
-/// Dead-window cleanup, real tmux server alive: a terminal that holds a
-/// `claudeSessionID` must be SUSPENDED (not deleted) so the session can be
-/// resumed. Regression test for the 2026-05-21 mass session-loss incident.
-@Test func testReconcileDeadWindowClaudeTerminalSuspended() async throws {
-    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let realTmux = TmuxManager()
-    let lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
-    )
-
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
-    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
-    // Start a REAL tmux server so reconcile sees serverAlive == true.
-    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
-
-    // A worktree whose path == the repo path is reported by `git worktree
-    // list`, so reconcile will not archive it as missing.
-    let wt = try await db.worktrees.create(
-        repoID: repo.id, name: "wt", branch: "main",
-        path: repoDir.path, tmuxServer: serverName
-    )
-    // A claude terminal pointing at a window that does not exist on the server.
-    let sessionID = UUID().uuidString
-    let terminal = try await db.terminals.create(
-        worktreeID: wt.id,
-        tmuxWindowID: "@stale-claude", tmuxPaneID: "%stale-claude",
-        label: "claude", claudeSessionID: sessionID, kind: .claude
-    )
-
-    do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
-    } catch {
-        try? await realTmux.killServer(server: serverName)
-        throw error
-    }
-
-    let after = try await db.terminals.get(id: terminal.id)
-    try? await realTmux.killServer(server: serverName)
-
-    #expect(after != nil, "claude terminal must NOT be deleted on dead window")
-    #expect(after?.isParked == true, "claude terminal must be parked (resumable via wake)")
-    #expect(after?.claudeSessionID == sessionID, "session ID must be preserved")
-}
-
-/// Dead-window cleanup, real tmux server alive: a terminal with NO
-/// `claudeSessionID` (plain shell) has nothing to recover and is still
-/// deleted — unchanged behavior.
-@Test func testReconcileDeadWindowShellTerminalDeleted() async throws {
-    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let realTmux = TmuxManager()
-    let lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
-    )
-
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
-    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
-    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
-
-    let wt = try await db.worktrees.create(
-        repoID: repo.id, name: "wt", branch: "main",
-        path: repoDir.path, tmuxServer: serverName
-    )
-    let terminal = try await db.terminals.create(
-        worktreeID: wt.id,
-        tmuxWindowID: "@stale-shell", tmuxPaneID: "%stale-shell"
-    )
-
-    do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
-    } catch {
-        try? await realTmux.killServer(server: serverName)
-        throw error
-    }
-
-    let after = try await db.terminals.get(id: terminal.id)
-    try? await realTmux.killServer(server: serverName)
-
-    #expect(after == nil, "shell terminal with no session must still be deleted")
-}
-
-@Test func testReconcileDeadWindowCodexTerminalWithSessionMetadataParked() async throws {
-    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let realTmux = TmuxManager()
-    let lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
-    )
-
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
-    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
-    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
-
-    let wt = try await db.worktrees.create(
-        repoID: repo.id, name: "wt", branch: "main",
-        path: repoDir.path, tmuxServer: serverName
-    )
-    let sessionID = UUID().uuidString
-    let transcriptPath = tempDir.appendingPathComponent("rollout.jsonl").path
-    let options = CodexLaunchOptions(
-        model: "acme-model", disabledFeatures: ["acme-feature"], codexHome: "/tmp/acme/codex")
-    let terminal = try await db.terminals.create(
-        worktreeID: wt.id,
-        tmuxWindowID: "@stale-codex", tmuxPaneID: "%stale-codex",
-        label: "Codex", claudeSessionID: sessionID, kind: .codex, codexLaunchOptions: options
-    )
-    try await db.terminals.updateSession(
-        id: terminal.id, sessionID: sessionID, transcriptPath: transcriptPath)
-
-    do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
-    } catch {
-        try? await realTmux.killServer(server: serverName)
-        throw error
-    }
-
-    let after = try await db.terminals.get(id: terminal.id)
-    try? await realTmux.killServer(server: serverName)
-
-    let parked = try #require(after, "identified Codex must survive positive window absence")
-    #expect(parked.isParked)
-    #expect(parked.hibernateReason == .recovery)
-    #expect(parked.kind == .codex)
-    #expect(parked.claudeSessionID == sessionID)
-    #expect(parked.transcriptPath == transcriptPath)
-    #expect(parked.codexLaunchOptions == options)
-    #expect(parked.tmuxWindowID == "@stale-codex")
-    #expect(parked.tmuxPaneID == "%stale-codex")
-    #expect(parked.recoveryResumePlan?.identity
-        == AgentSessionIdentity(agentKind: .codex, sessionID: sessionID))
-}
-
-@Test("Reconcile: dead window with Claude-resumable terminal parks, not deletes (safety check)")
-func testReconcileDeadWindowLiveClaudeNotParked() async throws {
-    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-
-    // Create a TmuxManager with seams to:
-    // 1. Force windowExists to return false for the test window
-    // 2. Return a Claude version string when paneCurrentCommand is called
-    // This simulates the safety check scenario: window reports dead, but
-    // Claude process is still running.
-    let tmux = TmuxManager(
-        realModeWindowExistsOverride: { server, windowID in
-            if windowID == "@live-claude-window" {
-                return false  // Simulate dead window
-            }
-            return nil
-        },
-        realModePaneCurrentCommandOverride: { server, paneID in
-            if paneID == "%live-claude-pane" {
-                return "2.1.86"  // Return Claude version string (matches isClaudeProcess regex)
-            }
-            return nil
-        }
-    )
-
-    let lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()
-    )
-
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
-    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
-    _ = try await tmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
-
-    let wt = try await db.worktrees.create(
-        repoID: repo.id, name: "wt", branch: "main",
-        path: repoDir.path, tmuxServer: serverName
-    )
-
-    let sessionID = UUID().uuidString
-    // Create a terminal with the test window/pane IDs that our seams will override
-    let terminal = try await db.terminals.create(
-        worktreeID: wt.id,
-        tmuxWindowID: "@live-claude-window", tmuxPaneID: "%live-claude-pane",
-        label: "claude", claudeSessionID: sessionID, kind: .claude
-    )
-
-    do {
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
-    } catch {
-        try? await tmux.killServer(server: serverName)
-        throw error
-    }
-
-    let afterReconcile = try await db.terminals.get(id: terminal.id)
-    try? await tmux.killServer(server: serverName)
-
-    // The safety check at WorktreeLifecycle+Reconcile.swift:272-279 should detect
-    // that a Claude process is still running in the pane despite windowExists returning false.
-    // Result: the terminal should NOT be parked (the safety check skips parking).
-    #expect(afterReconcile != nil, "Claude terminal must NOT be deleted or parked when live claude is detected")
-    #expect(afterReconcile?.isParked == false, "Claude terminal must NOT be parked — the safety check detected live claude process")
-    #expect(afterReconcile?.claudeSessionID == sessionID, "Session ID must be preserved")
 }

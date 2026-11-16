@@ -134,8 +134,9 @@ struct SessionRestoreTests {
         try await makeWorktree(db: fixture.db, repoID: fixture.repoID, directory: fixture.directory)
     }
 
-    /// A parked holder row, by default one this startup parked for recovery. It
-    /// names no process, as a park leaves it.
+    /// A parked row, by default a holder row this startup parked for recovery.
+    /// It names no process, as a park leaves it. A tmux row carries the window
+    /// and pane ids an older build recorded for it.
     @discardableResult
     private func park(
         in fixture: Fixture,
@@ -143,14 +144,16 @@ struct SessionRestoreTests {
         kind: TerminalKind = .claude,
         reason: HibernateReason = .recovery,
         parkedAt: Date = SessionRestoreTests.thisStartup,
-        transcriptPath: String? = nil
+        transcriptPath: String? = nil,
+        transport: TerminalTransport = .holder
     ) async throws -> UUID {
         let sessionID = "session-\(UUID().uuidString)"
         let terminal = try await fixture.db.terminals.create(
             worktreeID: (worktree ?? fixture.worktree).id,
-            tmuxWindowID: "", tmuxPaneID: "",
+            tmuxWindowID: transport == .tmux ? "@7" : "",
+            tmuxPaneID: transport == .tmux ? "%7" : "",
             label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: kind,
-            transport: .holder)
+            transport: transport)
         if let transcriptPath {
             try await fixture.db.terminals.updateSession(
                 id: terminal.id, sessionID: sessionID, transcriptPath: transcriptPath)
@@ -253,8 +256,7 @@ struct SessionRestoreTests {
             transport: .holder)
         let parkedSince = Date()
         try await fixture.lifecycle.reconcile(
-            repoID: repo.id, actuationLog: ActuationLog(path: fixture.logPath),
-            reapSharedScratchTmuxResources: true)
+            repoID: repo.id, actuationLog: ActuationLog(path: fixture.logPath))
         let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(parked.isParked)
         #expect(parked.hibernateReason == .recovery)
@@ -410,6 +412,28 @@ struct SessionRestoreTests {
 
         #expect(summary == SessionRestoreSummary(selected: 1, woken: 1))
         #expect(try await awake([control, other], in: fixture.db) == [control])
+    }
+
+    /// A tmux row this startup parked for recovery, as reconcile parks one
+    /// whose server is gone. It moves to the holder through `tbd terminal
+    /// migrate`, and its wake is refused with `terminalOnTmux`, so the pass
+    /// neither wakes it nor counts it: selected, it would read as a failure on
+    /// the restart that parked it.
+    @Test("a tmux row parked for recovery stays parked and is not counted")
+    func tmuxRowIsLeftOut() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let control = try await park(in: fixture)
+        let onTmux = try await park(in: fixture, transport: .tmux)
+
+        let summary = await fixture.router.restoreSessionsAfterStartup(parkedSince: Self.thisStartup)
+
+        #expect(summary == SessionRestoreSummary(selected: 1, woken: 1))
+        #expect(try await awake([control, onTmux], in: fixture.db) == [control])
+        #expect(try wakeRequests(at: fixture.logPath).count == 1)
+        let row = try #require(try await fixture.db.terminals.get(id: onTmux))
+        #expect(row.hibernateReason == .recovery)
+        #expect(row.transport == .tmux)
     }
 
     @Test("a pass that selects nothing reports nothing")

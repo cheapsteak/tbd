@@ -255,7 +255,7 @@ struct DevServerArchiveTests {
         f.inspector.set(.running(pid: 700, expectedStart: nil), for: apiTab.id)
 
         try await f.lifecycle.reconcile(
-            repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
+            repoID: repo.id, actuationLog: makeTestActuationLog())
 
         #expect(try await f.db.worktrees.get(id: wt.id)?.status == .archived)
         #expect(f.runner.runs.isEmpty)

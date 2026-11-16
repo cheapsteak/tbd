@@ -72,7 +72,6 @@ func makeLifecycle(
     subscriptions: StateSubscriptionManager? = nil,
     timeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
     windowIsDead: (@Sendable (String) -> Bool)? = nil,
-    listWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil,
     processSignaller: ProcessSignaller = ScriptedLivenessSignaller.doubleJobsRunning,
     holder: FakeHolderLaunch = FakeHolderLaunch()
 ) -> WorktreeLifecycle {
@@ -86,8 +85,7 @@ func makeLifecycle(
         tmux: TmuxManager(
             dryRun: true,
             dryRunRecorder: dryRunRecorder,
-            dryRunWindowIsDead: windowIsDead,
-            dryRunListWindows: listWindows
+            dryRunWindowIsDead: windowIsDead
         ),
         hooks: HookResolver(),
         subscriptions: subscriptions,
@@ -121,7 +119,6 @@ struct ScriptedLivenessSignaller: ProcessSignaller {
     func isAlive(_ pid: Int32) -> Bool { probe(pid) }
     func terminate(_ pid: Int32) {}
     func forceKill(_ pid: Int32) {}
-    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
     func commandLine(_ pid: Int32) -> String? { nil }
     func stat(_ pid: Int32) -> String? { nil }
     func startTime(_ pid: Int32) -> Date? { nil }

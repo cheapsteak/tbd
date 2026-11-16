@@ -29,15 +29,20 @@ extension RPCRouter {
     /// Which agent a transport migration of this row would start again, or nil
     /// when the move starts no agent and so is not checked.
     ///
-    /// Only a running Claude session with a conversation is relaunched: it is
-    /// parked and woken on the holder. A parked row is only rewritten, a
-    /// running shell restarts as a shell, and the rows the migrator skips
-    /// (Codex tabs among them) start nothing.
+    /// Only a live tmux row with a conversation — Claude, or Codex with a
+    /// recorded thread — is started again: once its tmux server is gone it is
+    /// parked and woken on the holder. A parked row is only rewritten, a shell
+    /// restarts as a shell, and a row with nothing to resume starts nothing.
+    /// Admission is asked before the migration probes the row's tmux server,
+    /// so a row whose server still runs is asked about too, and is refused by
+    /// the migration if admission lets it through.
     static func startAdmissionAgent(forMigrating terminal: Terminal) -> StartAdmissionAgent? {
-        guard TransportMigrationEligibility.decide(terminal) == .eligible,
-              !terminal.isParked,
-              terminal.claudeResumeDecision.resumableSessionID != nil else { return nil }
-        return .claude
+        guard terminal.transport == .tmux, !terminal.isParked,
+              let plan = terminal.recoveryResumePlan else { return nil }
+        switch plan {
+        case .claude: return .claude
+        case .codex: return .codex
+        }
     }
 
     /// The start-admission gate for a create-kind start. Call right after

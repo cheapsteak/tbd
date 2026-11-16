@@ -245,10 +245,9 @@ list`) — a legacy coordinate that still
 tells same-named tmux rows apart, as described under [Addressing a
 peer](#addressing-a-peer), but not an identity.
 
-A row is placed in a terminal by the first of three joins that answers:
-the Claude session id TBD captured at `SessionStart`; then, on the tmux
-transport, the pane the record names together with its working
-directory; then, on the holder transport, descent — the session's
+A row is placed in a terminal by the first of two joins that answers:
+the Claude session id TBD captured at `SessionStart`; then, on the holder
+transport, descent — the session's
 process sits under the job a live holder tab started, such as a launcher
 run in the tab or a `claude` typed at its shell prompt. Descent reads one
 snapshot of the process table and nothing else: a working directory or an
@@ -259,7 +258,8 @@ sessions inside one tab only the one nearest the tab's job is placed.
 So a `claude -p` started inside a Claude tab never stands in for the tab,
 and when TBD's record of a Claude tab's session is stale, the tab's own
 Claude lists as `external` until the next `SessionStart` records the
-current one. Under `--json`, `joinedBy` names the join that placed a row, and
+current one. A session on the tmux transport is placed only by its
+session id: one whose id TBD never captured lists as `external`. Under `--json`, `joinedBy` names the join that placed a row, and
 `unjoinedReason` says why an `external` row was not placed. The join is a
 view: it writes nothing onto the terminal row, so a shell tab it places a
 session in is still a shell tab to swap-profile and wake.

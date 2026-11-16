@@ -8,9 +8,9 @@ import Testing
 /// repo for the reconcile fixture.
 ///
 /// The two daemon-internal rails this covers act with nobody having asked: the
-/// boot-time reconcile sweep (kills the windows of worktrees that left disk,
-/// parks sessions whose window is gone, reaps orphaned windows and dead
-/// servers) and the auto-archive-on-merge rail. Both carry `{"kind":"daemon",
+/// boot-time reconcile sweep (tears down the terminals of worktrees that left
+/// disk, parks sessions nothing can reach any more) and the
+/// auto-archive-on-merge rail. Both carry `{"kind":"daemon",
 /// "rail":…}` and no `method`, and both skip their act rather than perform it
 /// unrecorded.
 @Suite("Actuation log sweep wiring")
@@ -81,10 +81,9 @@ struct ActuationLogSweepWiringTests {
             terminalIDs.insert(terminal.id.uuidString)
         }
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath), reapSharedScratchTmuxResources: true)
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
 
-        // The same sweep also reaps the servers those rows leave behind; this is
-        // about the per-terminal kills.
+        // Only the per-terminal kills name a terminal.
         let written = try requests(at: logPath).filter {
             ($0["target"] as? [String: Any])?["terminal"] != nil
         }
@@ -111,7 +110,13 @@ struct ActuationLogSweepWiringTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        // The worktree stays active, so the per-terminal pass that follows
+        // the archive arm sees its tmux row too, and would delete a row with
+        // no session whose server is gone. A server that may still be running
+        // keeps the row there, so the count below answers only for the
+        // archive arm.
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .running }
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let worktree = try await db.worktrees.create(
@@ -123,8 +128,7 @@ struct ActuationLogSweepWiringTests {
         // The sweep still completes — the daemon boots either way.
         try await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: ActuationLog(path: try makeUnwritablePath()),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: ActuationLog(path: try makeUnwritablePath()))
 
         // But the act did not happen: the row is still active and still owns its
         // terminal, so the next sweep (with a writable log) retries it.
@@ -141,10 +145,10 @@ struct ActuationLogSweepWiringTests {
 
         let logPath = try makeLogPath()
         let db = try TBDDatabase(inMemory: true)
-        // Every window reports dead, so the live main worktree's Claude session
+        // The tmux server is gone, so the live main worktree's Claude session
         // takes the park-on-recovery branch.
-        let lifecycle = makeLifecycle(
-            db: db, tmux: TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true }))
+        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
@@ -154,7 +158,7 @@ struct ActuationLogSweepWiringTests {
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
 
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath), reapSharedScratchTmuxResources: true)
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
 
         let parks = try requests(at: logPath).filter { $0["kind"] as? String == "hibernate" }
         #expect(parks.count == 1)
@@ -173,14 +177,91 @@ struct ActuationLogSweepWiringTests {
         #expect(parked?.hibernateReason == .recovery)
     }
 
+    /// The pass reads the row before it probes the server; a tab closed in
+    /// between is a quiet miss, as it is for the delete arm, and not a
+    /// transport failure.
+    @Test("reconcile records a tab closed during its probe as not found, not as a failure")
+    func reconcileRecordsAClosedTabAsNotFound() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "acme", defaultBranch: "main")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
+            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+        let terminal = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
+        let terminalID = terminal.id
+        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        // The tab closes while its server is probed, then the server reads gone.
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in
+            _ = try? await db.terminals.delete(id: terminalID)
+            return .absent
+        }
+
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
+
+        let parks = try requests(at: logPath).filter { $0["kind"] as? String == "hibernate" }
+        let request = try #require(parks.first, "the park was never attempted")
+        let outcome = try #require(
+            try outcomes(at: logPath).first { $0["confirms"] as? String == request["id"] as? String })
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-found")
+        #expect(try await db.terminals.get(id: terminalID) == nil)
+    }
+
+    /// A park that was written and then superseded before its fence is
+    /// recorded as dispatched, with a note saying so, and never as refused.
+    @Test("reconcile records a park superseded between its halves as dispatched, with a note")
+    func reconcileRecordsASupersededParkAsDispatched() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "acme", defaultBranch: "main")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
+            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+        let terminal = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
+        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
+        // A wake lands between the park and its fence.
+        lifecycle.leftoverParkBetweenHalvesForTesting = { id in
+            do {
+                try await db.terminals.clearHibernated(id: id)
+            } catch {
+                Issue.record("the interlude's wake failed: \(error)")
+            }
+        }
+
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
+
+        let parks = try requests(at: logPath).filter { $0["kind"] as? String == "hibernate" }
+        let request = try #require(parks.first, "the park was never attempted")
+        let outcome = try #require(
+            try outcomes(at: logPath).first { $0["confirms"] as? String == request["id"] as? String })
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(outcome["reason"] == nil)
+        #expect((outcome["error"] as? String)?.contains("changed again") == true)
+        #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
+    }
+
     @Test("an unwritable record skips the recovery park — the row stays unparked")
     func unwritableRecordSkipsRecoveryPark() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(
-            db: db, tmux: TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true }))
+        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
@@ -192,131 +273,9 @@ struct ActuationLogSweepWiringTests {
 
         try await lifecycle.reconcile(
             repoID: repo.id,
-            actuationLog: ActuationLog(path: try makeUnwritablePath()),
-            reapSharedScratchTmuxResources: true)
+            actuationLog: ActuationLog(path: try makeUnwritablePath()))
 
         #expect(try await db.terminals.get(id: terminal.id)?.hibernatedAt == nil)
-    }
-
-    // MARK: - reconcile: servers and orphaned windows
-
-    @Test("killing a server nobody references writes a dispose row naming the server")
-    func reconcileKillServerWritesDisposeRow() async throws {
-        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let logPath = try makeLogPath()
-        let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
-        let repo = try await db.repos.create(
-            path: repoDir.path, displayName: "acme", defaultBranch: "main")
-        // An archived row is the last pointer at this server — no live row
-        // references it, so the sweep kills the server itself.
-        let retired = try await db.worktrees.create(
-            repoID: repo.id, name: "retired", branch: "retired-branch",
-            path: tempDir.appendingPathComponent("retired").path, tmuxServer: "tbd-orphan-server")
-        try await db.worktrees.archive(id: retired.id)
-
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath), reapSharedScratchTmuxResources: true)
-
-        let serverRows = try requests(at: logPath).filter {
-            ($0["target"] as? [String: Any])?["server"] as? String == "tbd-orphan-server"
-        }
-        #expect(serverRows.count == 1)
-        let request = try #require(serverRows.first)
-        #expect(request["kind"] as? String == "dispose")
-        #expect(request["method"] == nil)
-        #expect((request["actor"] as? [String: Any])?["rail"] as? String == "reconcile")
-        let target = try #require(request["target"] as? [String: Any])
-        // Nothing names this server any more, so the row carries what does
-        // identify it: the server, and the repo whose sweep found it.
-        #expect(target["repo"] as? String == repo.id.uuidString)
-        #expect(target["window"] == nil)
-        #expect(target["terminal"] == nil)
-        #expect(try outcomes(at: logPath).contains {
-            $0["confirms"] as? String == request["id"] as? String
-                && $0["result"] as? String == "dispatched"
-        })
-    }
-
-    @Test("sweeping an orphaned window writes a dispose row naming server and window")
-    func reconcileOrphanWindowWritesDisposeRow() async throws {
-        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let logPath = try makeLogPath()
-        let db = try TBDDatabase(inMemory: true)
-        let server = TmuxManager.serverName(forRepoPath: repoDir.path)
-        // One live window on the repo's own server that no terminal row claims.
-        let lifecycle = makeLifecycle(
-            db: db,
-            tmux: TmuxManager(
-                dryRun: true,
-                dryRunListWindows: { probed, _ in
-                    probed == server ? [(windowID: "@99", paneID: "%99")] : []
-                }))
-        let repo = try await db.repos.create(
-            path: repoDir.path, displayName: "acme", defaultBranch: "main")
-        _ = try await db.worktrees.createMain(
-            repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: server)
-
-        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath), reapSharedScratchTmuxResources: true)
-
-        let orphanRows = try requests(at: logPath).filter {
-            ($0["target"] as? [String: Any])?["window"] as? String == "@99"
-        }
-        #expect(orphanRows.count == 1)
-        let request = try #require(orphanRows.first)
-        #expect(request["kind"] as? String == "dispose")
-        #expect((request["actor"] as? [String: Any])?["rail"] as? String == "reconcile")
-        let target = try #require(request["target"] as? [String: Any])
-        #expect(target["server"] as? String == server)
-        #expect(target["repo"] as? String == repo.id.uuidString)
-        #expect(try outcomes(at: logPath).contains {
-            $0["confirms"] as? String == request["id"] as? String
-                && $0["result"] as? String == "dispatched"
-        })
-    }
-
-    @Test("a failed scratch-only orphan-window sweep records transport failure without a repo")
-    func scratchOrphanWindowKillFailureWritesTransportFailed() async throws {
-        struct TmuxWentAway: Error, CustomStringConvertible {
-            var description: String { "scratch tmux server went away" }
-        }
-
-        let logPath = try makeLogPath()
-        let db = try TBDDatabase(inMemory: true)
-        let server = "scratch-shared"
-        let lifecycle = makeLifecycle(
-            db: db,
-            tmux: TmuxManager(
-                dryRun: true,
-                dryRunListWindows: { probed, _ in
-                    probed == server ? [(windowID: "@77", paneID: "%77")] : []
-                },
-                dryRunKillWindowError: { _, _ in TmuxWentAway() }))
-        _ = try await db.worktrees.createScratch(
-            name: "scratch-only", displayName: "Scratch Only",
-            path: "/tmp/scratch-only", tmuxServer: server)
-        #expect(try await db.repos.list().isEmpty)
-
-        try await lifecycle.reconcileScratchTerminals(
-            actuationLog: ActuationLog(path: logPath),
-            reapOrphanTmuxResources: true)
-
-        let requests = try requests(at: logPath).filter {
-            ($0["target"] as? [String: Any])?["window"] as? String == "@77"
-        }
-        #expect(requests.count == 1)
-        let request = try #require(requests.first)
-        let target = try #require(request["target"] as? [String: Any])
-        #expect(target["server"] as? String == server)
-        #expect(target["repo"] == nil)
-        let outcome = try #require(
-            try outcomes(at: logPath).first { $0["confirms"] as? String == request["id"] as? String })
-        #expect(outcome["result"] as? String == "transport-failed")
-        #expect(outcome["error"] as? String == "\(TmuxWentAway())")
     }
 
     // MARK: - The auto-archive-on-merge rail

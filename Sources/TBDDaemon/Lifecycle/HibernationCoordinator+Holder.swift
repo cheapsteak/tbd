@@ -115,15 +115,14 @@ extension HolderChildDisposition {
     }
 }
 
-/// Park and wake for the pty-holder transport.
+/// Park and wake for the pty-holder transport, the only transport TBD parks
+/// and wakes.
 ///
-/// Split from `HibernationCoordinator` so the diff to that file is a set of
-/// branch points rather than a second mechanic interleaved with the first. The
-/// two transports share every decision about WHETHER to act — the singleflight
-/// claim, the refusal cascade, the transcript rail, the resume argv — and share
-/// nothing about HOW: tmux parks by `respawn-window`ing a pane it owns, while a
-/// holder session is parked by ending the job the holder forked and clearing
-/// the pids that named it.
+/// `HibernationCoordinator` makes the decisions about WHETHER to act — the
+/// singleflight claim, the refusal cascade, the resume argv — and this
+/// extension carries out HOW: a holder session is parked by ending the job the
+/// holder forked and clearing the pids that named it, and woken by spawning a
+/// fresh holder.
 ///
 /// **The invariant the whole feature is judged on: a row never finalizes parked
 /// while its child is still running.** Every failure below rolls the park
@@ -189,9 +188,8 @@ extension HibernationCoordinator {
     /// see which sessions the registry adopted — so the sweep is the only
     /// place with the registry in hand.
     ///
-    /// A daemon with no registry at all answers false: that is the tmux-only
-    /// configuration, where a holder row is a leftover and the park's own
-    /// no-registry refusal is the right place to say so once.
+    /// A daemon with no registry at all answers false: the park's own
+    /// no-registry refusal is the right place to say so, once.
     func holderHasNoReader(terminalID: UUID) async -> Bool {
         guard let registry = holderRegistry else { return false }
         return await registry.reader(for: terminalID) == nil
@@ -224,9 +222,9 @@ extension HibernationCoordinator {
     /// the row as parked with no pids on it.
     ///
     /// Entered from `performHibernate` with `hibernatesInFlight` already
-    /// claimed, and with NO tmux server lock — a holder session has no server,
-    /// so there is nothing for a server lock to exclude. `hibernatesInFlight`
-    /// is the whole exclusion here, and it is enough: every mutation below
+    /// claimed, and with no server lock — a holder session has no server, so
+    /// there is nothing for a server lock to exclude. `hibernatesInFlight` is
+    /// the whole exclusion here, and it is enough: every mutation below
     /// addresses one terminal row and one holder.
     ///
     /// The session mod's draft gate has already let the park through
@@ -238,8 +236,7 @@ extension HibernationCoordinator {
         reason: HibernateReason,
         policy: HibernateEligibilityPolicy
     ) async -> HibernateResult {
-        // Re-read and re-check, in the same order and with the same refusal
-        // strings the tmux path uses under its server lock. This method is
+        // Re-read and re-check before anything is touched. This method is
         // actor-reentrant across the polls below, so the row it decided on
         // must be the row it acts on.
         guard let currentTerminal = try? await db.terminals.get(id: terminal.id) else {
@@ -256,7 +253,7 @@ extension HibernationCoordinator {
             pendingKillSince[terminal.id] = nil
             return .notEligible(reason: "Session activity changed before hibernation")
         }
-        // Re-asked of the row read under the claim, as the tmux park does.
+        // Re-asked of the row read under the claim.
         guard let sessionID = currentTerminal.claudeResumeDecision.resumableSessionID else {
             return Self.parkRefusal(for: currentTerminal)
                 ?? .notEligible(reason: Self.noSessionToParkReason)
@@ -320,10 +317,9 @@ extension HibernationCoordinator {
             return .notEligible(reason: Self.holderNoReaderRefusal)
         }
 
-        // Rail: transcript-tail validity, identical to the tmux path — and
-        // bypassed by the same policy, for the same reason: this park is a
-        // user's account switch, not a background reclaim, and the tmux arm
-        // has never refused one over a tail that was mid-write.
+        // Rail: transcript-tail validity — bypassed by `.profileSwap`,
+        // because that park is a user's account switch, not a background
+        // reclaim, and is never refused over a tail that was mid-write.
         // Not asked of an ended session: this rail exists to stop a park
         // before it ends a process mid-write, and there is no process left to
         // end. The post-exit check below still reports a cut tail.
@@ -378,8 +374,7 @@ extension HibernationCoordinator {
         if !gone {
             // Rung 1 — `SIGTERM` to the child, and to the child alone.
             //
-            // The tmux park's ending is the same SIGTERM, then a forced
-            // replacement. A session whose Stop hooks or MCP teardown take a
+            // A session whose Stop hooks or MCP teardown take a
             // while gets this rung's whole poll window before anything is
             // killed, because a `SIGKILL` of its process group is where a
             // transcript gets cut mid-write. `terminateProcessOnly` is
@@ -727,7 +722,6 @@ extension HibernationCoordinator {
     /// - `.same` — the daemon died mid-park, after the intent was written and
     ///   before the child was confirmed gone. The child is alive and is this
     ///   row's; un-park it, and adoption will pick the session up moments later.
-    ///   The tmux recovery in the same method has exactly this shape.
     /// - `.notRunning` — the child is gone but the row still names it. Clear the
     ///   pids so nothing later signals a number the kernel has recycled.
     ///
@@ -775,16 +769,16 @@ extension HibernationCoordinator {
 
     /// What a wake aimed at an UNPARKED holder row should answer.
     ///
-    /// The tmux answer to this question probes a pane; a holder row has none.
-    /// The equivalent evidence is the recorded child pid, read through the same
-    /// `ProcessIdentityCheck` the reaper's holder leg consults before it
-    /// signals anything — so a pid the kernel has recycled is recognized here
-    /// the same way it is there.
+    /// A holder row has no pane to probe. The evidence is the recorded child
+    /// pid, read through the same `ProcessIdentityCheck` the reaper's holder
+    /// leg consults before it signals anything — so a pid the kernel has
+    /// recycled is recognized here the same way it is there.
     ///
     /// Only `.notRunning` downgrades the answer. Every other verdict is an
     /// uncertain identity, and an uncertain identity is not evidence that a
-    /// session died — the same asymmetry the tmux classification applies to a
-    /// probe that merely threw. Like it, this reports and does not repair.
+    /// session died. This reports and does not repair: a wake that finds the
+    /// job gone answers `.sessionGone` rather than respawning over a row TBD
+    /// believes is awake.
     func classifyUnparkedHolderWake(_ terminal: Terminal) async -> WakeResult {
         guard let childPID = terminal.childPID, childPID > 1 else { return .notHibernated }
         let verdict = ProcessIdentityCheck.verify(
@@ -818,8 +812,8 @@ extension HibernationCoordinator {
     /// `wakeHolderSection` is the mutate half and claims nothing, while the
     /// public `wake` claims the in-flight sets and then composes its own
     /// resume. The swap needs the first without the second: its plan may say
-    /// fresh (a blank session swapped on tmux spawns fresh rather than showing
-    /// "no conversation found", and this arm matches it).
+    /// fresh (a blank session spawns fresh rather than showing "no
+    /// conversation found").
     ///
     /// A refused claim releases `spawnTitle` here rather than in the section,
     /// because the section is never entered.
@@ -915,10 +909,9 @@ extension HibernationCoordinator {
         // The overlay `spawnCommand` was composed with, planned before this
         // spawn's session-mod features were known: written from the context
         // `SessionModSpawn.prepare` returns, just before the launch, and never
-        // by a wake that adopts a live holder instead. Required, as
-        // `wakeTmux`'s is: the command already names a per-session file that
-        // only `settle` writes, so a caller must not be able to launch it
-        // without settling.
+        // by a wake that adopts a live holder instead. Required: the command
+        // already names a per-session file that only `settle` writes, so a
+        // caller must not be able to launch it without settling.
         overlay: ReplacementSpawnOverlay?
     ) async -> WakeResult {
         // Every refusal below goes through this rather than returning
@@ -1061,9 +1054,9 @@ extension HibernationCoordinator {
         // directly — the absence here is a decision about what is worth
         // reading, not a coordinate the scheduler lacks.
         logger.info("woke holder-backed terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public), holder \(handle.holderPID, privacy: .public), child \(handle.childPID, privacy: .public))")
-        // The incarnation this wake minted for the replacement agent, the same
-        // fact the tmux arm reports: it is what scopes a caller's wait to the
-        // session THIS call started rather than to whatever starts next.
+        // The incarnation this wake minted for the replacement agent: it is
+        // what scopes a caller's wait to the session THIS call started rather
+        // than to whatever starts next.
         return .ok(sessionIncarnationID: incarnationID)
     }
 

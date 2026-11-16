@@ -246,18 +246,7 @@ struct TransportMigrationActionTests {
         }
     }
 
-    @Test func aPaneFailingToAttachMidMoveIsNotAutoRecreated() async {
-        await withAppState { state in
-            let row = Self.row(transport: .tmux)
-            state.terminals[row.worktreeID] = [row]
-            state.switchingAccountTerminals[row.id] = .transportMove
-            #expect(state.claimAutomaticTerminalRecreation(terminalID: row.id) == .alreadyInFlight)
-            state.switchingAccountTerminals[row.id] = nil
-            #expect(state.claimAutomaticTerminalRecreation(terminalID: row.id) == .claimed(attempt: 1))
-        }
-    }
-
-    @Test func theManualRecreationClaimIsAlsoRefusedMidMove() async {
+    @Test func theRecreationClaimIsRefusedMidMove() async {
         await withAppState { state in
             let row = Self.row(transport: .tmux)
             state.terminals[row.worktreeID] = [row]

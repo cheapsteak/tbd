@@ -322,28 +322,22 @@ same gap every restart has today.
 Reconcile hardening, which applies to every daemon start and is what makes
 the handover safe:
 
-- `TmuxManager` gains tri-state probes: `probeServer` and `probeWindow`
-  return `alive`, `absent`, or `unknown`. `absent` requires tmux to have
-  answered (exit status from a live server saying no such window or server);
-  a timeout, a spawn failure, or an unparseable answer is `unknown`. The
-  existing `Bool` probes stay for their other callers.
-- `reconcileTerminalsWhileLocked` acts only on `absent`. On `unknown` it logs
-  the terminal and moves on, leaving the row live. A wedged tmux therefore
-  parks nothing; an operator can still park by hand. The delete arm for
-  non-Claude rows likewise fires only on `absent`.
+- Reconcile parks or deletes a live row only on positive evidence that its
+  session is gone. For a holder row that evidence is the holder's exit probe
+  answering that the holder is gone; a round trip that merely failed keeps
+  the row. For a row still on tmux it is every place this daemon can find the
+  tmux server's socket missing or refusing connections, with no tmux process
+  of this user naming the server (`LeftoverTmuxServerProbe`); any other
+  answer, a timeout included, keeps the row live. A wedged machine therefore
+  parks nothing. The app's Check Again (`terminal.recreateWindow`) and
+  `tbd terminal migrate` ask the same tmux probe and act on the same evidence
+  ("A live row whose tmux server outlived the update" in
+  [`2026-10-11-holder-transport-migration-design.md`](2026-10-11-holder-transport-migration-design.md)).
 - After `performStartupReconciliation`, the daemon runs
-  `hibernationCoordinator.reconcileOnStartup()` a second time. The first
-  run still precedes reconcile so shared scratch servers are reaped from a
-  consistent view; the second run un-parks anything the same boot parked
-  whose pane demonstrably still runs Claude. The pass is cheap: it only
-  examines parked rows.
-- Every other caller that mutates on a negative probe takes the tri-state
-  probe too, and treats `unknown` as a refusal to act: `terminal.recreateWindow`
-  (which parks and kills on absence) returns a retryable error and touches
-  nothing; the activity rail's tmux leg reports `unknown` so a close that
-  respects rails fails closed; and the wake path's recreate arm fails the wake
-  and leaves the row parked rather than kill a window it could not see.
-  Callers that only skip on a negative answer keep the `Bool` probes.
+  `hibernationCoordinator.reconcileOnStartup()` a second time. The first run
+  precedes reconcile; the second undoes any park the same boot left over a
+  holder child that is still running. The pass is cheap: it only examines
+  parked rows.
 
 Holder-transport sessions are unaffected: the predecessor's `releaseAll` and
 the successor's `adoptAll` already bracket a restart, and the handover

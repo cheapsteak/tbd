@@ -202,7 +202,7 @@ docker compose -p "acme-$TBD_WORKTREE_NAME" down --remove-orphans || true
 A crashed server's final screen is usually the only explanation of the crash, so it stays readable.
 
 - **holder transport** – every server tab opens on a pty holder. When the command exits, the daemon saves the final screen and scrollback into Session History, Closed Terminals, with the exit code. Both survive a daemon restart. "Show last output" opens that entry.
-- **tmux transport** – a server tab that still runs on tmux, from before TBD opened every session on the holder, keeps its final screen and exit code in its window, because `remain-on-exit` was set when the window was created. "Show last output" focuses that tab. Starting the server again opens it in a fresh tab, on a holder.
+- **tmux transport** – a server tab that still runs on tmux, from before TBD opened every session on the holder, keeps its final screen and exit code in its tmux window, because `remain-on-exit` was set when the window was created. TBD cannot show that window: "Show last output" focuses the tab, which shows the notice for a session still running in tmux ([design](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update)). Starting the server again opens it in a fresh tab, on a holder.
 
 Start opens a fresh tab, and Start or Stop detaches the saved entry from the server; it stays in Closed Terminals as an ordinary entry. An exit caused by Stop is never recorded as the server's last output.
 

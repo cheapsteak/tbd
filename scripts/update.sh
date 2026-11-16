@@ -1280,6 +1280,11 @@ print(json.dumps(out))
 # (hibernateReason "recovery") at or after the moment the handover began. An
 # empty <since> means every recovery-parked row, which is what --wake-only
 # does — it runs against a daemon whose start it did not witness.
+#
+# Only rows on the pty holder. A row on tmux cannot be woken where it is — the
+# daemon refuses the wake and names `tbd terminal migrate` — so sending one
+# would only count a failure. Anything but "holder" reads as tmux, as it does
+# for the app's decoder: an absent or unrecognized transport is tmux.
 select_wake_candidates() {
     local since="${1-}"
     python3 -c '
@@ -1307,6 +1312,8 @@ for row in rows:
     if not isinstance(row, dict):
         continue
     if row.get("hibernateReason") != "recovery":
+        continue
+    if row.get("transport") != "holder":
         continue
     parked = normalize(row.get("hibernatedAt"))
     if not parked:
@@ -1405,12 +1412,12 @@ wake_sweep() {
 
     WAKE_CANDIDATES=${#ids[@]}
     if [ "$WAKE_CANDIDATES" -eq 0 ]; then
-        log "no session was left parked by the reconcile"
+        log "no session on the pty holder was left parked by the reconcile"
         WAKE_WOKEN=0
         WAKE_FAILED=0
         return 0
     fi
-    log "$WAKE_CANDIDATES session(s) parked with reason recovery — waking $WAKE_CONCURRENCY at a time"
+    log "$WAKE_CANDIDATES holder session(s) parked with reason recovery — waking $WAKE_CONCURRENCY at a time"
     wake_terminals "${ids[@]}"
 }
 

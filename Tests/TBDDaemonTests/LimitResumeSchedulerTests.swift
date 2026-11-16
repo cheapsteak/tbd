@@ -194,57 +194,6 @@ final class OutcomeCollector: @unchecked Sendable {
         await scheduler.stop()
     }
 
-    @Test func copyModeReschedulesPlusTwoMinutes() async throws {
-        let actuator = FakeActuator([.paneInCopyMode, .sent])
-        let scheduler = makeScheduler(actuator: actuator)
-        await scheduler.start()
-        let scheduled = await scheduler.schedule(
-            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
-            resetsAt: clock.now().addingTimeInterval(-120),
-            limitType: "session", rawMessage: "m")
-        let id = try #require(scheduled?.id)
-        // The reschedule leaves the row pending, so the loop re-parks.
-        try await clock.requireSleeperArmed()
-        #expect(actuator.calls.count == 1)
-        let row = try #require(try await db.scheduledResumes.pending(terminalID: terminalID))
-        #expect(row.attemptCount == 1)
-        #expect(row.fireAt.timeIntervalSince(clock.now()) > 100) // ~+120s
-        await clock.advance(by: 130)
-        #expect(try await settledStatus(of: id) == .sent)
-        #expect(actuator.calls.count == 2)
-        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil)
-        await scheduler.stop()
-    }
-
-    @Test func copyModeCapsAtFifteenAttemptsThenFails() async throws {
-        let actuator = FakeActuator([.paneInCopyMode])
-        let collector = OutcomeCollector()
-        let scheduler = makeScheduler(actuator: actuator) { collector.record($0, $1) }
-        await scheduler.start()
-        _ = await scheduler.schedule(
-            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
-            resetsAt: clock.now().addingTimeInterval(-120),
-            limitType: "session", rawMessage: "m")
-        // Every attempt below the cap reschedules +120 s and re-parks the
-        // loop, so each arming is the barrier before the next advance. The
-        // attempt that hits the cap leaves nothing pending.
-        for attempt in 1..<LimitResumeScheduler.maxCopyModeAttempts {
-            try await clock.requireSleeperArmed()
-            #expect(actuator.calls.count == attempt)
-            await clock.advance(by: 130)
-        }
-        try await loopEffect(
-            "the copy-mode cap's .failed outcome",
-            observed: { "\(actuator.calls.count) actuations, outcomes \(collector.events.map { $0.1 })" }
-        ) {
-            collector.events.contains { if case .failed = $0.1 { return true }; return false }
-        }
-        #expect(actuator.calls.count == LimitResumeScheduler.maxCopyModeAttempts)
-        let rows = try await db.scheduledResumes.pending()
-        #expect(rows.isEmpty)
-        await scheduler.stop()
-    }
-
     /// Deterministic toggle-off race: schedule with a FUTURE resetsAt so the
     /// loop parks sleeping on the virtual clock, write the config change
     /// (guaranteed to complete before anything else happens), THEN advance
@@ -303,69 +252,6 @@ final class OutcomeCollector: @unchecked Sendable {
         #expect(try await settledStatus(of: id) == .cancelled)
         #expect(actuator.calls.count == 1)   // no retry
         #expect(collector.events.isEmpty)
-        await scheduler.stop()
-    }
-
-    /// If a row is cancelled out from under a copy-mode retry (e.g. by a
-    /// concurrent cancel) between actuation and the reschedule write,
-    /// `store.reschedule` returns false. The scheduler must not resurrect
-    /// the row into pending — it drops it from consideration instead.
-    ///
-    /// The row's cancel lands inside `actuate`, before the reschedule write
-    /// this test is about, so "nothing pending" alone could be read too early.
-    /// A second terminal's row, scheduled once the first actuation has begun,
-    /// is the barrier: the loop fires due rows in sequence and that row was not
-    /// in the batch being fired, so its outcome follows the first row's
-    /// reschedule attempt.
-    @Test func copyModeRescheduleDropsRowNoLongerPending() async throws {
-        final class CancellingActuator: LimitResumeActuating, @unchecked Sendable {
-            let store: ScheduledResumeStore
-            let barrierTerminalID: UUID
-            private let lock = NSLock()
-            private var _calls: [UUID] = []
-            /// Terminal IDs in actuation order.
-            var calls: [UUID] { lock.withLock { _calls } }
-            init(store: ScheduledResumeStore, barrierTerminalID: UUID) {
-                self.store = store
-                self.barrierTerminalID = barrierTerminalID
-            }
-            func actuate(_ resume: ScheduledResume) async -> ResumeActuationOutcome {
-                lock.withLock { _calls.append(resume.terminalID) }
-                if resume.terminalID == barrierTerminalID { return .sent }
-                _ = try? await store.cancelPending(terminalID: resume.terminalID)
-                return .paneInCopyMode
-            }
-            func userAlreadyContinued(_ resume: ScheduledResume) async -> Bool { false }
-        }
-        let barrierTerminal = try await db.terminals.create(
-            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2")
-        let actuator = CancellingActuator(
-            store: db.scheduledResumes, barrierTerminalID: barrierTerminal.id)
-        let collector = OutcomeCollector()
-        let scheduler = LimitResumeScheduler(
-            store: db.scheduledResumes, config: db.config,
-            actuator: actuator, clock: clock,
-            jitterProvider: { 0 }, onOutcome: { collector.record($0, $1) })
-        await scheduler.start()
-        _ = await scheduler.schedule(
-            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
-            resetsAt: clock.now().addingTimeInterval(-120),
-            limitType: "session", rawMessage: "m")
-        try await loopEffect("the copy-mode actuation", observed: { "no actuation" }) {
-            !actuator.calls.isEmpty
-        }
-        _ = await scheduler.schedule(
-            terminalID: barrierTerminal.id, worktreeID: worktreeID, claudeSessionID: nil,
-            resetsAt: clock.now().addingTimeInterval(-120),
-            limitType: "session", rawMessage: "m")
-        try await loopEffect(
-            "the barrier row's outcome",
-            observed: { "actuated terminals \(actuator.calls), no outcome" }
-        ) { !collector.events.isEmpty }
-
-        #expect(try await db.scheduledResumes.pending().isEmpty)
-        #expect(actuator.calls == [terminalID, barrierTerminal.id])   // never re-actuated
-        #expect(collector.events.map { $0.0.terminalID } == [barrierTerminal.id])
         await scheduler.stop()
     }
 

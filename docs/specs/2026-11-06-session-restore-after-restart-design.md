@@ -47,6 +47,8 @@ A row is selected when all of these hold:
 - `hibernateReason` is `recovery`.
 - `hibernatedAt` is at or after the moment this daemon process began its startup reconcile.
 - Its worktree's status is `active` or `main`.
+- It is on the pty holder. A row on tmux moves to the holder through `tbd terminal migrate`, not a
+  wake: its wake is refused with `terminalOnTmux`, so the pass would only count a failure for it.
 - `claudeResumeDecision` says it can resume.
 
 The time limit is what separates this restart from older ones. Without it, the 25 stale rows above
@@ -88,7 +90,7 @@ ends the pass the same way: `Daemon.stop()` cancels its task, and no further bat
 The pass calls `handleTerminalWake`, the handler behind the `terminal.wake` RPC, with the actor
 `.daemon(rail: ActuationRail.sessionRestore)`. So each wake gets what any wake gets: one actuation
 record, the start-admission check, the session-mod draft path, the row's state broadcast to the
-app, and the same outcome classification. No new spawn path exists, for tmux rows or holder rows.
+app, and the same outcome classification. No new spawn path exists.
 
 The pass omits `cols` and `rows`, so a session starts at its default size and resizes when a pane
 attaches. It omits `prompt`, so nothing is typed.
@@ -102,15 +104,16 @@ skipped.
 
 A row can also stop qualifying after the pass selects it. The pass selects once and takes about 90
 seconds, so during a gap the user can wake a row and park it again, or archive its worktree.
-Starting such a row would be wrong. For an `exited` row it would be destructive, because the wake is
-`respawn-window -k` and kills the idle shell the user is in. So the reason, the time limit and the
-worktree status are one predicate, `SessionRestoreCondition`. Selection uses it, and the pass hands
-it to each wake. `handleTerminalWake` passes it to `HibernationCoordinator.wake`, which evaluates it
-after its singleflight claim, on the row it has just read. A check in the pass would be too early,
-because the admission command can run for up to 10 seconds before the wake.
+Starting such a row would be wrong, because a wake starts a new holder running the agent's resume
+command: it would bring back a session the user parked on purpose, or start an agent in a worktree
+they archived. So the reason, the time limit and the worktree status are one predicate,
+`SessionRestoreCondition`. Selection uses it, and the pass hands it to each wake.
+`handleTerminalWake` passes it to `HibernationCoordinator.wake`, which evaluates it after its
+singleflight claim, on the row it has just read. A check in the pass would be too early, because the
+admission command can run for up to 10 seconds before the wake.
 
 On a mismatch the wake answers `.conditionNotMet`, starts nothing and changes nothing, and the pass
-counts the row as skipped. Every other caller names no condition and behaves as before.
+counts the row as skipped. Every other caller names no condition, and its wake evaluates none.
 
 An archive flips the worktree's status before it deletes the worktree's rows. A row whose status has
 flipped counts as skipped. A row already deleted answers `.notFound` and counts as failed, and the
@@ -237,6 +240,7 @@ Selection, each with a row that must be left out:
 - A `recovery` row parked before the startup time.
 - A row parked with each of `manual`, `auto`, `merged` and `exited`.
 - A row in an `archived`, `creating` or `failed` worktree.
+- A row on tmux, which also goes uncounted.
 - A row that cannot resume.
 
 Pass behavior, on a test clock:
@@ -259,7 +263,7 @@ Pass behavior, on a test clock:
   names no condition still wakes a `manual` row.
 - Each wake's actuation row names the `session-restore` rail.
 - A failed spawn leaves the row parked and the pass continues.
-- A wake names no size, so a window it recreates takes the default.
+- A wake names no size, so the holder it starts takes the default size.
 - A holder row is selected, and its wake takes the holder path and reaches no tmux.
 - The startup step starts no pass in mock mode, and starts one otherwise.
 

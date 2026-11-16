@@ -970,7 +970,6 @@ private final class HeldFirstLivenessProbe: ProcessSignaller, @unchecked Sendabl
 
     func terminate(_ pid: Int32) { table.terminate(pid) }
     func forceKill(_ pid: Int32) { table.forceKill(pid) }
-    func children(ofServerPID serverPID: Int32) -> [Int32] { table.children(ofServerPID: serverPID) }
     func commandLine(_ pid: Int32) -> String? { table.commandLine(pid) }
     func stat(_ pid: Int32) -> String? { table.stat(pid) }
     func startTime(_ pid: Int32) -> Date? { table.startTime(pid) }

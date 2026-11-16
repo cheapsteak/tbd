@@ -1,10 +1,7 @@
 import SwiftUI
 // Scoped, not a whole-module import: the panel reaches its terminal through
 // `TerminalEngine`. What it still takes from SwiftTerm is not the emulator —
-// the tmux grouped-session viewer runs in a SwiftTerm `LocalProcess` pty, and
 // outgoing bytes are classified by SwiftTerm's own paste markers.
-import class SwiftTerm.LocalProcess
-import protocol SwiftTerm.LocalProcessDelegate
 import struct SwiftTerm.EscapeSequences
 import AppKit
 import Darwin
@@ -14,47 +11,23 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "TerminalPanel")
 
-enum TerminalPreparationAction: Equatable, Sendable {
-    case startViewer(TmuxSessionPreparation)
-    case showMessage(String)
-    case requestAutomaticRecovery(failedStage: TmuxPreparationStage)
-}
-
-struct TerminalRecoveryDiagnosticContext: Equatable, Sendable {
-    let terminalID: UUID
-    let worktreeID: UUID?
-}
-
-/// User-facing copy for a terminal that could not be prepared.
+/// User-facing copy for a terminal panel that could not attach.
 enum TerminalPreparationPresentation {
-    static let commandFailedMessage =
-        "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics for details or close the tab."
-    static let tmuxExecutableUnavailableMessage =
-        "TBD couldn't find tmux — it is not in PATH and no fallback path is saved. Locate the tmux executable in Settings → Terminal, then reopen this terminal."
-    /// Shown for a session carried by the pty-holder transport, which the app
-    /// cannot render yet.
-    ///
-    /// Deliberately offers no remedy: there is no gesture that makes this pane
-    /// draw, so any call to action would be a lie. It says the session is fine
-    /// because it is — the daemon refuses every tmux mechanic for a holder row
-    /// before touching state, so nothing was parked, killed or lost.
-    static let holderTransportMessage =
-        "This session runs on the pty-holder transport, which TBD can't display yet. The session is unaffected and keeps running."
+    /// The title of the button that asks for a fresh attach.
+    static let retryTitle = "Retry"
     /// Shown when a holder attach was attempted and did not complete: the
     /// daemon kept refusing it, `attach.ready` was refused, or the panel could
     /// not resolve the session it was built for.
     ///
-    /// Distinct from `holderTransportMessage` because that copy is false here:
-    /// the app renders holder sessions, and this one merely failed to attach
-    /// to one. It names a remedy because there is one — the Retry button the
-    /// panel shows above the terminal builds a fresh panel, which attaches
-    /// again — and says the session is fine because it is: a refused attach
-    /// leaves the daemon's reader on the pty and the session running.
+    /// It names a remedy because there is one — the Retry button the panel
+    /// shows above the terminal builds a fresh panel, which attaches again —
+    /// and says the session is fine because it is: a refused attach leaves the
+    /// daemon's reader on the pty and the session running.
     ///
     /// It must never send the user to close the tab. Closing a tab ends its
     /// session, which is the one thing this failure did not do.
     static let holderAttachFailedMessage =
-        "TBD couldn't attach to this session's terminal. The session is unaffected and keeps running. Click \(TerminalRecoveryPresentation.retryTitle) above to attach again."
+        "TBD couldn't attach to this session's terminal. The session is unaffected and keeps running. Click \(retryTitle) above to attach again."
     /// The banner above a panel showing `holderAttachFailedMessage`, which
     /// carries the Retry button that copy points at.
     static let holderAttachRetryBannerMessage = "Not attached to this session's terminal."
@@ -101,49 +74,6 @@ enum TerminalPreparationPresentation {
     }
 }
 
-enum TerminalRecoveryPresentation {
-    static let failedMessage =
-        "Automatic terminal recovery failed. Retry manually or close the tab."
-    static let exhaustedMessage =
-        "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab."
-    static let retryTitle = "Retry"
-
-    /// The banner a failed recovery raises, or nil for an outcome that needs
-    /// none.
-    static func guidance(
-        for outcome: AutomaticTerminalRecreationOutcome
-    ) -> TerminalRecoveryGuidance? {
-        switch outcome {
-        case .failed(_, let refusal?):
-            return guidance(for: refusal)
-        case .failed(_, nil):
-            return TerminalRecoveryGuidance(message: failedMessage, offersRetry: true)
-        case .budgetExhausted:
-            return TerminalRecoveryGuidance(message: exhaustedMessage, offersRetry: true)
-        case .alreadyInFlight, .terminalUnavailable, .recreated:
-            return nil
-        }
-    }
-
-    /// The banner for a recreate the daemon refused: its own sentence, which
-    /// says what to do. A row still on tmux gets no Retry, because repeating
-    /// the request cannot change the transport it is on; every other refusal
-    /// keeps one.
-    static func guidance(for refusal: TerminalRecreationRefusal) -> TerminalRecoveryGuidance {
-        if refusal.rowIsOnTmux {
-            return TerminalRecoveryGuidance(message: refusal.message, offersRetry: false)
-        }
-        return TerminalRecoveryGuidance(
-            message: "Terminal recovery failed: \(refusal.message)", offersRetry: true)
-    }
-}
-
-/// What a panel's recovery banner says, and whether it offers Retry.
-struct TerminalRecoveryGuidance: Equatable, Sendable {
-    let message: String
-    let offersRetry: Bool
-}
-
 /// Sendable wrapper for a weak terminal engine reference, used to pass the
 /// reference into an `NSEvent` local monitor closure under strict concurrency.
 private final class WeakEngineRef: @unchecked Sendable {
@@ -158,9 +88,6 @@ private final class WeakEngineRef: @unchecked Sendable {
 /// proxy-unreachable banner driven by a TCP-connect health probe.
 struct TerminalPanelView: View {
     let terminalID: UUID
-    let tmuxServer: String
-    let tmuxWindowID: String
-    let tmuxBridge: TmuxBridge
     var tabCloseContext: TabCloseContext? = nil
     var worktreePath: String = ""
     var remoteURL: String?
@@ -168,19 +95,15 @@ struct TerminalPanelView: View {
     var onTerminalNotification: ((String, String) -> Void)?
     @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
-    /// Called only after tmux positively confirms the requested window is absent.
-    /// The callback owns the persistent automatic-recovery budget and recreation.
-    var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
-    /// When set, this ANSI text is fed into the terminal buffer before the tmux
-    /// client connects. The live tmux output overwrites it seamlessly.
+    /// When set, this ANSI text is fed into the terminal buffer before the
+    /// session attaches. The attach's own screen preamble overwrites it.
     /// See docs/superpowers/specs/2026-03-31-snapshot-display-approaches.md for
     /// alternative approaches that were tried and why they failed.
     var initialSnapshot: String?
-    /// When true, the terminal was suspended at view creation time. The view
-    /// feeds the snapshot but does NOT start a tmux client — the old window's
-    /// shell would overwrite the snapshot. Once resume completes and
-    /// `tmuxWindowID` changes, the view is recreated (`.id` changes) with
-    /// this flag false, and tmux connects normally.
+    /// When true, the terminal was parked at view creation time. The view
+    /// feeds the snapshot but does NOT attach — there is no session to attach
+    /// to. A wake flips the row's parked state, which is part of the pane's
+    /// `.id`, so the view is recreated with this flag false and attaches.
     var isSuspendedSnapshot: Bool = false
     /// Reason-phrased hibernate notice for a PARKED pane (see
     /// `HibernatedBannerModel.message(for:)`). When set alongside
@@ -203,7 +126,6 @@ struct TerminalPanelView: View {
 
     @State private var proxyWarning: String?
     @State private var didProbe = false
-    @State private var recoveryGuidance: TerminalRecoveryGuidance?
     /// Bytes this panel's outgoing queue is holding for a pty that has stopped
     /// accepting writes, once the stall has outlasted the queue's threshold;
     /// `nil` whenever nothing is waiting. Panel-local `@State` rather than an
@@ -229,17 +151,6 @@ struct TerminalPanelView: View {
             .first(where: { $0.id == terminalID })?.profileID
     }
 
-    /// The recovery banner's Retry. A retry the daemon refuses replaces the
-    /// banner with what the daemon said, so the person reads the reason rather
-    /// than a Retry that silently does nothing.
-    private func retryRecovery() {
-        Task {
-            if let refusal = await appState.recreateTerminalWindow(terminalID: terminalID) {
-                recoveryGuidance = TerminalRecoveryPresentation.guidance(for: refusal)
-            }
-        }
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             if let warning = proxyWarning,
@@ -256,11 +167,6 @@ struct TerminalPanelView: View {
                 }
                 .padding(8)
                 .background(Color.yellow.opacity(0.2))
-            }
-            if let recoveryGuidance {
-                TerminalRetryBanner(
-                    message: recoveryGuidance.message,
-                    onRetry: recoveryGuidance.offersRetry ? retryRecovery : nil)
             }
             // The Retry the attach-failed placard points at; the placard itself
             // is written into the terminal. Retry advances the terminal's
@@ -359,16 +265,11 @@ struct TerminalPanelView: View {
             }
             TerminalPanelRepresentable(
                 terminalID: terminalID,
-                tmuxServer: tmuxServer,
-                tmuxWindowID: tmuxWindowID,
-                tmuxBridge: tmuxBridge,
                 tabCloseContext: tabCloseContext,
                 worktreePath: worktreePath,
                 remoteURL: remoteURL,
                 onFilePathClicked: onFilePathClicked,
                 onTerminalNotification: onTerminalNotification,
-                onMissingWindow: onMissingWindow,
-                onRecoveryGuidance: { recoveryGuidance = $0 },
                 onOutgoingBackpressureChange: { pendingOutgoingBytes = $0 },
                 onHolderAttachRetryOffered: { holderAttachRetryOffered = true },
                 initialSnapshot: initialSnapshot,
@@ -412,14 +313,15 @@ struct TerminalPanelView: View {
         }
     }
 
-    /// Builds the environment for the SwiftTerm PTY that runs the tmux attach client.
+    /// Builds the environment for a command the app runs in a local pty of its
+    /// own: a remote provider's `attach` and the remote remediation terminal,
+    /// both through `LocalPTYTerminalRepresentable`.
     ///
-    /// The viewer environment must have `TMUX` and `TMUX_PANE` removed to prevent
-    /// nested-attach errors. When TBD.app itself is launched from inside a tmux session
-    /// (e.g., running `scripts/restart.sh` from a TBD pane), the parent environment
-    /// contains these variables. tmux's `attach` client refuses with:
-    /// "sessions should be nested with care, unset $TMUX to force" (exit 1) if run
-    /// in a nested context. The attach client must always be a fresh top-level tmux client.
+    /// `TMUX` and `TMUX_PANE` are removed because the command may exec tmux
+    /// itself, and tmux's `attach` refuses with "sessions should be nested
+    /// with care, unset $TMUX to force" (exit 1) when it inherits them. The
+    /// app inherits them whenever it was launched from inside a tmux session
+    /// (e.g., running `scripts/restart.sh` from a tmux pane).
     ///
     /// - Parameter base: Base environment dict (typically ProcessInfo.processInfo.environment)
     /// - Returns: Cleaned environment with TMUX/TMUX_PANE removed and TERM set to xterm-256color
@@ -434,12 +336,11 @@ struct TerminalPanelView: View {
 
 // MARK: - TerminalRetryBanner
 
-/// The orange banner above a terminal that says what went wrong and offers
-/// Retry: automatic recovery that gave up, and a holder attach that did.
+/// The orange banner above a terminal whose holder attach gave up, offering
+/// Retry.
 private struct TerminalRetryBanner: View {
     let message: String
-    /// nil hides Retry, for a banner whose remedy is something else.
-    let onRetry: (@MainActor () -> Void)?
+    let onRetry: @MainActor () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -449,10 +350,8 @@ private struct TerminalRetryBanner: View {
                 .font(.caption)
                 .textSelection(.enabled)
             Spacer()
-            if let onRetry {
-                Button(TerminalRecoveryPresentation.retryTitle) { onRetry() }
-                    .controlSize(.small)
-            }
+            Button(TerminalPreparationPresentation.retryTitle) { onRetry() }
+                .controlSize(.small)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
@@ -463,17 +362,12 @@ private struct TerminalRetryBanner: View {
 // MARK: - TerminalPanelRepresentable
 
 /// Wraps a terminal engine's view (`TerminalEngine`) in a SwiftUI
-/// `NSViewRepresentable`.
-///
-/// Uses tmux grouped sessions for session persistence:
-/// 1. TmuxBridge creates a grouped session pointing at the right window
-/// 2. SwiftTerm spawns `tmux attach -t <grouped-session>` in a native PTY
-/// 3. All input, output, and resize handled natively by the terminal driver
+/// `NSViewRepresentable`, attached to its session on the pty holder: the
+/// daemon vends a `dup` of the session's pty master together with the screen
+/// already on it, the panel paints that screen, and from then on it reads and
+/// writes the pty itself (`Coordinator.startHolderClient`).
 struct TerminalPanelRepresentable: NSViewRepresentable {
     let terminalID: UUID
-    let tmuxServer: String
-    let tmuxWindowID: String
-    let tmuxBridge: TmuxBridge
     var tabCloseContext: TabCloseContext? = nil
     var worktreePath: String = ""
     var remoteURL: String?
@@ -481,8 +375,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     var onTerminalNotification: ((String, String) -> Void)?
     @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
-    var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
-    var onRecoveryGuidance: (@MainActor (TerminalRecoveryGuidance) -> Void)?
     /// Carries this panel's queued-byte count to the parent's `@State` banner.
     var onOutgoingBackpressureChange: (@MainActor (Int?) -> Void)?
     /// Raises the parent's Retry banner once the attach-failed placard is up.
@@ -492,14 +384,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     var parkedNoticeMessage: String? = nil
     var shouldSuppressEvents: @MainActor () -> Bool = { false }
     /// Whether a panel lets SwiftTerm report mouse events to the program: only
-    /// on the holder transport.
+    /// on the holder transport, where the mode SwiftTerm sees is the
+    /// program's own, so a plain shell — no mouse mode — keeps local
+    /// selection.
     ///
-    /// Tmux-backed panels stay off. The daemon runs `set -g mouse on` on every
-    /// tmux server, so tmux holds a mouse mode permanently: with reporting on,
-    /// every drag on every tmux panel — a plain shell prompt included — would
-    /// go to tmux instead of selecting text in TBD. On the holder transport
-    /// the mode SwiftTerm sees is the program's own, so a plain shell — no
-    /// mouse mode — keeps local selection.
+    /// Any other answer stays off: a panel whose row AppState has not loaded
+    /// resolves as `.tmux` (`panelTransport()`), and reports nothing for a
+    /// session it cannot yet vouch for.
     nonisolated static func reportsMouseToApps(transport: TerminalTransport) -> Bool {
         transport == .holder
     }
@@ -569,8 +460,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // Set delegate for terminal events
         engine.delegate = coordinator
         coordinator.engine = engine
-        context.coordinator.tmuxBridge = tmuxBridge
-        context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
         context.coordinator.appState = appState
         // Mouse reporting stays off — click-drag selects locally — unless
@@ -578,23 +467,23 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // the panel's transport; re-applied in `updateNSView`.
         Self.applyMouseRouting(to: engine, transport: context.coordinator.panelTransport())
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
-        context.coordinator.onMissingWindow = onMissingWindow
-        context.coordinator.onRecoveryGuidance = onRecoveryGuidance
         context.coordinator.onOutgoingBackpressureChange = onOutgoingBackpressureChange
         context.coordinator.onHolderAttachRetryOffered = onHolderAttachRetryOffered
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
         // Program Status Protocol (OSC 7501): the probe is answered only by a
         // holder-transport panel — whatever agent the session runs, exactly as
-        // the daemon's reader answers — so a tmux panel never answers. Set
-        // before any byte is fed; re-evaluated in `updateNSView`.
+        // the daemon's reader answers — so a panel whose row has not loaded
+        // never answers. Set before any byte is fed; re-evaluated in
+        // `updateNSView`.
         engine.setProgramStatusReporting(
             enabled: AppState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
 
-        // Feed snapshot before tmux connects so the user sees the last state
+        // Feed the snapshot before the session attaches so the user sees the
+        // last state.
         let snapshot = initialSnapshot
         let suspendedOnCreate = isSuspendedSnapshot
         let parkedMessage = parkedNoticeMessage
-        // Start tmux client as soon as the view has real dimensions from layout
+        // Attach as soon as the view has real dimensions from layout.
         coordinator.onEngineReady = { [weak coordinator] engine in
             // PARKED pane: compose the hibernate notice INTO the snapshot as
             // its last rows (a notice block overwriting the frozen status-bar
@@ -622,22 +511,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     .replacingOccurrences(of: "\n", with: "\r\n")
                 engine.writeLocalText(normalized)
             }
-            // Skip tmux connect for suspended terminals — the old window's shell
-            // would overwrite the snapshot. The view will be recreated with a new
-            // .id when tmuxWindowID changes after resume completes.
+            // A parked terminal has no session to attach to. The view is
+            // recreated with a new `.id` once a wake unparks the row.
             guard !suspendedOnCreate else { return }
-            // Detach to a Task so `prepareSession` (which spawns tmux subprocesses)
-            // doesn't block the main thread. `startTmuxClient` hops back to
-            // `@MainActor` once the tmux args come back.
+            // A Task of its own, so the attach's RPCs and retry backoff never
+            // hold the layout pass that made the engine ready.
             Task { [weak coordinator, weak engine] in
                 guard let coordinator, let engine else { return }
-                await coordinator.startTmuxClient(
-                    engine: engine,
-                    bridge: tmuxBridge,
-                    server: tmuxServer,
-                    windowID: tmuxWindowID,
-                    panelID: terminalID
-                )
+                await coordinator.startSessionClient(engine: engine)
             }
         }
 
@@ -707,7 +588,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             Self.applyMouseRouting(to: engine, transport: context.coordinator.panelTransport())
         }
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
-        context.coordinator.onRecoveryGuidance = onRecoveryGuidance
         // Re-assigned here as well as in `makeNSView`: the closure captures the
         // parent's CURRENT `@State` setter, and a coordinator still holding the
         // one from `makeNSView` writes into a stale view identity.
@@ -727,7 +607,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
     // MARK: - Coordinator
 
-    final class Coordinator: NSObject, TerminalEngineDelegate, LocalProcessDelegate, @unchecked Sendable {
+    final class Coordinator: NSObject, TerminalEngineDelegate, @unchecked Sendable {
         /// The terminal this panel runs, and the owner of its view. Set once,
         /// by `makeNSView`, and held for the coordinator's life: SwiftUI holds
         /// the view, this holds the engine, and the engine holds the view, so a
@@ -735,25 +615,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// screen it drew.
         var engine: (any TerminalEngine)?
         weak var appState: AppState?
-        var tmuxBridge: TmuxBridge?
-        var tmuxServer: String = ""
         var panelID: UUID = UUID()
-        /// This coordinator's own successful `prepareSession` — the bridge that
-        /// tracks the view session and the generation naming that preparation
-        /// — empty until one succeeds (and forever for a holder panel, which
-        /// has no tmux view session). Both teardown paths reclaim
-        /// through it, so a stale teardown cannot kill a session a *newer*
-        /// coordinator prepared for the same `panelID`: `panelID` is the
-        /// terminal's id and survives the SwiftUI view rebuild that waking a
-        /// parked terminal triggers, which mints a fresh `Coordinator` for it.
-        ///
-        /// A lock-guarded holder rather than plain properties because the
-        /// write is `@MainActor` and `deinit`'s read is not isolated at all —
-        /// see `ViewSessionReclaim`.
-        let viewSessionReclaim = ViewSessionReclaim()
         var tabCloseContext: TabCloseContext?
-        var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
-        var onRecoveryGuidance: (@MainActor (TerminalRecoveryGuidance) -> Void)?
         /// Called when this panel paints the attach-failed placard, whose
         /// remedy is the Retry banner this raises. Not for the session-ended
         /// placards: there is nothing to attach to, and closing is the advice.
@@ -776,23 +639,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// it to AppState under this panel's terminal ID.
         var onProgramStatusReport: (([UInt8], Date) -> Void)?
         /// What runs once the engine has its real size: feeding the parked or
-        /// initial snapshot and starting the transport. Set by `makeNSView`,
+        /// initial snapshot and starting the attach. Set by `makeNSView`,
         /// and cleared as it runs, so it runs once.
         var onEngineReady: ((any TerminalEngine) -> Void)?
-        /// Internal rather than private so `TerminalTeardownReapTests` can hand
-        /// this coordinator a real `LocalProcess` and drive `cleanup()`
-        /// headlessly — the reap wiring is otherwise unreachable from a test,
-        /// since everything else about this type needs a live `NSView`.
-        var localProcess: LocalProcess?
-        /// The IO-thread feed path (`dataReceived` → `feed`) reaches the engine
-        /// through this lock-guarded holder rather than the main-confined
-        /// `engine` var. Written before `startProcess`, cleared by
-        /// `cleanup()` before the `LocalProcess` is released.
+        /// The holder reader's feed path reaches the engine on the reader's
+        /// own thread, through this lock-guarded holder rather than the
+        /// main-confined `engine` var. Written before the reader starts,
+        /// cleared by `cleanup()` or by the handback that ends the attach.
         private let viewHolder = TerminalViewHolder()
-        /// Test seam: the holder both transports feed through, so a test can
-        /// put this panel into the cleared-holder state a torn-down attach
-        /// leaves behind — a panel that still owns its engine and can no
-        /// longer read a byte back.
+        /// Test seam: the holder the attach feeds through, so a test can put
+        /// this panel into the cleared-holder state a torn-down attach leaves
+        /// behind — a panel that still owns its engine and can no longer read
+        /// a byte back.
         var viewHolderForTesting: TerminalViewHolder { viewHolder }
         /// Drains the vended pty for a holder-backed panel. Held by the panel
         /// because the reader has nothing to outlive the view for: it feeds
@@ -800,9 +658,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// is the only thing that ever releases the descriptor.
         private var holderReader: HolderStreamReader?
         /// A write-only `dup` of this holder session's pty master, and the
-        /// app's write destination for one (`performOutgoingWrite`'s
-        /// `.localPTY` arm). Without it a holder-backed panel has nowhere to
-        /// put a byte: it has no `LocalProcess`.
+        /// app's write destination for it (`performOutgoingWrite`). Without it
+        /// the panel has nowhere to put a byte.
         ///
         /// A `dup` that fails leaves the panel read-only: every write reports
         /// `.unwritable`, the queue holds nothing, and the daemon keeps
@@ -958,19 +815,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// skipped waiting for it cannot pass by arriving late anyway — see
         /// `HolderStreamReader.beforeClose`.
         var holderReaderBeforeClose: (@Sendable (HolderStreamReader) -> Void)?
-        private var groupedViewerProcessRunning = false
-        private var groupedViewerProcessGeneration: UInt64 = 0
-        private var groupedViewerConfirmationStarted = false
-        private var groupedViewerAttachmentConfirmed = false
-        private var groupedViewerConfirmationAttemptCount = 0
-        private static let maximumGroupedViewerConfirmationAttempts = 2
-        /// Recorded when `LocalProcess`'s own exit monitor fires — by then it
-        /// has already called `waitpid`, so `cleanup()` must NOT reap this pid
-        /// (it is free, and could have been recycled for another child of this
-        /// process). Both sides run on the main queue with the pinned SwiftTerm
-        /// revision; see `ChildExitObservation` for why it is lock-guarded
-        /// anyway and for the reaper thread that also reads it.
-        private let childExitObservation = ChildExitObservation()
         // `nonisolated(unsafe)`: set and removed on main, but `deinit` is
         // nonisolated and must be able to remove a monitor the main-actor
         // teardown missed.
@@ -990,10 +834,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// confined like `resizeDebounceTask` — mutated only from the
         /// `@MainActor` debounce path.
         private var resizeSerializer = TerminalResizeSerializer()
-        /// Set (permanently) by `cleanup()` when the view is torn down. Both
-        /// transports' attach paths re-check it after every `await`
-        /// resumption, so a client is never (re)started, and nothing is
-        /// committed, for a view that is gone. MainActor-confined: `cleanup()` is called
+        /// Set (permanently) by `cleanup()` when the view is torn down. The
+        /// attach path re-checks it after every `await` resumption, so a
+        /// client is never (re)started, and nothing is committed, for a view
+        /// that is gone. MainActor-confined: `cleanup()` is called
         /// from `dismantleNSView` and every reader is a `@MainActor` method,
         /// so plain-var access is race-free.
         private var isTornDown = false
@@ -1051,40 +895,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             appState?.registerTerminalCloseContext(context, for: terminalID)
         }
 
-        /// The notice to render *instead of* preparing a tmux view session, or
-        /// `nil` when this transport is carried by tmux and prepares as usual.
-        ///
-        /// Consulted before `prepareSession`, so a holder-backed session never
-        /// reaches the tmux failure classifier at all. That ordering is the
-        /// point. A holder row's `tmuxWindowID` is the empty string by
-        /// construction, so tmux preparation can only ever fail for it — and
-        /// *how* it fails is decided by something unrelated to the session:
-        ///
-        /// - The repo has some other tmux-backed session alive, so its (per-repo)
-        ///   tmux server is running. The window-inventory probe succeeds and
-        ///   omits the expected id, which classifies as `.windowMissing` — the
-        ///   app then fires automatic recovery, the daemon refuses
-        ///   `terminal.recreateWindow` for a holder row, and the user gets an
-        ///   orange banner with a Retry button that can only reproduce the
-        ///   refusal.
-        /// - Every session in the repo is holder-backed, so there is no tmux
-        ///   server. The probe itself fails, which is deliberately treated as
-        ///   ambiguous and classifies as `.commandFailed` — no recovery, but
-        ///   diagnostics copy about an attach that was never possible.
-        ///
-        /// Both are the wrong story, and neither is a property of the session,
-        /// which is running normally throughout. Branching on the transport the
-        /// app already receives in `Terminal` removes the whole question.
-        nonisolated static func transportPreparationNotice(
-            for transport: TerminalTransport
-        ) -> String? {
-            guard transport == .holder else { return nil }
-            return TerminalPreparationPresentation.holderTransportMessage
-        }
-
         /// This panel's transport, or `.tmux` when AppState has not loaded the
-        /// terminal. The fallback is the pre-existing behavior: an unresolvable
-        /// panel must keep taking the tmux path rather than be suppressed.
+        /// terminal. The fallback fails closed: the holder-only behaviors it
+        /// gates — mouse reporting, answering the program status probe, an
+        /// engine switch — stay off for a panel whose session nobody can
+        /// vouch for yet, and come on once its row loads.
         @MainActor
         func panelTransport() -> TerminalTransport {
             appState?.terminals.values
@@ -1102,11 +917,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 .lazy
                 .flatMap { $0 }
                 .first(where: { $0.id == panelID })
-        }
-
-        @MainActor
-        func transportPreparationNoticeForPanel() -> String? {
-            Self.transportPreparationNotice(for: panelTransport())
         }
 
         /// This panel's terminal kind, or nil when AppState has not loaded the
@@ -1162,13 +972,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// the request as `unknownterminal`, which is the truth for that
         /// window: this panel cannot answer for that terminal yet.
         ///
-        /// The registered closure is what makes the echo comparable across
-        /// transports: it enters the outbound path at `deliverOutgoing`, the
+        /// The registered closure is what makes the echo comparable with a
+        /// keystroke: it enters the outbound path at `deliverOutgoing`, the
         /// body of `engine(_:send:)` — the delegate entry a keystroke reaches
         /// after the engine's input hop — minus only the two guards the engine
         /// checks before it, which the closure checks itself, so the write pays
-        /// whatever a keystroke pays on this transport and reports what a
-        /// keystroke cannot.
+        /// whatever a keystroke pays and reports what a keystroke cannot.
         @MainActor
         private func registerLatencyProbe() {
             guard let diagnostic = latencyDiagnostic, let tap = latencyTap else { return }
@@ -1272,16 +1081,27 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             holderHandbackLedger ?? appState.holderHandbackLedger
         }
 
-        /// The holder arm of the transport branch both attach entry points
-        /// share. Returns `true` when it took over — the caller must then
-        /// prepare and attach nothing.
+        /// Attach this panel to its session, once the engine has its real
+        /// size: the holder attach, retries and all (`startHolderClient`).
         ///
-        /// The tmux path is the other arm and keeps its own body. Only the "is
-        /// this even a tmux session" question is common, and it is answered
-        /// here.
+        /// A row still on tmux is never attached. TBD can no longer show a
+        /// tmux session, and a pane shows such a row as
+        /// `LeftoverTmuxSessionNotice` while it runs and as its frozen
+        /// snapshot once it is parked, so a panel meets one only when the row
+        /// changed under it; the next view update replaces the panel.
+        ///
+        /// A row AppState has not loaded is attached all the same:
+        /// `startHolderClient` paints the attach-failed placard, whose Retry
+        /// tries again once the row is in.
         @MainActor
-        private func handleHolderTransport(into engine: any TerminalEngine) async -> Bool {
-            guard panelTransport() == .holder else { return false }
+        func startSessionClient(engine: any TerminalEngine) async {
+            guard !isTornDown else { return }
+            if panelTerminal()?.transport == .tmux {
+                logger.info(
+                    "terminal \(self.panelID, privacy: .public) is on tmux, which this panel cannot attach to; leaving it unattached"
+                )
+                return
+            }
             // A task of its own, kept so `cleanup()` can cancel it: the retry
             // loop inside can sleep for seconds, holding this coordinator.
             let attach = Task { @MainActor in
@@ -1290,7 +1110,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             holderAttachTask = attach
             await attach.value
             if holderAttachTask == attach { holderAttachTask = nil }
-            return true
         }
 
         /// The holder client this panel talks through: the injected one, or
@@ -2156,109 +1975,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             await engine.handbackPreamble(maxScrollbackLines: HolderHandback.handbackScrollbackLines)
         }
 
-        nonisolated static func preparationAction(
-            for result: Result<TmuxSessionPreparation, TmuxPreparationFailure>
-        ) -> TerminalPreparationAction {
-            switch result {
-            case .success(let prepared):
-                return .startViewer(prepared)
-            case .failure(.commandFailed):
-                return .showMessage(TerminalPreparationPresentation.commandFailedMessage)
-            case .failure(.windowMissing(let failedStage)):
-                return .requestAutomaticRecovery(failedStage: failedStage)
-            case .failure(.tmuxExecutableUnavailable):
-                return .showMessage(TerminalPreparationPresentation.tmuxExecutableUnavailableMessage)
-            }
-        }
-
-        nonisolated static func recoveryMessage(
-            for outcome: AutomaticTerminalRecreationOutcome
-        ) -> String? {
-            TerminalRecoveryPresentation.guidance(for: outcome)?.message
-        }
-
-        @MainActor
-        func recoveryGuidanceDidBecomeAvailable(_ guidance: TerminalRecoveryGuidance) {
-            onRecoveryGuidance?(guidance)
-        }
-
         @MainActor
         func shouldFeedPreparationMessage(_ message: String) -> Bool {
             fedPreparationMessages.insert(message).inserted
-        }
-
-        @MainActor
-        @discardableResult
-        func groupedViewerProcessDidStart(processRunning: Bool) -> UInt64 {
-            groupedViewerProcessGeneration &+= 1
-            groupedViewerProcessRunning = processRunning
-            groupedViewerConfirmationStarted = false
-            groupedViewerAttachmentConfirmed = false
-            groupedViewerConfirmationAttemptCount = 0
-            return groupedViewerProcessGeneration
-        }
-
-        @MainActor
-        func beginGroupedViewerAttachmentConfirmation() -> UInt64? {
-            guard groupedViewerProcessRunning,
-                  !groupedViewerConfirmationStarted,
-                  !groupedViewerAttachmentConfirmed,
-                  groupedViewerConfirmationAttemptCount < Self.maximumGroupedViewerConfirmationAttempts,
-                  !isTornDown else { return nil }
-            groupedViewerConfirmationStarted = true
-            groupedViewerConfirmationAttemptCount += 1
-            return groupedViewerProcessGeneration
-        }
-
-        @MainActor
-        func groupedViewerDidReceiveOutput() {
-            guard let tmuxBridge,
-                  let processGeneration = beginGroupedViewerAttachmentConfirmation() else { return }
-            let server = tmuxServer
-            let panelID = panelID
-            Task { [weak self] in
-                let attached = await tmuxBridge.hasAttachedClient(
-                    panelID: panelID,
-                    server: server
-                )
-                let shouldRetry = self?.groupedViewerAttachmentProbeDidComplete(
-                    clientAttached: attached,
-                    processGeneration: processGeneration
-                ) ?? false
-                if shouldRetry {
-                    self?.groupedViewerDidReceiveOutput()
-                }
-            }
-        }
-
-        @MainActor
-        func groupedViewerAttachmentProbeDidComplete(
-            clientAttached: Bool,
-            processGeneration: UInt64
-        ) -> Bool {
-            guard processGeneration == groupedViewerProcessGeneration,
-                  !groupedViewerAttachmentConfirmed,
-                  !isTornDown else { return false }
-            guard clientAttached else {
-                guard groupedViewerProcessRunning,
-                      groupedViewerConfirmationAttemptCount < Self.maximumGroupedViewerConfirmationAttempts else {
-                    return false
-                }
-                // Re-arm one immediate retry. This does not depend on another
-                // PTY output chunk, which an attached idle client may never emit.
-                groupedViewerConfirmationStarted = false
-                return true
-            }
-            guard groupedViewerProcessRunning else { return false }
-            groupedViewerAttachmentConfirmed = true
-            appState?.terminalViewerDidStart(terminalID: panelID)
-            return false
-        }
-
-        @MainActor
-        func groupedViewerProcessDidTerminate() {
-            groupedViewerProcessRunning = false
-            groupedViewerConfirmationStarted = false
         }
 
         @MainActor
@@ -2271,71 +1990,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         @MainActor
-        func recoveryDiagnosticContext() -> TerminalRecoveryDiagnosticContext {
-            TerminalRecoveryDiagnosticContext(
-                terminalID: panelID,
-                worktreeID: worktreeIDForDiagnostics()
-            )
-        }
-
-        @MainActor
         private func feedPreparationMessage(_ message: String, into engine: any TerminalEngine) {
             guard shouldFeedPreparationMessage(message) else { return }
             engine.writeLocalText("\r\n  \(message)\r\n")
-        }
-
-        @MainActor
-        private func logPreparationFailure(_ failure: TmuxPreparationFailure) {
-            let worktreeID = worktreeIDForDiagnostics()?.uuidString ?? "unknown"
-            switch failure {
-            case .windowMissing(let failedStage):
-                logger.error(
-                    "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=windowMissing"
-                )
-            case .tmuxExecutableUnavailable:
-                logger.error(
-                    "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(TmuxPreparationStage.createViewSession.rawValue, privacy: .public) category=tmuxExecutableUnavailable"
-                )
-            case .commandFailed(let stage, let output):
-                logger.error(
-                    "terminal preparation failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(stage.rawValue, privacy: .public) category=commandFailed"
-                )
-                logger.debug(
-                    "terminal preparation subprocess output terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(stage.rawValue, privacy: .public) output=\(output, privacy: .private)"
-                )
-            }
-        }
-
-        @MainActor
-        private func logAutomaticRecoveryOutcome(
-            _ outcome: AutomaticTerminalRecreationOutcome,
-            failedStage: TmuxPreparationStage,
-            diagnosticContext: TerminalRecoveryDiagnosticContext
-        ) {
-            let terminalID = diagnosticContext.terminalID
-            let worktreeID = diagnosticContext.worktreeID?.uuidString ?? "unknown"
-            switch outcome {
-            case .alreadyInFlight:
-                logger.info(
-                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=alreadyInFlight"
-                )
-            case .terminalUnavailable:
-                logger.info(
-                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=terminalUnavailable"
-                )
-            case .recreated(let attempt):
-                logger.info(
-                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=recreated attempt=\(attempt, privacy: .public)"
-                )
-            case .failed(let attempt, let refusal):
-                logger.error(
-                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=failed attempt=\(attempt, privacy: .public) refusal=\(refusal?.message ?? "none", privacy: .public)"
-                )
-            case .budgetExhausted:
-                logger.error(
-                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=budgetExhausted attempt=none"
-                )
-            }
         }
 
         /// Intercept scroll wheel events before they reach TerminalView.
@@ -2344,15 +2001,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// scroll events and forwards them to the session as mouse button
         /// presses.
         ///
-        /// Both transports install this — the tmux subprocess attach
-        /// (`startTmuxClient`) and the pty holder (`startHolderClient`) — and
-        /// each needs it for the same reason: they render into the one
-        /// `TBDTerminalView`,
-        /// which keeps `allowMouseReporting` off so click-drag selects text
-        /// locally — except on a holder panel, where reporting is on
-        /// (`reportsMouseToApps`) and the wheel still stays on this monitor,
-        /// which claims every wheel event while a mouse mode is on, before
-        /// SwiftTerm's handler can see it. A wheel event that reaches
+        /// The holder attach (`startHolderClient`) installs this once it is
+        /// live. The view keeps `allowMouseReporting` off so click-drag
+        /// selects text locally until the panel's row is known to be on the
+        /// holder (`reportsMouseToApps`); with reporting on, the wheel still
+        /// stays on this monitor, which claims every wheel event while a mouse
+        /// mode is on, before SwiftTerm's handler can see it. A wheel event that reaches
         /// SwiftTerm's own `scrollWheel` with reporting off is turned into
         /// Up/Down arrow keys whenever the session is on the alternate screen
         /// — keystrokes the session never asked for, landing on whatever is
@@ -2386,12 +2040,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// mouse-reporting path: `Terminal` hands the bytes to the view, the
         /// view to the engine, the engine to `engine(_:send:)` on this
         /// coordinator, and from there they take the same route as keystrokes
-        /// on whichever transport this panel is on — `performOutgoingWrite`
-        /// picks the holder pty or the local process.
+        /// — `performOutgoingWrite`, to the holder pty.
         ///
         /// Idempotent: a monitor already installed is removed first, so a
-        /// transport that starts after another one on the same coordinator
-        /// never leaves two monitors claiming the same events.
+        /// second install on the same coordinator never leaves two monitors
+        /// claiming the same events.
         ///
         /// Visibility filter: the `tv.window != nil` guard inside the
         /// closure rejects events when the terminal isn't currently part of
@@ -2479,16 +2132,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
         /// Take keyboard focus for this panel and start routing clicks to it.
         ///
-        /// Called once per panel, from whichever transport just went live:
-        /// the tmux viewer after its `LocalProcess` starts, and the holder
-        /// path after its attach is acked. A panel that never runs this is
-        /// reachable only through the key view loop — the user has to press
-        /// Tab before the session takes a keystroke — and its clicks never
-        /// claim first responder, which is what the holder transport shipped
-        /// with until this was hoisted out of the tmux path.
+        /// Called once per panel, by the holder attach once it is acked. A
+        /// panel that never runs this is reachable only through the key view
+        /// loop — the user has to press Tab before the session takes a
+        /// keystroke — and its clicks never claim first responder.
         ///
-        /// The click routing is uninstalled by `cleanup()`, which every
-        /// transport reaches.
+        /// The click routing is uninstalled by `cleanup()`.
         @MainActor
         private func claimKeyboardFocusAndClickRouting(on engine: any TerminalEngine) {
             // Focus on next run loop iteration (needs main actor for window access)
@@ -2508,147 +2157,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         @MainActor
-        func startTmuxClient(
-            engine: any TerminalEngine,
-            bridge: TmuxBridge,
-            server: String,
-            windowID: String,
-            panelID: UUID
-        ) async {
-            // A torn-down view must never (re)start a client (review H2):
-            // checked at entry AND after the await below — teardown can land
-            // while `prepareSession` is in flight, and the LocalProcess +
-            // NSEvent monitors committed after it would leak (cleanup()
-            // already ran; only deinit would remove the monitors, nothing
-            // would terminate the process).
-            guard !isTornDown else { return }
-            // A session that is not carried by tmux is settled here, before any
-            // tmux subprocess runs and before any classification — see
-            // `transportPreparationNotice(for:)`.
-            if await handleHolderTransport(into: engine) { return }
-            // `prepareSession` is non-isolated and awaits tmux subprocesses
-            // off the main actor — Swift releases main while we suspend here,
-            // so SwiftUI's render loop is no longer blocked while tmux runs.
-            let result: Result<TmuxSessionPreparation, TmuxPreparationFailure> = await bridge.prepareSession(
-                panelID: panelID,
-                server: server,
-                windowID: windowID
-            )
-
-            // Teardown may land while preparation is in flight. Do not render,
-            // recover, or start a viewer for a coordinator that is no longer live.
-            //
-            // A preparation that succeeded anyway must be reclaimed here, and
-            // this is the only place that can do it: `prepareSession` has
-            // already registered the session in the bridge, but
-            // `tmuxSessionGeneration` — the token both `cleanup()` and
-            // `deinit` reclaim by — is assigned further down, in the
-            // `.startViewer` branch we are about to skip. `cleanup()` has
-            // already run and `deinit` would find nil, so nothing else would
-            // ever kill it: a fast tab close would leak the view session and,
-            // with it, the linked worktree window and its pane process.
-            guard !isTornDown else {
-                if case .success(let preparation) = result {
-                    bridge.cleanupSession(panelID: panelID, generation: preparation.generation)
-                }
-                return
-            }
-
-            let prepared: TmuxPreparedSession
-            switch Self.preparationAction(for: result) {
-            case .showMessage(let message):
-                if case .failure(let failure) = result {
-                    logPreparationFailure(failure)
-                }
-                feedPreparationMessage(message, into: engine)
-                return
-            case .requestAutomaticRecovery(let failedStage):
-                if case .failure(let failure) = result {
-                    logPreparationFailure(failure)
-                }
-                guard let onMissingWindow else { return }
-                let diagnosticContext = recoveryDiagnosticContext()
-                let outcome = await onMissingWindow()
-                logAutomaticRecoveryOutcome(
-                    outcome,
-                    failedStage: failedStage,
-                    diagnosticContext: diagnosticContext
-                )
-                if let guidance = TerminalRecoveryPresentation.guidance(for: outcome) {
-                    recoveryGuidanceDidBecomeAvailable(guidance)
-                    feedPreparationMessage(guidance.message, into: engine)
-                }
-                return
-            case .startViewer(let value):
-                prepared = value.session
-                // Scope this coordinator's teardown to the preparation it just
-                // made, so `cleanup()`/`deinit` can only reclaim the view
-                // session this coordinator owns — see `cleanupSession`.
-                // Published under a lock because `deinit` reads it off the
-                // main actor — see `ViewSessionReclaim`.
-                viewSessionReclaim.publish(bridge: bridge, generation: value.generation)
-            }
-
-            let tmuxPath = prepared.executablePath
-            let processArgs = prepared.arguments
-
-            debugLog("PANEL: Starting: \(tmuxPath) \(processArgs.joined(separator: " "))")
-
-            // Build viewer environment with TMUX/TMUX_PANE scrubbed and TERM set correctly
-            let env = TerminalPanelView.makeViewerEnvironment(base: ProcessInfo.processInfo.environment)
-            let envPairs = env.map { "\($0.key)=\($0.value)" }
-
-            // `dispatchQueue: .main` keeps the exit monitor on main (see the
-            // serialization note in ChildReaper.swift); `directDelivery: true`
-            // delivers `dataReceived` inline on the IO thread, where `feed`
-            // parses off-main — the configuration upstream's own
-            // `MacLocalTerminalView` ships.
-            let process = LocalProcess(delegate: self, dispatchQueue: .main, directDelivery: true)
-            self.localProcess = process
-            // Written before startProcess; the IO thread reads it from
-            // `dataReceived`. Cleared by `cleanup()` before the process is
-            // released.
-            viewHolder.set(engine)
-            installLatencyTap(on: engine, transport: .tmux)
-            // Single-step on this transport, deliberately: there is no ack to
-            // wait for. The panel's viewer process owns its own pty from the
-            // moment it is spawned, so there is no window in which a probe
-            // write would land on a descriptor somebody else is still driving
-            // — which is exactly the window the holder arm defers past.
-            registerLatencyProbe()
-
-            process.startProcess(
-                executable: tmuxPath,
-                args: processArgs,
-                environment: envPairs,
-                execName: nil
-            )
-            groupedViewerProcessDidStart(processRunning: process.running)
-
-            // Send correct initial size from SwiftTerm's own computed dimensions
-            // (accounts for scroller width and actual cell metrics).
-            // The enclosing function is `@MainActor async`, so we're already
-            // main-isolated here — no `assumeIsolated` wrapper needed.
-            do {
-                let dims = engine.gridSize
-                let cols = dims.cols
-                let rows = dims.rows
-                if cols > 0 && rows > 0 && process.childfd >= 0 {
-                    var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
-                    _ = ioctl(process.childfd, TIOCSWINSZ, &size)
-                    debugLog("PANEL: initial resize \(cols)x\(rows)")
-                }
-            }
-
-            installScrollMonitor(on: engine)
-            claimKeyboardFocusAndClickRouting(on: engine)
-        }
-
-        @MainActor
         func cleanup() {
-            debugLog("PANEL: cleanup for \(panelID.uuidString.prefix(8))")
+            logger.debug("panel cleanup terminal=\(self.panelID, privacy: .public)")
             // Idempotent: a second call must not re-run the teardown (it would
-            // reap a pid whose `LocalProcess` this method already released).
+            // hand back an attach this method already handed back).
             guard !isTornDown else { return }
             // Before anything else: any in-flight attach establishment must
             // see the teardown at its next await resumption (review H2).
@@ -2658,18 +2170,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // cancelled sleep as this teardown.
             holderAttachTask?.cancel()
             holderAttachTask = nil
-            // Capture the pid BEFORE anything releases the `LocalProcess` —
-            // it is the only thing that knows it.
-            let ptyChildPid = localProcess?.shellPid ?? 0
             if let monitor = scrollMonitor {
                 NSEvent.removeMonitor(monitor)
                 scrollMonitor = nil
             }
             engine?.setClickRouting(enabled: false)
-            if let preparation = viewSessionReclaim.published {
-                preparation.bridge.cleanupSession(
-                    panelID: panelID, generation: preparation.generation)
-            }
             resizeDebounceTask?.cancel()
             resizeDebounceTask = nil
             removeLatencyTap()
@@ -2684,28 +2189,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // by a viewer that no longer exists — nothing draining it, no
             // injection deliverable, and every later attach refused.
             detachHolderSession()
-            // Release the PTY child's `LocalProcess` and reap the child.
-            //
-            // How the child dies is unchanged by this block. In practice the
-            // dominant path is the `tmuxBridge?.cleanupSession` call above:
-            // it runs `tmux kill-session`, which ends the session this client
-            // is attached to, so the attach client exits on its own. Failing
-            // that, `LocalProcess.deinit` closes the master fd here and the
-            // child exits on the resulting SIGHUP.
-            //
-            // What *is* deliberate is niling `localProcess` rather than
-            // leaving it to ARC. deinit then runs at a known moment and
-            // cancels SwiftTerm's `childMonitor` here, which is what makes
-            // `ChildReaper` the sole `waitpid` waiter for this pid. deinit
-            // never calls `waitpid` itself, so without the reap the child
-            // stays `<defunct>` under TBDApp forever.
-            //
-            // Holder panels have no `LocalProcess` at all, so `ptyChildPid` is
-            // 0 for them and `shouldReap` rejects it.
-            //
-            // Clear the holder BEFORE releasing the process: a late IO batch
-            // then reads nil and drops instead of feeding an engine whose
-            // session is being torn down.
+            // Clear the view holder, so a late reader batch reads nil and
+            // drops instead of feeding an engine whose session is being torn
+            // down.
             //
             // **Except while a holder handback is in flight**, where dropping a
             // late batch is exactly the wrong thing: those bytes have been taken
@@ -2715,126 +2201,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // the screen has been read. So does an ack still in flight, whose
             // answer may yet bring that handback (`holderAckInFlight`).
             if !holderHandbackInFlight && !holderAckInFlight { viewHolder.clear() }
-            localProcess = nil
-            ChildReaper.reap(pid: ptyChildPid, unless: childExitObservation)
         }
 
         deinit {
-            debugLog("PANEL: deinit for \(panelID.uuidString.prefix(8))")
+            // Read into a local first: the log's interpolation is a closure,
+            // and a closure here may not reach this object's isolated state.
+            let terminalID = panelID
+            logger.debug("panel deinit terminal=\(terminalID, privacy: .public)")
+            // `cleanup()` runs solely from `dismantleNSView`, which SwiftUI
+            // does not guarantee to run, so the one thing a missed teardown
+            // would leave app-wide — the scroll monitor — is removed here too.
+            // Everything else `cleanup()` does stays there, where it is done
+            // exactly once.
             if let monitor = scrollMonitor {
                 NSEvent.removeMonitor(monitor)
-            }
-            // Reclaim the tmux view session this panel owns. `cleanup()` is
-            // the only other caller and it runs solely from
-            // `dismantleNSView`, which SwiftUI does not guarantee to run: the
-            // bridge log recorded 15 `PANEL: deinit` lines in 35 seconds with
-            // no matching `PANEL: cleanup`, each one a view session left
-            // behind. That leak is not cosmetic — a view session holding a
-            // linked window keeps that window, its pane process and the whole
-            // tmux server alive after the owning `main` session is killed,
-            // because tmux destroys a window only when its last session
-            // reference drops.
-            //
-            // Only the tmux session is reclaimed here. The pid capture, the
-            // PTY reap and the holder handback stay in `cleanup()`, which
-            // documents why they must happen exactly once.
-            //
-            // Safe from a non-isolated `deinit`, and idempotent, by
-            // construction: `cleanupSession` takes the bridge's own lock,
-            // removes this panel from `activeSessions` and kills from a
-            // detached task, so after a `cleanup()` there is no entry left and
-            // this call returns without issuing a second `kill-session`. That
-            // idempotence is what is relied on — NOT `isTornDown`, which is
-            // `@MainActor`-confined and must not be read from here.
-            //
-            // The same reasoning covers the facts this reclamation needs. They
-            // are written from the `@MainActor` preparation path and read here
-            // on whatever thread drops the last strong reference, so they are
-            // published through `viewSessionReclaim`, which guards them with a
-            // lock. Nothing here relies on SwiftUI releasing coordinators on
-            // the main thread; a stale read would silently skip the kill.
-            //
-            // Generation-scoped, like `cleanup()`'s call: `deinit` fires
-            // strictly later and less predictably than `dismantleNSView`, so a
-            // superseded coordinator's release can land well after a rebuild
-            // has prepared a new session under the same `panelID`. Passing
-            // this coordinator's own generation makes that a no-op instead of
-            // killing the fresh session.
-            if let preparation = viewSessionReclaim.published {
-                preparation.bridge.cleanupSession(
-                    panelID: panelID, generation: preparation.generation)
-            }
-        }
-
-        // MARK: - LocalProcessDelegate
-        //
-        // `nonisolated`: the Coordinator's `TerminalEngineDelegate` conformance
-        // makes the class MainActor-isolated, but `LocalProcess` calls
-        // `dataReceived` inline on the IO thread (`directDelivery: true`) and
-        // the exit monitor's callback contract is queue-, not actor-based.
-
-        nonisolated func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
-            // Arrives on main already (`dispatchQueue: .main` governs the
-            // exit monitor regardless of `directDelivery`), but the method is
-            // nonisolated, so hop explicitly before touching actor state.
-            debugLog("PANEL: process terminated, exitCode=\(exitCode ?? -1)")
-            // `LocalProcess.processTerminated()` calls `waitpid` before it
-            // calls us, so this child is already reaped and its pid is free to
-            // be recycled — a later `cleanup()` must not wait on it. Recorded
-            // before the `async` below so the flag is set as early as this
-            // callback can set it.
-            childExitObservation.record()
-            DispatchQueue.main.async { [weak self] in
-                self?.groupedViewerProcessDidTerminate()
-                // This fires when the *attach client* (the on-screen tmux
-                // viewer) dies. A clean exit (code 0) means the view was torn
-                // down or detached while the underlying tmux window keeps
-                // running (`remain-on-exit on`), so the user's shell/agent is
-                // still alive — reopening reattaches. A non-zero exit (e.g. the
-                // whole tmux server died on sleep/wake or OOM, exit 256) means
-                // the session is NOT still running; don't claim it is. Reopening
-                // does the right thing for every tab kind — reattaches a live
-                // window, parks+resumes a dead Claude one, or respawns a
-                // shell/Codex — so use neutral "reconnect" wording that doesn't
-                // overpromise a session "recovery" for plain shell/Codex tabs.
-                let message: String
-                if let code = exitCode, code != 0 {
-                    message = "\r\n[View disconnected (exit \(code)). Reopen this tab to reconnect.]\r\n"
-                } else {
-                    message = "\r\n[View detached — session is still running in the background. Reopen this tab to reattach.]\r\n"
-                }
-                self?.engine?.writeLocalText(message)
-            }
-        }
-
-        nonisolated func dataReceived(slice: ArraySlice<UInt8>) {
-            // Feed synchronously on the calling (IO) thread — this is the
-            // off-main parse the 2.0 bump exists for; `feed` is thread-safe
-            // (the parse runs under the engine's lock) and the engine
-            // reference is owned by the holder, so a batch racing teardown
-            // either completes against a live engine or reads nil and drops.
-            viewHolder.feed(slice)
-            // The viewer-MRU signal keeps its main hop.
-            DispatchQueue.main.async { [weak self] in
-                self?.groupedViewerDidReceiveOutput()
-            }
-        }
-
-        nonisolated func getWindowSize() -> winsize {
-            // Use SwiftTerm's own dimensions — they account for scroller width
-            // and actual cell metrics computed from the font.
-            // `assumeIsolated` is sound: the only callers are `LocalProcess`'s
-            // `startProcess` paths, which TBD invokes from main.
-            return MainActor.assumeIsolated {
-                let dims = engine?.gridSize
-                if let dims, dims.cols > 0 && dims.rows > 0 {
-                    debugLog("PANEL: getWindowSize \(dims.cols)x\(dims.rows)")
-                    return winsize(
-                        ws_row: UInt16(dims.rows), ws_col: UInt16(dims.cols),
-                        ws_xpixel: 0, ws_ypixel: 0)
-                }
-                debugLog("PANEL: getWindowSize fallback 80x24")
-                return winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
             }
         }
 
@@ -2862,12 +2242,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         @discardableResult
         func deliverOutgoing(_ data: ArraySlice<UInt8>) -> Bool {
             // Everything this panel writes goes through one queue (Task 10),
-            // so a daemon injection — once one can arrive, over the fd
-            // sidecar while a holder-backed session is attached — can never
-            // land inside a user paste's ESC[200~/ESC[201~ brackets. The
-            // marker detection below fires on both transports; the holder is
-            // the one where the app itself can write an injection to the same
-            // fd — the case this queue exists for.
+            // so a daemon injection — which arrives over the fd sidecar while
+            // the session is attached, and which the app writes to the same
+            // fd as the user's keystrokes — can never land inside a user
+            // paste's ESC[200~/ESC[201~ brackets.
             //
             // Whole-payload equality, not a prefix or a search: a chunk IS a
             // marker or it is not. SwiftTerm hands the marker to
@@ -2907,8 +2285,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         ///
         /// Reaching it needs no synchronization of its own: this Coordinator
         /// is `@MainActor` by inference through its `TerminalEngineDelegate`
-        /// conformance (see the `LocalProcessDelegate` note above), so every
-        /// access — including the first, which may come from `cleanup()` on a
+        /// conformance, so every access — including the first, which may come from `cleanup()` on a
         /// panel that never typed rather than from `send` — is
         /// compiler-checked main-actor, and so is the queue itself.
         ///
@@ -2941,9 +2318,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// callback that ran after the close would write to whatever the
         /// kernel reissued that number to.
         ///
-        /// `nil` on every panel that is not holder-backed: a `LocalProcess`
-        /// panel writes through `DispatchIO`, which owns its own completion,
-        /// so it cannot short-write to this actor and needs no drain.
+        /// `nil` until a holder attach has taken its write-only descriptor,
+        /// and again once that descriptor is closed.
         private var drainNotifier: (any OutgoingDrainNotifier)?
 
         /// Publishes this panel's backpressure state: the queued byte count
@@ -2954,38 +2330,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var onOutgoingBackpressureChange: (@MainActor (Int?) -> Void)?
 
         /// Delivers one chunk `outgoingQueue` has decided may go out now, and
-        /// reports what took it: the holder session's pty, or the tmux
-        /// viewer's `LocalProcess`.
+        /// reports what took it.
         ///
-        /// A holder-backed panel has no `localProcess`; it writes to its own
-        /// `dup` of the session's pty master (`holderWriteFD`), which is what
-        /// makes the app the attached session's only writer and the daemon's
-        /// injection path worth having.
+        /// The panel writes to its own `dup` of the session's pty master
+        /// (`holderWriteFD`), which is what makes the app the attached
+        /// session's only writer and the daemon's injection path worth having.
         ///
-        /// **`.accepted` and `.refused` both mean handed off**, which is the
-        /// strongest claim available synchronously: the `localProcess` arm
-        /// hands bytes to `DispatchIO`, which cannot report a failure that
-        /// happens after this returns — the daemon's fail-open deadline is what
-        /// covers that residue. On the pty arm `.refused` means the kernel took
-        /// a prefix (possibly none) and `outgoingQueue` owns the rest and will
-        /// finish it on write-readiness. Only `.unwritable` is a report of loss
-        /// — no descriptor, a dead or exited child — and it is the only answer
-        /// that reaches the daemon as `written: false`.
+        /// **`.accepted` and `.refused` both mean handed off**: `.refused`
+        /// means the kernel took a prefix (possibly none) and `outgoingQueue`
+        /// owns the rest and will finish it on write-readiness. Only
+        /// `.unwritable` is a report of loss — no descriptor, a dead or exited
+        /// child — and it is the only answer that reaches the daemon as
+        /// `written: false`.
         private func performOutgoingWrite(_ data: Data) -> OutgoingInputQueue.WriteAttempt {
-            // The holder arm first, and it is exclusive by construction: a
-            // holder-backed panel never builds a `LocalProcess`, and a
-            // local-PTY panel never attaches a holder. Reading it first keeps
-            // the shape "one destination per panel" rather than a fallthrough
-            // whose order matters.
-            if holderWriteFD >= 0 { return writeToHolderPTY(data) }
-            // `running` counts as much as non-nil: `LocalProcess.send` silently
-            // drops everything once the child has exited, so reporting
-            // `.accepted` for a dead child would be a fabricated ack.
-            guard let localProcess, localProcess.running else {
-                return .unwritable(written: 0)
-            }
-            localProcess.send(data: [UInt8](data)[...])
-            return .accepted
+            guard holderWriteFD >= 0 else { return .unwritable(written: 0) }
+            return writeToHolderPTY(data)
         }
 
         /// Write one chunk to this holder session's pty, and report what the
@@ -3005,9 +2364,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// every stream behind it and finishes it when the pty is next
         /// writable. So a short write is no longer a failure to report; it is
         /// the ordinary shape of writing to a busy tty, and the ack the caller
-        /// carries to the daemon means what it means on the other arm of
-        /// `performOutgoingWrite` — accepted by a writer that will complete or
-        /// report.
+        /// carries to the daemon means accepted by a writer that will complete
+        /// or report.
         ///
         /// **What is bounded by what.** The remainder is bounded by the
         /// descriptor: it ends when the write returns `EIO` (the last slave
@@ -3067,22 +2425,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             //
             // The engine delivers delegate callbacks on the main thread; the
             // resize/debounce state (`resizeDebounceTask`, `resizeSerializer`)
-            // is MainActor-confined like the rest of the coordinator — same
-            // guard as `getWindowSize`.
+            // is MainActor-confined like the rest of the coordinator.
             MainActor.assumeIsolated {
-                // Local-PTY path: propagate resize to the PTY so tmux/shell gets
-                // SIGWINCH. A holder panel has no `localProcess`, so this is a
-                // no-op there and the holder arm below runs.
-                if newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 {
-                    var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
-                    _ = ioctl(fd, TIOCSWINSZ, &size)
-                    debugLog("PANEL: resize -> \(newCols)x\(newRows)")
-                }
-                // Holder path: **this panel owns `TIOCSWINSZ` for as long as it
-                // owns the pty**, and makes the same ioctl the arm above makes,
-                // on the write-only duplicate it took at attach. It is not left
-                // to the daemon: once the attach is acknowledged — or has timed
-                // out unacknowledged — `HolderRegistry.applyViewerResize` sees
+                // **This panel owns `TIOCSWINSZ` for as long as it owns the
+                // pty**, and sets it on the write-only duplicate it took at
+                // attach. It is not left to the daemon: once the attach is
+                // acknowledged — or has timed out unacknowledged —
+                // `HolderRegistry.applyViewerResize` sees
                 // a `viewerAttachment` and resizes only the emulator's grid,
                 // leaving the tty size to whoever is painting it. So a resize
                 // routed only through the RPC below would reach the grid and
@@ -3096,7 +2445,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // round trip; two ioctls signal the child twice and, until they
                 // agree, at a geometry nobody is painting. Narrow, not zero.
                 setHolderWindowSize(cols: newCols, rows: newRows)
-                // The daemon is told too, for a holder session: its emulator is
+                // The daemon is told too: its emulator is
                 // what `terminal.output` and the next re-adoption read, and it
                 // must not be left at the size the viewer arrived at. Debounced
                 // so only the tail of a drag flurry lands.
@@ -3125,7 +2474,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     """)
                 return
             }
-            debugLog("PANEL: holder resize -> \(cols)x\(rows)")
+            logger.debug("holder resize terminal=\(self.panelID, privacy: .public) size=\(cols, privacy: .public)x\(rows, privacy: .public)")
         }
 
         /// Debounced `pane.resize` for this panel's holder session, by name.

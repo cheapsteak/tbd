@@ -6,13 +6,15 @@ import TBDShared
 import TBDKernel
 import TestSupport
 
-/// One live Claude terminal, a dry-run tmux that records what it was asked to
-/// paste and press, and a router over an in-memory database.
+/// One live Claude terminal, a courier that records what it was asked to
+/// write, and a router over an in-memory database.
 ///
-/// The recording seams are `TmuxManager`'s own `dryRun*` hooks — the shape
-/// `TerminalSendDispatchTests` already uses — so nothing about the production
-/// path is stubbed out: the handler runs in full and the doubles only answer
-/// the questions tmux and the process table would have.
+/// The row is holder-backed, the one transport TBD types into, and the courier
+/// is a real `HolderInjectionCourier` whose viewer is always detached, so every
+/// delivery takes the direct-write branch and lands in `delivered` instead of a
+/// pty. Nothing about the production path is stubbed out: the handler runs in
+/// full and the doubles only answer the questions the holder and the process
+/// table would have.
 ///
 /// Shared deliberately, by the delivery suite that introduced it and by the
 /// authority, gate and holder suites that follow: one fixture over one handler
@@ -21,51 +23,76 @@ struct SendHarness {
     let router: RPCRouter
     let db: TBDDatabase
     let terminal: Terminal
-    let tmux: TmuxDouble
+    let delivered: DeliveryDouble
 
-    /// The foreground rail asks the process table whether the session's agent
-    /// owns the pane. A live Claude row must answer yes, or every text send in
-    /// every suite built on this harness is refused before it reaches the pane.
-    struct StubInspector: PaneProcessInspecting {
-        let foregroundByAgent: [String: Int32]
-        func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32? {
-            foregroundByAgent[agentName]
-        }
-        /// The wake rail's question, which no send this harness makes ever
-        /// asks. Answering the pane's own pid is "an idle shell".
-        func paneForegroundPID(panePID: Int32) -> Int32? { panePID }
-    }
-
-    /// Collects what reached the pane. A lock-guarded class rather than an
-    /// actor, because `TmuxManager`'s hooks are synchronous `@Sendable`
-    /// closures.
-    final class TmuxDouble: @unchecked Sendable {
+    /// What reached the child, read back as the message and the keys a person
+    /// would have typed. A lock-guarded class rather than an actor, because
+    /// the courier's write is a synchronous `@Sendable` closure.
+    ///
+    /// Each write is decoded on the shape `HolderSendComposition.compose` and
+    /// the paced key path give it:
+    ///   - A write that opens a bracketed paste is one pasted body, the bytes
+    ///     between the markers; a `\r` after the end marker is an Enter.
+    ///   - A write that is exactly one named key's bytes is that key — which
+    ///     is also how an empty-text submit's lone `\r` reads, as an Enter
+    ///     and no paste.
+    ///   - Anything else is a bare body, its one trailing `\r` an Enter.
+    ///
+    /// `writes` keeps the raw bytes for a suite that wants the framing itself.
+    final class DeliveryDouble: @unchecked Sendable {
         private let lock = NSLock()
+        private var _writes: [Data] = []
         private var _pastes: [String] = []
         private var _keys: [String] = []
-        var pastedBodies: [String] {
-            lock.lock()
-            defer { lock.unlock() }
-            return _pastes
+        var writes: [Data] { lock.withLock { _writes } }
+        var pastedBodies: [String] { lock.withLock { _pastes } }
+        var sentKeys: [String] { lock.withLock { _keys } }
+
+        /// The key names a send in these suites presses, tried in this order
+        /// against a write. `Enter` first, so a lone `\r` reads as Enter.
+        private static let namedKeys = [
+            "Enter", "Escape", "Tab", "BTab", "BSpace", "Space",
+            "Up", "Down", "Right", "Left", "Home", "End", "C-c", "C-d", "C-u",
+        ]
+
+        func record(_ bytes: Data) {
+            let (body, keys) = Self.decode([UInt8](bytes))
+            lock.withLock {
+                _writes.append(bytes)
+                if let body { _pastes.append(body) }
+                _keys.append(contentsOf: keys)
+            }
         }
-        var sentKeys: [String] {
-            lock.lock()
-            defer { lock.unlock() }
-            return _keys
+
+        private static func decode(_ write: [UInt8]) -> (body: String?, keys: [String]) {
+            let start = [UInt8](HolderSendComposition.pasteStart)
+            let end = [UInt8](HolderSendComposition.pasteEnd)
+            let enter = HolderSendComposition.submitByte
+            if write.starts(with: start),
+               let close = firstIndex(of: end, in: write, from: start.count) {
+                let body = String(decoding: write[start.count..<close], as: UTF8.self)
+                let tail = write[(close + end.count)...]
+                return (body, tail.elementsEqual([enter]) ? ["Enter"] : [])
+            }
+            if let name = namedKeys.first(where: { name in
+                HolderNamedKeys.bytes(for: name, modes: nil).map { [UInt8]($0) } == write
+            }) {
+                return (nil, [name])
+            }
+            if write.last == enter {
+                return (String(decoding: write.dropLast(), as: UTF8.self), ["Enter"])
+            }
+            return (String(decoding: write, as: UTF8.self), [])
         }
-        func recordPaste(_ bytes: Data) {
-            lock.lock()
-            defer { lock.unlock() }
-            _pastes.append(String(bytes: bytes, encoding: .utf8) ?? "")
-        }
-        /// Keys arrive as argv, because `sendKey` in dryRun hands the whole
-        /// `send-keys` command to `dryRunRecorder` rather than to a key-shaped
-        /// hook. The key is the last argument.
-        func recordArgv(_ args: [String]) {
-            guard args.contains("send-keys"), let key = args.last else { return }
-            lock.lock()
-            defer { lock.unlock() }
-            _keys.append(key)
+
+        private static func firstIndex(
+            of needle: [UInt8], in haystack: [UInt8], from offset: Int
+        ) -> Int? {
+            guard haystack.count >= needle.count, offset <= haystack.count - needle.count
+            else { return nil }
+            return (offset...(haystack.count - needle.count)).first {
+                haystack[$0..<($0 + needle.count)].elementsEqual(needle)
+            }
         }
     }
 
@@ -82,13 +109,10 @@ struct SendHarness {
     }
 
     static func make(
-        transport: TerminalTransport = .tmux,
+        // `.tmux` builds a row TBD no longer types into, for the suites that
+        // pin its refusal.
+        transport: TerminalTransport = .holder,
         kind: TerminalKind = .claude,
-        // Overrides the inspector's answer, per agent name, so a test can ask
-        // for "no foreground agent here" — the foreground rail's negative case
-        // — without touching anything else about the harness. Defaulted to the
-        // live-agent answer every other call site relies on.
-        foregroundByAgent: [String: Int32] = ["claude": 4242, "codex": 4242],
         // The two halves of the envelope-suppression check, defaulted to the
         // fail-closed answers the production router defaults to: no recorded
         // sidecar client, and the real process reader. A suite that does not
@@ -96,51 +120,38 @@ struct SendHarness {
         // envelope.
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
         processSignaller: any ProcessSignaller = ProductionProcessSignaller(),
-        // Wires a real `HolderInjectionCourier` whose viewer is always
-        // detached (so `deliver` takes the direct-write branch, never the
-        // sidecar) and whose write lands here instead of any pty, so a holder
-        // test can assert the exact bytes `performHolderSend` composed rather
-        // than only that some rail did or didn't refuse it. `nil` (the
-        // default) leaves `holderInjectionCourier` unset, which is what every
-        // other holder test relies on to reach `holderInputUnavailable`.
+        // Also handed every courier write, after `delivered` records it, for a
+        // holder suite that keeps its own recorder of the exact bytes
+        // `performHolderSend` composed.
         holderDeliveryRecorder: (@Sendable (Data) -> Void)? = nil,
-        // The send path's one wait: the settle the parts arm takes after an
-        // image paste. Defaulted to `ImmediateClock`, so every suite built on
-        // this harness runs the production arm without spending wall time on
-        // it; a suite that wants to PIN the wait passes an
-        // `EventDrivenTestClock` instead.
+        // `false` leaves `holderInjectionCourier` unset: the no-input-path
+        // state `performHolderSend` turns into `holderInputUnavailable`.
+        installsCourier: Bool = true,
+        // Behavior seam for the router's waits. Defaulted to `ImmediateClock`,
+        // so no suite built on this harness spends wall time; a suite that
+        // wants to PIN a wait passes an `EventDrivenTestClock` instead.
         clock: any Clock<Duration> = ImmediateClock()
     ) async throws -> SendHarness {
-        let double = TmuxDouble()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { double.recordArgv($0) },
-            // Alive, carrying no identity: the branch that proceeds. The target
-            // check is `TerminalSendTargetCheckTests`' business, not this
-            // harness's.
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
-            // The foreground rail skips itself when the pane pid is "0", which
-            // is what `dryRun` answers by default. Supplying a real-looking pid
-            // means the rail RUNS and the harness proves it gets through it,
-            // rather than passing because the rail never fired.
-            dryRunPanePID: { _, _ in "4242" },
-            dryRunPasteBytes: { _, _, bytes in double.recordPaste(bytes) })
+        let double = DeliveryDouble()
+        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
             tmux: tmux,
-            paneProcessInspector: StubInspector(foregroundByAgent: foregroundByAgent),
             recordedAppIdentity: recordedAppIdentity,
             processSignaller: processSignaller,
             actuationLog: ActuationLog(path: Self.scratchLogPath()),
             clock: clock)
-        if let holderDeliveryRecorder {
+        if installsCourier {
             router.holderInjectionCourier = HolderInjectionCourier(
                 sendFrame: { _ in },
                 viewerAttachment: { _ in nil },
-                writeDirectly: { _, bytes in holderDeliveryRecorder(bytes) })
+                writeDirectly: { _, bytes in
+                    double.record(bytes)
+                    holderDeliveryRecorder?(bytes)
+                })
         }
 
         let repo = try await db.repos.create(
@@ -160,7 +171,7 @@ struct SendHarness {
             kind: kind,
             transport: transport,
             childPID: transport == .holder ? 4242 : nil)
-        return SendHarness(router: router, db: db, terminal: terminal, tmux: double)
+        return SendHarness(router: router, db: db, terminal: terminal, delivered: double)
     }
 
     /// The one identity the envelope-suppression check accepts, and a harness
@@ -190,7 +201,6 @@ struct SendHarness {
             func startTime(_ pid: Int32) -> Date? { AuthenticatedApp.startedAt }
             func commandLine(_ pid: Int32) -> String? { AuthenticatedApp.commandLine }
             func stat(_ pid: Int32) -> String? { nil }
-            func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
             func terminate(_ pid: Int32) {}
             func forceKill(_ pid: Int32) {}
         }
@@ -199,7 +209,7 @@ struct SendHarness {
     /// A harness on which `AuthenticatedApp.connection` authenticates, so a send
     /// that asks for `envelope: .suppressed` actually gets it.
     static func makeAuthenticated(
-        transport: TerminalTransport = .tmux,
+        transport: TerminalTransport = .holder,
         kind: TerminalKind = .claude,
         holderDeliveryRecorder: (@Sendable (Data) -> Void)? = nil,
         clock: any Clock<Duration> = ImmediateClock()
