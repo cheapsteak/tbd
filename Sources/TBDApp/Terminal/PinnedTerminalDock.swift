@@ -155,16 +155,17 @@ private struct PinnedTerminalCell: View {
             if let worktree, TerminalPanePresentation.showsLeftoverTmuxNotice(for: terminal) {
                 LeftoverTmuxSessionNotice(terminalID: terminal.id, server: worktree.tmuxServer)
             } else if let worktree, TerminalPanePresentation.dockShowsParkedSnapshot(for: terminal) {
-                // Parked on tmux: the frozen snapshot with the notice that says
-                // how to move the row, as the main pane draws it. A suspended
-                // panel never attaches, so it cannot contend for a session.
+                // Parked on tmux: the frozen snapshot, as the main pane draws
+                // it, with a notice that says how to move the row from here.
+                // A suspended panel never attaches, so it cannot contend for a
+                // session.
                 TerminalPanelView(
                     terminalID: terminal.id,
                     worktreePath: worktree.path,
                     initialSnapshot: terminal.suspendedSnapshot,
                     isSuspendedSnapshot: true,
-                    parkedNoticeMessage: TerminalPanePresentation.parkedNoticeMessage(
-                        for: terminal, switching: nil)
+                    parkedNoticeMessage: TerminalPanePresentation.dockParkedNoticeMessage(
+                        for: terminal)
                 )
                 // The identity the main pane gives a parked pane.
                 .id(TerminalPanePresentation.identity(

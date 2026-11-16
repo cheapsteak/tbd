@@ -529,8 +529,19 @@ enum HibernatedBannerModel {
     /// (`TableTranscriptPaneView.parkedOnTmuxComposerNote`) each finish it
     /// with their own gesture, so the two say the rest in the same words.
     static let parkedOnTmuxInstruction =
-        "Parked on tmux, which TBD no longer resumes sessions on — choose "
+        "\(parkedOnTmuxLead) — choose "
         + "\(TransportMigrationVocabulary.menuTitle) in the tab's menu (or run `tbd terminal migrate`)"
+
+    /// What every notice for a row parked on the tmux transport opens with.
+    static let parkedOnTmuxLead = "Parked on tmux, which TBD no longer resumes sessions on"
+
+    /// The pinned dock's notice for a row parked on the tmux transport. The
+    /// dock has no tab menu and no click-to-resume, so this names the gesture
+    /// it does have: its header opens the tab in its worktree, where the tab's
+    /// menu moves it.
+    static let parkedOnTmuxDockMessage =
+        "\(parkedOnTmuxLead) — open this tab in its worktree to move it to the pty holder "
+        + "(or run `tbd terminal migrate`)"
 
     /// The notice for a row parked on the tmux transport. The daemon starts
     /// sessions only on the pty holder, so such a row cannot be woken where it

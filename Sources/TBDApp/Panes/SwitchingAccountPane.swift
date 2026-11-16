@@ -148,10 +148,19 @@ enum TerminalPanePresentation {
     /// The dock draws no parked placeholder for a holder row (see
     /// `attachIdentity`): its view keeps the last frame it drew. A row on tmux
     /// has no such frame, because no panel attaches to tmux, so the dock draws
-    /// what the main pane does — the snapshot, with the notice that says how to
-    /// move the row to the pty holder.
+    /// what the main pane does — the snapshot, with a notice that says how to
+    /// move the row to the pty holder (`dockParkedNoticeMessage`).
     static func dockShowsParkedSnapshot(for terminal: Terminal) -> Bool {
         terminal.transport == .tmux && terminal.isParked
+    }
+
+    /// The notice the pinned dock composes into a parked tmux row's snapshot,
+    /// or nil for a row the dock draws no snapshot for. Not the main pane's
+    /// notice, which points at the tab's menu and a click in the pane; the
+    /// dock has neither.
+    static func dockParkedNoticeMessage(for terminal: Terminal) -> String? {
+        guard dockShowsParkedSnapshot(for: terminal) else { return nil }
+        return HibernatedBannerModel.parkedOnTmuxDockMessage
     }
 
     /// The caption over the pane, or nil. Shown only while the switch has the

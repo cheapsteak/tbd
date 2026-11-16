@@ -53,13 +53,26 @@ struct LeftoverTmuxSessionNoticeTests {
 
     /// The dock draws no parked placeholder for a holder row, but a row parked
     /// on tmux has no live frame to keep, so the dock draws its snapshot and
-    /// the notice that says how to move it — the main pane's parked pane.
-    @Test("the dock draws a parked tmux row's snapshot and its move advice")
-    func dockDrawsAParkedTmuxRowsSnapshot() {
+    /// a notice that says how to move it. The dock has no tab menu and no
+    /// click-to-resume, so its notice names neither.
+    @Test("the dock draws a parked tmux row's snapshot and move advice true of the dock")
+    func dockDrawsAParkedTmuxRowsSnapshot() throws {
         let row = Self.row(transport: .tmux, parked: true)
         #expect(TerminalPanePresentation.dockShowsParkedSnapshot(for: row))
-        #expect(TerminalPanePresentation.parkedNoticeMessage(for: row, switching: nil)
-            == HibernatedBannerModel.parkedOnTmuxMessage)
+        let notice = try #require(TerminalPanePresentation.dockParkedNoticeMessage(for: row))
+        #expect(notice == HibernatedBannerModel.parkedOnTmuxDockMessage)
+        #expect(notice.hasPrefix(HibernatedBannerModel.parkedOnTmuxLead))
+        #expect(notice.contains("tbd terminal migrate"))
+        #expect(!notice.contains("menu"))
+        #expect(!notice.localizedCaseInsensitiveContains("click"))
+    }
+
+    @Test("the dock composes no notice for a row it draws no snapshot for")
+    func dockComposesNoNoticeOffTheSnapshot() {
+        #expect(TerminalPanePresentation.dockParkedNoticeMessage(
+            for: Self.row(transport: .tmux, parked: false)) == nil)
+        #expect(TerminalPanePresentation.dockParkedNoticeMessage(
+            for: Self.row(transport: .holder, parked: true)) == nil)
     }
 
     @Test("the dock draws a tmux row parked by the legacy column the same way")
