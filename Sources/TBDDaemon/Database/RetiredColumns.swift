@@ -53,5 +53,8 @@ enum RetiredColumns {
         // The pty-holder transport gate, added by `20260831055718_config_pty_holder`
         // as `INTEGER` with no default. Every session opens on the pty holder.
         RetiredColumn(table: "config", column: "pty_holder_enabled", epoch: 8),
+        // The tmux control-mode opt-in, added by the frozen `v45_config_control_mode`
+        // as `BOOLEAN DEFAULT 0`. Control mode is gone.
+        RetiredColumn(table: "config", column: "control_mode_enabled", epoch: 9),
     ]
 }
