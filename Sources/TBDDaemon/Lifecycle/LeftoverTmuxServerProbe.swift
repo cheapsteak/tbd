@@ -8,8 +8,8 @@ enum LeftoverTmuxServerState: Sendable, Equatable {
     /// evidence of absence lands here, a successful connect included.
     case running
     /// No socket the server could be listening on answers, and no live tmux
-    /// process names the server. The server is gone, and so is every session
-    /// it carried.
+    /// process of this user names the server. The server is gone, and so is
+    /// every session it carried.
     case absent
 }
 
@@ -17,8 +17,11 @@ enum LeftoverTmuxServerState: Sendable, Equatable {
 /// reads it.
 struct LeftoverTmuxProcess: Sendable, Equatable {
     let pid: pid_t
+    /// The process's real user id, or nil when the kernel would not give it.
+    let owner: uid_t?
     /// The process's argv, `argv[0]` included, or nil when the kernel would
-    /// not give it.
+    /// not give it, or when it was not asked because the process belongs to
+    /// another user.
     let arguments: [String]?
 }
 
@@ -68,10 +71,13 @@ struct LeftoverTmuxServerSighting: Sendable, Equatable {
 /// - **The socket.** A plain connect to every place this daemon can work out
 ///   the server's socket may be (`candidateSocketPaths`). Every candidate must
 ///   be positively absent.
-/// - **The process table.** No live process whose executable is tmux may name
-///   the server with `-L` (`processState(server:processes:)`). A tmux server
-///   keeps the command line of the client that started it, so a running server
-///   names itself there wherever its socket is.
+/// - **The process table.** No live process of this user whose executable is
+///   tmux may name the server with `-L`
+///   (`processState(server:processes:uid:)`). A tmux server keeps the command
+///   line of the client that started it, so a running server names itself
+///   there wherever its socket is. Another user's tmux processes are left out:
+///   tmux keeps each user's sockets under `tmux-<uid>`, so none of them can be
+///   a server this user's rows name.
 ///
 /// The socket alone cannot settle it, because the candidates come from this
 /// daemon's environment and working directory, and the daemon that started the
@@ -144,49 +150,60 @@ struct LeftoverTmuxServerProbe: Sendable {
 
     /// The probe the daemon runs: a plain connect to each candidate socket,
     /// each closed at once, then, only when every one of them is absent, one
-    /// read of the process table. `tmuxProcesses` is a seam for tests, so no
-    /// test depends on what tmux the machine is running.
+    /// read of the process table. `uid` is the user whose servers the rows
+    /// name: it places the candidate sockets and picks out the tmux processes
+    /// that count. `uid` and `tmuxProcesses`, which is handed `uid`, are seams
+    /// for tests, so no test depends on what tmux the machine is running or
+    /// whose it is.
     static func production(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fallbackRoot: String = defaultTemporaryDirectory,
-        tmuxProcesses: @escaping @Sendable () -> [LeftoverTmuxProcess]? = {
-            LeftoverTmuxServerProbe.liveTmuxProcesses()
+        uid: uid_t = getuid(),
+        tmuxProcesses: @escaping @Sendable (_ uid: uid_t) -> [LeftoverTmuxProcess]? = {
+            LeftoverTmuxServerProbe.liveTmuxProcesses(uid: $0)
         }
     ) -> LeftoverTmuxServerProbe {
         LeftoverTmuxServerProbe { server in
             await state(
                 server: server,
                 socketPaths: candidateSocketPaths(
-                    server: server, environment: environment, fallbackRoot: fallbackRoot),
-                tmuxProcesses: tmuxProcesses)
+                    server: server, environment: environment, fallbackRoot: fallbackRoot,
+                    uid: uid),
+                uid: uid,
+                tmuxProcesses: { tmuxProcesses(uid) })
         }
     }
 
     /// Both signals: the server is gone only when every candidate socket is
-    /// absent and the process table names it nowhere. The table is read only
+    /// absent and no tmux process of `uid` names it. The table is read only
     /// when the sockets are all absent, because a socket that answers settles
     /// it.
     static func state(
         server: String,
         socketPaths: [String],
+        uid: uid_t,
         tmuxProcesses: () -> [LeftoverTmuxProcess]?
     ) async -> LeftoverTmuxServerState {
         guard await state(ofSocketsAt: socketPaths) == .absent else { return .running }
-        return processState(server: server, processes: tmuxProcesses())
+        return processState(server: server, processes: tmuxProcesses(), uid: uid)
     }
 
     /// The process signal: absent only when the process table was read and
-    /// every tmux process in it has a readable command line that does not name
-    /// `server` with `-L`.
+    /// every tmux process in it that may be `uid`'s has a readable command
+    /// line that does not name `server` with `-L`.
     ///
-    /// A table that could not be read is running, and so is a tmux process
-    /// whose command line could not be read, whatever server is asked about:
-    /// it may be this server, and nothing else can say it is not.
+    /// A process whose owner was read and is another user is passed over,
+    /// readable command line or not. A table that could not be read is
+    /// running, and so is a tmux process that may be `uid`'s — its owner is
+    /// `uid` or could not be read — whose command line could not be read,
+    /// whatever server is asked about: it may be this server, and nothing else
+    /// can say it is not.
     static func processState(
-        server: String, processes: [LeftoverTmuxProcess]?
+        server: String, processes: [LeftoverTmuxProcess]?, uid: uid_t
     ) -> LeftoverTmuxServerState {
         guard let processes else { return .running }
         for process in processes {
+            if let owner = process.owner, owner != uid { continue }
             guard let arguments = process.arguments else { return .running }
             if commandLine(arguments, namesServer: server) { return .running }
         }
@@ -236,25 +253,66 @@ struct LeftoverTmuxServerProbe: Sendable {
         return false
     }
 
-    /// Every live process whose executable is tmux, with its command line, or
-    /// nil when the process table could not be read.
+    /// Every live process whose executable is tmux, with its owner and, unless
+    /// it belongs to a user other than `uid`, its command line; nil when the
+    /// process table could not be read.
     ///
     /// The table is one `sysctl(KERN_PROC_ALL)` (`ProcessTableSnapshot`), a
-    /// process's executable its `proc_pidpath` (`ProcessLiveness`), and its
-    /// command line the argv in its `KERN_PROCARGS2` buffer
-    /// (`ProcessEnvironmentReader.procArgs`). A process whose executable path
-    /// cannot be read is not counted as tmux.
-    static func liveTmuxProcesses() -> [LeftoverTmuxProcess]? {
+    /// process's executable its `proc_pidpath` (`ProcessLiveness`), its owner
+    /// its real user id (`realUserID(of:)`), and its command line the argv in
+    /// its `KERN_PROCARGS2` buffer (`ProcessEnvironmentReader.procArgs`).
+    static func liveTmuxProcesses(uid: uid_t) -> [LeftoverTmuxProcess]? {
         guard let table = ProcessTableSnapshot.read() else { return nil }
+        return tmuxProcesses(
+            among: table.entries.keys.sorted(),
+            uid: uid,
+            executablePath: { ProcessLiveness.executablePath(pid: $0) },
+            owner: { realUserID(of: $0) },
+            procArgs: { ProcessEnvironmentReader.procArgs(pid: $0) })
+    }
+
+    /// The tmux processes among `pids`, each read through the given lookups.
+    ///
+    /// A process whose executable path cannot be read is not counted as tmux.
+    /// The command line of a process another user owns is not asked for: it
+    /// cannot be one of `uid`'s servers, and the kernel would not give it to
+    /// a daemon that is not root anyway. A process whose owner cannot be read
+    /// is asked, as one of `uid`'s.
+    static func tmuxProcesses(
+        among pids: [pid_t],
+        uid: uid_t,
+        executablePath: (pid_t) -> String?,
+        owner: (pid_t) -> uid_t?,
+        procArgs: (pid_t) -> [UInt8]?
+    ) -> [LeftoverTmuxProcess] {
         var processes: [LeftoverTmuxProcess] = []
-        for pid in table.entries.keys.sorted() {
-            guard let path = ProcessLiveness.executablePath(pid: pid),
+        for pid in pids {
+            guard let path = executablePath(pid),
                   (path as NSString).lastPathComponent == "tmux" else { continue }
-            let argv = ProcessEnvironmentReader.procArgs(pid: pid)
-                .flatMap { Self.arguments(inProcArgs: $0) }
-            processes.append(LeftoverTmuxProcess(pid: pid, arguments: argv))
+            let processOwner = owner(pid)
+            if let processOwner, processOwner != uid {
+                processes.append(LeftoverTmuxProcess(pid: pid, owner: processOwner, arguments: nil))
+                continue
+            }
+            let argv = procArgs(pid).flatMap { Self.arguments(inProcArgs: $0) }
+            processes.append(LeftoverTmuxProcess(pid: pid, owner: processOwner, arguments: argv))
         }
         return processes
+    }
+
+    /// The real user id of the process holding `pid`, or nil when it is gone
+    /// or the kernel would not say.
+    ///
+    /// Read with `PROC_PIDT_SHORTBSDINFO`, which the kernel answers for any
+    /// user's process. `PROC_PIDTBSDINFO` carries the same field but answers
+    /// only for the caller's own processes unless the caller is root, so it
+    /// could never say a process is someone else's.
+    static func realUserID(of pid: pid_t) -> uid_t? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdshortinfo()
+        let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size else { return nil }
+        return info.pbsi_ruid
     }
 
     /// The argv in a `KERN_PROCARGS2` buffer, `argv[0]` included, or nil when

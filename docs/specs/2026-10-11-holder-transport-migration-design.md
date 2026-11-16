@@ -124,12 +124,20 @@ no tmux binary for either. The server is gone only when both say so.
   every socket probe in the daemon reads them.
 - **The process table.** A tmux server keeps the command line of the client
   that started it, `tmux -u -L <server> …`. This signal says gone only when the
-  process table was read and no live process whose executable is named `tmux`
-  (by `proc_pidpath`) names the server with `-L` in its argv (from
+  process table was read and no live process of this user whose executable is
+  named `tmux` (by `proc_pidpath`) names the server with `-L` in its argv (from
   `KERN_PROCARGS2`). The argv is read as tmux's `getopt` reads it, so
-  `-L <server>`, `-L<server>` and a cluster such as `-uL <server>` all count. A
-  tmux process whose argv cannot be read counts as running for every server,
-  and so does a process table that cannot be read.
+  `-L <server>`, `-L<server>` and a cluster such as `-uL <server>` all count.
+  "This user" is the daemon's `getuid()`, compared with each tmux process's
+  real user id (`proc_pidinfo` with `PROC_PIDT_SHORTBSDINFO`, which the kernel
+  answers for any user's process). tmux keeps each user's sockets under
+  `tmux-<uid>`, so another user's tmux cannot be a server this user's rows
+  name, and its argv is not read; the kernel would refuse it to a daemon that
+  is not root, and an unreadable argv would otherwise keep every server
+  running for as long as that user's tmux runs. A tmux process whose owner
+  cannot be read counts as this user's. One of this user's whose argv cannot
+  be read counts as running for every server, and so does a process table
+  that cannot be read.
 
 The socket cannot settle it alone, because its candidates are only as good as
 the environment and working directory they come from, and those are this
@@ -341,11 +349,14 @@ never unlinks it, and nothing TBD runs creates one any more.
   fallback root is injected, so no test asks the real `/private/tmp`.
 - The process signal, with an injected process table: every socket absent
   plus a tmux process naming the server is running; one naming another server
-  is gone; one whose argv cannot be read is running, for any server; no tmux
-  process is gone; a table that cannot be read is running; and a socket that
-  answers is running without the table being read. The `-L` matcher finds the
-  separate, joined and clustered forms and nothing else, and the argv reader
-  stops before the environment.
+  is gone; one whose argv cannot be read is running, for any server; another
+  user's, with an argv that cannot be read, is gone; no tmux process is gone;
+  a table that cannot be read is running; and a socket that answers is running
+  without the table being read. Another user's process is passed over even
+  when its argv names the server, and one whose owner cannot be read counts as
+  this user's. The lister, over injected lookups, never asks for another
+  user's argv. The `-L` matcher finds the separate, joined and clustered forms
+  and nothing else, and the argv reader stops before the environment.
 - Reconcile parks a live resumable tmux row whose server is gone, keeping its
   session id, deletes a live shell row on such a server, leaves a row whose
   server may run live and untouched, never probes a parked row, and asks the

@@ -141,8 +141,8 @@ park live sessions wholesale. Four things make the handover safe.
   when its holder's exit probe answers that the holder is gone; a round trip
   that merely failed leaves the row alone. A row still on tmux is parked only
   when every place its tmux server's socket can be is missing or refuses
-  connections and no tmux process names that server; any other answer, a
-  timeout included, leaves it live; see
+  connections and no tmux process of this user names that server; any other
+  answer, a timeout included, leaves it live; see
   [the design](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update).
 - **A second un-park pass runs after reconcile.** The first pass runs before
   reconcile, so it cannot repair a park the same boot creates. The second one

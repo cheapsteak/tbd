@@ -6,7 +6,7 @@ import Foundation
 /// TBD starts sessions only on the pty holder, and it no longer drives tmux at
 /// all. A tmux server started by an earlier build can outlive `tbd update`,
 /// though, until the Mac restarts, so a row can still be live with its agent
-/// running there. The daemon probes that server's socket and the tmux
+/// running there. The daemon probes that server's socket and this user's tmux
 /// processes that name it: a server that is positively gone gets its row
 /// parked, and a server still running leaves the row live, with these words in
 /// place of a terminal. Shared so the app's notice and every daemon refusal

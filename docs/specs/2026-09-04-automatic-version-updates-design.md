@@ -326,8 +326,8 @@ the handover safe:
   session is gone. For a holder row that evidence is the holder's exit probe
   answering that the holder is gone; a round trip that merely failed keeps
   the row. For a row still on tmux it is every place the tmux server's socket
-  can be missing or refusing connections, with no tmux process naming the
-  server (`LeftoverTmuxServerProbe`); any other answer, a timeout included,
+  can be missing or refusing connections, with no tmux process of this user
+  naming the server (`LeftoverTmuxServerProbe`); any other answer, a timeout included,
   keeps the row live. A wedged machine therefore
   parks nothing. The app's Check Again (`terminal.recreateWindow`) and
   `tbd terminal migrate` ask the same tmux probe and act on the same evidence

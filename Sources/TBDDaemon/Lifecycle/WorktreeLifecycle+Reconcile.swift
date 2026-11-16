@@ -454,9 +454,9 @@ extension WorktreeLifecycle {
     /// Codex sessions and delete non-resumable rows.
     ///
     /// The two transports differ only in what "unreachable" is read off. A
-    /// tmux row is judged by its server's socket and the tmux processes that
-    /// name it (`LeftoverTmuxServerProbe`, a transition measure with a
-    /// replacement date), because TBD no longer drives tmux and a server an
+    /// tmux row is judged by its server's socket and this user's tmux
+    /// processes that name it (`LeftoverTmuxServerProbe`, a transition measure
+    /// with a replacement date), because TBD no longer drives tmux and a server an
     /// earlier build started can still be running; holder rows are judged by
     /// the holder inventory, via `holderRowVerdict(for:)`.
     ///

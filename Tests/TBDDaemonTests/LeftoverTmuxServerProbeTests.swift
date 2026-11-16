@@ -169,7 +169,7 @@ struct LeftoverTmuxServerProbeTests {
         let probe = LeftoverTmuxServerProbe.production(
             environment: ["TMUX_TMPDIR": "\(root)/configured"],
             fallbackRoot: "\(root)/fallback",
-            tmuxProcesses: { [] })
+            tmuxProcesses: { _ in [] })
 
         #expect(await probe.state("tbd-acme") == .running)
         #expect(await probe.state("tbd-acme-other") == .absent)
@@ -189,7 +189,7 @@ struct LeftoverTmuxServerProbeTests {
         let probe = LeftoverTmuxServerProbe.production(
             environment: ["TMUX_TMPDIR": "\(root)/missing"],
             fallbackRoot: "\(root)/fallback",
-            tmuxProcesses: { [] })
+            tmuxProcesses: { _ in [] })
 
         #expect(await probe.state("tbd-acme") == .running)
     }
@@ -209,7 +209,7 @@ struct LeftoverTmuxServerProbeTests {
         let probe = LeftoverTmuxServerProbe.production(
             environment: ["TMUX_TMPDIR": "\(root)/configured"],
             fallbackRoot: "\(root)/fallback",
-            tmuxProcesses: { [] })
+            tmuxProcesses: { _ in [] })
 
         #expect(await probe.state("tbd-acme") == .running)
     }
@@ -226,7 +226,7 @@ struct LeftoverTmuxServerProbeTests {
         let probe = LeftoverTmuxServerProbe.production(
             environment: ["TMUX_TMPDIR": "\(root)/configured"],
             fallbackRoot: "\(root)/fallback",
-            tmuxProcesses: { [] })
+            tmuxProcesses: { _ in [] })
 
         #expect(await probe.state("tbd-acme") == .absent)
     }
@@ -273,10 +273,14 @@ struct LeftoverTmuxServerProbeTests {
 
     // MARK: - The process table
 
-    /// A tmux process with this command line after `argv[0]`.
+    /// A tmux process of this user with this command line after `argv[0]`.
     private static func tmux(_ arguments: String...) -> LeftoverTmuxProcess {
-        LeftoverTmuxProcess(pid: 4242, arguments: ["/opt/acme/bin/tmux"] + arguments)
+        LeftoverTmuxProcess(
+            pid: 4242, owner: getuid(), arguments: ["/opt/acme/bin/tmux"] + arguments)
     }
+
+    /// A user id that is not this one.
+    private static var anotherUser: uid_t { getuid() &+ 1 }
 
     /// The production probe with no candidate socket present — this daemon has
     /// no `TMUX_TMPDIR`, and the fallback root is an empty scratch directory —
@@ -288,7 +292,10 @@ struct LeftoverTmuxServerProbeTests {
         return LeftoverTmuxServerProbe.production(
             environment: [:],
             fallbackRoot: "\(root)/fallback",
-            tmuxProcesses: { processes })
+            tmuxProcesses: { uid in
+                #expect(uid == getuid(), "the lister was handed another user's id")
+                return processes
+            })
     }
 
     /// The case the process signal exists for: the server's socket is under a
@@ -325,11 +332,57 @@ struct LeftoverTmuxServerProbeTests {
         defer { cleanup() }
         let probe = try probeWithEverySocketAbsent(root: root, processes: [
             Self.tmux("-L", "tbd-other"),
-            LeftoverTmuxProcess(pid: 4243, arguments: nil),
+            LeftoverTmuxProcess(pid: 4243, owner: getuid(), arguments: nil),
         ])
 
         #expect(await probe.state("tbd-acme") == .running)
         #expect(await probe.state("tbd-other") == .running)
+    }
+
+    /// The case the owner exists for: on a Mac with several users, another
+    /// user's tmux has a readable path and an unreadable command line. Its
+    /// sockets are under its own `tmux-<uid>`, so it cannot be this server.
+    @Test("every socket absent and another user's tmux process with an unreadable command line reads as gone")
+    func anotherUsersTmuxProcessReadsAsGone() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let probe = try probeWithEverySocketAbsent(root: root, processes: [
+            LeftoverTmuxProcess(pid: 4243, owner: Self.anotherUser, arguments: nil),
+        ])
+
+        #expect(await probe.state("tbd-acme") == .absent)
+    }
+
+    /// Another user's process is passed over even when its command line was
+    /// read and names the server: the name is that user's server, not this one.
+    @Test("another user's tmux process naming the server does not keep it running")
+    func anotherUsersTmuxProcessNamingTheServerIsPassedOver() {
+        let state = LeftoverTmuxServerProbe.processState(
+            server: "tbd-acme",
+            processes: [LeftoverTmuxProcess(
+                pid: 4243, owner: Self.anotherUser,
+                arguments: ["/opt/acme/bin/tmux", "-L", "tbd-acme"])],
+            uid: getuid())
+
+        #expect(state == .absent)
+    }
+
+    /// An owner that could not be read may be this user, so the process
+    /// counts as one of this user's.
+    @Test("a tmux process whose owner could not be read counts as this user's")
+    func aTmuxProcessWithAnUnreadableOwnerCounts() {
+        let unreadable = LeftoverTmuxProcess(pid: 4243, owner: nil, arguments: nil)
+        let naming = LeftoverTmuxProcess(
+            pid: 4244, owner: nil, arguments: ["/opt/acme/bin/tmux", "-L", "tbd-acme"])
+        let other = LeftoverTmuxProcess(
+            pid: 4245, owner: nil, arguments: ["/opt/acme/bin/tmux", "-L", "tbd-other"])
+
+        #expect(LeftoverTmuxServerProbe.processState(
+            server: "tbd-acme", processes: [unreadable], uid: getuid()) == .running)
+        #expect(LeftoverTmuxServerProbe.processState(
+            server: "tbd-acme", processes: [naming], uid: getuid()) == .running)
+        #expect(LeftoverTmuxServerProbe.processState(
+            server: "tbd-acme", processes: [other], uid: getuid()) == .absent)
     }
 
     @Test("every socket absent and no tmux process reads as gone")
@@ -364,6 +417,7 @@ struct LeftoverTmuxServerProbeTests {
         let state = await LeftoverTmuxServerProbe.state(
             server: "tbd-acme",
             socketPaths: ["\(fallback)/tbd-acme"],
+            uid: getuid(),
             tmuxProcesses: {
                 tableReads += 1
                 return []
@@ -371,6 +425,49 @@ struct LeftoverTmuxServerProbeTests {
 
         #expect(state == .running)
         #expect(tableReads == 0)
+    }
+
+    // MARK: - Which processes are tmux, and whose
+
+    /// The lister over a fake table: pid 10 is this user's tmux, 11 another
+    /// user's tmux, 12 a tmux whose owner cannot be read, 13 not tmux, and 14
+    /// a process whose path cannot be read. Only 10 and 12 have their command
+    /// lines asked for.
+    @Test("the lister reads the command line of every tmux process but another user's")
+    func theListerSkipsAnotherUsersCommandLine() {
+        let uid = getuid()
+        let paths: [pid_t: String] = [
+            10: "/opt/acme/bin/tmux", 11: "/usr/local/bin/tmux",
+            12: "/opt/acme/bin/tmux", 13: "/bin/zsh",
+        ]
+        let owners: [pid_t: uid_t] = [10: uid, 11: Self.anotherUser, 13: uid, 14: uid]
+        var asked: [pid_t] = []
+
+        let processes = LeftoverTmuxServerProbe.tmuxProcesses(
+            among: [10, 11, 12, 13, 14],
+            uid: uid,
+            executablePath: { paths[$0] },
+            owner: { owners[$0] },
+            procArgs: { pid in
+                asked.append(pid)
+                return Self.procArgs(argc: 3, path: "/opt/acme/bin/tmux",
+                                     argv: ["tmux", "-L", "tbd-\(pid)"], environment: [])
+            })
+
+        #expect(asked == [10, 12])
+        #expect(processes == [
+            LeftoverTmuxProcess(pid: 10, owner: uid, arguments: ["tmux", "-L", "tbd-10"]),
+            LeftoverTmuxProcess(pid: 11, owner: Self.anotherUser, arguments: nil),
+            LeftoverTmuxProcess(pid: 12, owner: nil, arguments: ["tmux", "-L", "tbd-12"]),
+        ])
+    }
+
+    /// The real kernel call, against this process: the owner it reads is the
+    /// one `getuid()` reports.
+    @Test("the real user id read for this process is getuid()")
+    func realUserIDOfThisProcess() {
+        #expect(LeftoverTmuxServerProbe.realUserID(of: getpid()) == getuid())
+        #expect(LeftoverTmuxServerProbe.realUserID(of: 0) == nil)
     }
 
     // MARK: - Which command lines name the server

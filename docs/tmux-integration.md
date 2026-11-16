@@ -10,8 +10,8 @@ and does not drive tmux: it cannot show a tmux session, send to one or park
 one, and it ends one only by killing its window when the row is torn down. A
 row still recorded as `tmux` is either parked — its wake refuses and names
 `tbd terminal migrate`, which moves it to the holder — or live. A live tmux
-row is judged by its tmux server's socket and by the tmux processes that name
-the server: once the server is gone the row is parked with its session kept (a
+row is judged by its tmux server's socket and by this user's tmux processes
+that name the server: once the server is gone the row is parked with its session kept (a
 row with nothing to resume is removed), and while it may still be running the
 app shows a notice in place of the terminal with the command that ends it. The current rule is in
 [`specs/2026-10-11-holder-transport-migration-design.md`](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update),
