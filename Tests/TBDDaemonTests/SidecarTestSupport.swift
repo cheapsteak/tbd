@@ -2,23 +2,22 @@ import Foundation
 import TestSupport
 import TBDShared
 
-/// Thread-safe collector for `onInput` callbacks, which fire on the receive
-/// thread. Tests poll `count` until the expected frames land.
-final class SidecarInputCollector: @unchecked Sendable {
+/// Thread-safe event counter for callbacks that fire off the test's task —
+/// a receive thread, a test hook, a task's `defer`. Tests poll `count` until
+/// the expected events land.
+final class SidecarEventCounter: @unchecked Sendable {
     private let lock = NSLock()
-    private var items: [(header: SidecarInputHeader, bytes: Data)] = []
+    private var events = 0
 
-    func record(_ header: SidecarInputHeader, _ bytes: Data) {
-        lock.lock(); items.append((header, bytes)); lock.unlock()
+    func record() {
+        lock.lock(); events += 1; lock.unlock()
     }
 
-    var count: Int { lock.lock(); defer { lock.unlock() }; return items.count }
-    var all: [(header: SidecarInputHeader, bytes: Data)] { lock.lock(); defer { lock.unlock() }; return items }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return events }
 }
 
-/// Thread-safe ordered recorder of `kind:pane` tags across the two sidecar
-/// sinks (`onInput`/`onPaste`), which fire on one receive thread. Lets a test
-/// assert wire ordering ACROSS both callbacks.
+/// Thread-safe ordered recorder of `kind:pane` tags from sidecar sinks, which
+/// fire on one receive thread. Lets a test assert wire ordering.
 final class TaggedFrameSequence: @unchecked Sendable {
     private let lock = NSLock()
     private var tags: [String] = []
