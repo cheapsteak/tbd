@@ -1,7 +1,8 @@
 # tmux control mode integration (v2 design)
 
+Status: **retired.** TBD's tmux control mode is retired: its implementation has been removed, and this document is kept as the design record.
+
 **Date:** 2026-05-17
-**Status:** Design complete. Architecture (A-lite + FD vending), scrollback (α replay + server-side `history-limit`), pipe-deadlock ordering (vend-and-ack handshake), RPC↔pipe ordering (dissolved by 1-pane-per-window), flow control (Policy B: EAGAIN-driven pause + aggressive auto-pause for non-visible panes), crash recovery (tmux for liveness, SQLite for metadata; mode-specific reconnect flows), input path (bytes-blob RPC, threshold paste, dedicated keystroke channel), notification signals (Stop hook stays primary; `%output` activity tracker as thin UI affordance; auto-suspend removed as a separate refactor), and `%layout-change` policy (extra tmux panes treated as second-class; original-pane death marks the window dead) are all resolved. Pane lifecycle FSM is the last item — captured below; mostly falls out of the other decisions.
 **Supersedes (in part):** [issue #1](https://github.com/cheapsteak/tbd/issues/1)
 **Reviewed by:** [companion review file](./2026-05-17-tmux-control-mode-design-review.md) (codex) + three in-session subagent reviews (iTerm2 verifier, terminal-ecosystem lens, SwiftTerm API surveyor). Findings folded back in. Replay-mechanism design verified by direct experiment against tmux 3.6a.
 
