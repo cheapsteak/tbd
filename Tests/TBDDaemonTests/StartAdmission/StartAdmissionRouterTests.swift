@@ -496,7 +496,7 @@ struct StartAdmissionRouterTests {
                 try await db.terminals.setHibernated(
                     id: terminal.id, sessionID: terminal.claudeSessionID ?? "session-1",
                     reason: .recovery)
-                return try await db.terminals.get(id: terminal.id)
+                return .parked(try await db.terminals.get(id: terminal.id))
             },
             wake: { _ in .ok(sessionIncarnationID: nil) },
             moveRunningShell: { _ in .moved })

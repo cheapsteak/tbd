@@ -212,7 +212,7 @@ struct ReconcileLeftoverTmuxTests {
 
     // MARK: - The shared park
 
-    @Test("parkLeftoverTmuxRow parks a live resumable tmux row and returns it")
+    @Test("parkLeftoverTmuxRow parks a live resumable tmux row and reports it parked")
     func parkLeftoverParksALiveResumableRow() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -223,7 +223,11 @@ struct ReconcileLeftoverTmuxTests {
         let rows = try await seedTerminals(db: db, worktree: main)
         let claudeBefore = try #require(try await db.terminals.get(id: rows.claude.id))
 
-        let parked = try #require(try await lifecycle.parkLeftoverTmuxRow(claudeBefore))
+        guard case .parked(let row) = try await lifecycle.parkLeftoverTmuxRow(claudeBefore) else {
+            Issue.record("the row was not parked")
+            return
+        }
+        let parked = try #require(row)
 
         #expect(parked.id == rows.claude.id)
         #expect(parked.isParked)
@@ -234,8 +238,9 @@ struct ReconcileLeftoverTmuxTests {
         #expect(try await db.terminals.get(id: rows.claude.id) == parked)
     }
 
-    /// Nil, and the row untouched, for every row the park must not take: a
-    /// holder row, a row already parked, and a row with nothing to resume.
+    /// Left alone, and the row untouched, for every row the park must not
+    /// take: a holder row, a row already parked, and a row with nothing to
+    /// resume.
     @Test("parkLeftoverTmuxRow refuses a holder row, a parked row and a row with nothing to resume")
     func parkLeftoverRefusesOtherRows() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
@@ -257,11 +262,11 @@ struct ReconcileLeftoverTmuxTests {
         let parkedBefore = try #require(try await db.terminals.get(id: alreadyParked.id))
         let shellBefore = try #require(try await db.terminals.get(id: rows.shell.id))
 
-        #expect(try await lifecycle.parkLeftoverTmuxRow(holderBefore) == nil)
+        #expect(try await lifecycle.parkLeftoverTmuxRow(holderBefore) == .leftAlone)
         #expect(try await db.terminals.get(id: holder.id) == holderBefore)
-        #expect(try await lifecycle.parkLeftoverTmuxRow(parkedBefore) == nil)
+        #expect(try await lifecycle.parkLeftoverTmuxRow(parkedBefore) == .leftAlone)
         #expect(try await db.terminals.get(id: alreadyParked.id) == parkedBefore)
-        #expect(try await lifecycle.parkLeftoverTmuxRow(shellBefore) == nil)
+        #expect(try await lifecycle.parkLeftoverTmuxRow(shellBefore) == .leftAlone)
         #expect(try await db.terminals.get(id: rows.shell.id) == shellBefore)
     }
 
@@ -281,8 +286,7 @@ struct ReconcileLeftoverTmuxTests {
         try await db.terminals.setHibernated(id: rows.claude.id, sessionID: "sess-tmux")
         let changed = try #require(try await db.terminals.get(id: rows.claude.id))
 
-        #expect(try await lifecycle.parkLeftoverTmuxRow(asRead) == nil)
-        #expect(try await lifecycle.parkLeftoverTmuxRowReportingOutcome(asRead) == .leftAlone)
+        #expect(try await lifecycle.parkLeftoverTmuxRow(asRead) == .leftAlone)
         #expect(try await db.terminals.get(id: rows.claude.id) == changed)
     }
 
@@ -300,8 +304,7 @@ struct ReconcileLeftoverTmuxTests {
         let asRead = try #require(try await db.terminals.get(id: rows.claude.id))
         try await db.terminals.delete(id: rows.claude.id)
 
-        #expect(try await lifecycle.parkLeftoverTmuxRowReportingOutcome(asRead) == .closed)
-        #expect(try await lifecycle.parkLeftoverTmuxRow(asRead) == nil)
+        #expect(try await lifecycle.parkLeftoverTmuxRow(asRead) == .closed)
         #expect(try await db.terminals.get(id: rows.claude.id) == nil)
     }
 
@@ -316,7 +319,7 @@ struct ReconcileLeftoverTmuxTests {
         let rows = try await seedTerminals(db: db, worktree: main)
         let asRead = try #require(try await db.terminals.get(id: rows.claude.id))
 
-        let outcome = try await lifecycle.parkLeftoverTmuxRowReportingOutcome(asRead)
+        let outcome = try await lifecycle.parkLeftoverTmuxRow(asRead)
 
         let parked = try #require(try await db.terminals.get(id: rows.claude.id))
         #expect(parked.isParked)

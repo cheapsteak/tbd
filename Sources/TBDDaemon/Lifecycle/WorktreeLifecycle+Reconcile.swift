@@ -684,7 +684,7 @@ extension WorktreeLifecycle {
         }
         let outcome: LeftoverTmuxParkOutcome
         do {
-            outcome = try await parkLeftoverTmuxRowReportingOutcome(terminal)
+            outcome = try await parkLeftoverTmuxRow(terminal)
         } catch {
             await actuationLog.appendOutcome(
                 confirms: actuationID, result: .transportFailed, error: "\(error)")

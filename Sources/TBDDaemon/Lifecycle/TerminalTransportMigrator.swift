@@ -104,9 +104,9 @@ actor TerminalTransportMigrator {
         /// name one. `WorktreeLifecycle.leftoverTmuxServerSighting(for:)`.
         let tmuxServerSighting: @Sendable (Terminal) async -> LeftoverTmuxServerSighting?
         /// Park a live tmux row whose server the probe found gone, keeping its
-        /// session identity, and return the parked row; nil when the row
-        /// changed first. `WorktreeLifecycle.parkLeftoverTmuxRow(_:)`.
-        let parkLeftover: @Sendable (Terminal) async throws -> Terminal?
+        /// session identity, and say what happened.
+        /// `WorktreeLifecycle.parkLeftoverTmuxRow(_:)`.
+        let parkLeftover: @Sendable (Terminal) async throws -> LeftoverTmuxParkOutcome
         /// The ordinary wake. Everything above its single transport branch is
         /// already transport-independent — profile, environment, settings
         /// overlay, trust seed, transcript sync and the `claude --resume`
@@ -293,10 +293,16 @@ actor TerminalTransportMigrator {
         }
         let parked: Terminal
         do {
-            guard let row = try await operations.parkLeftover(terminal) else {
+            switch try await operations.parkLeftover(terminal) {
+            case .parked(let row?):
+                parked = row
+            case .parked(nil), .closed:
+                // Closed before or during the park, or parked and then gone
+                // before it could be read back.
+                return .skipped(reason: Self.notFoundSkip)
+            case .leftAlone, .superseded:
                 return .skipped(reason: Self.raceSkip)
             }
-            parked = row
         } catch {
             let detail = "\(error)"
             logger.error("transport migration: could not park terminal \(terminalID, privacy: .public) whose tmux server is gone: \(detail, privacy: .public)")

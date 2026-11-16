@@ -58,8 +58,12 @@ struct TerminalTransportMigratorTests {
 
     /// A park the recording wiring answers itself instead of running.
     enum StagedPark: Sendable {
-        /// The row changed before the park: `parkLeftover` returns nil.
+        /// The row changed before the park: `parkLeftover` reports it left
+        /// alone.
         case changedFirst
+        /// The tab was closed before the park: `parkLeftover` reports it
+        /// closed.
+        case closedFirst
         /// The park's write threw.
         case fails
     }
@@ -137,11 +141,14 @@ struct TerminalTransportMigratorTests {
                     parkLeftover: { terminal in
                         await calls.record(.park(terminal.id))
                         switch parkOverride[terminal.id] {
-                        case .changedFirst: return nil
+                        case .changedFirst: return .leftAlone
+                        case .closedFirst: return .closed
                         case .fails: throw StagedParkError()
                         case nil: break
                         }
-                        let parked = try await lifecycle.parkLeftoverTmuxRow(terminal)
+                        let outcome = try await lifecycle.parkLeftoverTmuxRow(terminal)
+                        let parked: Terminal?
+                        if case .parked(let row) = outcome { parked = row } else { parked = nil }
                         if parkAlsoUnparks, parked != nil {
                             // A focus-wake landing in the gap between the park
                             // and the rewrite, which is the race the
@@ -151,7 +158,7 @@ struct TerminalTransportMigratorTests {
                         if parkAlsoDeletesTheRow, parked != nil {
                             try? await database.terminals.delete(id: terminal.id)
                         }
-                        return parked
+                        return outcome
                     },
                     wake: { id in
                         let transport = try? await database.terminals.get(id: id)?.transport
@@ -714,6 +721,21 @@ struct TerminalTransportMigratorTests {
 
     /// A park whose write failed is a refusal carrying the failure, not a
     /// skip: nothing about the person's state has to change.
+    /// A tab closed before the park could take it is reported as not found,
+    /// not as a session that changed. Nothing is woken.
+    @Test("a park that finds the tab closed is the not-found skip, with no wake")
+    func aParkThatFindsTheTabClosedIsTheNotFoundSkip() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture)
+
+        let outcome = await fixture.recordingMigrator(parkOverride: [row.id: .closedFirst])
+            .migrate(terminalID: row.id)
+
+        #expect(outcome == .skipped(reason: TerminalTransportMigrator.notFoundSkip))
+        #expect(await fixture.calls == [.sighting(row.id), .park(row.id)])
+    }
+
     @Test("a park whose write fails is refused with its failure")
     func aParkWhoseWriteFailsIsRefused() async throws {
         let fixture = try await Self.makeFixture()

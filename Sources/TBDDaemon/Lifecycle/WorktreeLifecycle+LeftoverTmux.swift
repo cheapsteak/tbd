@@ -30,17 +30,6 @@ extension WorktreeLifecycle {
             server: server, state: await leftoverTmuxProbe.state(server))
     }
 
-    /// Park a live tmux row whose server the probe found gone, and return the
-    /// parked row, or nil when it was not parked for any reason
-    /// `parkLeftoverTmuxRowReportingOutcome` reports. For a caller that only
-    /// needs to know whether the row is parked now.
-    func parkLeftoverTmuxRow(_ terminal: Terminal) async throws -> Terminal? {
-        if case .parked(let row) = try await parkLeftoverTmuxRowReportingOutcome(terminal) {
-            return row
-        }
-        return nil
-    }
-
     /// Park a live tmux row whose server the probe found gone, keeping the
     /// identity a wake resumes from — the Claude session id and transcript, or
     /// the Codex thread id and launch options — and say what happened.
@@ -53,10 +42,10 @@ extension WorktreeLifecycle {
     ///
     /// A row closed before either half is `.closed`, not an error: a tab
     /// closed while the probe ran is an ordinary race, and the park has
-    /// nothing left to keep. Any other failure is thrown.
-    func parkLeftoverTmuxRowReportingOutcome(
-        _ terminal: Terminal
-    ) async throws -> LeftoverTmuxParkOutcome {
+    /// nothing left to keep. When a half fails, the row is read again to tell
+    /// a close or a wake from a real failure; a failure is thrown as the half
+    /// raised it, also when that second read fails.
+    func parkLeftoverTmuxRow(_ terminal: Terminal) async throws -> LeftoverTmuxParkOutcome {
         guard terminal.transport == .tmux, !terminal.isParked,
               terminal.recoveryResumePlan != nil else {
             return .leftAlone
@@ -68,8 +57,10 @@ extension WorktreeLifecycle {
                 expectedState: TerminalHibernationSnapshot(terminal: terminal),
                 reason: .recovery,
                 at: now())
-        } catch {
-            guard try await db.terminals.get(id: terminal.id) == nil else { throw error }
+        } catch let parkError {
+            guard try await rowAfterFailedHalf(terminal.id, failure: parkError) == nil else {
+                throw parkError
+            }
             logger.info("leftover tmux park: terminal \(terminal.id, privacy: .public) was closed before it could be parked")
             return .closed
         }
@@ -81,10 +72,10 @@ extension WorktreeLifecycle {
         do {
             fenced = try await db.terminals.finalizeHibernatedShellRespawn(
                 id: terminal.id, expectedIncarnation: incarnation, at: now())
-        } catch {
+        } catch let fenceError {
             // Closed between the halves, or woken between them, which leaves
             // a row that is no longer parked for the fence to finish.
-            guard let current = try await db.terminals.get(id: terminal.id) else {
+            guard let current = try await rowAfterFailedHalf(terminal.id, failure: fenceError) else {
                 logger.info("leftover tmux park: terminal \(terminal.id, privacy: .public) was closed while it was being parked")
                 return .closed
             }
@@ -92,7 +83,7 @@ extension WorktreeLifecycle {
                 logger.info("leftover tmux park: terminal \(terminal.id, privacy: .public) was parked and then woken before the park finished; left as the wake made it")
                 return .superseded
             }
-            throw error
+            throw fenceError
         }
         guard fenced != nil else {
             logger.info("leftover tmux park: terminal \(terminal.id, privacy: .public) was parked and then changed before the park finished; left as that change made it")
@@ -102,18 +93,32 @@ extension WorktreeLifecycle {
         await subscriptions?.broadcastPendingPrompts(
             terminalID: terminal.id, from: pendingQuestions)
         logger.notice("leftover tmux park: parked terminal \(terminal.id, privacy: .public) — its tmux server is gone; session preserved, it wakes after `tbd terminal migrate`")
-        let parked = try await db.terminals.get(id: terminal.id)
+        // The park is written. A read back that fails must not report it as
+        // failed, so it reads as a row that could not be shown.
+        let parked: Terminal? = try? await db.terminals.get(id: terminal.id)
         return .parked(parked)
+    }
+
+    /// The row as it reads after one of the park's halves threw `failure`, nil
+    /// when it is gone. A read that itself fails throws `failure`, not its own
+    /// error: the half's failure is the one the caller has to see.
+    private func rowAfterFailedHalf(_ id: UUID, failure: any Error) async throws -> Terminal? {
+        do {
+            return try await db.terminals.get(id: id)
+        } catch {
+            throw failure
+        }
     }
 }
 
-/// What `WorktreeLifecycle.parkLeftoverTmuxRowReportingOutcome` did with a
-/// row. The four are kept apart because the actuation record says different
-/// things about each: only `leftAlone` declined the act, and `superseded` is
-/// a park that was written.
+/// What `WorktreeLifecycle.parkLeftoverTmuxRow` did with a row. The four are
+/// kept apart because each caller reports them differently: only `leftAlone`
+/// declined the act, `closed` found nothing to park, and `superseded` is a
+/// park that was written.
 enum LeftoverTmuxParkOutcome: Sendable, Equatable {
     /// Parked, with the ended agent's process token fenced. Carries the row as
-    /// it reads now, nil when it was closed in the moment after.
+    /// it reads now, nil when it was closed in the moment after or could not
+    /// be read back.
     case parked(Terminal?)
     /// Nothing was written: the row is not a live tmux row with a session to
     /// resume, or it changed after the caller read it.

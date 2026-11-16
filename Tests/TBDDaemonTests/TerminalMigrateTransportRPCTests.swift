@@ -69,7 +69,7 @@ struct TerminalMigrateTransportRPCTests {
             parkLeftover: { terminal in
                 try await db.terminals.setHibernated(
                     id: terminal.id, sessionID: "acme-session", reason: .recovery)
-                return try await db.terminals.get(id: terminal.id)
+                return .parked(try await db.terminals.get(id: terminal.id))
             },
             wake: { _ in wakeResult },
             // The move's own composition is proved in

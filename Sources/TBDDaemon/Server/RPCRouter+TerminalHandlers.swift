@@ -1475,7 +1475,7 @@ extension RPCRouter {
             .recreateWindowRepark, actor: actor,
             target: .local(worktree: terminal.worktreeID, terminal: terminal.id))
         let outcome = try await actuating(reparkID) {
-            try await lifecycle.parkLeftoverTmuxRowReportingOutcome(terminal)
+            try await lifecycle.parkLeftoverTmuxRow(terminal)
         }
         switch outcome {
         case .parked(let parked):
