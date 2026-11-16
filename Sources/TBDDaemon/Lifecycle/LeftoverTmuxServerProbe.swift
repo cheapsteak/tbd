@@ -338,25 +338,41 @@ struct LeftoverTmuxServerProbe: Sendable {
         String(bytes: name.utf8.prefix(Int(MAXCOMLEN)), encoding: .utf8)
     }
 
+    /// What the kernel pads the executable path in a `KERN_PROCARGS2` buffer
+    /// to: the size of a pointer, 8 bytes for every process on a Mac TBD runs
+    /// on.
+    static let procArgsPathAlignment = 8
+
     /// The argv in a `KERN_PROCARGS2` buffer, `argv[0]` included, or nil when
-    /// the buffer is too short, claims no arguments, or ends before argv does.
+    /// the buffer is too short, claims no arguments, is not laid out as below,
+    /// or ends before argv does.
     ///
-    /// The buffer is an `Int32` argc, the executable path and its terminator,
-    /// NUL padding, then `argc` NUL-terminated arguments, then the environment.
+    /// The buffer is an `Int32` argc, then the executable path and its
+    /// terminator, padded with NULs to `procArgsPathAlignment` bytes, then
+    /// `argc` NUL-terminated arguments, then the environment. argv starts at
+    /// the padded boundary, so an empty `argv[0]` is read as one: skipping
+    /// every NUL after the path instead would take it for padding and shift
+    /// every argument by one. A buffer whose padding is not all NULs is not
+    /// the layout this reads, and is unreadable. The layout is the kernel's:
+    /// exec pads the saved path to a pointer's size when it lays out a
+    /// process's strings. The tests that start a process with an empty
+    /// `argv[0]`, under paths that need each amount of padding, pin it against
+    /// the real kernel.
+    ///
     /// The environment holds secrets and is never read: the walk stops after
-    /// the last argument. The padding cannot be told from an empty `argv[0]`,
-    /// the same limit `ProcessEnvironmentReader.parse` has; tmux's `argv[0]` is
-    /// never empty. An argument that is not UTF-8 reads as empty: it cannot be
-    /// a server name TBD chose, so this can only miss a match it could never
-    /// have made.
+    /// the last argument. An argument that is not UTF-8 reads as empty: it
+    /// cannot be a server name TBD chose, so this can only miss a match it
+    /// could never have made.
     static func arguments(inProcArgs raw: [UInt8]) -> [String]? {
         guard raw.count >= 4 else { return nil }
         let argc = raw.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
         guard argc > 0 else { return nil }
-        var position = 4
-        guard let pathEnd = raw[position...].firstIndex(of: 0) else { return nil }
-        position = pathEnd
-        while position < raw.count, raw[position] == 0 { position += 1 }
+        guard let pathEnd = raw[4...].firstIndex(of: 0) else { return nil }
+        let alignment = procArgsPathAlignment
+        let paddedPathLength = (pathEnd + 1 - 4 + alignment - 1) / alignment * alignment
+        var position = 4 + paddedPathLength
+        guard position <= raw.count,
+              raw[pathEnd..<position].allSatisfy({ $0 == 0 }) else { return nil }
         // No capacity is reserved from argc: a malformed buffer can claim any
         // count, and the walk below ends at the buffer's end whatever it says.
         var arguments: [String] = []

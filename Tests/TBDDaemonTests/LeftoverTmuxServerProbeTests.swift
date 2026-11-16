@@ -608,11 +608,13 @@ struct LeftoverTmuxServerProbeTests {
 
     // MARK: - Reading argv out of KERN_PROCARGS2
 
-    /// A `KERN_PROCARGS2` buffer: argc, the executable path, padding, argv,
+    /// A `KERN_PROCARGS2` buffer laid out as the kernel lays it out: argc, the
+    /// executable path and its terminator padded with NULs to 8 bytes, argv,
     /// then the environment.
     private static func procArgs(argc: Int32, path: String, argv: [String], environment: [String]) -> [UInt8] {
         var raw = withUnsafeBytes(of: argc) { Array($0) }
-        raw += Array(path.utf8) + [0, 0, 0, 0]
+        raw += Array(path.utf8) + [0]
+        while (raw.count - 4) % 8 != 0 { raw.append(0) }
         for entry in argv + environment {
             raw += Array(entry.utf8) + [0]
         }
@@ -639,5 +641,51 @@ struct LeftoverTmuxServerProbeTests {
         #expect(LeftoverTmuxServerProbe.arguments(inProcArgs: [3, 0]) == nil)
         #expect(LeftoverTmuxServerProbe.arguments(inProcArgs: Self.procArgs(
             argc: 0, path: "/opt/acme/bin/tmux", argv: [], environment: [])) == nil)
+    }
+
+    /// An empty `argv[0]` is an argument, not padding, for paths that need no
+    /// padding (15 bytes and the terminator), one byte of it (14), and seven
+    /// (16).
+    @Test("an empty argv[0] is read in place, so -L stays where it was",
+          arguments: ["/opt/acme/bin/t", "/opt/acme/tmux", "/opt/acme/bin/tm"])
+    func anEmptyArgvZeroIsReadInPlace(path: String) {
+        let raw = Self.procArgs(
+            argc: 3, path: path, argv: ["", "-L", "tbd-acme"],
+            environment: ["ACME_TOKEN=secret"])
+
+        let argv = LeftoverTmuxServerProbe.arguments(inProcArgs: raw)
+        #expect(argv == ["", "-L", "tbd-acme"])
+        #expect(LeftoverTmuxServerProbe.commandLine(argv ?? [], namesServer: "tbd-acme"))
+    }
+
+    /// A buffer whose bytes after the path are not NUL up to the padded
+    /// boundary is not the layout the kernel writes.
+    @Test("a KERN_PROCARGS2 buffer whose path is not padded is unreadable")
+    func anUnpaddedBufferIsUnreadable() {
+        var raw = withUnsafeBytes(of: Int32(2)) { Array($0) }
+        raw += Array("/bin/x".utf8) + [0]
+        raw += Array("tmux".utf8) + [0] + Array("-L".utf8) + [0]
+
+        #expect(LeftoverTmuxServerProbe.arguments(inProcArgs: raw) == nil)
+    }
+
+    /// The real kernel's layout: a process started with an empty `argv[0]`
+    /// under exec paths that need five bytes of padding (10 bytes), one (14),
+    /// none (15) and seven (16), and one started with an ordinary `argv[0]`,
+    /// each read back as started.
+    @Test("a real process's argv reads back as it was started, an empty argv[0] included",
+          arguments: [
+            ("/bin/sleep", ["", "30"]),
+            ("/bin/////sleep", ["", "30"]),
+            ("/bin//////sleep", ["", "30"]),
+            ("/bin///////sleep", ["", "30"]),
+            ("/bin/sleep", ["sleep", "30"]),
+          ])
+    func aRealProcesssArgvReadsBack(path: String, argv: [String]) throws {
+        let pid = try Self.spawnChild(path: path, argv: argv)
+        defer { Self.endChild(pid) }
+
+        let raw = try #require(ProcessEnvironmentReader.procArgs(pid: pid))
+        #expect(LeftoverTmuxServerProbe.arguments(inProcArgs: raw) == argv)
     }
 }

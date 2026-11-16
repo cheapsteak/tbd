@@ -371,8 +371,11 @@ never unlinks it, and nothing TBD runs creates one any more.
   path only when the command name does not settle it, and asks nothing of
   another user's process; against the real kernel, the table gives a started
   process's command name and real user id. The `-L` matcher finds the
-  separate, joined and clustered forms and nothing else, and the argv reader
-  stops before the environment.
+  separate, joined and clustered forms and nothing else. The argv reader
+  starts argv at the 8-byte boundary the kernel pads the executable path to,
+  so an empty `argv[0]` is read in place rather than taken for padding, and it
+  stops before the environment; a process started with an empty `argv[0]` under
+  paths that need each amount of padding reads back as started.
 - Reconcile parks a live resumable tmux row whose server is gone, keeping its
   session id, deletes a live shell row on such a server, leaves a row whose
   server may run live and untouched, never probes a parked row, and asks the
