@@ -113,8 +113,8 @@ struct PeerRegistryScan: Equatable, Sendable {
 /// The pure join keys, shared by the reader and the classifier.
 ///
 /// A caseless enum rather than statics on a type, so nothing has to reason
-/// about isolation to use them. The pid and path keys deliberately mirror the
-/// daemon's `RosterJoinKeys`: the two subsystems read the same registry, and a
+/// about isolation to use them. The pid key deliberately mirrors the daemon's
+/// `RosterJoinKeys`: the two subsystems read the same registry, and a
 /// listing that read it differently from the roster would describe a fleet the
 /// roster does not act on.
 enum PeerJoinKeys {

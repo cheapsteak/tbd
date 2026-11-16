@@ -28,9 +28,6 @@ public struct TBDSpawnedSession: Sendable, Equatable {
     /// The worktree's display name — the human-visible name in the sidebar,
     /// which is also the `--name` TBD spawned the session with.
     public let displayName: String
-    /// The worktree directory on this machine. Joined against the record's
-    /// `cwd`.
-    public let worktreePath: String
     /// The Claude session id TBD captured for this terminal through the
     /// `SessionStart` hook, when one was captured. Joined against the record's
     /// `sessionId`, the one join the roster admits on.
@@ -46,7 +43,6 @@ public struct TBDSpawnedSession: Sendable, Equatable {
         repoID: UUID,
         terminalID: UUID,
         displayName: String,
-        worktreePath: String,
         claudeSessionID: String?,
         permissionClass: ShadowPeerPermissionClass? = nil
     ) {
@@ -54,7 +50,6 @@ public struct TBDSpawnedSession: Sendable, Equatable {
         self.repoID = repoID
         self.terminalID = terminalID
         self.displayName = displayName
-        self.worktreePath = worktreePath
         self.claudeSessionID = claudeSessionID
         self.permissionClass = permissionClass
     }
@@ -107,7 +102,6 @@ public struct DatabaseLocalSessionDirectory: LocalSessionDirectory {
                     repoID: repoID,
                     terminalID: terminal.id,
                     displayName: worktree.displayName,
-                    worktreePath: worktree.localPath,
                     claudeSessionID: terminal.claudeSessionID,
                     permissionClass: Self.spawnedPermissionClass)
             }
@@ -992,14 +986,5 @@ enum RosterJoinKeys {
         let stem = String(filename.dropLast(".json".count))
         guard let value = pid_t(stem), String(value) == stem, value > 0 else { return nil }
         return value
-    }
-
-    /// Lexical path normalisation only — no symlink resolution, which would
-    /// stat the filesystem once per record per tick to answer a question both
-    /// sides of the comparison already agree on.
-    static func normalizedPath(_ path: String) -> String {
-        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
-        guard standardized.count > 1, standardized.hasSuffix("/") else { return standardized }
-        return String(standardized.dropLast())
     }
 }

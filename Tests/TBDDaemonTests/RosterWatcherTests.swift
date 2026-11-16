@@ -57,7 +57,6 @@ private let fixtureTerminalID = UUID(uuidString: "5A1B2C3D-7E8F-4A0B-9C1D-2E3F4A
 private func spawnedSession(
     repoID: UUID = repoA,
     displayName: String = "useful-swallow",
-    worktreePath: String = "/tmp/tbd-roster-fixture/useful-swallow",
     claudeSessionID: String? = "4E12DD65-92B8-4D8E-9920-214C6553FC63",
     terminalID: UUID = fixtureTerminalID,
     permissionClass: ShadowPeerPermissionClass? = .bypass
@@ -67,7 +66,6 @@ private func spawnedSession(
         repoID: repoID,
         terminalID: terminalID,
         displayName: displayName,
-        worktreePath: worktreePath,
         claudeSessionID: claudeSessionID,
         permissionClass: permissionClass)
 }
@@ -417,7 +415,6 @@ struct RosterWatcherScopingTests {
                 spawnedSession(
                     repoID: repoB,
                     displayName: "other-repo-worktree",
-                    worktreePath: "/tmp/tbd-roster-fixture/other-repo-worktree",
                     claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000",
                     terminalID: UUID()),
             ])
@@ -992,7 +989,6 @@ struct RosterWatcherReconnectTests {
             // binding the link's own state has never heard of.
             let second = spawnedSession(
                 displayName: "zesty-otter",
-                worktreePath: "/tmp/tbd-roster-fixture/zesty-otter",
                 claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000",
                 terminalID: UUID())
             try write(registryRecord(), pid: 4242, in: directory)
@@ -1011,7 +1007,7 @@ struct RosterWatcherReconnectTests {
             try write(
                 registryRecord(
                     sessionID: second.claudeSessionID,
-                    cwd: second.worktreePath,
+                    cwd: "/tmp/tbd-roster-fixture/zesty-otter",
                     socket: "/tmp/cc-socks/4343.sock",
                     tmux: "main:@3542.%3542"),
                 pid: 4343, in: directory)
@@ -1042,12 +1038,10 @@ struct RosterWatcherReconnectTests {
         try await withRegistry { directory in
             let brisk = spawnedSession(
                 displayName: "brisk-otter",
-                worktreePath: "/tmp/tbd-roster-fixture/brisk-otter",
                 claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000",
                 terminalID: UUID())
             let cheerful = spawnedSession(
                 displayName: "cheerful-moth",
-                worktreePath: "/tmp/tbd-roster-fixture/cheerful-moth",
                 claudeSessionID: "CCCCCCCC-0000-0000-0000-000000000000",
                 terminalID: UUID())
             try write(registryRecord(), pid: 4242, in: directory)
@@ -1074,12 +1068,12 @@ struct RosterWatcherReconnectTests {
             // so `brisk-otter` is h2 and `cheerful-moth` is h3.
             try write(
                 registryRecord(
-                    sessionID: brisk.claudeSessionID, cwd: brisk.worktreePath,
+                    sessionID: brisk.claudeSessionID, cwd: "/tmp/tbd-roster-fixture/brisk-otter",
                     socket: "/tmp/cc-socks/4343.sock", tmux: "main:@3542.%3542"),
                 pid: 4343, in: directory)
             try write(
                 registryRecord(
-                    sessionID: cheerful.claudeSessionID, cwd: cheerful.worktreePath,
+                    sessionID: cheerful.claudeSessionID, cwd: "/tmp/tbd-roster-fixture/cheerful-moth",
                     socket: "/tmp/cc-socks/4444.sock", tmux: "main:@3543.%3543"),
                 pid: 4444, in: directory)
             await sendHook.arm {
@@ -1191,7 +1185,6 @@ struct DatabaseLocalSessionDirectoryTests {
         #expect(session.repoID == repo.id)
         #expect(session.terminalID == made.terminal.id)
         #expect(session.displayName == "useful-swallow")
-        #expect(session.worktreePath == made.worktree.localPath)
         #expect(session.claudeSessionID == "4E12DD65-92B8-4D8E-9920-214C6553FC63")
         // Every Claude terminal TBD spawns is launched with
         // `--dangerously-skip-permissions`, so the directory vouches `bypass`.
