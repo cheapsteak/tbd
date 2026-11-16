@@ -47,6 +47,8 @@ A row is selected when all of these hold:
 - `hibernateReason` is `recovery`.
 - `hibernatedAt` is at or after the moment this daemon process began its startup reconcile.
 - Its worktree's status is `active` or `main`.
+- It is on the pty holder. A row on tmux moves to the holder through `tbd terminal migrate`, not a
+  wake: its wake is refused with `terminalOnTmux`, so the pass would only count a failure for it.
 - `claudeResumeDecision` says it can resume.
 
 The time limit is what separates this restart from older ones. Without it, the 25 stale rows above
@@ -88,7 +90,7 @@ ends the pass the same way: `Daemon.stop()` cancels its task, and no further bat
 The pass calls `handleTerminalWake`, the handler behind the `terminal.wake` RPC, with the actor
 `.daemon(rail: ActuationRail.sessionRestore)`. So each wake gets what any wake gets: one actuation
 record, the start-admission check, the session-mod draft path, the row's state broadcast to the
-app, and the same outcome classification. No new spawn path exists, for tmux rows or holder rows.
+app, and the same outcome classification. No new spawn path exists.
 
 The pass omits `cols` and `rows`, so a session starts at its default size and resizes when a pane
 attaches. It omits `prompt`, so nothing is typed.
@@ -237,6 +239,7 @@ Selection, each with a row that must be left out:
 - A `recovery` row parked before the startup time.
 - A row parked with each of `manual`, `auto`, `merged` and `exited`.
 - A row in an `archived`, `creating` or `failed` worktree.
+- A row on tmux, which also goes uncounted.
 - A row that cannot resume.
 
 Pass behavior, on a test clock:
