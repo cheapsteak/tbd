@@ -356,6 +356,10 @@ func makeCoordinatorHarness() async throws -> QuietIngestHarness {
     // Isolated defaults: `UserDefaults.standard` on this unbundled executable is
     // the developer's real TBDApp.plist.
     let suite = TestDefaultsSuite("TBDAppTests.QuietIngest")
+    // Until the harness owns them, a throw below must still release the suite
+    // and the pty: the harness's `tearDown` is the only other place they go.
+    var handedToHarness = false
+    defer { if !handedToHarness { suite.tearDown() } }
     let defaults = suite.defaults
     let appState = AppState(userDefaults: defaults)
 
@@ -379,6 +383,7 @@ func makeCoordinatorHarness() async throws -> QuietIngestHarness {
     // process spawn children, and one that inherited the vended end would hold
     // the session open past the panel.
     let pty = try RawPTYPair()
+    defer { if !handedToHarness { pty.close() } }
     let vended = fcntl(pty.ptyFD, F_DUPFD_CLOEXEC, 0)
     try #require(vended >= 0, "could not duplicate the fixture pty (errno \(errno))")
 
@@ -407,6 +412,7 @@ func makeCoordinatorHarness() async throws -> QuietIngestHarness {
         terminalID: terminalID,
         defaultsSuite: suite
     )
+    handedToHarness = true
     // What the attach wrote, if anything, is not what any test is about.
     await harness.settle()
     harness.discardSentBytes()
