@@ -8,14 +8,14 @@ Three components, one SPM package. All daemon-managed paths live under `~/tbd/` 
 Long-running headless process. Owns all state and logic.
 - **SQLite** at `~/tbd/state.db` — worktree ledger, repo list, terminals, notes, tabs, model profiles (WAL mode, GRDB)
 - **Unix socket** at `~/tbd/sock` — the RPC interface
-- **Tmux manager** — one tmux server per repo (`tbd-<djb2-hash-of-repo-path>`), creates/destroys windows
+- **Tmux manager** — names each repo's tmux server (`tbd-<djb2-hash-of-repo-path>`) and kills a tmux row's window when the row is torn down; TBD opens no tmux window (see "Tmux Architecture")
 - **Git manager** — fetch, worktree add/remove/list, conflict check, headSHA, merge-base ancestry
 - **Hook resolver** — resolves and runs worktree lifecycle hooks per priority chain
 - **Worktree lifecycle** — orchestrates create/archive/revive/adopt/reconcile + conflict detection, parent/lineage resolution
 - **PR status manager** — polls GitHub for PR state (open/merged/closed, mergeable) per worktree, persists last-known status to the DB so icons survive restart
 - **Auto-archive-on-merge coordinator** — archives a worktree automatically once its PR merges, when armed per-worktree or via the global default
 - **SSH agent resolver** — finds live SSH agent socket, maintains `~/.ssh/tbd-agent.sock` symlink
-- **Hibernation coordinator** — parks Claude sessions, on tmux and on the pty holder, and wakes them with `claude --resume` on the pty holder; a session parked on tmux refuses to wake until `tbd terminal migrate` moves it. Parks come from "Hibernate now" (`terminal.hibernate`), from the idle sweep and park-on-merge (both off by default), and from the in-place profile swap and the transport migration; the session mod is a park's only guard for an unsent draft. A session parked by hand wakes only when asked; an automatic park also wakes when its worktree is focused
+- **Hibernation coordinator** — parks Claude sessions on the pty holder and wakes them with `claude --resume` there. It refuses to park a live tmux row, and a session parked on tmux refuses to wake until `tbd terminal migrate` moves it. Parks come from "Hibernate now" (`terminal.hibernate`), from the idle sweep and park-on-merge (both off by default), and from the in-place profile swap; the session mod is a park's only guard for an unsent draft. A session parked by hand wakes only when asked; an automatic park also wakes when its worktree is focused
 - **Model profile resolver** — picks the credential profile (oauth/apiKey/proxy/bedrock) for a spawned Claude session
 - **Claude usage poller** — polls Claude OAuth usage every 30 min, broadcasts to clients
 - **Session instrumentation writers** — `PluginDirWriter`, `ClaudeHookOverlay`, `SkillFileWriter`, `CodexHomeManager` (see "Session Instrumentation")
@@ -29,7 +29,7 @@ Connects to daemon on launch (starts it if not running). Stateless except for UI
 - **Tab system** — generic Tab model wrapping `PaneContent` (`.terminal`/`.webview`/`.codeViewer`/`.note`/`.liveTranscript`/`.history`); tabs are renameable, reorderable, and DB-persisted
 - **Pane types** — terminal, webview (WKWebView), code viewer (Highlightr), note (text editor), live transcript (Claude conversation as chat), history (past sessions)
 - **Transcript pane** — renders a Claude session's JSONL as a chat UI with per-tool cards (Read/Write/Edit/Bash/Grep/Glob/Agent/AskUserQuestion/...), context-usage badge, subagent expansion; retargets automatically when the session id rolls over
-- **Terminal rendering** — grouped tmux sessions + direct PTY attachment (NOT control mode); customizable font, colors, cursor; user-defined themes via `ThemeStore` + `UserTerminalTheme` (importable from Alacritty TOML format via `AlacrittyImporter`, watched for on-disk changes by `ThemeDirectoryWatcher`)
+- **Terminal rendering** — attaches to each session's pty holder; a live tmux row shows a notice instead of a terminal (see "Tmux Architecture"); customizable font, colors, cursor; user-defined themes via `ThemeStore` + `UserTerminalTheme` (importable from Alacritty TOML format via `AlacrittyImporter`, watched for on-disk changes by `ThemeDirectoryWatcher`)
 - **Pinned terminal dock** — vertical dock showing pinned terminals from worktrees not currently visible
 - **Jump menu** — Cmd-K palette that jumps to the worktree that just pinged
 - **Navigation history** — browser-style back/forward across recently selected worktrees
@@ -104,29 +104,19 @@ GRDB `DatabaseMigrator`, numbered sequentially. Never modify an existing migrati
 
 ## Tmux Architecture
 
-Every new session opens on the pty holder (`TerminalSpawnTransport.decide`); a daemon with no `TBDHolder` beside it refuses the spawn. This section covers the sessions that still run on tmux, which TBD serves — send, output, park, view — until `tbd terminal migrate` moves them. TBD opens no new tmux window for them: a parked tmux session refuses to wake, and an in-place account switch of a running one is refused. `terminal.recreateWindow` opens no window: it parks a tmux agent tab whose window has gone and whose session can be resumed, so a migration followed by a wake brings it back on the holder, and it refuses every other row.
+Every session opens on the pty holder (`TerminalSpawnTransport.decide`); a daemon with no `TBDHolder` beside it refuses the spawn. TBD does not drive tmux: it cannot show a tmux session, send to one or park one, and it ends one only by killing its window when the row is torn down. A row still recorded as `tmux` is one of two kinds:
 
-**Grouped sessions** (not control mode). Rationale in `docs/tmux-integration.md`.
+- **Parked** – its wake refuses and names `tbd terminal migrate`, which rewrites the row onto the holder; the next wake resumes it there.
+- **Live** – judged by its tmux server's socket (`LeftoverTmuxServerProbe`: one `AF_UNIX` connect, no tmux binary). Startup reconcile, the app's Check Again (`terminal.recreateWindow`) and `tbd terminal migrate` each probe; nothing probes on a timer. Once the server is gone the row is parked with its session kept (a row with nothing to resume is deleted), and a migrate goes on to wake it on the holder. While the server may still be running, the row stays live, the app shows `LeftoverTmuxSessionNotice` in place of a terminal with the `tmux -L <server> kill-server` command that ends it, and a migrate refuses with `terminalOnTmux`.
 
-```
-tmux server: tbd-<djb2-hash-of-repo-path>
-├── Session "main" (daemon-managed, persists across app restarts)
-│   ├── Window @1: claude code
-│   ├── Window @2: setup hook / shell
-│   └── ...
-└── Session "tbd-view-abc123" (grouped, created by app for viewing)
-```
+The probe is a transition measure, replaced by parking on sight on 2027-01-15. The rule and its rejected alternatives: `docs/specs/2026-10-11-holder-transport-migration-design.md`, "A live row whose tmux server outlived the update".
 
-- A tmux session's window lives in `main`; app creates grouped sessions per visible terminal panel
-- Each grouped session shares all windows but has independent current-window and PTY size
-- `main` persists when app closes; grouped sessions are ephemeral
-- Server name uses djb2 hash of repo path (deterministic, survives DB recreations)
+What TBD still does with tmux:
 
-### TmuxManager API highlights
-- `sendKeys` — literal text (tmux `-l`); `sendKey` — a key name like "Enter"
-- `capturePaneOutput` / `capturePaneWithAnsi` — plain or ANSI-escaped snapshot
-- `paneCurrentCommand` / `panePID` — used by `ClaudeStateDetector`
-- `windowExists` — reconcile check; `dryRun` mode for tests
+- Server names use the djb2 hash of the repo path (`TmuxManager.serverName`), deterministic and surviving DB recreation; the probe and the notice both name the server this way.
+- Tearing a tmux row down — closing its tab, archiving or forgetting its worktree, or reconcile's archive of a worktree gone from git — kills its window (`WorktreeLifecycle.captureThenKillWindow`, `tearDownWindow`).
+
+How TBD used to serve tmux sessions, and why it never used control mode: `docs/tmux-integration.md`, kept as the design record.
 
 ## Worktree Lifecycle
 
@@ -144,7 +134,7 @@ Split across files: base struct (`WorktreeLifecycle.swift`), `+Create`, `+Archiv
 Revive recreates a worktree from an archived branch. Adopt (`worktree.adopt`) registers an existing on-disk git worktree into TBD (idempotent).
 
 ### Conflict Detection & Reconcile
-Per-repo merge-tree conflict scan against the default branch updates `hasConflicts`. On startup, `reconcile` compares `git worktree list` against the DB, marks missing worktrees archived, logs (but does not adopt) git worktrees under TBD's worktree directories that have no row (`tbd worktree adopt <path>` opts one in), fixes stale tmux server names, and prunes dead terminal records. `breakCyclicParents` runs once at startup to repair any parent-pointer cycles.
+Per-repo merge-tree conflict scan against the default branch updates `hasConflicts`. On startup, `reconcile` compares `git worktree list` against the DB, marks missing worktrees archived, logs (but does not adopt) git worktrees under TBD's worktree directories that have no row (`tbd worktree adopt <path>` opts one in), prunes dead terminal records, and parks a live tmux row once its tmux server is gone (see "Tmux Architecture"). `breakCyclicParents` runs once at startup to repair any parent-pointer cycles.
 
 ## System Prompt Layers
 
@@ -174,7 +164,6 @@ JSON-RPC style over the Unix socket (newline-delimited). Method families (see `S
 - **Model profile**: `modelProfile.list`/`.add`/`.delete`/`.rename`/`.updateEndpoint`/`.updateBedrock`/`.setGlobalDefault`/`.setPrimaryAgentPreference`/`.setRepoOverride`/`.fetchUsage`/`.healthCheck`
 - **Claude preferences**: `claude.setSpawnPreferences` — stores Claude spawn-env overrides (`ClaudeSpawnPreferences`) into the config row; handled by `RPCRouter+ClaudePreferencesHandlers.swift`
 - **Env overrides**: `config.setEnvOverrides`, `repo.setEnvOverrides`, `modelProfile.setEnvOverrides` — persist free-form `[String: String]` env vars per scope; `config.get` reads the config row; `config.setAutoArchiveOnMergeDefault` sets the global auto-archive default. Handled by `RPCRouter+EnvOverridesHandlers.swift`
-- **Appearance**: `appearance.updateColorFgBg` — fans out `COLORFGBG` env update to all active tmux servers; handled by `RPCRouter+AppearanceHandlers.swift`
 - **Notification**: `notify`, `notifications.list`, `notifications.markRead`
 - **PR**: `pr.list`, `pr.refresh`
 - **Note**: `note.create`/`.get`/`.update`/`.delete`/`.list`

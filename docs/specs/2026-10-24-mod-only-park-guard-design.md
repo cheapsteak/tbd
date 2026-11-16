@@ -29,7 +29,7 @@ A park's outcome depends on two things: how the session was spawned, read from i
 
 Codex sessions are never parked, as before.
 
-Every park ends the same way. On tmux, `TmuxSignalEnding` sends SIGTERM to the Claude process found under the pane on the process table, then `respawn-window -k` guarantees the end. On the pty-holder transport, the ladder starts at its terminate rung. SIGTERM runs Claude Code's graceful shutdown, so a confirmed session's mod still makes its final save in `session.end`.
+Every park ends the same way: on the pty-holder transport, where the ladder starts at its terminate rung. SIGTERM runs Claude Code's graceful shutdown, so a confirmed session's mod still makes its final save in `session.end`.
 
 ## The effective composer-draft value
 

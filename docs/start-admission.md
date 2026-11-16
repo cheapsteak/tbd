@@ -59,9 +59,9 @@ asks before each start until the first hold, then holds the rest for the same re
 again. A held transport move leaves the session running where it is and lists it as
 `skipped: held: <reason>`.
 
-Also checked: recreating a Codex tab's window, and moving a running Claude session to the pty
-holder. Not checked: shell and dev-server tabs, a wake of a tab that is not parked or is Codex's
-(the wake refuses it), a move or
-window recreate that starts no agent, remote sessions, and TBD's own daemon rails other than the
+Also checked: moving a live tmux session with a conversation — Claude, or Codex with a
+recorded thread — to the pty holder once its tmux server is gone. Not checked: shell and
+dev-server tabs, a wake of a tab that is not parked or is Codex's (the wake refuses it), a move
+that starts no agent, Check Again on a tmux tab (it starts nothing), remote sessions, and TBD's own daemon rails other than the
 session restore pass, which starts many agents with no gesture. The actor is self-declared, so this
 is a resource policy and not a security boundary.

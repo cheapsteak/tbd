@@ -1,16 +1,24 @@
 # Tmux Integration: Learnings & Architecture
 
-How TBD integrates with tmux, what we tried, what worked, and why.
+Status: **retired.** TBD's tmux viewer and session integration is retired: its implementation has been removed, and this document is kept as the design record.
 
-TBD opens every new session on the pty holder
-([`specs/2026-08-30-pty-holder-session-transport-design.md`](specs/2026-08-30-pty-holder-session-transport-design.md)).
-What follows describes the sessions that still run on tmux, which TBD keeps
-serving until `tbd terminal migrate` moves them to the holder. TBD starts no
-new tmux window for them: a parked tmux session refuses to wake, and an
-in-place account switch of a running one is refused. `terminal.recreateWindow`
-opens no window: it parks a tmux agent tab whose window has gone and whose
-session can be resumed, so a migration followed by a wake brings it back on
-the holder, and it refuses every other row.
+How TBD integrated with tmux, what we tried, what worked, and why.
+
+TBD opens every session on the pty holder
+([`specs/2026-08-30-pty-holder-session-transport-design.md`](specs/2026-08-30-pty-holder-session-transport-design.md))
+and does not drive tmux: it cannot show a tmux session, send to one or park
+one, and it ends one only by killing its window when the row is torn down. A
+row still recorded as `tmux` is either parked — its wake refuses and names
+`tbd terminal migrate`, which moves it to the holder — or live. A live tmux
+row is judged by its tmux server's socket: once the server is gone the row is
+parked with its session kept (a row with nothing to resume is removed), and
+while it may still be running the app shows a notice in place of the terminal
+with the command that ends it. The current rule is in
+[`specs/2026-10-11-holder-transport-migration-design.md`](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update),
+"A live row whose tmux server outlived the update".
+
+Everything below describes how TBD served tmux sessions, and is kept as the
+design record and as tmux reference.
 
 ## Architecture: One Linked Window Per Viewer + Direct PTY
 

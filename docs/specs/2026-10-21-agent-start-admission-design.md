@@ -39,10 +39,10 @@ An agent start is a request that would launch a Claude Code or Codex process on 
 - `terminal.continueInCodex`, `terminal.continueInClaude` and `terminal.swapProfile` when
   it starts a new session; `terminalHistory.revive` when it resumes a Claude session (every
   other kind of history entry reopens as a shell)
-- `terminal.recreateWindow` for a Codex tab, which starts Codex again in a new window
-- `terminal.migrateTransport` for each running Claude session with a conversation, which it
-  parks and wakes on the pty holder. With no terminal id it moves every session, so it can
-  start many agents in one call.
+- `terminal.migrateTransport` for each live tmux session with a conversation — Claude, or
+  Codex with a recorded thread — which it parks and wakes on the pty holder once the
+  session's tmux server is gone. With no terminal id it moves every session, so it can start
+  many agents in one call.
 
 Not checked:
 
@@ -50,7 +50,8 @@ Not checked:
 - A wake of a terminal that is not parked. It starts nothing, and the wake path already
   answers it as a no-op.
 - A wake of a parked Codex terminal. The wake path refuses it and starts nothing.
-- `terminal.recreateWindow` for a Claude tab, which only parks it, and for a shell.
+- `terminal.recreateWindow`, which starts nothing: it parks a tmux tab once its tmux server
+  is gone.
 - The moves in `terminal.migrateTransport` that start no agent: a parked row is only
   rewritten, and a running shell restarts as a shell.
 - Remote sessions. They run on another machine.
@@ -133,8 +134,6 @@ ask again, which is exactly the "when" this design keeps out of the daemon.
 - `terminal.migrateTransport` leaves a held session running where it is and lists it under
   `skipped` with the reason `held: <reason>`. The call's report is its answer, so it does
   not fail with `startHeld`.
-- A held `terminal.recreateWindow` leaves the Codex tab as it was. The app's own recreate is
-  never checked, so the person can always repair the tab.
 
 ### The flag
 

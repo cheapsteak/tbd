@@ -359,7 +359,7 @@ appends to.
   reconcilers. Its rendezvous files are swept by `OrphanGC`
   (`Sources/TBDDaemon/GC/OrphanGC.swift`, under `gcEnabled`); its child is
   swept by `AgentReaper` (`Sources/TBDDaemon/Process/AgentReaper.swift`,
-  unflagged like its tmux leg); a session row whose holder is gone is reclaimed
+  unflagged); a session row whose holder is gone is reclaimed
   by the reconcile arm in
   `Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+Reconcile.swift`. An outbox
   cannot outlive the holder that holds it, so it inherits all three.

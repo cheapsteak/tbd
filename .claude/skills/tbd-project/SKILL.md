@@ -22,7 +22,7 @@ The daemon owns all state. The CLI and app are both clients that talk to the dae
                      │
               ┌──────┼──────┐
               ▼      ▼      ▼
-           SQLite   tmux    git
+           SQLite  holder   git
 ```
 
 For detailed architecture, component descriptions, and file locations: consult `references/architecture.md`
@@ -47,7 +47,7 @@ JSON over Unix socket. `RPCRequest` has `method: String` and `params: String` (r
 
 ### Tmux Integration
 
-Every new session opens on the pty holder. For sessions still on tmux, TBD uses **grouped sessions** — NOT control mode. Each terminal panel creates a grouped session (`tmux new-session -t main -s view-<uuid>`) and attaches via a native PTY. SwiftTerm connects directly. For rationale and details: consult `references/architecture.md` or `docs/tmux-integration.md`.
+Every session opens on the pty holder, and TBD cannot show, send to or park a tmux session. A row still recorded as `tmux` is parked once its tmux server is gone; while the server may still be running, the app shows a notice with the `tmux -L <server> kill-server` command that ends it. Details: the "Tmux Architecture" section of `references/architecture.md`; the old viewer's design record is `docs/tmux-integration.md`.
 
 ### Git Operations
 
@@ -98,9 +98,6 @@ scripts/restart.sh          # rebuild + restart (~2s) — always use the worktre
 scripts/restart.sh --app    # app only (NOT for daemon/shared changes)
 scripts/restart.sh --quick  # skip build
 ```
-
-### Debug terminal rendering
-Check `/tmp/tbd-bridge.log` for tmux bridge diagnostics.
 
 ### Diagnostics
 Use `os.Logger` with the `com.tbd.app` / `com.tbd.daemon` subsystems — no `print()` in `Sources/` (SwiftLint-enforced; `TBDCLI` excepted). Stream a feature area: `log stream --level debug --predicate 'subsystem BEGINSWITH "com.tbd"'`. Full guide: `docs/diagnostics-strategy.md`.

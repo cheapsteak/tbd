@@ -22,11 +22,11 @@ gate from the subsystem they belong to:
   `gc_holder_rendezvous_enabled`.
 - **Row-less holder reclamation** in `OrphanGC` – runs under `gc_enabled`.
   Formerly `gc_rowless_holders_enabled`.
-- **The reaper's holder leg** – runs on every pass, like the reaper's tmux leg,
-  which has never had a switch. Formerly `reap_holder_children_enabled`.
-- **The reconcile holder arm** – judges on every pass, like the reconcile tmux
-  arm. A finished, resumable holder row is parked, preserving its session id,
-  exactly as a finished tmux row is. Formerly `holder_row_reconcile_enabled`.
+- **The reaper's holder leg** – runs on every pass, with no switch of its
+  own. Formerly `reap_holder_children_enabled`.
+- **The reconcile holder arm** – judges on every pass. A finished, resumable
+  holder row is parked, preserving its session id. Formerly
+  `holder_row_reconcile_enabled`.
 
 The transport itself sits behind `pty_holder_enabled`. That flag gates
 spawning, not servicing: it decides which transport a new session gets, and

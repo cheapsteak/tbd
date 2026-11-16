@@ -80,7 +80,6 @@ These say where a moved helper or test lives, or why a target depends on the dae
 
 ## Out of scope
 
-- **`TBDDaemonLiveTests` keeps its dependency on `TBDApp`.** `TmuxBridgeViewSessionLiveTests` drives the app's `TmuxBridge` against a real tmux server. That is a real app-to-daemon integration test, and it goes away with the tmux transport.
 - **The SwiftPM #7715 clean-up** in `test.yml` treats `DaemonTestSupport` as it treats `TestSupport`, which it does not clean. Whether test-support targets join that list is a separate decision.
 
 ## Rejected alternatives
