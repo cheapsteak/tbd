@@ -108,18 +108,6 @@ struct LocalizedErrorPayloadTests {
             ("FDSidecarError.superseded", FDSidecarError.superseded),
             ("FDSidecarError.disconnected", FDSidecarError.disconnected),
             (
-                "TmuxPreparationFailure.windowMissing",
-                TmuxPreparationFailure.windowMissing(failedStage: .linkWindow)
-            ),
-            (
-                "TmuxPreparationFailure.commandFailed",
-                TmuxPreparationFailure.commandFailed(stage: .verifySelection, output: "can't find window @91")
-            ),
-            (
-                "TmuxPreparationFailure.tmuxExecutableUnavailable",
-                TmuxPreparationFailure.tmuxExecutableUnavailable
-            ),
-            (
                 "UserTerminalTheme.ValidationError.wrongAnsiCount",
                 UserTerminalTheme.ValidationError.wrongAnsiCount(9)
             ),
@@ -175,18 +163,8 @@ struct LocalizedErrorPayloadTests {
         assertRenders(FDSidecarError.connectFailed(61), ["61"], "FDSidecarError.connectFailed")
     }
 
-    @Test("command and stage payloads reach the rendered description")
+    @Test("RPC error payloads reach the rendered description")
     func commandPayloadsRender() {
-        assertRenders(
-            TmuxPreparationFailure.commandFailed(stage: .verifySelection, output: "can't find window @91"),
-            ["verifySelection", "can't find window @91"],
-            "TmuxPreparationFailure.commandFailed"
-        )
-        assertRenders(
-            TmuxPreparationFailure.windowMissing(failedStage: .linkWindow),
-            ["linkWindow"],
-            "TmuxPreparationFailure.windowMissing"
-        )
         assertRenders(
             DaemonClientError.rpcError("worktree.wake refused", code: "terminalSessionGone"),
             ["worktree.wake refused"],

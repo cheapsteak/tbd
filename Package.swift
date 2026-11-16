@@ -484,9 +484,6 @@ let package = Package(
                 "TBDKernel",
                 "TestSupport",
                 "DaemonTestSupport",
-                // TmuxBridge (app side) drives a real tmux server in
-                // TmuxBridgeViewSessionLiveTests, which makes it tier 3.
-                "TBDApp",
                 // Load-bearing for the same reason `TBDPeerHelperTests` depends
                 // on `TBDPeerHelper` below: the suites under `Holder/` spawn the
                 // real `TBDHolder` binary through the real `HolderSpawner`, so

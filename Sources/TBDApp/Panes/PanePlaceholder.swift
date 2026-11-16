@@ -1,5 +1,8 @@
 import SwiftUI
 import TBDShared
+import os
+
+private let terminalNotificationLogger = Logger(subsystem: "com.tbd.app", category: "TerminalNotification")
 
 // MARK: - Overlay helpers
 
@@ -385,20 +388,22 @@ struct PanePlaceholder: View {
             // This terminal is pinned and currently owned by PinnedTerminalDock.
             // Rendering a second TerminalPanelView here (this is the worktree
             // layout / keep-alive pager path) would mount the same terminal
-            // twice and collide on the shared `tbd-view-<id>` tmux session. The
-            // dock holds the live viewer; show a placeholder instead. This
-            // placeholder is only ever offscreen (a kept-alive non-selected
-            // worktree) — selecting the worktree moves the terminal into
-            // `visibleTerminalIDs`, so it leaves `dockedTerminalIDs` and renders
-            // for real in the main area.
+            // twice, and the two panels would fight over the session's one
+            // holder attach. The dock holds the live viewer; show a
+            // placeholder instead. This placeholder is only ever offscreen (a
+            // kept-alive non-selected worktree) — selecting the worktree moves
+            // the terminal into `visibleTerminalIDs`, so it leaves
+            // `dockedTerminalIDs` and renders for real in the main area.
             pinnedInDockPlaceholder
+        } else if let terminal = terminal(for: terminalID),
+                  TerminalPanePresentation.showsLeftoverTmuxNotice(for: terminal) {
+            // Still running in a tmux server that outlived the update: there
+            // is no terminal to show, only what to do about it.
+            LeftoverTmuxSessionNotice(terminalID: terminal.id, server: worktree.tmuxServer)
         } else if let terminal = terminal(for: terminalID) {
             let switching = appState.switchingAccountTerminals[terminal.id]
             TerminalPanelView(
                 terminalID: terminalID,
-                tmuxServer: worktree.tmuxServer,
-                tmuxWindowID: terminal.tmuxWindowID,
-                tmuxBridge: appState.tmuxBridge,
                 tabCloseContext: tabID.map { TabCloseContext(worktreeID: worktree.id, tabID: $0) },
                 worktreePath: worktree.path,
                 remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
@@ -406,10 +411,8 @@ struct PanePlaceholder: View {
                     actions.routeTerminalFile(terminalID, path)
                 },
                 onTerminalNotification: { title, body in
-                    debugLog("OSC 777: \(title) — \(body)")
-                },
-                onMissingWindow: {
-                    await appState.requestAutomaticTerminalRecreation(terminalID: terminalID)
+                    terminalNotificationLogger.debug(
+                        "OSC 777 terminal=\(terminalID, privacy: .public) title=\(title, privacy: .public) body=\(body, privacy: .public)")
                 },
                 initialSnapshot: terminal.suspendedSnapshot,
                 // Show the frozen snapshot backdrop while PARKED — hibernated
@@ -510,7 +513,7 @@ struct PanePlaceholder: View {
     /// Placeholder shown in the worktree-layout path for a terminal that is
     /// currently pinned and rendered live in `PinnedTerminalDock`. Avoids a
     /// second `TerminalPanelView` for the same terminal (which would fight over
-    /// the shared `tbd-view-<id>` tmux session). Never user-visible in practice
+    /// the session's one holder attach). Never user-visible in practice
     /// — only the offscreen kept-alive pager hits this branch.
     private var pinnedInDockPlaceholder: some View {
         VStack(spacing: 8) {

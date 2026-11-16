@@ -235,9 +235,9 @@ extension AppState {
     }
 
     /// "Show last output" for an exited server: the saved entry in Session
-    /// History's Closed Terminals viewer when the daemon saved one (holder
-    /// transport), else the server's own tab, whose dead pane still shows the
-    /// output (tmux).
+    /// History's Closed Terminals viewer when the daemon saved one, else the
+    /// server's own tab (on a tab still recorded as tmux, the leftover-session
+    /// notice).
     func showDevServerLastOutput(worktreeID: UUID, server: DevServerInfo) async {
         if let entryID = server.lastOutputID {
             await devServerLastOutputOpener(worktreeID, entryID)

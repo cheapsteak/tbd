@@ -3,18 +3,15 @@ import Foundation
 /// Trailing-edge debounce for a typed search query, so a burst of keystrokes
 /// costs one RPC instead of one per character.
 ///
-/// Same shape and same contract as `AppearanceBroadcastDebouncer` (see that
-/// file for the long-form rationale): cancel-and-replace a `Task` over
-/// `clock.sleep(for:)`, with the clock injected as the last, defaulted,
-/// **existential** parameter. Combine's `.debounce` is not an option — it takes
-/// a `Scheduler`, which can never be an `any Clock<Duration>`, so the project's
-/// clock seam (`docs/specs/2026-07-24-test-hardening-design.md` §5) cannot be
-/// threaded through it and the timing would only be testable against a wall
-/// clock.
+/// Cancel-and-replace a `Task` over `clock.sleep(for:)`, with the clock
+/// injected as the last, defaulted, **existential** parameter. Combine's
+/// `.debounce` is not an option — it takes a `Scheduler`, which can never be an
+/// `any Clock<Duration>`, so the project's clock seam
+/// (`docs/specs/2026-07-24-test-hardening-design.md` §5) cannot be threaded
+/// through it and the timing would only be testable against a wall clock.
 ///
-/// Unlike `AppearanceBroadcastDebouncer` this one takes values directly rather
-/// than subscribing to a publisher: its input is SwiftUI `@State` text driven
-/// by `.onChange`, not a `@Published` property.
+/// It takes values directly rather than subscribing to a publisher: its input
+/// is SwiftUI `@State` text driven by `.onChange`, not a `@Published` property.
 @MainActor
 final class SearchQueryDebouncer {
     private let interval: Duration

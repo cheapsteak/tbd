@@ -7,24 +7,15 @@ import Testing
 import TBDShared
 import TestSupport
 
-/// Tier 2: drives the **real attach entry point** — `Coordinator.startTmuxClient`
-/// — for a holder-backed panel, and requires that it attaches to the session's
-/// pty instead of reaching the tmux machinery behind it.
+/// Tier 2: drives the **real attach entry point** — `Coordinator.startSessionClient`
+/// — and requires that a holder-backed panel attaches to the session's pty,
+/// and that a panel never attaches a row still on tmux.
 ///
-/// `TerminalPanelViewTests` covers the pure decision function
-/// (`transportPreparationNotice(for:)`) and the `panelTransport()` lookup under
-/// it. Those would all stay green if someone deleted or reordered the
-/// `if await handleHolderTransport(into:) { return }` line at the top of the
-/// attach path, which is the whole defect this gate exists to prevent — a
-/// holder row would go back to being classified as a broken tmux window and
-/// the false "recovery" banner would return. So the assertions here are about
-/// **what ran and what did not**, observed on the production call path:
+/// The assertions are about **what ran and what did not**, observed on the
+/// production call path:
 ///
-/// - **The session is painted, and no tmux command was issued.** `TmuxBridge`
-///   takes an injected `TmuxCommandRunner`; a holder panel must leave its log
-///   empty while the screen the daemon handed back appears in the buffer. This
-///   is the discriminator for `startTmuxClient`: dropping its branch sends
-///   `prepareSession` straight into `kill-session` / `new-session`.
+/// - **The session is painted.** The screen the daemon handed back appears in
+///   the buffer, and the ack names the attach the daemon minted.
 /// - **The ordering the attach depends on.** The preamble goes in through
 ///   `feedSnapshot`, and the reader is wired only after that feed's ingest
 ///   window has closed — `feedSnapshot` lowers its flag a main-queue turn
@@ -32,16 +23,11 @@ import TestSupport
 ///   regardless of origin. `attach.ready` is the first thing that happens
 ///   after the reader exists, so the state observed AT the ack is the
 ///   observable form of that ordering.
+/// - **The refusals.** When the daemon says the attach is unavailable, ended
+///   or refused, the placard is what the panel shows.
 ///
-/// The branch also has a positive control on the same entry point with a
-/// `.tmux` panel, so a branch that suppressed *everything* would fail too, plus
-/// the refusal case: when the daemon says the attach is unavailable, the
-/// placard is what the panel shows.
-///
-/// **Nothing here talks to a live daemon or a live tmux.** Every tmux command
-/// goes through the recorder (the resolver points at a stub binary the runner
-/// never executes), and the holder attach goes through an injected
-/// `HolderAttaching` stub over a real pipe.
+/// **Nothing here talks to a live daemon.** The holder attach goes through an
+/// injected `HolderAttaching` stub over a real pipe.
 // A hang guard, and it has to clear the bounded waits below, which run to
 // `TestDeadlines.saturatedPass` (120 s): a suite limit under that truncates
 // their named diagnostic into a bare "Time limit was exceeded" — measured, by
@@ -50,20 +36,6 @@ import TestSupport
 // `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
 @Suite("A holder-backed panel attaches to its pty, not to tmux", .fastPassBounded)
 struct TerminalHolderTransportGateTests {
-
-    /// Records every tmux invocation and refuses all of them, so a preparation
-    /// that does run fails at `new-session` and classifies as `.commandFailed`
-    /// without spawning a viewer process.
-    private actor RefusingTmuxRunner {
-        private(set) var invocations: [[String]] = []
-
-        func run(args: [String]) -> TmuxCommandOutcome {
-            invocations.append(args)
-            return TmuxCommandOutcome(success: false, output: "fixture refuses every tmux command")
-        }
-
-        func recorded() -> [[String]] { invocations }
-    }
 
     /// What the panel looked like at the instant `attach.ready` was sent.
     private struct ReadyObservation: Sendable {
@@ -176,16 +148,13 @@ struct TerminalHolderTransportGateTests {
         }
     }
 
-    /// A panel wired the way production wires one, plus the bridge whose
-    /// command log is the "did any tmux mechanic run" verdict.
+    /// A panel wired the way production wires one.
     @MainActor
     private struct Panel {
         let state: AppState
         let coordinator: TerminalPanelRepresentable.Coordinator
         let engine: SwiftTermEngine
         let view: TBDTerminalView
-        let bridge: TmuxBridge
-        let runner: RefusingTmuxRunner
         let worktreeID: UUID
         let terminalID: UUID
         let defaultsSuite: TestDefaultsSuite
@@ -193,7 +162,6 @@ struct TerminalHolderTransportGateTests {
 
     private static let paneID = "%1"
     private static let windowID = "@1"
-    private static let server = "tbd-fixture"
     private static let preambleText = "HOLDER-PREAMBLE"
     private static let generation: UInt64 = 7
     /// An OSC 777 rides the preamble on purpose. It is the discriminator
@@ -211,15 +179,12 @@ struct TerminalHolderTransportGateTests {
         "\r\nLIVE-OUTPUT\u{1b}]777;notify;live;fresh output\u{07}"
 
     @MainActor
-    private func makePanel(
-        transport: TerminalTransport,
-        fixture: TmuxBridgeFixture
-    ) throws -> Panel {
+    private func makePanel(transport: TerminalTransport) throws -> Panel {
         let worktreeID = UUID()
         let terminalID = UUID()
         let state = AppState()
         // A holder row carries EMPTY tmux coordinates by construction — the v1
-        // schema's NOT NULL columns cannot be relaxed — so the branch must
+        // schema's NOT NULL columns cannot be relaxed — so the panel must
         // discriminate on `transport` alone, never on those strings.
         let isHolder = transport == .holder
         state.terminals[worktreeID] = [Terminal(
@@ -243,25 +208,15 @@ struct TerminalHolderTransportGateTests {
         )
         let engine = SwiftTermEngine(view: view)
 
-        let runner = RefusingTmuxRunner()
-        let bridge = TmuxBridge(
-            tmuxExecutableResolver: try fixture.resolvingResolver(),
-            commandRunner: { _, _, args in await runner.run(args: args) }
-        )
-
         let coordinator = TerminalPanelRepresentable.Coordinator()
         coordinator.appState = state
         coordinator.panelID = terminalID
-        coordinator.tmuxBridge = bridge
-        coordinator.tmuxServer = Self.server
 
         return Panel(
             state: state,
             coordinator: coordinator,
             engine: engine,
             view: view,
-            bridge: bridge,
-            runner: runner,
             worktreeID: worktreeID,
             terminalID: terminalID,
             defaultsSuite: suite
@@ -315,14 +270,12 @@ struct TerminalHolderTransportGateTests {
         return stub
     }
 
-    // MARK: - startTmuxClient
+    // MARK: - startSessionClient
 
     @MainActor
-    @Test("startTmuxClient attaches a holder panel to its pty and paints the screen it was handed")
-    func startTmuxClientAttachesHolderPanel() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .holder, fixture: fixture)
+    @Test("startSessionClient attaches a holder panel to its pty and paints the screen it was handed")
+    func startSessionClientAttachesHolderPanel() async throws {
+        let panel = try makePanel(transport: .holder)
         defer { tearDown(panel) }
         let pty = try FakePTY()
         defer { pty.closeWriteEnd() }
@@ -341,26 +294,12 @@ struct TerminalHolderTransportGateTests {
             ingestAtWiring = engine.isIngestingSnapshot
         }
 
-        await panel.coordinator.startTmuxClient(
-            engine: panel.engine,
-            bridge: panel.bridge,
-            server: Self.server,
-            windowID: "",
-            panelID: panel.terminalID
-        )
+        await panel.coordinator.startSessionClient(engine: panel.engine)
 
-        // The discriminator for the branch: `prepareSession`'s very first act
-        // is a pre-emptive `kill-session`, so a single recorded invocation
-        // means the branch did not run first.
-        let recorded = await panel.runner.recorded()
-        #expect(recorded.isEmpty,
-                "a holder-backed panel must reach no tmux mechanic whatsoever, ran \(recorded)")
-        #expect(panel.coordinator.localProcess == nil,
-                "the holder path starts no viewer process")
         #expect(stub.attaches == 1, "the panel must request exactly one attach")
         #expect(rowText(0, panel) == Self.preambleText,
                 "the screen the daemon handed back must be on the terminal")
-        #expect(!didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
+        #expect(!didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
                 "the placard belongs to a refused attach, not to a live one")
 
         // The ack carries what only this attach knows: the session's id (a
@@ -403,11 +342,9 @@ struct TerminalHolderTransportGateTests {
     }
 
     @MainActor
-    @Test("startTmuxClient shows the attach-failed placard when the daemon refuses a holder attach")
-    func startTmuxClientShowsPlacardWhenAttachRefused() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .holder, fixture: fixture)
+    @Test("startSessionClient shows the attach-failed placard when the daemon refuses a holder attach")
+    func startSessionClientShowsPlacardWhenAttachRefused() async throws {
+        let panel = try makePanel(transport: .holder)
         defer { tearDown(panel) }
         let stub = StubHolderAttach(attach: {
             throw DaemonClientError.rpcError("attach failed: no live holder reader", code: nil)
@@ -419,26 +356,12 @@ struct TerminalHolderTransportGateTests {
         var retryOffers = 0
         panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
-        await panel.coordinator.startTmuxClient(
-            engine: panel.engine,
-            bridge: panel.bridge,
-            server: Self.server,
-            windowID: "",
-            panelID: panel.terminalID
-        )
+        await panel.coordinator.startSessionClient(engine: panel.engine)
 
         #expect(stub.attaches == 1)
         #expect(stub.readyCalls.isEmpty, "an attach that never happened must not be acked")
         #expect(didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
                 "a refused attach must explain itself with the attach-failed notice")
-        // The transport notice says TBD cannot display holder sessions, which
-        // is false here: it can, and this panel merely failed to attach to
-        // one. It must not be the copy a refused attach paints.
-        #expect(!didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
-                "a refused attach must not claim the transport is undisplayable")
-        let recorded = await panel.runner.recorded()
-        #expect(recorded.isEmpty,
-                "a refused holder attach must not fall back into tmux, ran \(recorded)")
         #expect(retryOffers == 1,
                 "the attach-failed placard points at a Retry button, so it must raise the banner that carries it")
     }
@@ -452,10 +375,8 @@ struct TerminalHolderTransportGateTests {
     /// the whole backoff to say so).
     @MainActor
     @Test("a holder attach the daemon can never serve is not retried and offers no Retry")
-    func startTmuxClientShowsUnavailablePlacardWithoutRetry() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .holder, fixture: fixture)
+    func startSessionClientShowsUnavailablePlacardWithoutRetry() async throws {
+        let panel = try makePanel(transport: .holder)
         defer { tearDown(panel) }
         let stub = StubHolderAttach(
             attach: { throw DaemonClientError.attachUnavailable("unavailable") })
@@ -463,13 +384,7 @@ struct TerminalHolderTransportGateTests {
         var retryOffers = 0
         panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
-        await panel.coordinator.startTmuxClient(
-            engine: panel.engine,
-            bridge: panel.bridge,
-            server: Self.server,
-            windowID: "",
-            panelID: panel.terminalID
-        )
+        await panel.coordinator.startSessionClient(engine: panel.engine)
 
         #expect(stub.attaches == 1, "an answer that cannot change must not be asked again")
         #expect(didFeed(TerminalPreparationPresentation.holderAttachUnavailableMessage, panel))
@@ -483,10 +398,8 @@ struct TerminalHolderTransportGateTests {
     /// are false, so the ended copy must replace it.
     @MainActor
     @Test("a holder attach the daemon reports as ended shows the session-ended placard")
-    func startTmuxClientShowsEndedPlacardWhenTheHolderIsGone() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .holder, fixture: fixture)
+    func startSessionClientShowsEndedPlacardWhenTheHolderIsGone() async throws {
+        let panel = try makePanel(transport: .holder)
         defer { tearDown(panel) }
         let stub = StubHolderAttach(attach: {
             throw DaemonClientError.attachUnavailable(AttachRequestResult.holderSessionEndedStatus)
@@ -495,13 +408,7 @@ struct TerminalHolderTransportGateTests {
         var retryOffers = 0
         panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
-        await panel.coordinator.startTmuxClient(
-            engine: panel.engine,
-            bridge: panel.bridge,
-            server: Self.server,
-            windowID: "",
-            panelID: panel.terminalID
-        )
+        await panel.coordinator.startSessionClient(engine: panel.engine)
 
         #expect(stub.attaches == 1)
         // The fixture's tab is a shell, so the copy promises no resume.
@@ -524,7 +431,7 @@ struct TerminalHolderTransportGateTests {
         let copy = Copy.holderAttachFailedMessage.lowercased()
         #expect(!copy.contains("close"), "closing the tab ends the session this copy says keeps running")
         #expect(!copy.contains("reopen"), "reopening means closing first, which ends the session")
-        #expect(Copy.holderAttachFailedMessage.contains(TerminalRecoveryPresentation.retryTitle),
+        #expect(Copy.holderAttachFailedMessage.contains(Copy.retryTitle),
                 "the copy must name the button that retries, by its own title")
         #expect(copy.contains("keeps running"))
         let unavailable = Copy.holderAttachUnavailableMessage.lowercased()
@@ -631,9 +538,7 @@ struct TerminalHolderTransportGateTests {
     @MainActor
     @Test("a holder attach whose ready is refused stops reading and shows the attach-failed placard")
     func holderAttachWithRefusedReadyShowsPlacard() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .holder, fixture: fixture)
+        let panel = try makePanel(transport: .holder)
         defer { tearDown(panel) }
         let pty = try FakePTY()
         defer { pty.closeWriteEnd() }
@@ -644,19 +549,11 @@ struct TerminalHolderTransportGateTests {
         // would hand a retry the descriptor the first reader closed.
         panel.coordinator.holderAttachRetryDelays = []
 
-        await panel.coordinator.startTmuxClient(
-            engine: panel.engine,
-            bridge: panel.bridge,
-            server: Self.server,
-            windowID: "",
-            panelID: panel.terminalID
-        )
+        await panel.coordinator.startSessionClient(engine: panel.engine)
 
         #expect(stub.readyCalls.count == 1)
         #expect(didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
                 "a viewer the daemon has not accounted for must say so")
-        #expect(!didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
-                "a refused ready must not claim the transport is undisplayable")
     }
 
     /// Holds a handback open until the test releases it, standing in for the
@@ -680,9 +577,7 @@ struct TerminalHolderTransportGateTests {
     @MainActor
     @Test("a holder attach waits for the predecessor's handback before it asks the daemon")
     func holderAttachWaitsForPredecessorHandback() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .holder, fixture: fixture)
+        let panel = try makePanel(transport: .holder)
         defer { tearDown(panel) }
         let pty = try FakePTY()
         defer { pty.closeWriteEnd() }
@@ -695,13 +590,7 @@ struct TerminalHolderTransportGateTests {
         panel.state.holderHandbackLedger.register(terminalID: panel.terminalID, task: handback)
 
         let attaching = Task { @MainActor in
-            await panel.coordinator.startTmuxClient(
-                engine: panel.engine,
-                bridge: panel.bridge,
-                server: Self.server,
-                windowID: "",
-                panelID: panel.terminalID
-            )
+            await panel.coordinator.startSessionClient(engine: panel.engine)
         }
         // Give the attach every chance to run ahead of the handback. The
         // assertion below cannot pass by luck: the only path to `attach` runs
@@ -724,50 +613,64 @@ struct TerminalHolderTransportGateTests {
     @MainActor
     @Test("a holder attach with no handback in flight does not wait")
     func holderAttachWithoutHandbackDoesNotWait() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .holder, fixture: fixture)
+        let panel = try makePanel(transport: .holder)
         defer { tearDown(panel) }
         let pty = try FakePTY()
         defer { pty.closeWriteEnd() }
         let stub = attachStub(panel, fd: pty.readEnd)
         #expect(!panel.state.holderHandbackLedger.isInFlight(terminalID: panel.terminalID))
 
-        await panel.coordinator.startTmuxClient(
-            engine: panel.engine,
-            bridge: panel.bridge,
-            server: Self.server,
-            windowID: "",
-            panelID: panel.terminalID
-        )
+        await panel.coordinator.startSessionClient(engine: panel.engine)
 
         #expect(stub.attaches == 1)
         #expect(stub.readyCalls.count == 1)
     }
 
+    /// A row still on tmux is shown as `LeftoverTmuxSessionNotice`, never as
+    /// a panel; a panel that meets one anyway — its row changed under it —
+    /// attaches nothing and paints no placard, so no attach is asked of the
+    /// daemon for a session it cannot vend.
     @MainActor
-    @Test("startTmuxClient still prepares a tmux-backed panel through tmux")
-    func startTmuxClientStillPreparesTmuxPanel() async throws {
-        let fixture = try TmuxBridgeFixture()
-        defer { fixture.remove() }
-        let panel = try makePanel(transport: .tmux, fixture: fixture)
+    @Test("a panel never attaches a row still on tmux")
+    func aPanelNeverAttachesATmuxRow() async throws {
+        let panel = try makePanel(transport: .tmux)
         defer { tearDown(panel) }
+        let stub = StubHolderAttach(attach: {
+            throw DaemonClientError.rpcError("a tmux row was asked to attach", code: nil)
+        })
+        panel.coordinator.holderAttachClient = stub
+        panel.coordinator.holderAttachRetryDelays = []
+        var retryOffers = 0
+        panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
-        await panel.coordinator.startTmuxClient(
-            engine: panel.engine,
-            bridge: panel.bridge,
-            server: Self.server,
-            windowID: Self.windowID,
-            panelID: panel.terminalID
-        )
+        await panel.coordinator.startSessionClient(engine: panel.engine)
 
-        let recorded = await panel.runner.recorded()
-        #expect(!recorded.isEmpty,
-                "the branch must not suppress the tmux path it does not own")
-        #expect(!didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
-                "the holder notice must never appear on a tmux-backed panel")
-        // The refusing runner makes preparation fail at `new-session`, which
-        // classifies as `.commandFailed` — the pre-existing copy, unchanged.
-        #expect(didFeed(TerminalPreparationPresentation.commandFailedMessage, panel))
+        #expect(stub.attaches == 0, "a row on tmux has no holder session to attach to")
+        #expect(!didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
+                "nothing was attempted, so nothing failed")
+        #expect(retryOffers == 0, "a Retry would only ask for the same attach")
+    }
+
+    /// A row AppState has not loaded is not assumed to be on tmux: the panel
+    /// takes the holder path, which paints the attach-failed placard and
+    /// offers the Retry that attaches once the row is in.
+    @MainActor
+    @Test("a panel whose row is not loaded offers Retry without asking the daemon")
+    func aPanelWhoseRowIsNotLoadedOffersRetry() async throws {
+        let panel = try makePanel(transport: .holder)
+        defer { tearDown(panel) }
+        panel.state.terminals[panel.worktreeID] = []
+        let stub = StubHolderAttach(attach: {
+            throw DaemonClientError.rpcError("an unloaded row was asked to attach", code: nil)
+        })
+        panel.coordinator.holderAttachClient = stub
+        var retryOffers = 0
+        panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
+
+        await panel.coordinator.startSessionClient(engine: panel.engine)
+
+        #expect(stub.attaches == 0, "an attach needs the row's worktree, which is not loaded")
+        #expect(didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel))
+        #expect(retryOffers == 1)
     }
 }

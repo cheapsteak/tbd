@@ -14,7 +14,8 @@ import TBDShared
 
 /// Preference key carrying the px size of the area the active content renders
 /// in. AppState reads this via `.onPreferenceChange` to drive the daemon-side
-/// resize broadcast, so tmux pane dimensions follow what SwiftTerm renders.
+/// resize broadcast, so the dimensions of sessions no panel is attached to
+/// follow what the terminal area renders.
 /// What each path posts:
 /// - **A tab on the daemon path:** `PanelSurfaceWorkspaceView`'s full width,
 ///   the side region included, and the measured height of its primary leaf's
@@ -92,7 +93,7 @@ struct TerminalContainerView: View {
         // Always render DockSplitView so mainContent stays in the same
         // structural position. Switching between bare `mainContent` and
         // `DockSplitView { mainContent }` destroys all terminal views,
-        // killing their tmux sessions. Dock content is still conditionally
+        // detaching every attached session. Dock content is still conditionally
         // rendered (cheap to recreate).
         DockSplitView(
             dockRatio: $appState.dockRatio,
@@ -178,8 +179,8 @@ struct SingleWorktreeView: View {
                 }
 
                 // The active tab's content. Off the daemon path, its measured
-                // size goes to MainAreaSizeKey so the daemon-side tmux resize
-                // matches the actual SwiftTerm pane area (tab bar + divider
+                // size goes to MainAreaSizeKey so the daemon-side resize
+                // matches the actual terminal pane area (tab bar + divider
                 // above and the resume banner below are excluded). On it,
                 // `PanelSurfaceWorkspaceView` posts the key itself, measured
                 // at its primary leaf, so exactly one view posts it.
@@ -247,7 +248,6 @@ struct SingleWorktreeView: View {
                 }
                 .environment(appState)
             }
-            // TmuxBridge sessions are created on-demand by TerminalPanelView
             .task(id: worktreeID) {
                 // Auto-create a terminal when selecting a main worktree with none
                 let terminals = appState.terminals[worktreeID] ?? []
@@ -797,8 +797,8 @@ private struct MultiWorktreeView: View {
 private struct MultiWorktreeCell: View {
     let worktreeID: UUID
     /// First cell in the grid publishes its inner-content size to
-    /// MainAreaSizeKey so the daemon-side tmux resize matches the actual
-    /// SwiftTerm pane area (excludes the per-cell header bar + divider).
+    /// MainAreaSizeKey so the daemon-side resize matches the actual
+    /// terminal pane area (excludes the per-cell header bar + divider).
     /// All cells are equal size so a single publisher suffices.
     let isPrimary: Bool
     @Environment(AppState.self) var appState

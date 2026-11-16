@@ -152,16 +152,12 @@ private struct PinnedTerminalCell: View {
             Divider()
 
             // Terminal content
-            if let worktree {
+            if let worktree, TerminalPanePresentation.showsLeftoverTmuxNotice(for: terminal) {
+                LeftoverTmuxSessionNotice(terminalID: terminal.id, server: worktree.tmuxServer)
+            } else if let worktree {
                 TerminalPanelView(
                     terminalID: terminal.id,
-                    tmuxServer: worktree.tmuxServer,
-                    tmuxWindowID: terminal.tmuxWindowID,
-                    tmuxBridge: appState.tmuxBridge,
-                    worktreePath: worktree.path,
-                    onMissingWindow: {
-                        await appState.requestAutomaticTerminalRecreation(terminalID: terminal.id)
-                    }
+                    worktreePath: worktree.path
                 )
                 // The identity every terminal host shares, so the attach-failed
                 // placard's Retry, an account switch's wake, and an engine

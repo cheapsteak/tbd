@@ -122,10 +122,6 @@ final class AppState {
             }
         }
     }
-    /// Subscription to appearance.$schemeID changes for pushing COLORFGBG updates to running tmux servers.
-    @ObservationIgnored private var appearanceSubscription: AnyCancellable?
-    /// Owns the trailing-edge quiet window in front of that subscription.
-    private let appearanceDebouncer = AppearanceBroadcastDebouncer()
     /// Subscription to themeStore.$userThemes changes for reconciling the active scheme.
     @ObservationIgnored private var themeStoreSubscription: AnyCancellable?
 
@@ -751,8 +747,8 @@ final class AppState {
 
     /// Worktree IDs with at least one terminal currently in the `.working`
     /// activity state (an agent is actively running). These must not have their
-    /// view trees torn down by keep-alive eviction — unmounting kills the
-    /// on-screen tmux viewer mid-run and shows a spurious detach message.
+    /// view trees torn down by keep-alive eviction — unmounting detaches the
+    /// on-screen viewer mid-run, and the next mount pays a fresh attach.
     var workingWorktreeIDs: Set<UUID> {
         var ids = Set<UUID>()
         for (worktreeID, terminalList) in terminals
@@ -771,7 +767,7 @@ final class AppState {
     /// active-tab terminal is pinned — the would-be double-mount of that terminal
     /// (dock cell + kept-alive pager) is prevented structurally by the
     /// `dockedTerminalIDs` dedup in `PanePlaceholder`, so the two viewers never
-    /// collide on the shared `tbd-view-<id>` tmux session.
+    /// fight over the session's one holder attach.
     var protectedWorktreeIDs: Set<UUID> {
         selectedWorktreeIDs.union(workingWorktreeIDs)
     }
@@ -796,8 +792,8 @@ final class AppState {
     /// — i.e. exactly the terminals `PinnedTerminalDock` renders. The keep-alive
     /// pager must skip these (see `AppState.shouldSuppressTerminalInLayout` /
     /// `PanePlaceholder`) so a docked terminal is never mounted a second time;
-    /// two `TerminalPanelView`s for one terminal would collide on the shared
-    /// `tbd-view-<id>` tmux session and thrash it.
+    /// two `TerminalPanelView`s for one terminal would fight over the
+    /// session's one holder attach and thrash it.
     var dockedTerminalIDs: Set<UUID> {
         let visible = visibleTerminalIDs
         return Set(pinnedTerminals.map(\.id).filter { !visible.contains($0) })
@@ -1514,8 +1510,8 @@ final class AppState {
     /// billed, concurrency-limited resource the rest of this comment is
     /// about. Deliberately SMALLER than `keepAliveLimit` (the local
     /// worktree cap, 8) even though both share the same protected-selection
-    /// + capped-recency shape: a warm LOCAL tmux attach is free (the daemon
-    /// already keeps the tmux session running regardless), but a warm
+    /// + capped-recency shape: a warm LOCAL attach is free (the session's
+    /// holder keeps it running regardless), but a warm
     /// REMOTE attach is a real, live connection to another machine — for an
     /// SSM- or ssh-backed provider, a billed and concurrency-limited
     /// resource — that buys nothing the user can see, since awareness of a
@@ -2053,10 +2049,6 @@ final class AppState {
     /// when a terminal was deleted. Pruned on every mutation and adoption.
     @ObservationIgnored var recentlyDeletedTerminalIDs: [UUID: Date] = [:]
 
-    /// App-lifetime automatic recovery attempts, keyed by stable terminal UUID.
-    /// View/coordinator reconstruction must not reset this budget.
-    @ObservationIgnored var terminalRecoveryBudget = TerminalRecoveryBudget()
-
     // Alert state for user feedback
     var alertMessage: String? = nil {
         didSet { if alertMessage == nil { alertRevealPath = nil } }
@@ -2076,7 +2068,6 @@ final class AppState {
 
     let daemonClient: DaemonClient
     let tmuxExecutableResolver: TmuxExecutableResolver
-    let tmuxBridge: TmuxBridge
     /// The app's own transcript reader. Constructed unconditionally — it costs
     /// nothing until a pane registers, and it stats no file until then.
     let transcriptSource = TranscriptSource()
@@ -2928,7 +2919,6 @@ final class AppState {
         self.phoneRetryClock = phoneRetryClock
         self.windowChrome = WindowChromeState()
         self.tmuxExecutableResolver = tmuxExecutableResolver
-        self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
         self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()
         self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
         RetiredFilePanelDefaults.remove(from: userDefaults)
@@ -3106,57 +3096,18 @@ final class AppState {
 
     // MARK: - Appearance Subscriptions
 
-    /// Subscribe to appearance setting changes and push updates to running tmux servers.
-    /// Called when `appearance` is set via didSet.
+    /// Subscribe to theme-store reloads for `appearance`. Called when
+    /// `appearance` is set via didSet.
     @MainActor
     private func setupAppearanceSubscriptions(_ appearance: AppearanceSettings) {
-        // Subscribe to schemeID changes to push COLORFGBG updates to all running tmux servers.
-        // When the user changes the color scheme, this notifies all shells so tools like vim,
-        // less, fzf can auto-adjust to the new scheme.
-        // Debounce rapid changes (e.g., scrubbing through the scheme picker) to coalesce
-        // multiple RPCs into a single request. The 200ms window is long enough to capture
-        // rapid picker changes but short enough to feel responsive.
-        // The debounce lives in `AppearanceBroadcastDebouncer` rather than in a
-        // Combine `.debounce` operator: that operator takes a `Scheduler`, which
-        // cannot be an `any Clock<Duration>`, so the delay was untestable except
-        // by reconstructing the whole chain in the test and waiting on a real
-        // 200ms timer. The debouncer keeps `dropFirst()`/`removeDuplicates()`
-        // (pure, no time) in Combine and replaces only the timed stage with
-        // cancel-and-replace on the injected clock. Run-loop-mode independence
-        // is unchanged, not new: the operator being replaced was already
-        // `DispatchQueue.main` for exactly that reason (a picker scrub puts the
-        // run loop in `.eventTracking`, which stalls a `RunLoop.main` timer).
-        //
-        // Drop any fire still pending from a previous `appearance`: this runs
-        // from that property's `didSet`, and releasing the old subscription no
-        // longer kills an armed timer the way tearing down a Combine chain did.
-        appearanceDebouncer.cancel()
-        appearanceSubscription = appearanceDebouncer.start(observing: appearance) { [weak self] _ in
-            self?.broadcastAppearanceColorFgBg(appearance)
-        }
-
         // When the theme store reloads (external file add/delete/edit), reconcile
         // the active schemeID so a deleted theme falls back to the default rather
         // than leaving the UI pointing at an unknown id.
         themeStoreSubscription = themeStore.$userThemes
-            .dropFirst()  // skip subscriber-time emission, match appearanceSubscription pattern
+            .dropFirst()  // skip the emission a new subscriber gets on subscribing
             .sink { [weak appearance] _ in
                 appearance?.reconcileWithStore()
             }
-    }
-
-    /// Compute the new COLORFGBG value and push it to all running tmux servers.
-    @MainActor
-    private func broadcastAppearanceColorFgBg(_ appearance: AppearanceSettings) {
-        let newValue = appearance.currentColorFgBg
-        Task {
-            do {
-                try await daemonClient.updateAppearanceColorFgBg(value: newValue)
-            } catch {
-                logger.error("Failed to broadcast COLORFGBG update: \(error, privacy: .public)")
-                // Fire-and-forget: don't block on RPC failure
-            }
-        }
     }
 
     // MARK: - Layout Persistence
@@ -3895,16 +3846,15 @@ final class AppState {
     /// gap must not auto-wake a just-manually-parked session. On wake the
     /// reason is cleared but the snapshot is KEPT, matching the daemon's
     /// `clearHibernated` (the woken view shows the frozen pane while the live
-    /// tmux client reconnects).
+    /// attach comes up).
     func applyTerminalHibernationDelta(_ delta: TerminalHibernationDelta) {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
-        // Apply fresh tmux ids (carried on wake, especially after a window
-        // RECREATE) together with the un-park flip. The terminal view keys on
-        // `id-tmuxWindowID-isParked`; flipping isParked while the cached row
-        // still points at the dead window would rebuild the view against that
-        // dead window, and its failed attach re-parks the row (wake flap).
+        // Apply fresh tmux ids, when the delta carries them, together with
+        // the un-park flip. The pane's identity includes `tmuxWindowID`, so
+        // ids that landed only in a later refetch would rebuild the pane a
+        // second time.
         if let windowID = delta.tmuxWindowID {
             terminals[delta.worktreeID]?[idx].tmuxWindowID = windowID
         }

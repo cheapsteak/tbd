@@ -4,10 +4,11 @@ import Testing
 
 /// Tests for terminal viewer environment scrubbing.
 ///
-/// The SwiftTerm PTY that displays terminal tabs must run `tmux attach`
-/// with a clean environment — specifically, TMUX and TMUX_PANE must be removed
-/// to prevent "sessions should be nested with care, unset $TMUX to force" errors
-/// when TBD.app itself was launched from within a tmux session.
+/// The local PTYs the app spawns — a remote provider's attach command and the
+/// remediation terminal — run with a clean environment: TMUX and TMUX_PANE
+/// are removed, so a child that is itself a tmux client does not refuse with
+/// "sessions should be nested with care, unset $TMUX to force" when TBD.app
+/// was launched from within a tmux session.
 @Suite("Terminal viewer environment")
 struct TerminalViewerEnvironmentTests {
 

@@ -3,80 +3,17 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
-@Suite("Terminal panel close context")
+@Suite("Terminal panel coordinator")
 struct TerminalPanelViewTests {
-    @Test("generic command failure renders diagnostics guidance without recovery")
-    func commandFailureRendersGuidanceWithoutRecovery() {
-        let action = TerminalPanelRepresentable.Coordinator.preparationAction(
-            for: .failure(.commandFailed(stage: .linkWindow, output: "failed"))
-        )
-
-        #expect(action == .showMessage(
-            "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics for details or close the tab."
-        ))
-    }
-
-    @Test("unresolvable tmux executable names the remedy instead of diagnostics")
-    func tmuxExecutableUnavailableRendersLocateGuidance() {
-        let action = TerminalPanelRepresentable.Coordinator.preparationAction(
-            for: .failure(.tmuxExecutableUnavailable)
-        )
-
-        #expect(action == .showMessage(
-            "TBD couldn't find tmux — it is not in PATH and no fallback path is saved. Locate the tmux executable in Settings → Terminal, then reopen this terminal."
-        ))
-        #expect(action != .showMessage(
-            TerminalPreparationPresentation.commandFailedMessage
-        ))
-    }
-
-    @Test("confirmed missing window requests automatic recovery")
-    func confirmedMissingWindowRequestsRecovery() {
-        let action = TerminalPanelRepresentable.Coordinator.preparationAction(
-            for: .failure(.windowMissing(failedStage: .selectWindow))
-        )
-
-        #expect(action == .requestAutomaticRecovery(failedStage: .selectWindow))
-    }
-
-    // MARK: - Transport gate (holder-backed sessions are not a tmux mechanic)
+    // MARK: - Transport lookup
     //
-    // These cover the pure decision (`transportPreparationNotice(for:)`) and
-    // the `panelTransport()` lookup under it, and nothing more: they would all
-    // stay green if the `handleHolderTransport` branch were dropped from the
-    // attach path. `TerminalHolderTransportGateTests` is the suite that drives
-    // `startTmuxClient` itself and pins that the branch is actually taken, and
-    // taken first.
-
-    @Test("a holder-backed session is never prepared through tmux")
-    func holderTransportSkipsTmuxPreparation() {
-        #expect(TerminalPanelRepresentable.Coordinator.transportPreparationNotice(for: .holder) ==
-            "This session runs on the pty-holder transport, which TBD can't display yet. The session is unaffected and keeps running.")
-    }
-
-    @Test("a tmux-backed session still prepares through tmux")
-    func tmuxTransportStillPreparesThroughTmux() {
-        #expect(TerminalPanelRepresentable.Coordinator.transportPreparationNotice(for: .tmux) == nil)
-    }
-
-    @Test("the holder notice replaces the copy of BOTH tmux failure classifications")
-    func holderNoticeReplacesBothClassificationMessages() {
-        // A holder row's tmux preparation fails either way, and *which* way
-        // depends on whether an unrelated tmux server happens to be running for
-        // the repo: `.windowMissing` (recovery + Retry banner) when one is,
-        // `.commandFailed` (diagnostics copy) when none is. Neither classifier's
-        // copy may survive for a holder row.
-        let notice = TerminalPanelRepresentable.Coordinator.transportPreparationNotice(for: .holder)
-        #expect(notice != nil)
-        #expect(notice != TerminalPreparationPresentation.commandFailedMessage)
-        #expect(notice != TerminalPreparationPresentation.tmuxExecutableUnavailableMessage)
-        #expect(notice != TerminalRecoveryPresentation.failedMessage)
-        #expect(notice != TerminalRecoveryPresentation.exhaustedMessage)
-    }
+    // `panelTransport()` gates the holder-only behaviors — mouse reporting,
+    // the program status probe, an engine switch — so it answers `.holder`
+    // only for a row AppState has loaded as one.
 
     @MainActor
-    @Test("a holder-backed terminal short-circuits preparation before tmux classification")
-    func holderTerminalShortCircuitsPreparation() {
+    @Test("a holder-backed terminal resolves as holder")
+    func holderTerminalResolvesAsHolder() {
         let state = AppState()
         let terminalID = UUID()
         seedTerminal(terminalID, in: state, transport: .holder)
@@ -86,13 +23,11 @@ struct TerminalPanelViewTests {
         coordinator.panelID = terminalID
 
         #expect(coordinator.panelTransport() == .holder)
-        #expect(coordinator.transportPreparationNoticeForPanel() ==
-            TerminalPreparationPresentation.holderTransportMessage)
     }
 
     @MainActor
-    @Test("a tmux-backed terminal is unaffected by the transport gate")
-    func tmuxTerminalIsUnaffectedByTransportGate() {
+    @Test("a tmux-backed terminal resolves as tmux")
+    func tmuxTerminalResolvesAsTmux() {
         let state = AppState()
         let terminalID = UUID()
         seedTerminal(terminalID, in: state, transport: .tmux)
@@ -102,226 +37,39 @@ struct TerminalPanelViewTests {
         coordinator.panelID = terminalID
 
         #expect(coordinator.panelTransport() == .tmux)
-        #expect(coordinator.transportPreparationNoticeForPanel() == nil)
     }
 
     @MainActor
-    @Test("an unresolvable terminal falls back to the tmux path")
-    func unresolvableTerminalFallsBackToTmuxPath() {
-        // AppState has not loaded this terminal (or it was removed). The gate
-        // must not invent a holder row and suppress a real tmux panel.
+    @Test("an unresolvable terminal fails closed, not as holder")
+    func unresolvableTerminalFailsClosed() {
+        // AppState has not loaded this terminal (or it was removed). The
+        // lookup must not invent a holder row and switch on behaviors only a
+        // holder session may have.
         let coordinator = TerminalPanelRepresentable.Coordinator()
         coordinator.appState = AppState()
         coordinator.panelID = UUID()
 
         #expect(coordinator.panelTransport() == .tmux)
-        #expect(coordinator.transportPreparationNoticeForPanel() == nil)
-    }
-
-    @Test("prepared session starts the viewer")
-    func preparedSessionStartsViewer() {
-        let prepared = TmuxPreparedSession(
-            executablePath: "/opt/local/bin/tmux",
-            arguments: ["-u", "attach"]
-        )
-
-        let preparation = TmuxSessionPreparation(session: prepared, generation: 7)
-
-        #expect(TerminalPanelRepresentable.Coordinator.preparationAction(
-            for: .success(preparation)) == .startViewer(preparation))
-    }
-
-    @MainActor
-    @Test("confirmed grouped viewer attachment, not process spawn, resets the automatic recovery budget")
-    func confirmedGroupedViewerAttachmentResetsRecoveryBudget() {
-        let state = AppState()
-        let terminalID = UUID()
-        seedTerminal(terminalID, in: state)
-        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
-        state.finishTerminalRecreation(terminalID: terminalID)
-
-        let coordinator = TerminalPanelRepresentable.Coordinator()
-        coordinator.appState = state
-        coordinator.panelID = terminalID
-        let generation = coordinator.groupedViewerProcessDidStart(processRunning: true)
-        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == generation)
-
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(attempt: 2))
-        state.finishTerminalRecreation(terminalID: terminalID)
-
-        #expect(coordinator.groupedViewerAttachmentProbeDidComplete(
-            clientAttached: false,
-            processGeneration: generation
-        ))
-        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == generation)
-        #expect(!coordinator.groupedViewerAttachmentProbeDidComplete(
-            clientAttached: true,
-            processGeneration: generation
-        ))
-
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(attempt: 1))
-    }
-
-    @MainActor
-    @Test("failed grouped viewer attachment confirmation does not reset recovery")
-    func failedGroupedViewerConfirmationDoesNotResetRecoveryBudget() {
-        let state = AppState()
-        let terminalID = UUID()
-        seedTerminal(terminalID, in: state)
-        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
-        state.finishTerminalRecreation(terminalID: terminalID)
-
-        let coordinator = TerminalPanelRepresentable.Coordinator()
-        coordinator.appState = state
-        coordinator.panelID = terminalID
-        let generation = coordinator.groupedViewerProcessDidStart(processRunning: true)
-        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == generation)
-        #expect(coordinator.groupedViewerAttachmentProbeDidComplete(
-            clientAttached: false,
-            processGeneration: generation
-        ))
-        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == generation)
-        #expect(!coordinator.groupedViewerAttachmentProbeDidComplete(
-            clientAttached: false,
-            processGeneration: generation
-        ))
-        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == nil)
-
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(attempt: 2))
-    }
-
-    @MainActor
-    @Test("a late grouped viewer probe cannot confirm a restarted process")
-    func lateGroupedViewerProbeCannotConfirmRestartedProcess() {
-        let state = AppState()
-        let terminalID = UUID()
-        seedTerminal(terminalID, in: state)
-        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
-        state.finishTerminalRecreation(terminalID: terminalID)
-
-        let coordinator = TerminalPanelRepresentable.Coordinator()
-        coordinator.appState = state
-        coordinator.panelID = terminalID
-        let staleGeneration = coordinator.groupedViewerProcessDidStart(processRunning: true)
-        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == staleGeneration)
-        coordinator.groupedViewerProcessDidTerminate()
-        let liveGeneration = coordinator.groupedViewerProcessDidStart(processRunning: true)
-
-        #expect(!coordinator.groupedViewerAttachmentProbeDidComplete(
-            clientAttached: true,
-            processGeneration: staleGeneration
-        ))
-
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(attempt: 2))
-        state.finishTerminalRecreation(terminalID: terminalID)
-
-        #expect(coordinator.beginGroupedViewerAttachmentConfirmation() == liveGeneration)
-        #expect(!coordinator.groupedViewerAttachmentProbeDidComplete(
-            clientAttached: true,
-            processGeneration: liveGeneration
-        ))
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(attempt: 1))
-    }
-
-    @Test("budget exhaustion renders stable recovery guidance")
-    func budgetExhaustionRendersStableGuidance() {
-        #expect(TerminalPanelRepresentable.Coordinator.recoveryMessage(for: .budgetExhausted) ==
-            "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab.")
-    }
-
-    @Test("failed automatic recovery renders stable manual retry guidance")
-    func failedRecoveryRendersStableGuidance() {
-        #expect(TerminalPanelRepresentable.Coordinator.recoveryMessage(for: .failed(attempt: 1)) ==
-            "Automatic terminal recovery failed. Retry manually or close the tab.")
-    }
-
-    @Test("budget exhaustion presentation exposes manual retry")
-    func budgetExhaustionPresentationExposesManualRetry() {
-        #expect(TerminalRecoveryPresentation.retryTitle == "Retry")
-        #expect(TerminalRecoveryPresentation.exhaustedMessage ==
-            "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab.")
-    }
-
-    @MainActor
-    @Test("recovery guidance callback carries the actual failed and exhausted messages")
-    func recoveryGuidanceCallbackCarriesActualMessage() throws {
-        let coordinator = TerminalPanelRepresentable.Coordinator()
-        var messages: [String] = []
-        coordinator.onRecoveryGuidance = { messages.append($0.message) }
-
-        coordinator.recoveryGuidanceDidBecomeAvailable(
-            try #require(TerminalRecoveryPresentation.guidance(for: .failed(attempt: 1)))
-        )
-        coordinator.recoveryGuidanceDidBecomeAvailable(
-            try #require(TerminalRecoveryPresentation.guidance(for: .budgetExhausted))
-        )
-
-        #expect(messages == [
-            "Automatic terminal recovery failed. Retry manually or close the tab.",
-            "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab."
-        ])
+        #expect(!TerminalPanelRepresentable.reportsMouseToApps(transport: coordinator.panelTransport()))
     }
 
     // MARK: - The daemon's recreate refusal
 
-    static let migrateRefusal = TerminalRecreationRefusal(
-        message: "Terminal acme runs on the tmux transport, which TBD no longer starts sessions on. "
-            + "Run `tbd terminal migrate acme` to move it to the pty holder, then open it again.",
-        rowIsOnTmux: true)
-
-    /// A failed automatic recovery the daemon refused shows the daemon's own
-    /// sentence, not the generic one, so the person reads what to do.
-    @Test("a refused automatic recovery shows the daemon's text")
-    func aRefusedAutomaticRecoveryShowsTheDaemonsText() {
-        let guidance = TerminalRecoveryPresentation.guidance(
-            for: .failed(attempt: 1, refusal: Self.migrateRefusal))
-        #expect(guidance?.message == Self.migrateRefusal.message)
-    }
-
-    /// A row still on tmux gets no Retry: the same request would be refused
-    /// again.
-    @Test("a refusal for a row on tmux offers no Retry")
-    func aRefusalForARowOnTmuxOffersNoRetry() {
-        let guidance = TerminalRecoveryPresentation.guidance(for: Self.migrateRefusal)
-        #expect(guidance == TerminalRecoveryGuidance(
-            message: Self.migrateRefusal.message, offersRetry: false))
-    }
-
-    /// Any other refusal keeps Retry, with the daemon's reason in the text.
-    @Test("any other refusal keeps Retry and names the daemon's reason")
-    func anyOtherRefusalKeepsRetry() {
-        let refusal = TerminalRecreationRefusal(
-            message: "Worktree not found for terminal: acme", rowIsOnTmux: false)
-        let guidance = TerminalRecoveryPresentation.guidance(for: refusal)
-        #expect(guidance.offersRetry)
-        #expect(guidance.message.contains("Worktree not found for terminal: acme"))
-    }
-
-    /// A failure the daemon did not write keeps the generic text and Retry.
-    @Test("a failure with no refusal keeps the generic text and Retry")
-    func aFailureWithNoRefusalKeepsTheGenericTextAndRetry() {
-        #expect(TerminalRecoveryPresentation.guidance(for: .failed(attempt: 2))
-            == TerminalRecoveryGuidance(
-                message: TerminalRecoveryPresentation.failedMessage, offersRetry: true))
-    }
-
-    /// Whether the row is on tmux is read from the code, never the sentence.
-    @Test("a refusal is for a row on tmux exactly when it carries the tmux code")
-    func aRefusalIsForARowOnTmuxExactlyWhenItCarriesTheTmuxCode() {
+    /// The leftover notice shows the daemon's own sentence under it, so the
+    /// refusal carries it verbatim whatever its code.
+    @Test("a refusal carries the daemon's sentence, whatever its code")
+    func aRefusalCarriesTheDaemonsSentence() {
         let coded = TerminalRecreationRefusal.from(DaemonClientError.rpcError(
             "anything at all", code: RPCErrorCode.terminalOnTmux.rawValue))
-        #expect(coded == TerminalRecreationRefusal(message: "anything at all", rowIsOnTmux: true))
+        #expect(coded == TerminalRecreationRefusal(message: "anything at all"))
 
         let uncoded = TerminalRecreationRefusal.from(DaemonClientError.rpcError(
-            "run `tbd terminal migrate` first", code: nil))
-        #expect(uncoded?.rowIsOnTmux == false,
-                "the sentence was read to decide the transport")
+            "Worktree not found for terminal: acme", code: nil))
+        #expect(uncoded == TerminalRecreationRefusal(message: "Worktree not found for terminal: acme"))
+    }
 
+    @Test("a failure the daemon did not write is no refusal")
+    func aFailureTheDaemonDidNotWriteIsNoRefusal() {
         #expect(TerminalRecreationRefusal.from(DaemonClientError.daemonNotRunning) == nil,
                 "a failure the daemon did not write was shown as its refusal")
     }
@@ -358,28 +106,6 @@ struct TerminalPanelViewTests {
         coordinator.panelID = terminalID
 
         #expect(coordinator.worktreeIDForDiagnostics() == worktreeID)
-    }
-
-    @MainActor
-    @Test("recovery diagnostic context retains worktree after terminal removal")
-    func recoveryDiagnosticContextSurvivesTerminalRemoval() {
-        let state = AppState()
-        let worktreeID = UUID()
-        let terminalID = UUID()
-        seedTerminal(terminalID, in: state, worktreeID: worktreeID)
-        let coordinator = TerminalPanelRepresentable.Coordinator()
-        coordinator.appState = state
-        coordinator.panelID = terminalID
-
-        let context = coordinator.recoveryDiagnosticContext()
-        state.removeDeletedTerminalFromState(
-            terminalID: terminalID,
-            worktreeID: worktreeID
-        )
-
-        #expect(coordinator.worktreeIDForDiagnostics() == nil)
-        #expect(context.terminalID == terminalID)
-        #expect(context.worktreeID == worktreeID)
     }
 
     @MainActor

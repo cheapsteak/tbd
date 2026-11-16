@@ -128,6 +128,19 @@ enum TerminalPanePresentation {
         switching == nil && ParkedPaneWakeModel.showsWakeOverlay(for: terminal)
     }
 
+    /// Whether a terminal host shows `LeftoverTmuxSessionNotice` in place of a
+    /// terminal view: for a row on tmux that is not parked.
+    ///
+    /// TBD no longer shows tmux sessions, and the daemon parks a tmux row once
+    /// it finds its server gone (at startup, on `tbd cleanup`, and on Check
+    /// Again), so a row still live on tmux is one whose server outlived the
+    /// update and may still be running. A parked tmux row keeps the parked
+    /// pane, whose notice says how to move it to the pty holder; a holder row,
+    /// parked or live, is a terminal as ever.
+    static func showsLeftoverTmuxNotice(for terminal: Terminal) -> Bool {
+        terminal.transport == .tmux && !terminal.isParked
+    }
+
     /// The caption over the pane, or nil. Shown only while the switch has the
     /// row parked: before the park the session is still live and painting, and
     /// after the wake the fresh attach is the news.

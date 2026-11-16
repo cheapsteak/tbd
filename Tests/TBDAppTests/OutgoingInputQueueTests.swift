@@ -18,7 +18,7 @@ import TestSupport
 ///
 /// `.serialized` for cheap isolation between tests that each mint their own
 /// clock + queue; not required for correctness, matches this
-/// repo's convention for small clock-driven suites (`AppearanceDebounceTests`).
+/// repo's convention for small clock-driven suites (`SearchQueryDebouncerTests`).
 ///
 /// `.clockDriven` is at SUITE level on purpose: five of these tests `await` a
 /// continuation that a broken implementation would never resume, so each needs
