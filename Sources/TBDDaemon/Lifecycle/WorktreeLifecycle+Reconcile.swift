@@ -682,24 +682,39 @@ extension WorktreeLifecycle {
             logger.warning("reconcile: skipped parking terminal \(terminal.id, privacy: .public) — the actuation record is unwritable")
             return
         }
-        let parked: Terminal?
+        let outcome: LeftoverTmuxParkOutcome
         do {
-            parked = try await parkLeftoverTmuxRow(terminal)
+            outcome = try await parkLeftoverTmuxRowReportingOutcome(terminal)
         } catch {
             await actuationLog.appendOutcome(
                 confirms: actuationID, result: .transportFailed, error: "\(error)")
             logger.warning("reconcile: could not park tmux terminal \(terminal.id, privacy: .public) whose tmux server \(server, privacy: .public) is gone: \(error.localizedDescription, privacy: .public)")
             return
         }
-        guard parked != nil else {
+        switch outcome {
+        case .parked:
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
+            logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — its tmux server \(server, privacy: .public) is gone, session \(sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
+        case .leftAlone:
             await actuationLog.appendOutcome(
                 confirms: actuationID, result: .refused(.notEligible),
                 error: "the row changed after reconcile read it")
             logger.info("reconcile: left tmux terminal \(terminal.id, privacy: .public) as it is — it changed after this pass read it")
-            return
+        case .closed:
+            // A quiet miss, as the delete arm's is: a tab closed while the
+            // probe ran leaves nothing to park.
+            await actuationLog.appendOutcome(
+                confirms: actuationID, result: .refused(.notFound),
+                error: "the tab was closed after reconcile read it")
+            logger.info("reconcile: left tmux terminal \(terminal.id, privacy: .public) alone — its tab was closed after this pass read it")
+        case .superseded:
+            // The park was written, so it is recorded as dispatched, with what
+            // became of it.
+            await actuationLog.appendOutcome(
+                confirms: actuationID, result: .dispatched,
+                error: "the park was written, but the row changed again before it finished")
+            logger.info("reconcile: parked tmux terminal \(terminal.id, privacy: .public), but it changed again before the park finished; left as that change made it")
         }
-        await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
-        logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — its tmux server \(server, privacy: .public) is gone, session \(sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
     }
 
     // MARK: - The holder inventory

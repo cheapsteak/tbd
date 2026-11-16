@@ -1474,18 +1474,34 @@ extension RPCRouter {
         let reparkID = try await beginActuation(
             .recreateWindowRepark, actor: actor,
             target: .local(worktree: terminal.worktreeID, terminal: terminal.id))
-        let parked = try await actuating(reparkID) {
-            try await lifecycle.parkLeftoverTmuxRow(terminal)
+        let outcome = try await actuating(reparkID) {
+            try await lifecycle.parkLeftoverTmuxRowReportingOutcome(terminal)
         }
-        guard let parked else {
+        switch outcome {
+        case .parked(let parked):
+            await finishActuation(reparkID, .dispatched)
+            logger.notice("recreateWindow: parked \(plan.identity.agentKind.rawValue, privacy: .public) terminal \(terminal.id, privacy: .public) on tmux — its server \(sighting.server, privacy: .public) is gone, session \(plan.identity.sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
+            guard let parked else {
+                return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+            }
+            return try RPCResponse(result: parked)
+        case .leftAlone:
             let refusal = "Terminal \(terminal.id) changed before TBD could park it, "
                 + "and was left as it is. Check again to look at it afresh."
             await finishActuation(reparkID, .refused(.notEligible), error: refusal)
             return RPCResponse(error: refusal)
+        case .closed:
+            await finishActuation(
+                reparkID, .refused(.notFound), error: "the tab was closed before it could be parked")
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        case .superseded:
+            // The park was written, so it is recorded as dispatched, with what
+            // became of it.
+            let refusal = "Terminal \(terminal.id) changed while TBD was parking it, "
+                + "and was left as that change made it. Check again to look at it afresh."
+            await finishActuation(reparkID, .dispatched, error: refusal)
+            return RPCResponse(error: refusal)
         }
-        await finishActuation(reparkID, .dispatched)
-        logger.notice("recreateWindow: parked \(plan.identity.agentKind.rawValue, privacy: .public) terminal \(terminal.id, privacy: .public) on tmux — its server \(sighting.server, privacy: .public) is gone, session \(plan.identity.sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
-        return try RPCResponse(result: parked)
     }
 
     func handleTerminalOutput(_ paramsData: Data) async throws -> RPCResponse {

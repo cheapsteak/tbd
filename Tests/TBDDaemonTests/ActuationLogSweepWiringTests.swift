@@ -171,6 +171,43 @@ struct ActuationLogSweepWiringTests {
         #expect(parked?.hibernateReason == .recovery)
     }
 
+    /// The pass reads the row before it probes the server; a tab closed in
+    /// between is a quiet miss, as it is for the delete arm, and not a
+    /// transport failure.
+    @Test("reconcile records a tab closed during its probe as not found, not as a failure")
+    func reconcileRecordsAClosedTabAsNotFound() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let logPath = try makeLogPath()
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "acme", defaultBranch: "main")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
+            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+        let terminal = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
+        let terminalID = terminal.id
+        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        // The tab closes while its server is probed, then the server reads gone.
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in
+            _ = try? await db.terminals.delete(id: terminalID)
+            return .absent
+        }
+
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath))
+
+        let parks = try requests(at: logPath).filter { $0["kind"] as? String == "hibernate" }
+        let request = try #require(parks.first, "the park was never attempted")
+        let outcome = try #require(
+            try outcomes(at: logPath).first { $0["confirms"] as? String == request["id"] as? String })
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-found")
+        #expect(try await db.terminals.get(id: terminalID) == nil)
+    }
+
     @Test("an unwritable record skips the recovery park — the row stays unparked")
     func unwritableRecordSkipsRecoveryPark() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()

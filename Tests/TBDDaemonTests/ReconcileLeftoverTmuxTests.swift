@@ -282,7 +282,45 @@ struct ReconcileLeftoverTmuxTests {
         let changed = try #require(try await db.terminals.get(id: rows.claude.id))
 
         #expect(try await lifecycle.parkLeftoverTmuxRow(asRead) == nil)
+        #expect(try await lifecycle.parkLeftoverTmuxRowReportingOutcome(asRead) == .leftAlone)
         #expect(try await db.terminals.get(id: rows.claude.id) == changed)
+    }
+
+    /// A tab closed after the caller read it is an ordinary race, not a
+    /// failure: the park reports it closed and throws nothing.
+    @Test("parkLeftoverTmuxRow reports a row closed since it was read as closed, without throwing")
+    func parkLeftoverReportsAClosedRow() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(
+            db: db, probe: RecordingLeftoverTmuxProbe(answer: { _ in .absent }))
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let rows = try await seedTerminals(db: db, worktree: main)
+        let asRead = try #require(try await db.terminals.get(id: rows.claude.id))
+        try await db.terminals.delete(id: rows.claude.id)
+
+        #expect(try await lifecycle.parkLeftoverTmuxRowReportingOutcome(asRead) == .closed)
+        #expect(try await lifecycle.parkLeftoverTmuxRow(asRead) == nil)
+        #expect(try await db.terminals.get(id: rows.claude.id) == nil)
+    }
+
+    @Test("parkLeftoverTmuxRow reports a park it made as parked, with the row")
+    func parkLeftoverReportsTheParkedRow() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(
+            db: db, probe: RecordingLeftoverTmuxProbe(answer: { _ in .absent }))
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let rows = try await seedTerminals(db: db, worktree: main)
+        let asRead = try #require(try await db.terminals.get(id: rows.claude.id))
+
+        let outcome = try await lifecycle.parkLeftoverTmuxRowReportingOutcome(asRead)
+
+        let parked = try #require(try await db.terminals.get(id: rows.claude.id))
+        #expect(parked.isParked)
+        #expect(outcome == .parked(parked))
     }
 
     /// The pass reads a worktree's rows before it probes their server, so a
