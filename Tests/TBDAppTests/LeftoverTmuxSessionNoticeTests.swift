@@ -8,6 +8,8 @@ import TBDShared
 /// A row still live on tmux is one whose server outlived the update: the app
 /// shows the notice in its place and never a terminal. Every other row keeps
 /// what it had — a parked tmux row its parked pane, a holder row its terminal.
+/// The pinned dock follows the main pane: a parked tmux row there gets its
+/// snapshot and notice too.
 @Suite("Leftover tmux session notice")
 struct LeftoverTmuxSessionNoticeTests {
     private static func row(transport: TerminalTransport, parked: Bool) -> Terminal {
@@ -45,6 +47,40 @@ struct LeftoverTmuxSessionNoticeTests {
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "@3", tmuxPaneID: "%3",
             suspendedAt: Date(), kind: .claude, transport: .tmux)
         #expect(!TerminalPanePresentation.showsLeftoverTmuxNotice(for: row))
+    }
+
+    // MARK: - The pinned dock
+
+    /// The dock draws no parked placeholder for a holder row, but a row parked
+    /// on tmux has no live frame to keep, so the dock draws its snapshot and
+    /// the notice that says how to move it — the main pane's parked pane.
+    @Test("the dock draws a parked tmux row's snapshot and its move advice")
+    func dockDrawsAParkedTmuxRowsSnapshot() {
+        let row = Self.row(transport: .tmux, parked: true)
+        #expect(TerminalPanePresentation.dockShowsParkedSnapshot(for: row))
+        #expect(TerminalPanePresentation.parkedNoticeMessage(for: row, switching: nil)
+            == HibernatedBannerModel.parkedOnTmuxMessage)
+    }
+
+    @Test("the dock draws a tmux row parked by the legacy column the same way")
+    func dockDrawsALegacySuspendedTmuxRowsSnapshot() {
+        let row = Terminal(
+            id: UUID(), worktreeID: UUID(), tmuxWindowID: "@3", tmuxPaneID: "%3",
+            suspendedAt: Date(), kind: .claude, transport: .tmux)
+        #expect(TerminalPanePresentation.dockShowsParkedSnapshot(for: row))
+    }
+
+    @Test("the dock draws no snapshot for a live tmux row, which gets the notice")
+    func dockDrawsNoSnapshotForALiveTmuxRow() {
+        let row = Self.row(transport: .tmux, parked: false)
+        #expect(!TerminalPanePresentation.dockShowsParkedSnapshot(for: row))
+        #expect(TerminalPanePresentation.showsLeftoverTmuxNotice(for: row))
+    }
+
+    @Test("the dock draws no snapshot for a holder row, live or parked", arguments: [false, true])
+    func dockDrawsNoSnapshotForAHolderRow(parked: Bool) {
+        #expect(!TerminalPanePresentation.dockShowsParkedSnapshot(
+            for: Self.row(transport: .holder, parked: parked)))
     }
 
     @Test("the notice names the server's kill-server command and Check Again")

@@ -89,9 +89,10 @@ enum TerminalPanePresentation {
     /// engine Switch Terminal Engine chose (`AppState.terminalEngineOverrides`),
     /// which rebuilds the view on that engine.
     ///
-    /// The pinned dock uses this alone: it renders no parked placeholder, and
-    /// rebuilding it on a park would only start an attach to a session that
-    /// is not there. `attachRetry` and `engineOverride` have no default so no
+    /// The pinned dock uses this alone for a holder row: it renders no parked
+    /// placeholder for one, and rebuilding it on a park would only start an
+    /// attach to a session that is not there. A row parked on tmux is the
+    /// exception (`dockShowsParkedSnapshot`). `attachRetry` and `engineOverride` have no default so no
     /// host can leave Retry or a switch unable to rebuild it. A nil override
     /// adds nothing, so a terminal nobody switched keeps the identity it had.
     /// The engine the flag would choose is left out on purpose: turning the
@@ -139,6 +140,18 @@ enum TerminalPanePresentation {
     /// parked or live, is a terminal as ever.
     static func showsLeftoverTmuxNotice(for terminal: Terminal) -> Bool {
         terminal.transport == .tmux && !terminal.isParked
+    }
+
+    /// Whether the pinned dock draws a row's frozen snapshot and parked notice
+    /// in place of a live terminal view: for a row parked on tmux.
+    ///
+    /// The dock draws no parked placeholder for a holder row (see
+    /// `attachIdentity`): its view keeps the last frame it drew. A row on tmux
+    /// has no such frame, because no panel attaches to tmux, so the dock draws
+    /// what the main pane does — the snapshot, with the notice that says how to
+    /// move the row to the pty holder.
+    static func dockShowsParkedSnapshot(for terminal: Terminal) -> Bool {
+        terminal.transport == .tmux && terminal.isParked
     }
 
     /// The caption over the pane, or nil. Shown only while the switch has the
