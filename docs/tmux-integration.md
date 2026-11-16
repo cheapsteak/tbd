@@ -78,8 +78,7 @@ The command builders for each step live in `TmuxBridge`
   the *same* window always do, no matter how their sessions are arranged — the
   only escape is the per-client `ignore-size` flag.
 - **No shared pointer.** A private session means switching what a panel shows
-  cannot move any other viewer, and cannot move `main` — which matters because
-  the daemon's control-mode connection attaches to `main`.
+  cannot move any other viewer, and cannot move `main`.
 - **Session persistence.** `main` survives app restarts, and tmux keeps all
   scrollback.
 - **Native PTY.** SwiftTerm works exactly as designed: input, output and resize
@@ -95,8 +94,7 @@ linking hands it exactly the one it should show. The narrower grant is worth
 more here than the shared window list, which no TBD viewer has any use for.
 
 Some identifiers and comments in the app still say "grouped sessions" for this
-path (`AppState`, `DaemonClient`, `RPCRouter+AttachHandlers`); read them as
-"the direct-PTY viewer path, as opposed to control mode".
+path; read them as "the direct-PTY viewer path".
 
 ## What We Tried First: Control Mode (-CC)
 
