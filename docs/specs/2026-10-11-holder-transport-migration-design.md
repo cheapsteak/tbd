@@ -109,12 +109,12 @@ live, and nothing in TBD can reach their sessions.
 no tmux binary for either. The server is gone only when both say so.
 
 - **The socket.** The daemon tries a plain `AF_UNIX` `connect()` to each place
-  it can work out the row's tmux socket may be,
-  `<directory>/tmux-<uid>/<server>`, and closes each socket at once. tmux takes
-  the directory from `TMUX_TMPDIR`, reads the value as one path, and resolves
-  it with `realpath(3)`. When the resolve fails (a missing directory, or a `~/`
-  path, which tmux does not expand there) tmux falls back to `/tmp`, which
-  resolves to `/private/tmp`, without a word. So the candidates are this
+  it can find the row's tmux socket, `<directory>/tmux-<uid>/<server>`, and
+  closes each socket at once. tmux takes the directory from `TMUX_TMPDIR`,
+  reads the value as one path, and resolves it with `realpath(3)`. When the
+  resolve fails (a missing directory, or a `~/` path, which tmux does not
+  expand there) tmux falls back to `/tmp`, which resolves to `/private/tmp`,
+  without a word. So the candidates are this
   daemon's `TMUX_TMPDIR`, resolved against its working directory, when it
   resolves, and always `/private/tmp`. This signal says gone only when every
   candidate is positively absent: `ENOENT` (nothing bound) or `ECONNREFUSED`

@@ -68,9 +68,9 @@ struct LeftoverTmuxServerSighting: Sendable, Equatable {
 ///
 /// **Two signals, and the server is gone only when both say so.**
 ///
-/// - **The socket.** A plain connect to every place this daemon can work out
-///   the server's socket may be (`candidateSocketPaths`). Every candidate must
-///   be positively absent.
+/// - **The socket.** A plain connect to every place this daemon can find the
+///   server's socket (`candidateSocketPaths`). Every candidate must be
+///   positively absent.
 /// - **The process table.** No live tmux process of this user may name the
 ///   server with `-L` (`processState(server:processes:uid:)`). A tmux server
 ///   keeps the command line of the client that started it, so a running server
