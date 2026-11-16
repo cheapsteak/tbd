@@ -690,15 +690,20 @@ struct LeftoverTmuxServerProbeTests {
     }
 
     /// The real kernel's layout: a process started with an empty `argv[0]`
-    /// under exec paths that need five bytes of padding (10 bytes), one (14),
-    /// none (15) and seven (16), and one started with an ordinary `argv[0]`,
-    /// each read back as started.
+    /// under exec paths of 10 to 17 bytes, which with the terminator need each
+    /// of the eight amounts of padding, none to seven bytes, and one started
+    /// with an ordinary `argv[0]`, each read back as started. The repeated
+    /// slashes only lengthen the path: the kernel keeps it as it was given.
     @Test("a real process's argv reads back as it was started, an empty argv[0] included",
           arguments: [
-            ("/bin/sleep", ["", "30"]),
-            ("/bin/////sleep", ["", "30"]),
-            ("/bin//////sleep", ["", "30"]),
-            ("/bin///////sleep", ["", "30"]),
+            ("/bin/sleep", ["", "30"]),          // 10 bytes, 5 of padding
+            ("/bin//sleep", ["", "30"]),         // 11 bytes, 4
+            ("/bin///sleep", ["", "30"]),        // 12 bytes, 3
+            ("/bin////sleep", ["", "30"]),       // 13 bytes, 2
+            ("/bin/////sleep", ["", "30"]),      // 14 bytes, 1
+            ("/bin//////sleep", ["", "30"]),     // 15 bytes, none
+            ("/bin///////sleep", ["", "30"]),    // 16 bytes, 7
+            ("/bin////////sleep", ["", "30"]),   // 17 bytes, 6
             ("/bin/sleep", ["sleep", "30"]),
           ])
     func aRealProcesssArgvReadsBack(path: String, argv: [String]) throws {
