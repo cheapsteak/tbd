@@ -2,15 +2,24 @@ import Darwin
 import Foundation
 import TBDShared
 
-/// What a socket probe established about the tmux server a live tmux row
-/// names.
+/// What the probe established about the tmux server a live tmux row names.
 enum LeftoverTmuxServerState: Sendable, Equatable {
-    /// Something may still be serving the socket. Every answer that is not
-    /// positive evidence of absence lands here, a successful connect included.
+    /// The server may still be running. Every answer that is not positive
+    /// evidence of absence lands here, a successful connect included.
     case running
-    /// Nothing is bound at the socket path, or nothing accepts on it. The
-    /// server is gone, and so is every session it carried.
+    /// No socket the server could be listening on answers, and no live tmux
+    /// process names the server. The server is gone, and so is every session
+    /// it carried.
     case absent
+}
+
+/// A live process whose executable is tmux, as the probe's process signal
+/// reads it.
+struct LeftoverTmuxProcess: Sendable, Equatable {
+    let pid: pid_t
+    /// The process's argv, `argv[0]` included, or nil when the kernel would
+    /// not give it.
+    let arguments: [String]?
 }
 
 /// The tmux server a live tmux row names, and what the probe said about it.
@@ -21,7 +30,7 @@ struct LeftoverTmuxServerSighting: Sendable, Equatable {
 }
 
 /// Whether the tmux server behind a live tmux row is still running, read off
-/// its socket without running the tmux binary.
+/// its socket and the process table without running the tmux binary.
 ///
 /// TBD no longer drives tmux. It cannot show, send to, park or end a tmux
 /// session. A tmux server started by an earlier build can outlive `tbd update`
@@ -45,14 +54,33 @@ struct LeftoverTmuxServerSighting: Sendable, Equatable {
 /// row.
 ///
 /// **This probe is a transition measure; on 2027-01-15 it is replaced by
-/// parking on sight**, which parks every live tmux row without asking its
-/// socket anything. By then no tmux server started before the pty holder
+/// parking on sight**, which parks every live tmux row without asking about
+/// its server. By then no tmux server started before the pty holder
 /// became the only spawn path (2026-11-14) should still be running, because a
 /// restart ends one. Until then a row is parked only on positive evidence that
 /// its server is gone, because parking a row whose agent still runs lets a
 /// later wake start a second agent on the same session id. See
 /// `docs/specs/2026-10-11-holder-transport-migration-design.md`, "A live row
 /// whose tmux server outlived the update".
+///
+/// **Two signals, and the server is gone only when both say so.**
+///
+/// - **The socket.** A plain connect to every place this daemon can work out
+///   the server's socket may be (`candidateSocketPaths`). Every candidate must
+///   be positively absent.
+/// - **The process table.** No live process whose executable is tmux may name
+///   the server with `-L` (`processState(server:processes:)`). A tmux server
+///   keeps the command line of the client that started it, so a running server
+///   names itself there wherever its socket is.
+///
+/// The socket alone cannot settle it, because the candidates come from this
+/// daemon's environment and working directory, and the daemon that started the
+/// server may have had others: `tbd update` starts the daemon with the shell's
+/// environment, `scripts/restart.sh` with the worktree as its working
+/// directory, and the app's fallback launch with the LaunchServices
+/// environment, usually without `TMUX_TMPDIR`, from `/`. A server started under
+/// a `TMUX_TMPDIR` this daemon does not have is listening somewhere no
+/// candidate names. The process table does not depend on either.
 struct LeftoverTmuxServerProbe: Sendable {
     /// The state of the tmux server with this name (`tmux -L <name>`).
     let state: @Sendable (_ server: String) async -> LeftoverTmuxServerState
@@ -78,17 +106,16 @@ struct LeftoverTmuxServerProbe: Sendable {
     /// directory, or a `~/` path, which tmux does not expand here — tmux falls
     /// back to `/tmp` without a word. So this resolves the value the same way
     /// and drops it when the resolve fails. A relative value resolves against
-    /// the daemon's working directory, which is the one tmux resolved it
-    /// against: the daemon ran every tmux client in its own working
-    /// directory. The fallback is probed even when the value resolves,
-    /// because the two places cannot both be known to be empty any other way,
-    /// and a running server read as gone is the one mistake this probe must
-    /// not make.
+    /// this daemon's working directory, because a daemon ran its tmux clients
+    /// in its own. The fallback is probed even when the value resolves,
+    /// because the two places cannot both be known to be empty any other way.
     ///
-    /// `environment` must be the environment TBD ran tmux with. The daemon ran
-    /// every tmux client with its own environment, so the daemon's
-    /// `TMUX_TMPDIR` is the one that placed the socket, whatever the person's
-    /// shell says. `fallbackRoot` is a seam for tests.
+    /// `environment` is this daemon's own, and so is the working directory.
+    /// They are the ones that placed the socket only when this daemon started
+    /// the server. The daemon that did may have had another `TMUX_TMPDIR` or
+    /// another working directory, so these candidates can miss its socket; the
+    /// process signal is what covers that (see the type's documentation).
+    /// `fallbackRoot` is a seam for tests.
     static func candidateSocketPaths(
         server: String,
         environment: [String: String],
@@ -116,20 +143,155 @@ struct LeftoverTmuxServerProbe: Sendable {
     }
 
     /// The probe the daemon runs: a plain connect to each candidate socket,
-    /// each closed at once.
+    /// each closed at once, then, only when every one of them is absent, one
+    /// read of the process table. `tmuxProcesses` is a seam for tests, so no
+    /// test depends on what tmux the machine is running.
     static func production(
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        fallbackRoot: String = defaultTemporaryDirectory
+        fallbackRoot: String = defaultTemporaryDirectory,
+        tmuxProcesses: @escaping @Sendable () -> [LeftoverTmuxProcess]? = {
+            LeftoverTmuxServerProbe.liveTmuxProcesses()
+        }
     ) -> LeftoverTmuxServerProbe {
         LeftoverTmuxServerProbe { server in
-            await state(ofSocketsAt: candidateSocketPaths(
-                server: server, environment: environment, fallbackRoot: fallbackRoot))
+            await state(
+                server: server,
+                socketPaths: candidateSocketPaths(
+                    server: server, environment: environment, fallbackRoot: fallbackRoot),
+                tmuxProcesses: tmuxProcesses)
         }
     }
 
-    /// The server is gone only when every candidate socket is positively
-    /// absent. One candidate that answers, or fails in any way that is not
-    /// evidence of absence, reads as running, and the rest are not asked.
+    /// Both signals: the server is gone only when every candidate socket is
+    /// absent and the process table names it nowhere. The table is read only
+    /// when the sockets are all absent, because a socket that answers settles
+    /// it.
+    static func state(
+        server: String,
+        socketPaths: [String],
+        tmuxProcesses: () -> [LeftoverTmuxProcess]?
+    ) async -> LeftoverTmuxServerState {
+        guard await state(ofSocketsAt: socketPaths) == .absent else { return .running }
+        return processState(server: server, processes: tmuxProcesses())
+    }
+
+    /// The process signal: absent only when the process table was read and
+    /// every tmux process in it has a readable command line that does not name
+    /// `server` with `-L`.
+    ///
+    /// A table that could not be read is running, and so is a tmux process
+    /// whose command line could not be read, whatever server is asked about:
+    /// it may be this server, and nothing else can say it is not.
+    static func processState(
+        server: String, processes: [LeftoverTmuxProcess]?
+    ) -> LeftoverTmuxServerState {
+        guard let processes else { return .running }
+        for process in processes {
+            guard let arguments = process.arguments else { return .running }
+            if commandLine(arguments, namesServer: server) { return .running }
+        }
+        return .absent
+    }
+
+    /// tmux's global options that take a value, from its `getopt` string
+    /// (`2c:CDdf:lL:NqS:T:uUvV`).
+    static let optionsTakingAValue: Set<Character> = ["c", "f", "L", "S", "T"]
+
+    /// Whether a tmux command line names `server` as its `-L` socket name.
+    ///
+    /// Read the way `getopt` reads a cluster of short options, so all of these
+    /// name `tbd-acme`: `-L tbd-acme`, `-Ltbd-acme`, `-uL tbd-acme` and
+    /// `-uLtbd-acme`. Within one argument after `argv[0]` that starts with a
+    /// single `-`, each letter is an option. The first letter that takes a
+    /// value ends the cluster, and its value is the rest of the argument, or
+    /// the next argument when nothing is left. A cluster names the server when
+    /// that letter is `L` and its value is `server` exactly.
+    ///
+    /// Every argument is read this way, past the command and past `--`, and a
+    /// value is read again as an argument in its own right. Both can only find
+    /// a match a strict parse would not, which reads a gone server as running,
+    /// never the reverse.
+    static func commandLine(_ arguments: [String], namesServer server: String) -> Bool {
+        var index = 1
+        while index < arguments.count {
+            let argument = arguments[index]
+            index += 1
+            guard argument.hasPrefix("-"), !argument.hasPrefix("--") else { continue }
+            var letters = argument.dropFirst()
+            while let letter = letters.first {
+                letters = letters.dropFirst()
+                guard optionsTakingAValue.contains(letter) else { continue }
+                let value: String?
+                if !letters.isEmpty {
+                    value = String(letters)
+                } else if index < arguments.count {
+                    value = arguments[index]
+                } else {
+                    value = nil
+                }
+                if letter == "L", value == server { return true }
+                break
+            }
+        }
+        return false
+    }
+
+    /// Every live process whose executable is tmux, with its command line, or
+    /// nil when the process table could not be read.
+    ///
+    /// The table is one `sysctl(KERN_PROC_ALL)` (`ProcessTableSnapshot`), a
+    /// process's executable its `proc_pidpath` (`ProcessLiveness`), and its
+    /// command line the argv in its `KERN_PROCARGS2` buffer
+    /// (`ProcessEnvironmentReader.procArgs`). A process whose executable path
+    /// cannot be read is not counted as tmux.
+    static func liveTmuxProcesses() -> [LeftoverTmuxProcess]? {
+        guard let table = ProcessTableSnapshot.read() else { return nil }
+        var processes: [LeftoverTmuxProcess] = []
+        for pid in table.entries.keys.sorted() {
+            guard let path = ProcessLiveness.executablePath(pid: pid),
+                  (path as NSString).lastPathComponent == "tmux" else { continue }
+            let argv = ProcessEnvironmentReader.procArgs(pid: pid)
+                .flatMap { Self.arguments(inProcArgs: $0) }
+            processes.append(LeftoverTmuxProcess(pid: pid, arguments: argv))
+        }
+        return processes
+    }
+
+    /// The argv in a `KERN_PROCARGS2` buffer, `argv[0]` included, or nil when
+    /// the buffer is too short, claims no arguments, or ends before argv does.
+    ///
+    /// The buffer is an `Int32` argc, the executable path and its terminator,
+    /// NUL padding, then `argc` NUL-terminated arguments, then the environment.
+    /// The environment holds secrets and is never read: the walk stops after
+    /// the last argument. The padding cannot be told from an empty `argv[0]`,
+    /// the same limit `ProcessEnvironmentReader.parse` has; tmux's `argv[0]` is
+    /// never empty. An argument that is not UTF-8 reads as empty: it cannot be
+    /// a server name TBD chose, so this can only miss a match it could never
+    /// have made.
+    static func arguments(inProcArgs raw: [UInt8]) -> [String]? {
+        guard raw.count >= 4 else { return nil }
+        let argc = raw.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
+        guard argc > 0 else { return nil }
+        var position = 4
+        guard let pathEnd = raw[position...].firstIndex(of: 0) else { return nil }
+        position = pathEnd
+        while position < raw.count, raw[position] == 0 { position += 1 }
+        // No capacity is reserved from argc: a malformed buffer can claim any
+        // count, and the walk below ends at the buffer's end whatever it says.
+        var arguments: [String] = []
+        for _ in 0..<Int(argc) {
+            guard position < raw.count,
+                  let end = raw[position...].firstIndex(of: 0) else { return nil }
+            arguments.append(String(bytes: raw[position..<end], encoding: .utf8) ?? "")
+            position = end + 1
+        }
+        return arguments
+    }
+
+    /// The socket signal: absent only when every candidate socket is
+    /// positively absent. One candidate that answers, or fails in any way that
+    /// is not evidence of absence, reads as running, and the rest are not
+    /// asked.
     static func state(ofSocketsAt socketPaths: [String]) async -> LeftoverTmuxServerState {
         guard !socketPaths.isEmpty else { return .running }
         for socketPath in socketPaths {

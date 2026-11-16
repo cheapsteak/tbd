@@ -5,12 +5,14 @@ import TestSupport
 @testable import TBDDaemonLib
 
 /// `LeftoverTmuxServerProbe` — whether a tmux server an earlier build started
-/// is still running, read off its socket without running tmux.
+/// is still running, read off its socket and the process table without running
+/// tmux.
 ///
 /// Every socket here is real and lives under a short scratch root
 /// (`fencedScratchRoot`), because a path over darwin's 104-byte `sun_path`
 /// limit never reaches a connect at all and would green on an answer that
-/// never went near a socket. No tmux binary is run.
+/// never went near a socket. No tmux binary is run, and the process table is
+/// always injected, so no answer depends on what tmux the machine is running.
 @Suite("Leftover tmux server probe")
 struct LeftoverTmuxServerProbeTests {
 
@@ -166,7 +168,8 @@ struct LeftoverTmuxServerProbeTests {
         _ = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
         let probe = LeftoverTmuxServerProbe.production(
             environment: ["TMUX_TMPDIR": "\(root)/configured"],
-            fallbackRoot: "\(root)/fallback")
+            fallbackRoot: "\(root)/fallback",
+            tmuxProcesses: { [] })
 
         #expect(await probe.state("tbd-acme") == .running)
         #expect(await probe.state("tbd-acme-other") == .absent)
@@ -185,7 +188,8 @@ struct LeftoverTmuxServerProbeTests {
         defer { close(fd) }
         let probe = LeftoverTmuxServerProbe.production(
             environment: ["TMUX_TMPDIR": "\(root)/missing"],
-            fallbackRoot: "\(root)/fallback")
+            fallbackRoot: "\(root)/fallback",
+            tmuxProcesses: { [] })
 
         #expect(await probe.state("tbd-acme") == .running)
     }
@@ -204,7 +208,8 @@ struct LeftoverTmuxServerProbeTests {
         defer { close(fd) }
         let probe = LeftoverTmuxServerProbe.production(
             environment: ["TMUX_TMPDIR": "\(root)/configured"],
-            fallbackRoot: "\(root)/fallback")
+            fallbackRoot: "\(root)/fallback",
+            tmuxProcesses: { [] })
 
         #expect(await probe.state("tbd-acme") == .running)
     }
@@ -220,7 +225,8 @@ struct LeftoverTmuxServerProbeTests {
         _ = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
         let probe = LeftoverTmuxServerProbe.production(
             environment: ["TMUX_TMPDIR": "\(root)/configured"],
-            fallbackRoot: "\(root)/fallback")
+            fallbackRoot: "\(root)/fallback",
+            tmuxProcesses: { [] })
 
         #expect(await probe.state("tbd-acme") == .absent)
     }
@@ -263,5 +269,179 @@ struct LeftoverTmuxServerProbeTests {
             let state = await LeftoverTmuxServerProbe.classify { throw failure }
             #expect(state == .running, "\(failure) read as \(state)")
         }
+    }
+
+    // MARK: - The process table
+
+    /// A tmux process with this command line after `argv[0]`.
+    private static func tmux(_ arguments: String...) -> LeftoverTmuxProcess {
+        LeftoverTmuxProcess(pid: 4242, arguments: ["/opt/acme/bin/tmux"] + arguments)
+    }
+
+    /// The production probe with no candidate socket present — this daemon has
+    /// no `TMUX_TMPDIR`, and the fallback root is an empty scratch directory —
+    /// and `processes` as the process table.
+    private func probeWithEverySocketAbsent(
+        root: String, processes: [LeftoverTmuxProcess]?
+    ) throws -> LeftoverTmuxServerProbe {
+        _ = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
+        return LeftoverTmuxServerProbe.production(
+            environment: [:],
+            fallbackRoot: "\(root)/fallback",
+            tmuxProcesses: { processes })
+    }
+
+    /// The case the process signal exists for: the server's socket is under a
+    /// `TMUX_TMPDIR` this daemon does not have, so every candidate is absent,
+    /// and the server's own command line is what still names it.
+    @Test("every socket absent and a tmux process naming the server reads as running")
+    func aTmuxProcessNamingTheServerReadsAsRunning() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let probe = try probeWithEverySocketAbsent(root: root, processes: [
+            Self.tmux("-u", "-L", "tbd-acme", "set-option", "-g", "status", "off", ";",
+                      "new-session", "-d", "-s", "acme"),
+        ])
+
+        #expect(await probe.state("tbd-acme") == .running)
+    }
+
+    @Test("every socket absent and a tmux process naming another server reads as gone")
+    func aTmuxProcessNamingAnotherServerReadsAsGone() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let probe = try probeWithEverySocketAbsent(root: root, processes: [
+            Self.tmux("-u", "-L", "tbd-other", "new-session", "-d"),
+        ])
+
+        #expect(await probe.state("tbd-acme") == .absent)
+    }
+
+    /// A tmux process whose command line cannot be read may be any server,
+    /// so it keeps every server running, the one it would name and any other.
+    @Test("every socket absent and a tmux process with an unreadable command line reads as running")
+    func aTmuxProcessWithUnreadableArgumentsReadsAsRunning() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let probe = try probeWithEverySocketAbsent(root: root, processes: [
+            Self.tmux("-L", "tbd-other"),
+            LeftoverTmuxProcess(pid: 4243, arguments: nil),
+        ])
+
+        #expect(await probe.state("tbd-acme") == .running)
+        #expect(await probe.state("tbd-other") == .running)
+    }
+
+    @Test("every socket absent and no tmux process reads as gone")
+    func noTmuxProcessReadsAsGone() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let probe = try probeWithEverySocketAbsent(root: root, processes: [])
+
+        #expect(await probe.state("tbd-acme") == .absent)
+    }
+
+    @Test("every socket absent and a process table that could not be read reads as running")
+    func anUnreadableProcessTableReadsAsRunning() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let probe = try probeWithEverySocketAbsent(root: root, processes: nil)
+
+        #expect(await probe.state("tbd-acme") == .running)
+    }
+
+    /// A socket that answers settles it, so the table is not read at all.
+    @Test("a socket that answers reads as running without reading the process table")
+    func anAnsweringSocketSkipsTheProcessTable() async throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let fallback = try makeDirectory("\(root)/fallback/tmux-\(getuid())")
+        let fd = try #require(HolderRendezvousFixture.bind(
+            at: "\(fallback)/tbd-acme", listening: true, backlog: 4))
+        defer { close(fd) }
+        var tableReads = 0
+
+        let state = await LeftoverTmuxServerProbe.state(
+            server: "tbd-acme",
+            socketPaths: ["\(fallback)/tbd-acme"],
+            tmuxProcesses: {
+                tableReads += 1
+                return []
+            })
+
+        #expect(state == .running)
+        #expect(tableReads == 0)
+    }
+
+    // MARK: - Which command lines name the server
+
+    /// The separate and joined forms, alone and inside a cluster of short
+    /// options, as tmux's `getopt` reads them.
+    @Test("a -L naming the server is found in every form getopt accepts", arguments: [
+        ["-L", "tbd-acme"],
+        ["-Ltbd-acme"],
+        ["-uL", "tbd-acme"],
+        ["-uLtbd-acme"],
+        ["-u", "-f", "/dev/null", "-L", "tbd-acme", "new-session", "-d"],
+    ])
+    func aMinusLNamingTheServerIsFound(arguments: [String]) {
+        #expect(LeftoverTmuxServerProbe.commandLine(
+            ["tmux"] + arguments, namesServer: "tbd-acme"))
+    }
+
+    /// Only `-L`'s own value counts, and only when it is the server exactly.
+    @Test("a command line that does not name the server with -L is not a match", arguments: [
+        ["-L", "tbd-acme-other"],
+        ["-Ltbd-acme2"],
+        ["-L"],
+        ["-S", "/private/tmp/tmux-501/tbd-acme"],
+        ["-c", "tbd-acme"],
+        ["-fL", "tbd-acme"],
+        ["new-session", "-s", "tbd-acme"],
+        ["--", "tbd-acme"],
+    ])
+    func aCommandLineWithoutTheServerIsNoMatch(arguments: [String]) {
+        #expect(!LeftoverTmuxServerProbe.commandLine(
+            ["tmux"] + arguments, namesServer: "tbd-acme"))
+    }
+
+    @Test("argv[0] is not read as an option")
+    func argvZeroIsNotAnOption() {
+        #expect(!LeftoverTmuxServerProbe.commandLine(["-Ltbd-acme"], namesServer: "tbd-acme"))
+    }
+
+    // MARK: - Reading argv out of KERN_PROCARGS2
+
+    /// A `KERN_PROCARGS2` buffer: argc, the executable path, padding, argv,
+    /// then the environment.
+    private static func procArgs(argc: Int32, path: String, argv: [String], environment: [String]) -> [UInt8] {
+        var raw = withUnsafeBytes(of: argc) { Array($0) }
+        raw += Array(path.utf8) + [0, 0, 0, 0]
+        for entry in argv + environment {
+            raw += Array(entry.utf8) + [0]
+        }
+        return raw
+    }
+
+    @Test("the argv in a KERN_PROCARGS2 buffer is read, and the environment is not")
+    func argvIsReadAndTheEnvironmentIsNot() {
+        let raw = Self.procArgs(
+            argc: 3, path: "/opt/acme/bin/tmux", argv: ["tmux", "-L", "tbd-acme"],
+            environment: ["ACME_TOKEN=secret", "PATH=/usr/bin"])
+
+        #expect(LeftoverTmuxServerProbe.arguments(inProcArgs: raw) == ["tmux", "-L", "tbd-acme"])
+    }
+
+    /// A buffer that cannot be read is no command line at all, which the
+    /// process signal counts as running.
+    @Test("a KERN_PROCARGS2 buffer that ends before argv does is unreadable")
+    func aTruncatedBufferIsUnreadable() {
+        let whole = Self.procArgs(
+            argc: 3, path: "/opt/acme/bin/tmux", argv: ["tmux", "-L", "tbd-acme"], environment: [])
+
+        #expect(LeftoverTmuxServerProbe.arguments(inProcArgs: Array(whole.dropLast())) == nil)
+        #expect(LeftoverTmuxServerProbe.arguments(inProcArgs: [3, 0]) == nil)
+        #expect(LeftoverTmuxServerProbe.arguments(inProcArgs: Self.procArgs(
+            argc: 0, path: "/opt/acme/bin/tmux", argv: [], environment: [])) == nil)
     }
 }

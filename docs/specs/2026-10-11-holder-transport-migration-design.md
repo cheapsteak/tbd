@@ -105,30 +105,45 @@ started before then keeps running across `tbd update` — tmux has no reason to
 exit when its client goes — until it is ended or the Mac restarts. Its rows read
 live, and nothing in TBD can reach their sessions.
 
-**The probe.** For each live tmux row, the daemon tries a plain `AF_UNIX`
-`connect()` to each place the row's tmux socket can be,
-`<directory>/tmux-<uid>/<server>`, and closes each socket at once. It runs no
-tmux binary. tmux takes the directory from `TMUX_TMPDIR` — here the daemon's own
-environment, because the daemon ran every tmux client with it — reads the value
-as one path, and resolves it with `realpath(3)`. When the resolve fails (a
-missing directory, or a `~/` path, which tmux does not expand there) tmux falls
-back to `/tmp`, which resolves to `/private/tmp`, without a word. So the
-candidates are the resolved `TMUX_TMPDIR`, when it resolves, and always
-`/private/tmp`; a relative value resolves against the daemon's working
-directory, the one its tmux clients ran in.
+**The probe.** For each live tmux row the daemon reads two signals, and runs
+no tmux binary for either. The server is gone only when both say so.
 
-The server is gone only when every candidate is positively absent: `ENOENT`
-(nothing bound) or `ECONNREFUSED` (bound, nothing accepting). Any other answer
-from any candidate — success included, and a path too long to try — means it
-may be running. The errno rules are `HolderRegistry.exitProbeOutcome(for:)`'s,
-the one place every socket probe in the daemon reads them
-(`LeftoverTmuxServerProbe`).
+- **The socket.** The daemon tries a plain `AF_UNIX` `connect()` to each place
+  it can work out the row's tmux socket may be,
+  `<directory>/tmux-<uid>/<server>`, and closes each socket at once. tmux takes
+  the directory from `TMUX_TMPDIR`, reads the value as one path, and resolves
+  it with `realpath(3)`. When the resolve fails (a missing directory, or a `~/`
+  path, which tmux does not expand there) tmux falls back to `/tmp`, which
+  resolves to `/private/tmp`, without a word. So the candidates are this
+  daemon's `TMUX_TMPDIR`, resolved against its working directory, when it
+  resolves, and always `/private/tmp`. This signal says gone only when every
+  candidate is positively absent: `ENOENT` (nothing bound) or `ECONNREFUSED`
+  (bound, nothing accepting). Any other answer from any candidate — success
+  included, and a path too long to try — means the server may be running. The
+  errno rules are `HolderRegistry.exitProbeOutcome(for:)`'s, the one place
+  every socket probe in the daemon reads them.
+- **The process table.** A tmux server keeps the command line of the client
+  that started it, `tmux -u -L <server> …`. This signal says gone only when the
+  process table was read and no live process whose executable is named `tmux`
+  (by `proc_pidpath`) names the server with `-L` in its argv (from
+  `KERN_PROCARGS2`). The argv is read as tmux's `getopt` reads it, so
+  `-L <server>`, `-L<server>` and a cluster such as `-uL <server>` all count. A
+  tmux process whose argv cannot be read counts as running for every server,
+  and so does a process table that cannot be read.
 
-One running server can still read as gone: Darwin answers `ECONNREFUSED` at
-once when a listener's accept backlog is full, the same answer a stale socket
-gives. A tmux server's backlog fills only under a burst of clients connecting
-together, and TBD no longer runs any tmux client against it, so this case is
-accepted rather than guarded with a second probe.
+The socket cannot settle it alone, because its candidates are only as good as
+the environment and working directory they come from, and those are this
+daemon's, not necessarily the ones of the daemon that started the server.
+Daemons start from different places: `tbd update` with the shell's
+environment, `scripts/restart.sh` with the worktree as its working directory,
+and the app's fallback launch with the LaunchServices environment, usually
+without `TMUX_TMPDIR`, from `/`. A server started under a `TMUX_TMPDIR` the
+current daemon does not have listens where no candidate looks, and only its
+command line still names it. The command line covers one more case the socket
+cannot: Darwin answers `ECONNREFUSED` at once when a listener's accept backlog
+is full, the same answer a stale socket gives, and the server's process still
+names it then. The process table is read only when every socket is absent,
+because a socket that answers settles it (`LeftoverTmuxServerProbe`).
 
 The asymmetry is deliberate. Parking a row whose agent still runs lets a later
 migration and wake start a second agent on the same session id, beside the one
@@ -322,8 +337,15 @@ never unlinks it, and nothing TBD runs creates one any more.
   `TMUX_TMPDIR` naming a missing directory is dropped. A listener under the
   fallback root reads as running while `TMUX_TMPDIR` names a missing
   directory, a listener at either candidate reads as running, and a server
-  absent from every candidate reads as gone. The fallback root is injected, so
-  no test asks the real `/private/tmp`.
+  absent from every candidate, with no tmux process, reads as gone. The
+  fallback root is injected, so no test asks the real `/private/tmp`.
+- The process signal, with an injected process table: every socket absent
+  plus a tmux process naming the server is running; one naming another server
+  is gone; one whose argv cannot be read is running, for any server; no tmux
+  process is gone; a table that cannot be read is running; and a socket that
+  answers is running without the table being read. The `-L` matcher finds the
+  separate, joined and clustered forms and nothing else, and the argv reader
+  stops before the environment.
 - Reconcile parks a live resumable tmux row whose server is gone, keeping its
   session id, deletes a live shell row on such a server, leaves a row whose
   server may run live and untouched, never probes a parked row, and asks the
