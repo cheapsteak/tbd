@@ -10,7 +10,10 @@
 //
 // `back` and `forward` are `page.goBack()` and `page.goForward()`, which settle on a move
 // within the page's document as on one that loads a page. The app's screen follows once the
-// page's `route` message reaches it, so each step waits for the screen.
+// page's `route` message reaches it, so each step waits for the screen. The other way round, the
+// app shows a screen as it asks the page for its entry, and the page acts when the request
+// arrives; a browser move made sooner wins over the request, as it does on a phone. So each
+// check of a screen also waits for the entry the browser is on to name that screen.
 
 import { readFileSync } from 'node:fs';
 
@@ -28,17 +31,18 @@ const MAIN_REF = MOCK.rows.find((/** @type {any} */ r) => r.name === 'main').ses
 const DRAFT = 'A draft kept in memory.';
 
 /**
- * Waits until the app shows the sessions list.
+ * Waits until the app shows the sessions list, and the entry the browser is on names it.
  * @param {Page} page
  */
 async function expectList(page) {
   await expect(app(page).locator('#app')).toHaveAttribute('data-screen', 'sessions');
   await expect.poll(() => rowNames(page)).toEqual([...MOCK_NAMES].sort());
+  await expect.poll(() => entryRef(page), 'the entry names the list').toBeNull();
 }
 
 /**
  * Waits until the app shows the session of the row named `name`, on the tab named `tab` when
- * the row has tabs.
+ * the row has tabs, and the entry the browser is on names that session.
  * @param {Page} page
  * @param {string} name
  * @param {string} [tab]
@@ -47,6 +51,32 @@ async function expectSession(page, name, tab) {
   await expect(app(page).locator('#app')).toHaveAttribute('data-screen', 'session');
   await expect(app(page).locator('.s-head .t1 > span').first()).toHaveText(name);
   if (tab !== undefined) await expect(app(page).getByRole('tab', { selected: true })).toContainText(tab);
+  await expect.poll(() => entryRef(page), 'the entry names the session').toEqual(mockRef(name, tab));
+}
+
+/**
+ * The ref of the mock's session in the row named `name`: the one on the tab named `tab`, or the
+ * row's only one.
+ * @param {string} name
+ * @param {string} [tab]
+ */
+function mockRef(name, tab) {
+  const row = MOCK.rows.find((/** @type {any} */ r) => r.name === name);
+  const sessions = row?.sessions.filter((/** @type {any} */ s) => tab === undefined || s.tabName === tab) ?? [];
+  if (sessions.length !== 1) throw new RangeError(`no one session for ${name}, ${tab}`);
+  return sessions[0].ref;
+}
+
+/**
+ * The session ref the entry the browser is on names, or null for the list. It reads the app's
+ * route string (`encodeRoute` in app/src/state/routeState.ts), which the loader never reads.
+ * @param {Page} page
+ */
+function entryRef(page) {
+  return page.evaluate(() => {
+    const route = history.state?.tbdPhone?.app;
+    return typeof route === 'string' ? JSON.parse(route).ref : null;
+  });
 }
 
 /**
@@ -212,6 +242,7 @@ test('back closes an open sheet or menu as it leaves the session, and forward br
   await openApp(page, appHost);
   const address = page.url();
   await openSessionByName(page, 'Checkout v2', 'Review');
+  await expectSession(page, 'Checkout v2', 'Review');
   await composer(page).fill(DRAFT);
   await app(page).getByRole('button', { name: 'Session menu' }).click();
   await expect(app(page).locator('[role="dialog"]')).toBeVisible();
@@ -271,16 +302,12 @@ test('a new frame opens on the entry the browser is on, and back and forward ste
 });
 
 test('a reload on a session’s entry opens that session again, and back onto an entry from before the reload shows its screen in the same page', async ({ page, appHost }) => {
-  // Two worktrees' entries before the reload: Checkout v2 on its Review tab, then main. The app
-  // shows a screen as it asks for its entry, and the page adds the entry when the request
-  // arrives, so the test waits for the entries before it moves the browser.
+  // Two worktrees' entries before the reload: Checkout v2 on its Review tab, then main.
   await openApp(page, appHost);
   const address = page.url();
-  const start = await historyLength(page);
   await openSessionByName(page, 'Checkout v2', 'Review');
   await expectSession(page, 'Checkout v2', 'Review');
   await forkIntoMain(page);
-  await expect.poll(() => historyLength(page)).toBe(start + 2);
 
   await page.reload();
   await page.waitForFunction(() => /** @type {any} */ (window).__host?.ready === true);
@@ -296,7 +323,6 @@ test('a reload on a session’s entry opens that session again, and back onto an
   expect(await historyLength(page)).toBe(length);
   await openSessionByName(page, 'Login redirect fix');
   await expectSession(page, 'Login redirect fix');
-  await expect.poll(() => historyLength(page)).toBe(length + 1);
   await composer(page).fill(DRAFT);
   await back(page);
   await expectList(page);
