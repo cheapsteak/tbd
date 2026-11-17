@@ -242,10 +242,11 @@ other message on the port.
   most pushes follow a tap within milliseconds. A pending open can land seconds after its tap,
   and its entry might be skipped. Back would then pass over that worktree. The end-to-end tests
   add entries through real taps, and the device checks cover a fork.
-- **Entries from before a reload.** After the page reloads, the entries from the earlier page
-  load belong to another document. We expect a back onto one of them to load the loader's page
-  again, which reconnects. The new frame then opens that entry's screen. That costs a reconnect,
-  but it lands on the right screen.
+- **Entries from before a reload.** After the page reloads, the browser keeps the entries from the
+  earlier page load. In WebKit and Chromium under Playwright, a back onto one of them stays in
+  the same page and fires `popstate`, and the loader shows that entry's screen with no
+  reconnect. The chevron still steps back only within this page load's entries (section 4),
+  because no standard promises that such a move stays in the same document.
 - **A cached old loader.** A phone that holds an old loader when its laptop updates sees "Reload
   this page" once. The order of a normal rollout makes this rare (section 1).
 
