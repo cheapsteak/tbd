@@ -1,6 +1,8 @@
 // The app runner. It loads in <iframe sandbox="allow-scripts">, so its origin is opaque.
 // It takes one `bundle` message from the loader, checks the bundle text against its
-// SHA-256, gives the bundle `globalThis.tbdHost`, and starts it from a blob: URL.
+// SHA-256, gives the bundle `globalThis.tbdHost`, and starts it from a blob: URL. The handle
+// is `{ port, protocol: 1, history: 1 }`: `history: 1` tells the app that this loader keeps
+// its history entries, through the `history` and `route` port messages.
 //
 // A classic script, not a module: a module script from an opaque origin would need CORS.
 // Everything sits inside one function so that nothing here becomes a global the bundle
@@ -71,7 +73,7 @@
 
     // 5. The bundle's one handle on the loader.
     Object.defineProperty(globalThis, 'tbdHost', {
-      value: Object.freeze({ port, protocol: 1 }),
+      value: Object.freeze({ port, protocol: 1, history: 1 }),
       writable: false,
       configurable: false,
       enumerable: false,

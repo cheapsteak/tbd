@@ -1,12 +1,14 @@
 // The loader page's controller (spec section 8.1). It reads a pairing link from the address,
 // opens the store, and moves between the screens of ui.js: Laptops, pairing, and one laptop's
 // connection with its header strip and app frame. Which screen follows what is decided in
-// views.js; the work is done by the modules it wires together.
+// views.js; the work is done by the modules it wires together. The app frame's history entries
+// are history.js's: each new frame is attached to the page's history, and its requests go there.
 
 import { systemClock, withVisibleTimeout } from './clock.js';
 import { LaptopConnection } from './connection.js';
 import { PAIRED_GRACE_MS, STORE_TIMEOUT_MS } from './constants.js';
 import { AppFrame, readEnv } from './frame.js';
+import { PageHistory, windowHistory } from './history.js';
 import { unwrapPhoneKeyPair } from './keys.js';
 import {
   deviceNameFromUserAgent, linkErrorMessage, normalizeDeviceName, readPairingLink, takePairingFragment,
@@ -34,6 +36,7 @@ import {
 /** @typedef {import('./connection.js').ConnectionEvent} ConnectionEvent */
 /** @typedef {import('./connection.js').ConnectionState} ConnectionState */
 /** @typedef {import('./connection.js').FatalReason} FatalReason */
+/** @typedef {import('./history.js').FrameHistory} FrameHistory */
 /** @typedef {import('./pairing.js').PairingFailure} PairingFailure */
 /** @typedef {import('./links.js').PairingLinkData} PairingLinkData */
 /** @typedef {import('./presence.js').FetchLike} FetchLike */
@@ -167,6 +170,8 @@ class LoaderPage {
   #frameHost;
   #probe;
   #visibility;
+  /** The tab's history entries for app frames. */
+  #history;
 
   /** @type {Store | null} */
   #store = null;
@@ -196,6 +201,8 @@ class LoaderPage {
   #renameConnecting = null;
   /** @type {AppFrame | null} */
   #frame = null;
+  /** @type {FrameHistory | null} The current frame's hold on `#history`. */
+  #frameHistory = null;
   /** @type {string | null} */
   #frameSha = null;
   #envQueued = false;
@@ -231,6 +238,8 @@ class LoaderPage {
     this.#frameHost = element(this.#doc, 'frame-host');
     this.#probe = element(this.#doc, 'safe-probe');
     this.#visibility = documentVisibility(this.#doc);
+    // Made with the page, so it counts every browser move, including those while no frame runs.
+    this.#history = new PageHistory({ port: windowHistory(this.#win) });
 
     this.#doc.addEventListener('visibilitychange', () => {
       if (this.#doc.visibilityState === 'visible') this.#resume();
@@ -780,6 +789,8 @@ class LoaderPage {
   }
 
   #destroyFrame() {
+    this.#frameHistory?.detach();
+    this.#frameHistory = null;
     this.#frame?.destroy();
     this.#frame = null;
     this.#frameSha = null;
@@ -875,17 +886,24 @@ class LoaderPage {
     this.#screen.hidden = true;
     this.#frameHost.hidden = false;
     this.#lastEnvKey = null;
-    this.#frame = new AppFrame({
+    const frame = new AppFrame({
       host: this.#frameHost,
       runnerURL: RUNNER_URL,
       text,
       sha256,
       sendApp: (body) => connection.sendApp(/** @type {Record<string, unknown>} */ (body)),
       onOpenLink: (url) => this.#showLinkSheet(url),
+      onHistory: (request) => this.#frameHistory?.apply(request),
       onFault: () => this.#endConnection('reload'),
       visibility: this.#visibility,
       clock: this.#clock,
     });
+    this.#frame = frame;
+    // Events come only from the current connection, so `#current` is its laptop. The frame
+    // opens on the screen of the entry the browser is on; its route waits on the port until
+    // the app listens.
+    const laptopID = /** @type {LaptopRecord} */ (this.#current).id;
+    this.#frameHistory = this.#history.attach(laptopID, (state, move) => frame.sendRoute(state, move));
     this.#frameSha = sha256;
     this.#renderStrip();
     this.#sendEnv();

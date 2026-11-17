@@ -310,6 +310,19 @@ test.describe('framed with sandbox="allow-scripts" by the loader\'s origin', () 
     expect(await runner.frame.evaluate(() => self.origin)).toBe('null');
   });
 
+  test('the bundle\'s handle holds its port, protocol 1 and history 1, and nothing else', async ({ page, server }) => {
+    await openHarness(page, server.origin);
+    const runner = await frameRunner(page, server, 'allow-scripts');
+    await waitReady(page, runner);
+    const text = 'tbdHost.port.postMessage({ t: \'host\', keys: Object.keys(tbdHost), protocol: tbdHost.protocol, '
+      + 'history: tbdHost.history, port: tbdHost.port instanceof MessagePort });\n';
+    const sent = await post(page, runner.index, { type: 'bundle', nonce: NONCE, text, sha256: sha256(text) }, 1);
+    await expect.poll(() => portLog(page, runner.index, sent)).toEqual([[
+      { t: 'host', keys: ['port', 'protocol', 'history'], protocol: 1, history: 1, port: true },
+      { t: 'started' },
+    ]]);
+  });
+
   const refusedBase = bundleMessage('refused');
   const { nonce: _nonce, ...noNonce } = refusedBase;
   /** @type {Array<[string, Record<string, unknown>, number]>} */

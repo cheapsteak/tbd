@@ -77,12 +77,17 @@
  */
 
 /**
- * A message on the runner/app MessagePort.
+ * A message on the runner/app MessagePort. `history` comes from the app and `route` goes to
+ * it: `state` is the app's route string, or null for the sessions list, and `move` is the
+ * page's count of browser moves (history.js).
  * @typedef {{t: 'app', body: object}
  *   | {t: 'channel', state: 'up'|'down'}
  *   | EnvMessage
  *   | {t: 'sendFailed', reason: 'offline'|'tooLarge'}
  *   | {t: 'openLink', url: string}
+ *   | {t: 'history', op: 'push'|'replace', state: string|null, move: number}
+ *   | {t: 'history', op: 'back', move: number}
+ *   | {t: 'route', state: string|null, move: number}
  *   | {t: 'started'}
  *   | {t: 'fault', reason: 'hash'|'script'}} PortMessage
  */
