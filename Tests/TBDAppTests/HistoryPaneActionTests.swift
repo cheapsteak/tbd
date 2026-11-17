@@ -236,7 +236,7 @@ extension HistoryPaneActionTests {
             }
         }
         defer { server.stop() }
-        let state = AppState(userDefaults: suite.defaults, daemonClient: DaemonClient(socketPath: server.path))
+        let state = AppState(userDefaults: suite.defaults, daemonClient: server.holdingClient())
         state.historyLoadStates[worktreeID] = .loaded([summary])
         let older = Task { await state.fetchSessions(worktreeID: worktreeID) }
         _ = try await oldStarted.next(timeout: TestDeadlines.saturatedPass)
@@ -290,7 +290,7 @@ extension HistoryPaneActionTests {
             return RPCResponse(error: "current refresh failed")
         }
         defer { server.stop() }
-        let state = AppState(userDefaults: suite.defaults, daemonClient: DaemonClient(socketPath: server.path))
+        let state = AppState(userDefaults: suite.defaults, daemonClient: server.holdingClient())
         let worktreeID = UUID()
         state.historyLoadStates[worktreeID] = .loaded([summary])
         await state.loadSessionTranscript(sessionID: summary.id, readTail: { tail },
@@ -332,7 +332,7 @@ extension HistoryPaneActionTests {
             return try RPCResponse(result: [summary])
         }
         defer { server.stop() }
-        let state = AppState(userDefaults: suite.defaults, daemonClient: DaemonClient(socketPath: server.path))
+        let state = AppState(userDefaults: suite.defaults, daemonClient: server.holdingClient())
         let worktreeID = UUID()
         state.historyLoadStates[worktreeID] = .loaded([summary])
         state.sessionTranscripts[summary.id] = []
@@ -373,7 +373,7 @@ extension HistoryPaneActionTests {
             return try RPCResponse(result: [second])
         }
         defer { server.stop() }
-        let state = AppState(userDefaults: suite.defaults, daemonClient: DaemonClient(socketPath: server.path))
+        let state = AppState(userDefaults: suite.defaults, daemonClient: server.holdingClient())
         // Completed cache entries keep this control focused on refresh ownership.
         state.sessionTranscripts[first.id] = []
         state.sessionTranscripts[second.id] = []
@@ -540,6 +540,16 @@ private final class HistoryRPCServer: @unchecked Sendable {
     }
 
     func stop() { lock.withLock { stopped = true } }
+
+    /// A client for a test that holds a reply open with a gate. The answering
+    /// side already runs off the cooperative pool, but the client waits for
+    /// that reply in `recv`, blocking its thread for as long as the gate stays
+    /// shut. On the pool (three threads on CI) a few parallel holds stop every
+    /// RPC in the pass, these tests' own included, so the client's round trips
+    /// go to `GateExecutor` too.
+    func holdingClient() -> DaemonClient {
+        DaemonClient(socketPath: path, rpcExecutor: GateExecutor.shared)
+    }
 
     private func serve() {
         defer { close(fd); try? FileManager.default.removeItem(atPath: root) }
