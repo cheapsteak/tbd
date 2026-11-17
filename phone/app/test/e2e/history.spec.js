@@ -73,6 +73,21 @@ async function chevron(page) {
   await app(page).getByRole('button', { name: 'Back to sessions' }).click();
 }
 
+/**
+ * Forks the session that shows, Checkout v2's Review tab, into main. The phone moves from one
+ * worktree's session to another's only through a pending open, so a fork that the laptop opens
+ * in another worktree stands in for one.
+ * @param {Page} page
+ */
+async function forkIntoMain(page) {
+  await hostCall(page, 'setReply', 'session.fork', { result: { session: MAIN_REF } });
+  await app(page).getByRole('button', { name: 'Account: acme-work. Switch account' }).click();
+  const menu = app(page).getByRole('menu', { name: 'Account for this session' });
+  await menu.getByRole('menuitemradio', { name: /^Personal\b/ }).click();
+  await menu.getByRole('button', { name: 'Fork into a new tab' }).click();
+  await expectSession(page, 'main');
+}
+
 /** @param {Page} page */
 function composer(page) {
   return app(page).locator('.dock .comp textarea.field');
@@ -151,19 +166,12 @@ test('back and forward step between the list and a worktree, and the chevron is 
 });
 
 test('a move from one worktree to another adds an entry: back returns to the first, then the list, and forward to the first', async ({ page, appHost }) => {
-  // The phone moves from one worktree's session to another's only through a pending open, so a
-  // fork that the laptop opens in another worktree, main, stands in for one here.
   await openApp(page, appHost);
   const address = page.url();
   await openSessionByName(page, 'Checkout v2', 'Review');
   await expectSession(page, 'Checkout v2', 'Review');
   await composer(page).fill(DRAFT);
-  await hostCall(page, 'setReply', 'session.fork', { result: { session: MAIN_REF } });
-  await app(page).getByRole('button', { name: 'Account: acme-work. Switch account' }).click();
-  const menu = app(page).getByRole('menu', { name: 'Account for this session' });
-  await menu.getByRole('menuitemradio', { name: /^Personal\b/ }).click();
-  await menu.getByRole('button', { name: 'Fork into a new tab' }).click();
-  await expectSession(page, 'main');
+  await forkIntoMain(page);
 
   await back(page);
   await expectSession(page, 'Checkout v2', 'Review');
@@ -262,16 +270,21 @@ test('a new frame opens on the entry the browser is on, and back and forward ste
   await expectNoReload(page, address, 2);
 });
 
-test('a reload on a session’s entry opens that session again, and the entries go on from there', async ({ page, appHost }) => {
+test('a reload on a session’s entry opens that session again, and back onto an entry from before the reload shows its screen in the same page', async ({ page, appHost }) => {
+  // Two worktrees' entries before the reload: Checkout v2 on its Review tab, then main. The app
+  // shows a screen as it asks for its entry, and the page adds the entry when the request
+  // arrives, so the test waits for the entries before it moves the browser.
   await openApp(page, appHost);
   const address = page.url();
+  const start = await historyLength(page);
   await openSessionByName(page, 'Checkout v2', 'Review');
-  await app(page).getByRole('tab', { name: /^Claude/ }).click();
-  await expectSession(page, 'Checkout v2', 'Claude');
+  await expectSession(page, 'Checkout v2', 'Review');
+  await forkIntoMain(page);
+  await expect.poll(() => historyLength(page)).toBe(start + 2);
 
   await page.reload();
   await page.waitForFunction(() => /** @type {any} */ (window).__host?.ready === true);
-  await expectSession(page, 'Checkout v2', 'Claude');
+  await expectSession(page, 'main');
   await expectNoReload(page, address);
   await markPage(page);
 
@@ -283,6 +296,7 @@ test('a reload on a session’s entry opens that session again, and the entries 
   expect(await historyLength(page)).toBe(length);
   await openSessionByName(page, 'Login redirect fix');
   await expectSession(page, 'Login redirect fix');
+  await expect.poll(() => historyLength(page)).toBe(length + 1);
   await composer(page).fill(DRAFT);
   await back(page);
   await expectList(page);
@@ -295,13 +309,13 @@ test('a reload on a session’s entry opens that session again, and the entries 
   expect(await isMarked(page), 'the same page load').toBe(true);
   await expectNoReload(page, address);
 
-  // Back onto the entry the earlier page load made shows that entry's screen. Both engines move
-  // onto it within this page load today, with a popstate, but a new load would end on the list
-  // too, as the new frame opens on the entry's screen.
+  // Back onto the entry the earlier page load made for Checkout v2's Review tab. A load of the
+  // page would show that screen too, since a new frame opens on the entry's screen, so only the
+  // mark on the window tells a popstate from a load: both engines stay in this page load.
   await back(page);
-  await page.waitForFunction(() => /** @type {any} */ (window).__host?.ready === true);
+  await expectSession(page, 'Checkout v2', 'Review');
   expect(await entryDoc(page), "the earlier page load's entry").not.toBe(reloadDoc);
-  await expectList(page);
+  expect(await isMarked(page), 'a popstate in this page load, not a load of the page').toBe(true);
   await expectNoReload(page, address);
 });
 

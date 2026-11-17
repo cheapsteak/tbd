@@ -313,7 +313,9 @@ only WebKit fires the second `load`.
   - a sheet open during back closes;
   - the chevron, then forward;
   - a new bundle swapped in, then back shows the entry's screen;
-  - a page reload on a session's entry opens that session.
+  - a page reload on a session's entry opens that session, and back onto a session's entry from
+    before the reload shows that session without loading the page again: a mark set on the
+    page's window survives the move.
 
   Each case checks that the frame never reloaded: no second-`load` fault, the frame still on the
   runner, one subscribe, and a draft typed in the composer still there.
