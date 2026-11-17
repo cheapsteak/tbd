@@ -132,7 +132,11 @@ public final class GateExecutor: TaskExecutor, @unchecked Sendable {
 /// `GateExecutor.shared` so nothing it waits on touches the pool. A server
 /// whose internal init forwards the executor — `SocketServer`'s
 /// `shutdownExecutor:` — gives a test that reaches the latch through `stop()`
-/// the same handle, as `SocketServerSocketOwnershipTests` uses it. Where a
+/// the same handle, as `SocketServerSocketOwnershipTests` uses it. On the app
+/// side, `DaemonClient(rpcExecutor:)` is the handle for a fake daemon that
+/// holds a reply: the client waits for every reply in `recv` on a detached
+/// task, so a held reply blocks that task's thread, and `HistoryPaneActionTests`
+/// passes `GateExecutor.shared` to keep it off the pool. Where a
 /// server builds its latch with the default, there is no such handle, and the
 /// bound is still the only thing yours to get right. `BoundedGateWaitTests`
 /// pins the rule.

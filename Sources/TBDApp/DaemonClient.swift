@@ -80,13 +80,23 @@ actor DaemonClient {
     /// returns in milliseconds and never approaches this ceiling.
     nonisolated static let rpcRecvDeadlineSeconds: TimeInterval = 300
 
+    /// Where `sendRawAsync` runs its blocking round trip. `nil`, the
+    /// production value, means the cooperative pool. This exists for tests
+    /// only: a test whose fake daemon holds a reply open passes `GateExecutor`,
+    /// so the `recv` waiting on that reply blocks a thread the test owns
+    /// instead of one of the pool's (three on CI). See `ShutdownLatch` in the
+    /// daemon for the same seam.
+    private let rpcExecutor: (any TaskExecutor)?
+
     init(
         socketPath: String? = nil, vendSocketPath: String? = nil,
+        rpcExecutor: (any TaskExecutor)? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         // See HookResolver — resolve here, not at the caller's site.
         self.socketPath = socketPath ?? TBDConstants.socketPath
         self.vendSocketPath = vendSocketPath ?? TBDConstants.vendSocketPath
+        self.rpcExecutor = rpcExecutor
         self.elapsed = ClockStopwatch.start(on: clock)
     }
 
@@ -486,11 +496,22 @@ actor DaemonClient {
         return try response.decodeResult(resultType)
     }
 
-    // MARK: - Async RPC helpers (dispatch blocking recv off the cooperative thread pool)
+    // MARK: - Async RPC helpers (run blocking recv off this actor)
 
-    /// Wraps the blocking `sendRaw` in a detached task so it runs on a background thread.
+    /// Wraps the blocking `sendRaw` in a detached task, so a slow reply does
+    /// not hold this actor. A detached task still runs on the cooperative
+    /// pool unless `rpcExecutor` says otherwise, and `sendRaw` keeps its
+    /// thread in `recv` until the reply arrives.
     private func sendRawAsync(_ request: RPCRequest) async throws -> MeasuredResponse {
-        try await Task.detached(priority: .userInitiated) { [self] in
+        // Swift 6.2's executor-preference initializer crashes with nil on the
+        // macOS 15 concurrency runtime (see `ShutdownLatch`), so the
+        // production default keeps the plain detached task.
+        if let rpcExecutor {
+            return try await Task.detached(executorPreference: rpcExecutor, priority: .userInitiated) { [self] in
+                try self.sendRaw(request)
+            }.value
+        }
+        return try await Task.detached(priority: .userInitiated) { [self] in
             try self.sendRaw(request)
         }.value
     }
