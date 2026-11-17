@@ -20,9 +20,9 @@ const entry = (fields = {}) => ({ tbdPhone: { v: 1, laptop: 'L', doc: DOC, step:
 /**
  * A History API with entries and a current index, as a browser keeps them. `back()` moves on
  * a later microtask and then fires `popstate`, as a browser does; `go` is the browser's own
- * back or forward. Each call is recorded with every argument it got. `refuse` makes the calls it
- * names throw, as WebKit's throttle on the History API does, changing nothing, until it is
- * called again without them.
+ * back or forward, and `follow` a link to a fragment of the page. Each call is recorded with
+ * every argument it got. `refuse` makes the calls it names throw, as WebKit's throttle on the
+ * History API does, changing nothing, until it is called again without them.
  * @param {unknown[]} [states] the entries' states, oldest first
  * @param {number} [at] the current entry's index; the last entry by default
  */
@@ -81,6 +81,16 @@ function fakeHistory(states = [null], at = states.length - 1) {
     port,
     calls,
     go,
+    /**
+     * A link to a fragment of the page, followed: an entry with no state after the current
+     * one, in place of those forward of it, and a popstate. The page's `hashchange` follows.
+     */
+    follow() {
+      entries.splice(index + 1);
+      entries.push(null);
+      index += 1;
+      popState();
+    },
     /** @param {...('pushState' | 'replaceState' | 'back')} methods */
     refuse(...methods) {
       refused = new Set(methods);
@@ -442,13 +452,14 @@ test('a popstate with no frame attached counts a move and does nothing else', ()
 
 test('a pairing link opened under a running app: the frame detaches, and later moves send and write nothing', () => {
   const h = setUp();
-  // The fragment navigation adds an entry with no state and fires popstate before hashchange.
-  h.port.pushState(null);
-  h.go(-1);
-  h.go(1);
-  assert.deepEqual(h.entries()[1], entry({ step: 0, app: null }), 'the entry matches the list the app was sent');
-  assert.deepEqual(h.routes, [[null, 0], [null, 1], [null, 2]]);
-  // On hashchange the loader takes the link out of the address, then removes the frame.
+  // The link's fragment adds an entry with no state, and its popstate comes before the
+  // hashchange, while the frame still runs: the entry becomes this laptop's list, the screen
+  // the app is sent.
+  h.follow();
+  assert.deepEqual(h.entries(), [entry(), entry()]);
+  assert.deepEqual(h.routes, [[null, 0], [null, 1]]);
+  // On hashchange, main.js takes the link out of the address, which leaves the entry with no
+  // state, and only then acts on the link, which removes the frame.
   h.port.replaceState(null);
   h.frame?.detach();
   const writes = h.writes().length;
@@ -456,10 +467,10 @@ test('a pairing link opened under a running app: the frame detaches, and later m
   h.go(1);
   h.frame?.apply({ op: 'push', state: 'x', move: h.page.move });
   h.frame?.apply({ op: 'back', move: h.page.move });
-  assert.deepEqual(h.routes, [[null, 0], [null, 1], [null, 2]]);
+  assert.deepEqual(h.routes, [[null, 0], [null, 1]]);
   assert.equal(h.writes().length, writes);
-  assert.deepEqual(h.entries()[1], null);
-  assert.equal(h.page.move, 4);
+  assert.deepEqual(h.entries(), [entry(), null], 'the link\'s entry keeps no state');
+  assert.equal(h.page.move, 3);
 });
 
 test('attach detaches the frame before it: only the newest frame hears routes and is heard', () => {
