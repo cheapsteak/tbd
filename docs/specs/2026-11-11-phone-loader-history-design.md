@@ -52,7 +52,8 @@ call (`phone/app/src-policy.test.js`).
 
 ## Overview
 
-- The runner gives the app one new field on its handle: `tbdHost.history === 1`.
+- The loader page says in its `bundle` message that it keeps history, and the runner passes that
+  on to the app as one new field on its handle: `tbdHost.history === 1`.
 - The app decides which moves add an entry and which rewrite one, because only it knows the
   sessions list. It sends `push`, `replace` or `back` to the loader.
 - The loader carries those out with `pushState`, `replaceState` and `history.back()`. It listens
@@ -64,11 +65,25 @@ call (`phone/app/src-policy.test.js`).
 The loader is always the newest version on Pages, but a phone can run a cached copy. A laptop can
 run any TBD release. So both mixes happen.
 
+The loader has two parts with different lifetimes:
+
+- **The page** (`main.js`, `frame.js`, `history.js` and the rest) loads once per tab, and a tab or
+  Home Screen app can stay open for days, across a deploy.
+- **The runner** (`runner.html`, `runner.js`) loads again for every app frame, so a page from
+  before a deploy can start a frame on a runner from after it.
+
+The history code lives in the page, so the page states the capability. `AppFrame` adds
+`history: 1` to the `bundle` message it posts to the runner, and the runner sets
+`tbdHost.history` to `1` only when that message carries it.
+
 - **A new app with an old loader.** The new app requires the new loader. At start it reads
   `tbdHost.history`, and if that field is not `1`, it throws before it draws anything. Every
   loader already treats a bundle that throws at start as a `script` fault: it removes the frame
   and shows "Reload this page" with a Reload button. A reload fetches the new loader. This needs
-  no change to old loaders and none to the laptop.
+  no change to old loaders and none to the laptop. It covers every mix of the two parts:
+  - an old page with a new runner: the old page's `bundle` message has no `history`, so the
+    runner gives the app none;
+  - a new page with an old runner from the cache: the old runner never sets the field.
 - **A new loader with an old app.** An old app never sends `history` messages and ignores the
   `route` message. The loader then adds no entries, and back leaves the page, as before this
   design. The new loader keeps working with every TBD release.
@@ -206,7 +221,8 @@ So back steps through worktrees, not tabs.
 - When the session list has not fully arrived, which is the case at start, it waits for it.
 - When the full list does not hold the session, or the string does not decode, it shows the list
   and sends `replace` with `null`.
-- When the screen already shows, only the menu and the sheet close.
+- When the screen already shows, the screen stays. The menu and the sheet still close, and a
+  pending open is still cleared, as for any `route` message.
 - It sends no `push` or `replace` for the move itself.
 
 **The back chevron.** The chevron sends `back` and changes nothing itself. The `route` message
@@ -230,9 +246,10 @@ other message on the port.
   laptop.
 - No URL from the app reaches the History API. The address bar never changes.
 - History state is readable only by pages of the loader's own origin.
-- An app could add many entries to trap the user. The loader adds an entry only when the app asks
-  and only with a current `move`, and the browsers' own back-button protection still applies.
-  The bundle's hash is checked before it runs, so the bundle is the one the laptop's TBD ships.
+- An app could add many entries to trap the user. The `move` check guards against races, not
+  volume: an app can push as many entries as it likes. The limits are elsewhere. The bundle's
+  hash is checked before it runs, so the bundle is the one the laptop's TBD ships, and the
+  browsers' own back-button protection still applies.
 
 ## 7. Risks and assumptions
 
@@ -247,8 +264,18 @@ other message on the port.
   the same page and fires `popstate`, and the loader shows that entry's screen with no
   reconnect. The chevron still steps back only within this page load's entries (section 4),
   because no standard promises that such a move stays in the same document.
-- **A cached old loader.** A phone that holds an old loader when its laptop updates sees "Reload
-  this page" once. The order of a normal rollout makes this rare (section 1).
+- **A cached old loader.** A phone tab opened before the loader deployed, and still open when its
+  laptop updates, sees "Reload this page" once. The reload brings the new loader (section 1).
+- **Throttled History API calls.** WebKit throws when a page calls `pushState` or `replaceState`
+  too often in a short time. Only a misbehaving bundle could do that. The loader catches a write
+  that throws, leaves the entry as it was, and still sends any `route` message it owes, so the
+  app's `move` stays current.
+- **The browser's history cap.** Browsers keep a bounded number of entries per tab (Chromium
+  keeps 50) and drop the oldest. After that many worktree moves in one page load, the oldest
+  entry kept can have `step` above 0 with nothing before it. A chevron tap there calls
+  `history.back()`, nothing happens, and the loader drops the app's requests as stale until the
+  next browser back or forward. Reaching it takes dozens of worktree moves and then a back to the
+  oldest one, so the design accepts it.
 
 ## 8. Testing
 
@@ -287,8 +314,8 @@ only WebKit fires the second `load`.
   Each case checks that the frame never reloaded: no second-`load` fault, the frame still on the
   runner, one subscribe, and a draft typed in the composer still there.
 - **Version skew, end to end.**
-  - A runner without `history: 1` makes the new app fault at start, and the loader shows "Reload
-    this page".
+  - An old page, whose `bundle` message has no `history`, makes the new app fault at start, and
+    so does an old runner that never sets the field. The loader then shows "Reload this page".
   - In the loader's own suite, a fixture bundle that never sends `history` messages adds no
     entries, and back leaves the page.
 
