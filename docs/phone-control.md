@@ -69,9 +69,9 @@ phone only after you click Allow.
 
 ## Go back and forward
 
-On the phone, the browser's back and forward steps through the worktrees you opened. That covers
-Safari's back button and edge swipe, and Android's back. Back from the sessions list leaves the
-page.
+On the phone, the browser's back and forward buttons step through the worktrees you opened.
+That covers Safari's back button and edge swipe, and Android's back. Back from the sessions list
+leaves the page.
 
 ## Remove a phone
 
