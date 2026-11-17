@@ -267,9 +267,11 @@ other message on the port.
 - **A cached old loader.** A phone tab opened before the loader deployed, and still open when its
   laptop updates, sees "Reload this page" once. The reload brings the new loader (section 1).
 - **Throttled History API calls.** WebKit throws when a page calls `pushState` or `replaceState`
-  too often in a short time. Only a misbehaving bundle could do that. The loader catches a write
+  too often in a short time. Only a misbehaving bundle could do that. The loader catches a call
   that throws, leaves the entry as it was, and still sends any `route` message it owes, so the
-  app's `move` stays current.
+  app's `move` stays current. That message names the screen of the entry as it stands, so the
+  screen still matches the entry. A `history.back()` that throws leaves the browser on the same
+  entry and brings no `popstate`, so the loader sends `route` for that entry itself.
 - **The browser's history cap.** Browsers keep a bounded number of entries per tab (Chromium
   keeps 50) and drop the oldest. After that many worktree moves in one page load, the oldest
   entry kept can have `step` above 0 with nothing before it. A chevron tap there calls
@@ -289,7 +291,9 @@ only WebKit fires the second `load`.
   - malformed messages are dropped: wrong types, a string over the cap, a non-integer `move`; and
     extra fields are not stored;
   - no call passes a URL;
-  - a `popstate` with no frame, and one onto another laptop's entry.
+  - a `popstate` with no frame, and one onto another laptop's entry;
+  - a `pushState`, `replaceState` or `history.back()` that throws: the entry stays as it was, and
+    any `route` owed still goes out, naming the screen of that entry.
 - **`frame.js` unit tests** for the new port messages, in and out.
 - **App unit tests**:
   - `readHost` refuses a handle without `history: 1`;

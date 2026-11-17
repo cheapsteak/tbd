@@ -20,7 +20,9 @@ const entry = (fields = {}) => ({ tbdPhone: { v: 1, laptop: 'L', doc: DOC, step:
 /**
  * A History API with entries and a current index, as a browser keeps them. `back()` moves on
  * a later microtask and then fires `popstate`, as a browser does; `go` is the browser's own
- * back or forward. Each call is recorded with every argument it got.
+ * back or forward. Each call is recorded with every argument it got. `refuse` makes the calls it
+ * names throw, as WebKit's throttle on the History API does, changing nothing, until it is
+ * called again without them.
  * @param {unknown[]} [states] the entries' states, oldest first
  * @param {number} [at] the current entry's index; the last entry by default
  */
@@ -31,12 +33,25 @@ function fakeHistory(states = [null], at = states.length - 1) {
   const calls = [];
   /** @type {Set<() => void>} */
   const listeners = new Set();
+  /** @type {Set<string>} */
+  let refused = new Set();
+  const popState = () => {
+    for (const listener of [...listeners]) listener();
+  };
   /** @param {number} delta */
   const go = (delta) => {
     const to = index + delta;
     if (to < 0 || to >= entries.length) return;
     index = to;
-    for (const listener of [...listeners]) listener();
+    popState();
+  };
+  /**
+   * @param {string} method
+   * @param {unknown[]} args
+   */
+  const record = (method, args) => {
+    calls.push({ method, args });
+    if (refused.has(method)) throw new DOMException(`${method} refused`, 'SecurityError');
   };
   /** @type {import('../../history.js').HistoryPort} */
   const port = {
@@ -44,17 +59,17 @@ function fakeHistory(states = [null], at = states.length - 1) {
       return entries[index];
     },
     pushState(...args) {
-      calls.push({ method: 'pushState', args });
+      record('pushState', args);
       entries.splice(index + 1);
       entries.push(structuredClone(args[0]));
       index += 1;
     },
     replaceState(...args) {
-      calls.push({ method: 'replaceState', args });
+      record('replaceState', args);
       entries[index] = structuredClone(args[0]);
     },
     back(...args) {
-      calls.push({ method: 'back', args });
+      record('back', args);
       queueMicrotask(() => go(-1));
     },
     onPopState(listener) {
@@ -66,10 +81,14 @@ function fakeHistory(states = [null], at = states.length - 1) {
     port,
     calls,
     go,
+    /** @param {...('pushState' | 'replaceState' | 'back')} methods */
+    refuse(...methods) {
+      refused = new Set(methods);
+    },
     /** Every entry's state, oldest first. */
     entries: () => entries,
     index: () => index,
-    /** The calls that wrote to the history or moved it. */
+    /** The calls that wrote to the history or moved it, refused ones included. */
     writes: () => calls.map((call) => call.method),
     listeners: () => listeners.size,
   };
@@ -458,6 +477,83 @@ test('attach detaches the frame before it: only the newest frame hears routes an
   assert.deepEqual(routes, [['a', 0], [null, 1]], 'and its detach did not detach the second');
   second.apply({ op: 'push', state: 'b', move: 1 });
   assert.deepEqual(h.entries(), [entry(), entry({ step: 1, app: 'b' })]);
+});
+
+// --- PageHistory: calls the browser refuses ------------------------------------------------
+
+test('a frame that starts while the browser refuses replaceState gets the screen of the entry as it was', () => {
+  /** @type {Array<[unknown[], string | null]>} the entries, and the screen the frame is sent */
+  const cases = [
+    [[null], null],
+    // Another laptop's entry reads as this laptop's list.
+    [[entry({ laptop: 'K', step: 1, app: 'k' })], null],
+    [[entry({ doc: 'old', step: 4, app: 'x' })], 'x'],
+  ];
+  for (const [states, screen] of cases) {
+    const fake = fakeHistory(states);
+    fake.refuse('replaceState');
+    const page = new PageHistory({ port: fake.port, doc: DOC });
+    /** @type {Array<[string | null, number]>} */
+    const routes = [];
+    page.attach('L', (state, move) => routes.push([state, move]));
+    assert.deepEqual(fake.writes(), ['replaceState']);
+    assert.deepEqual(fake.entries(), states, 'the entry stays as it was');
+    assert.deepEqual(routes, [[screen, 0]]);
+  }
+});
+
+test('a push or replace the browser refuses leaves the entries as they were, owes no route, and the next one lands', () => {
+  const h = setUp();
+  h.refuse('pushState', 'replaceState');
+  h.frame?.apply({ op: 'push', state: 'a', move: 0 });
+  h.frame?.apply({ op: 'replace', state: 'b', move: 0 });
+  assert.deepEqual(h.writes(), ['replaceState', 'pushState', 'replaceState']);
+  assert.deepEqual(h.entries(), [entry()]);
+  assert.deepEqual(h.routes, [[null, 0]]);
+  assert.equal(h.page.move, 0);
+  h.refuse();
+  h.frame?.apply({ op: 'push', state: 'c', move: 0 });
+  assert.deepEqual(h.entries(), [entry(), entry({ step: 1, app: 'c' })]);
+});
+
+test('a back the browser refuses moves nothing, and the route names the entry it stays on, so the app is heard again', async () => {
+  const h = setUp();
+  h.frame?.apply({ op: 'push', state: 'a', move: 0 });
+  h.refuse('back');
+  h.frame?.apply({ op: 'back', move: 0 });
+  await settle();
+  assert.equal(h.index(), 1);
+  assert.equal(h.page.move, 1);
+  assert.deepEqual(h.routes, [[null, 0], ['a', 1]]);
+  // The app answers with the count that route carried.
+  h.refuse();
+  h.frame?.apply({ op: 'back', move: 1 });
+  await settle();
+  assert.equal(h.index(), 0);
+  assert.deepEqual(h.routes, [[null, 0], ['a', 1], [null, 3]]);
+});
+
+test('a back from step 0 whose rewrite the browser refuses sends the screen the entry still names', async () => {
+  const h = setUp({ states: [null, entry({ app: 'a' })] });
+  h.refuse('replaceState');
+  h.frame?.apply({ op: 'back', move: 0 });
+  await settle();
+  assert.equal(h.writes().includes('back'), false);
+  assert.deepEqual(h.entries(), [null, entry({ app: 'a' })]);
+  assert.deepEqual(h.routes, [['a', 0], ['a', 1]]);
+  assert.equal(h.page.move, 1);
+});
+
+test('a popstate onto another laptop\'s entry whose rewrite the browser refuses still sends the list', () => {
+  const h = setUp({ states: [entry({ laptop: 'K', app: 'k' }), null] });
+  h.refuse('replaceState');
+  h.go(-1);
+  assert.deepEqual(h.entries()[0], entry({ laptop: 'K', app: 'k' }));
+  assert.deepEqual(h.routes, [[null, 0], [null, 1]]);
+  // The entry still reads as this laptop's list, so the chevron there shows the list too.
+  h.frame?.apply({ op: 'back', move: 1 });
+  assert.deepEqual(h.routes, [[null, 0], [null, 1], [null, 2]]);
+  assert.deepEqual(h.entries()[0], entry({ laptop: 'K', app: 'k' }));
 });
 
 test('no write passes a URL or a title: each gets the entry\'s state alone', () => {

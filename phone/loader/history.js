@@ -7,7 +7,9 @@
 //
 // Every History API call the loader makes for the app is in this module. The app's route is a
 // string the loader never reads: it is checked for type and length, stored in the entry, and
-// handed back only to an app frame for the same laptop. No call passes a URL.
+// handed back only to an app frame for the same laptop. No call passes a URL. A call the
+// browser refuses by throwing leaves the entry as it was, and any route the loader owes still
+// goes out, naming the screen of the entry as it stands.
 
 import { base64urlEncode } from './channel/pairingLink.js';
 import { isObject, isPlainRecord } from './objects.js';
@@ -151,8 +153,10 @@ export class PageHistory {
     const attachment = { laptop: laptopID, sendRoute };
     this.#attached = attachment;
     const current = readEntry(this.#port.state);
-    const app = current !== null && current.laptop === laptopID ? current.app : null;
-    this.#port.replaceState(this.#entry(laptopID, this.#ownStep(current), app));
+    const app = screenOf(current, laptopID);
+    // The screen matches the entry even when the write throws: an entry that is not this
+    // laptop's reads as its list.
+    attempt(() => this.#port.replaceState(this.#entry(laptopID, this.#ownStep(current), app)));
     sendRoute(app, this.#move);
     return {
       apply: (request) => {
@@ -177,23 +181,24 @@ export class PageHistory {
       case 'push': {
         // The entry before the new one is this page load's only when the current one is.
         const step = current !== null && current.doc === this.#doc ? ownStep + 1 : 0;
-        this.#port.pushState(this.#entry(attachment.laptop, step, request.state));
+        attempt(() => this.#port.pushState(this.#entry(attachment.laptop, step, request.state)));
         return;
       }
       case 'replace':
-        this.#port.replaceState(this.#entry(attachment.laptop, ownStep, request.state));
+        attempt(() => this.#port.replaceState(this.#entry(attachment.laptop, ownStep, request.state)));
         return;
       case 'back':
         this.#move += 1;
         if (ownStep > 0) {
           // The entry before is this page load's own, in this document: the popstate that
-          // follows sends the route.
-          this.#port.back();
-          return;
+          // follows sends the route. A back that throws moves nothing and brings no popstate,
+          // so the route goes out here.
+          if (attempt(() => this.#port.back())) return;
+        } else {
+          // Going back from here would leave the page or load it again. Show the list instead.
+          attempt(() => this.#port.replaceState(this.#entry(attachment.laptop, ownStep, null)));
         }
-        // Going back from here would leave the page or load it again. Show the list instead.
-        this.#port.replaceState(this.#entry(attachment.laptop, ownStep, null));
-        attachment.sendRoute(null, this.#move);
+        this.#sendScreen(attachment);
     }
   }
 
@@ -207,9 +212,20 @@ export class PageHistory {
       return;
     }
     // Another laptop's entry, or one the loader did not write: it becomes this laptop's list,
-    // so the entry matches the screen the app is sent.
-    this.#port.replaceState(this.#entry(attachment.laptop, this.#ownStep(current), null));
+    // so the entry matches the screen the app is sent. Left as it was by a write that throws,
+    // it still reads as this laptop's list.
+    attempt(() => this.#port.replaceState(this.#entry(attachment.laptop, this.#ownStep(current), null)));
     attachment.sendRoute(null, this.#move);
+  }
+
+  /**
+   * Sends the frame the screen of the entry the browser is on, read after any write: the
+   * entry's app string when it is this laptop's, and the list otherwise. So when a write threw
+   * and left the entry as it was, the screen still matches the entry.
+   * @param {Attachment} attachment
+   */
+  #sendScreen(attachment) {
+    attachment.sendRoute(screenOf(readEntry(this.#port.state), attachment.laptop), this.#move);
   }
 
   /**
@@ -228,6 +244,34 @@ export class PageHistory {
    */
   #entry(laptop, step, app) {
     return { tbdPhone: { v: 1, laptop, doc: this.#doc, step, app } };
+  }
+}
+
+/**
+ * The screen an entry shows to a frame for `laptop`: its app string when the entry is that
+ * laptop's, and the list otherwise.
+ * @param {PhoneEntry | null} entry
+ * @param {string} laptop
+ * @returns {string | null}
+ */
+function screenOf(entry, laptop) {
+  return entry !== null && entry.laptop === laptop ? entry.app : null;
+}
+
+/**
+ * Runs one History API call, and says whether it returned. A browser can refuse one: WebKit
+ * throws when a page calls `pushState` or `replaceState` too often in a short time. The entry
+ * then stays as it was, and the caller goes on to send any route it owes, so the app's move
+ * count stays current.
+ * @param {() => void} call
+ * @returns {boolean}
+ */
+function attempt(call) {
+  try {
+    call();
+    return true;
+  } catch {
+    return false;
   }
 }
 
