@@ -811,6 +811,32 @@ test('a pending open adds an entry when it lands in another worktree, and rewrit
   assert.deepEqual(fromList.entryCalls, [['push', shows(R2)]]);
 });
 
+test('a pending open beside its session rewrites the entry when the row comes back after a partial snapshot', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openPending({ ref: R2 }, h.actions.navMark());
+  h.actions.onChannelDown();
+  h.actions.onChannelUp();
+  // A new stream's snapshot that holds only W2; W1 follows as a sessions.changed.
+  h.sent[1]!.resolve({
+    stream: 's2', seq: 1, replayed: false, omittedRows: 0, more: true, rows: [row('W2', [OTHER])],
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }] }],
+  });
+  await flush();
+  assert.deepEqual(h.state().ui.route, shows(R));
+  // W1 comes back with the fork beside R: the list that showed R did not hold W1, the new one does.
+  h.actions.onEvent(changed([row('W1', [R, R2])]));
+  assert.deepEqual(h.state().ui.route, shows(R2));
+  assert.deepEqual(h.entryCalls, [['push', shows(R)], ['replace', shows(R2)]]);
+  // And when the newer list no longer holds the session that showed, the list that showed it says where it was.
+  const gone = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  gone.actions.openSession(R);
+  gone.actions.openPending({ ref: R2 }, gone.actions.navMark());
+  gone.actions.onEvent(changed([row('W1', [R2])]));
+  assert.deepEqual(gone.state().ui.route, shows(R2));
+  assert.deepEqual(gone.entryCalls, [['push', shows(R)], ['replace', shows(R2)]]);
+});
+
 test("a route message shows its entry's screen as a tap would, and asks for no entry", async () => {
   const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
   h.actions.openSession(R);

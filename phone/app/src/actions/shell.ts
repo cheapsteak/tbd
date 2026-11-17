@@ -22,7 +22,7 @@ import { findSession, restoreRef, sameRoute } from '../state/route.ts';
 import { decodeRoute } from '../state/routeState.ts';
 import { applySnapshot, isComplete } from '../state/sessionsData.ts';
 import { emptyRecord, nextToast, SESSIONS_ROUTE } from '../state/store.ts';
-import type { AppState, MenuState, PendingOpen, Route, SheetState, UIState } from '../state/store.ts';
+import type { AppState, MenuState, PendingOpen, Route, SessionsData, SheetState, UIState } from '../state/store.ts';
 import type { ActionContext, Actions } from './index.ts';
 
 export function shellActions(ctx: ActionContext, self: () => Actions) {
@@ -67,7 +67,8 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
   /**
    * Asks the loader's history to match a move from the screen `before` showed to the one `after`
    * shows: a new entry for a move to a session in another worktree, from the list or from
-   * another row; the current entry rewritten for anything else.
+   * another row; the current entry rewritten for anything else. Which row holds each session
+   * comes from `after`'s list when it holds the session (`sameWorktree`).
    */
   function record(before: AppState, after: AppState): void {
     const route = after.ui.route;
@@ -329,17 +330,26 @@ function listComplete(s: AppState): boolean {
 }
 
 /**
- * Whether `a` and `b` both show a session, and one row of their lists holds both: the same
- * worktree, or the same remote session's row.
+ * Whether `before` and `after` both show a session, and one row holds both: the same worktree,
+ * or the same remote session's row. Both sessions are looked up in `after`'s list, the newer one,
+ * and the session `before` showed in `before`'s own list when `after`'s does not hold it. So a
+ * partial list that lacked the row `before` showed, whose row came back in `after`'s list, does
+ * not count as a move to another row.
  */
-function sameWorktree(a: AppState, b: AppState): boolean {
-  const row = shownRowID(a);
-  return row !== null && row === shownRowID(b);
+function sameWorktree(before: AppState, after: AppState): boolean {
+  const row = shownRowID(before.ui.route, after.sessions, before.sessions);
+  return row !== null && row === shownRowID(after.ui.route, after.sessions);
 }
 
-/** The ID of the row that lists the session `s` shows, or null on the list or when no row lists it. */
-function shownRowID(s: AppState): string | null {
-  const { route } = s.ui;
+/**
+ * The ID of the row that lists the session `route` shows, in the first of `lists` that holds
+ * it, or null on the sessions list or when none of them does.
+ */
+function shownRowID(route: Route, ...lists: SessionsData[]): string | null {
   if (route.screen === 'sessions') return null;
-  return findSession(s.sessions, route.ref)?.row.id ?? null;
+  for (const d of lists) {
+    const found = findSession(d, route.ref);
+    if (found !== null) return found.row.id;
+  }
+  return null;
 }
