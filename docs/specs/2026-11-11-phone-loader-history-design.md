@@ -79,8 +79,11 @@ The history code lives in the page, so the page states the capability. `AppFrame
 - **A new app with an old loader.** The new app requires the new loader. At start it reads
   `tbdHost.history`, and if that field is not `1`, it throws before it draws anything. Every
   loader already treats a bundle that throws at start as a `script` fault: it removes the frame
-  and shows "Reload this page" with a Reload button. A reload fetches the new loader. This needs
-  no change to old loaders and none to the laptop. It covers every mix of the two parts:
+  and shows "Reload this page" with a Reload button. A reload fetches the new loader once the
+  browser's cached copy has expired. Pages lets a browser keep the loader for a few minutes, so a
+  reload in the minutes right after a deploy can bring back the cached copy, and the screen
+  returns until it expires. This needs no change to old loaders and none to the laptop. It covers
+  every mix of the two parts:
   - an old page with a new runner: the old page's `bundle` message has no `history`, so the
     runner gives the app none;
   - a new page with an old runner from the cache: the old runner never sets the field.
@@ -172,14 +175,16 @@ The loader's existing `replaceState` that clears a pairing link from the address
   Then it sends `route` with that string. This is how a tab that reloaded, a new bundle after a
   TBD update, and a retry after "Laptop offline" all return to the entry's screen.
 - **`push`.** The loader adds an entry after the current one, for this laptop and this page load,
-  with `step` one more than the current entry's and the app's string. The browser drops every
-  entry forward of the current one, as a push always does.
+  with the app's string. Its `step` is one more than the current entry's when the current entry
+  is this page load's, and 0 otherwise. The browser drops every entry forward of the current one,
+  as a push always does.
 - **`replace`.** The loader rewrites the current entry with the app's string. It keeps `step`.
 - **`back`.** When the current entry is ours, from this page load, with `step` above 0, the entry
-  before it is this page load's own, in this document. The loader counts a move and calls
-  `history.back()`. The `popstate` that follows sends `route`. Otherwise the loader counts a
-  move, rewrites the current entry to this laptop's list, and sends `route` with `null`. So the
-  chevron never leaves the page and never reloads it.
+  before it is one this page load wrote: one it pushed, or one it rewrote in place. The loader
+  counts a move and calls `history.back()`. The `popstate` that follows sends `route`. Otherwise
+  the loader counts a move, rewrites the current entry to this laptop's list, and sends `route`
+  with `null`. So the chevron never leaves the page. Section 7 covers the one case where the entry
+  before came from an earlier page load.
 - **`popstate` while a frame runs.** The loader counts a move.
   - When the entry is ours and for this laptop, it sends `route` with the entry's `app`.
   - Otherwise it rewrites the entry to this laptop's list and sends `route` with `null`, so the
@@ -189,7 +194,8 @@ The loader's existing `replaceState` that clears a pairing link from the address
   list and pairing. The loader counts a move and does nothing else, so the screen stays. A frame
   that starts later opens the screen of the entry the browser is on then.
 - **Back from the list.** The list's first entry is the one the loader's page loaded on, so the
-  entry before it belongs to whatever page came before. The browser leaves the page.
+  entry before it belongs to whatever page came before. The browser leaves the page. A list entry
+  further on exists only when the app rewrote an entry to the list (section 7).
 
 What stays as it is:
 
@@ -262,16 +268,32 @@ other message on the port.
 - **Entries from before a reload.** After the page reloads, the browser keeps the entries from the
   earlier page load. In WebKit and Chromium under Playwright, a back onto one of them stays in
   the same page and fires `popstate`, and the loader shows that entry's screen with no
-  reconnect. The chevron still steps back only within this page load's entries (section 4),
-  because no standard promises that such a move stays in the same document.
+  reconnect. The chevron steps back only onto an entry this page load wrote (section 4), because
+  no standard promises that such a move stays in the same document. An entry from an earlier load
+  counts as written once this load rewrites it in place, as a tap on another tab does, so a
+  chevron tap can then reach it. That move is the same as the browser's back onto it, and the user
+  lands on the right screen either way.
 - **A cached old loader.** A phone tab opened before the loader deployed, and still open when its
-  laptop updates, sees "Reload this page" once. The reload brings the new loader (section 1).
+  laptop updates, sees "Reload this page". The reload brings the new loader once the browser's
+  cached copy has expired (section 1).
+- **A list entry that is not the first.** When the shown session leaves the list, or a back or
+  forward lands on a session that is gone, the app rewrites that entry to the list. Two list
+  entries can then sit in a row, and one back press from the later one changes nothing on screen;
+  the next leaves the page. The loader cannot remove an entry, and skipping one would take a
+  browser move the user did not make, so the design accepts it.
+- **Back on a loader screen.** While a connection screen, the laptops list or pairing shows, back
+  and forward still move through the app's entries, and the screen stays (section 4). After three
+  worktree moves, the first three back presses on the laptops list change nothing visible. The
+  next frame opens the screen of the entry the browser is on.
 - **Throttled History API calls.** WebKit throws when a page calls `pushState` or `replaceState`
   too often in a short time. Only a misbehaving bundle could do that. The loader catches a call
   that throws, leaves the entry as it was, and still sends any `route` message it owes, so the
-  app's `move` stays current. That message names the screen of the entry as it stands, so the
-  screen still matches the entry. A `history.back()` that throws leaves the browser on the same
-  entry and brings no `popstate`, so the loader sends `route` for that entry itself.
+  app's `move` stays current. That message names the screen of the entry as it stands. A
+  `history.back()` that throws leaves the browser on the same entry and brings no `popstate`, so
+  the loader sends `route` for that entry itself. A refused `push` or `replace` owes no `route`
+  and sends none, so the app's screen runs one move ahead of the entry until the next move.
+  Sending the entry's screen there could loop: the app answers a `route` for a session that is
+  gone with a `replace`, which the browser would refuse again.
 - **The browser's history cap.** Browsers keep a bounded number of entries per tab (Chromium
   keeps 50) and drop the oldest. After that many worktree moves in one page load, the oldest
   entry kept can have `step` above 0 with nothing before it. A chevron tap there calls

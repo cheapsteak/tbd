@@ -71,7 +71,8 @@ phone only after you click Allow.
 
 On the phone, the browser's back and forward buttons step through the worktrees you opened.
 That covers Safari's back button and edge swipe, and Android's back. Back from the sessions list
-leaves the page.
+leaves the page. If the worktree you were in was archived, the first back from the list can
+leave the screen as it is.
 
 ## Remove a phone
 
