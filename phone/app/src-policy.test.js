@@ -186,7 +186,10 @@ const ALLOWED = [
   'const entries = new HistoryLink((request) => link.postHistory(request));',
   "this.#post({ op: 'back', move: this.#move });",
   'const pushStateLater = true;',
-  ' * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or `back`',
+  ' * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or a move',
+  ' * to another history entry (`onRoute` in `actions/shell.ts`), so a fork or create the user has',
+  'if (host.history !== 1) throw new Error(NO_HISTORY);',
+  "? { t: 'history', op: 'back', move }",
   'const older = history.slice(0, n);',
   'const goBack = history.length > 0;',
 ];
