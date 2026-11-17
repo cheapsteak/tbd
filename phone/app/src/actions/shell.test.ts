@@ -856,7 +856,7 @@ test("a route message ends a fork's wait for its reply, so the fork never takes 
   assert.deepEqual(h.state().ui.route, shows(R));
 });
 
-test('a route message for the screen that shows only closes the menu and the sheet', async () => {
+test('a route message for the screen that shows keeps it, and does the rest as any route message does', async () => {
   const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
   h.actions.openSheet({ name: 'new', repoID: 'R1', repoName: 'acme' });
   h.actions.openPending({ worktreeID: WT, toast: null }, h.actions.navMark());
@@ -864,21 +864,33 @@ test('a route message for the screen that shows only closes the menu and the she
   h.actions.onRoute(null);
   assert.equal(h.state().ui.route, SESSIONS_ROUTE);
   assert.equal(h.state().ui.sheet, null);
-  assert.deepEqual(h.state().ui.pendingOpen, { worktreeID: WT, toast: null });
-  assert.equal(h.actions.navMark(), nav);
-  // On a session too.
+  assert.equal(h.state().ui.pendingOpen, null, 'a pending open is cleared');
+  assert.equal(h.actions.navMark(), nav + 1, 'and it counts as a navigation');
+  // So the worktree the create made takes the user nowhere when its row comes.
+  h.actions.onEvent(changed([row(WT, [R2])], [], ['W1', 'W2', WT]));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  // On a session too: its transcript stays as it is.
   h.actions.openSession(R);
   h.actions.openMenu({ name: 'model' });
+  // A fork whose session no row lists yet.
+  const forked: PhoneSessionRef = { kind: 'local', terminalID: 'T-forked' };
+  h.actions.openPending({ ref: forked });
+  assert.deepEqual(h.state().ui.pendingOpen, { ref: forked });
   h.calls.length = 0;
   h.entryCalls.length = 0;
   h.actions.onRoute(encodeRoute(shows(R)));
   assert.deepEqual(h.state().ui.route, shows(R));
   assert.equal(h.state().ui.menu, null);
-  assert.deepEqual(h.calls, []);
-  // With neither open, it changes nothing.
-  const before = h.state();
+  assert.equal(h.state().ui.pendingOpen, null);
+  assert.equal(h.actions.navMark(), nav + 3);
+  // With nothing open or waiting, it still counts, so a fork in flight never takes the user away.
+  const forkMark = h.actions.navMark();
   h.actions.onRoute(encodeRoute(shows(R)));
-  assert.equal(h.state(), before);
+  assert.deepEqual(h.state().ui.route, shows(R));
+  assert.equal(h.actions.navMark(), forkMark + 1);
+  h.actions.openPending({ ref: OTHER }, forkMark);
+  assert.equal(h.state().ui.pendingOpen, null);
+  assert.deepEqual(h.state().ui.route, shows(R));
   assert.deepEqual(h.calls, []);
   assert.deepEqual(h.entryCalls, []);
 });

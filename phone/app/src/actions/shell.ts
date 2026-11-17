@@ -204,8 +204,9 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
      * - A session the list may still bring, because it has not fully arrived, as at start, waits
      *   as a restore (`PendingOpen`) while the list shows.
      *
-     * When the screen it names shows already, only the menu and the sheet close, and a restore
-     * still waiting is dropped, since this entry has replaced the one that named it.
+     * When the screen it names shows already, the screen stays, and the rest is as for any route
+     * message: the menu and the sheet close, any pending open is cleared, and it counts as a
+     * navigation.
      */
     onRoute(state: string | null): void {
       const s = store.get();
@@ -226,11 +227,7 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
         }
       }
       if (sameRoute(s.ui.route, target)) {
-        setUI((ui) => {
-          const pendingOpen = restoreRef(ui.pendingOpen) === null ? ui.pendingOpen : null;
-          if (ui.menu === null && ui.sheet === null && pendingOpen === ui.pendingOpen) return ui;
-          return { ...ui, menu: null, sheet: null, pendingOpen };
-        });
+        setUI((ui) => ({ ...ui, menu: null, sheet: null, pendingOpen: null, nav: ui.nav + 1 }));
       } else {
         const shown = restore === null ? target : SESSIONS_ROUTE;
         setUI((ui) => ({

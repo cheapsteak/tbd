@@ -66,8 +66,8 @@ export interface UIState {
   pendingOpen: PendingOpen | null;
   /**
    * How many navigations the user has made: each `openSession` that changed the route, and each
-   * move to a history entry for another screen (`onRoute`), the back chevron's included. A route
-   * change an event or a pending open makes does not count. `navMark` reads it.
+   * move to a history entry (`onRoute`), the back chevron's included, even onto the screen that
+   * shows. A route change an event or a pending open makes does not count. `navMark` reads it.
    */
   nav: number;
   /** Why the laptop refused the last action on a session, shown with it, by `refKey` of the session. */
