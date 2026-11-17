@@ -758,6 +758,12 @@ Research: `phone-app-stack.md`.
   storage.
 - The loader posts the bundle's text, its SHA-256, and one end of a `MessageChannel` to the frame.
   It checks `event.source` and a nonce first.
+- The port carries the messages `app`, `openLink`, `channel`, `env` and `sendFailed`, plus two for
+  history: `history` (app to loader) and `route` (loader to app). The runner gives the bundle a
+  `tbdHost` handle, `{port, protocol: 1}`, and sets `history: 1` on it only when the loader
+  page's `bundle` message says the page keeps history. That field tells the app that the loader
+  handles history. The fields of the two history messages are in
+  [the loader-history design](2026-11-11-phone-loader-history-design.md).
 - The runner checks the hash, creates a `blob:` URL inside the frame, and starts the bundle as one
   classic script.
 - The runner's security policy, set by its own `<meta>` tag:
@@ -783,6 +789,11 @@ Research: `phone-app-stack.md`.
     and the script rules above (no inline script, no `eval`, Trusted Types) keep text the app
     displays from becoming script.
 - `srcdoc` is not used. A `srcdoc` frame inherits the loader's policy, which blocks the bundle.
+- **History entries.** The loader owns the browser history for the app. It adds or rewrites an
+  entry when the app asks over its port, and never with a URL. It relays the browser's back and
+  forward to the app as `route` messages. The app makes no History or Navigation API call,
+  because on WebKit a move onto an entry that the sandboxed frame pushed fires a second `load`
+  on the frame. See [the loader-history design](2026-11-11-phone-loader-history-design.md).
 
 **The app bundle.**
 

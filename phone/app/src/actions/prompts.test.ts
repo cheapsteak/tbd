@@ -18,7 +18,16 @@ import type { AnsweredHere, CardState } from '../state/prompts.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState } from '../state/store.ts';
 import { createActions } from './index.ts';
+import type { ActionContext, Actions } from './index.ts';
 import { WAKING_TEXT } from './prompts.ts';
+
+/**
+ * The loader's history entries. They answer the back chevron as the loader does when the entry
+ * before is not one of the app's: with a route message for the list.
+ */
+function backToList(actions: () => Actions): ActionContext['entries'] {
+  return { push() {}, replace() {}, back() { actions().onRoute(null); } };
+}
 
 const CAN = { available: true };
 const OFF_REASON = "Answering prompts is turned off in TBD's settings on the laptop.";
@@ -81,7 +90,7 @@ function harness(answer?: { available: boolean; reason?: string }) {
     },
   };
   const store = createStore({ ...initialState(), sessions: applySnapshot(snapshot(answer)) });
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions: Actions = createActions({ store, client, link: { openLink: () => {} }, entries: backToList(() => actions), now: () => 0 });
   const last = (method: Method): Sent => {
     const found = sent.filter((s) => s.method === method).at(-1);
     assert.ok(found, `no ${method} was sent`);
@@ -916,7 +925,7 @@ function sendHarness(opts: { chip?: PhoneStatusChip; send?: { available: boolean
   });
   const initial = initialState();
   const store = createStore({ ...initial, sessions, ui: { ...initial.ui, route: { screen: 'session', ref: R } } });
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions: Actions = createActions({ store, client, link: { openLink: () => {} }, entries: backToList(() => actions), now: () => 0 });
   const state = (): AppState => store.get();
   const sends = (): Sent[] => sent.filter((s) => s.method === 'message.send');
   const own = (r: Readonly<Record<string, string>>, ref: PhoneSessionRef): string | undefined => {

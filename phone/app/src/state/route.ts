@@ -62,6 +62,11 @@ export function resolvePendingOpen(p: PendingOpen, d: SessionsData): Route | nul
   return pendingOpenTarget(p, d)?.route ?? null;
 }
 
+/** The session a restore (`PendingOpen`) waits for, or null when `p` is not a restore. */
+export function restoreRef(p: PendingOpen | null): PhoneSessionRef | null {
+  return p !== null && 'ref' in p && p.restore === true ? p.ref : null;
+}
+
 /**
  * `resolvePendingOpen`'s route, with the row that lists its session, so a caller that needs the
  * row does not look the session up again.

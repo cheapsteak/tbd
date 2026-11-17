@@ -116,9 +116,17 @@ export async function takeProblems(problems, pattern) {
   return taken;
 }
 
+/** How many times `openApp` has opened the host in this worker, so each visit has its own URL. */
+let visits = 0;
+
 /**
  * Opens the host and waits for the app's `#app` inside the frame. A scenario is a name under
  * `scenarios/` or an object in the same form, which is loaded before the channel comes up.
+ *
+ * Each call is a new visit on a URL of its own (`visit`, which the host ignores), so the app
+ * starts on the sessions list. A load of the URL the page is on already would be a reload to
+ * the browser, which keeps the history entry, and the app would come back to the screen that
+ * entry names, as it does on a phone. A test that means a reload calls `page.reload()`.
  * @param {Page} page
  * @param {AppHost} appHost
  * @param {{ scenario?: string | object, channel?: 'up' | 'down' }} [options]
@@ -126,7 +134,8 @@ export async function takeProblems(problems, pattern) {
 export async function openApp(page, appHost, { scenario = 'mock', channel = 'up' } = {}) {
   if (channel !== 'up' && channel !== 'down') throw new RangeError(`openApp: no channel ${channel}`);
   const named = typeof scenario === 'string';
-  const query = new URLSearchParams({ scenario: named ? scenario : '', channel: named ? channel : 'down' });
+  visits += 1;
+  const query = new URLSearchParams({ scenario: named ? scenario : '', channel: named ? channel : 'down', visit: String(visits) });
   await page.goto(`${appHost.origin}/__app/host.html?${query}`);
   await page.waitForFunction(() => /** @type {any} */ (window).__host?.ready === true);
   if (!named) {

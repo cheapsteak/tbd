@@ -2,9 +2,9 @@
 // frame's sandbox are what enforce the rules at run time. This test bans, in every source file
 // under `app/src/`, the patterns that would break them or lead out of the frame: HTML strings,
 // eval, runtime styles, the network, storage, workers, other windows, the frame's own
-// navigation, links that skip the loader's link sheet, and the raw loader port outside
-// `host.ts`. Self-navigation matters most: neither the policy nor the sandbox stops it, and the
-// request leaves before the loader sees the frame's second load.
+// navigation and history entries, links that skip the loader's link sheet, and the raw loader
+// port outside `host.ts`. Self-navigation matters most: neither the policy nor the sandbox stops
+// it, and the request leaves before the loader sees the frame's second load.
 //
 // It reads the files as text, comments included, so a banned name in a comment fails too. A
 // file the bundle never imports, such as a test, is held to it as well.
@@ -21,7 +21,7 @@ const PHONE = fileURLToPath(new URL('../', import.meta.url));
 
 /**
  * `host.ts` is the one module that holds the loader port, so that everything the app sends
- * leaves through `HostLink`'s two message shapes. Its test drives the raw port to check that.
+ * leaves through `HostLink`'s three message shapes. Its test drives the raw port to check that.
  */
 const PORT_FILES = ['host.ts', 'host.test.ts'];
 
@@ -108,25 +108,31 @@ const BANNED = [
   { pattern: /indexedDB/, samples: ["indexedDB.open('db');"] },
   { pattern: /document\.cookie/, samples: ['document.cookie = s;'] },
   { pattern: /document\.domain/, samples: ['document.domain = s;'] },
-  // The frame's own navigation, and other windows.
+  // The frame's own navigation and history entries, and other windows.
   {
     pattern: /\blocation\b/,
     samples: ['location = url;', 'window.location = url;', "location['href'] = url;", 'document.location.assign(url);',
       'location.replace(url);'],
   },
-  // The history and Navigation APIs reload the frame (`history.go(0)`, `navigation.reload()`) or
-  // move it to another entry of the session history it shares with the loader's page. Each is
-  // banned with any accessor: `.`, `?.`, or a bracket around a string.
+  // The history and Navigation APIs reload the frame (`history.go(0)`, `navigation.reload()`),
+  // move it to another entry of the session history it shares with the loader's page, or add or
+  // rewrite an entry of it. The loader keeps that history, and the app asks it for entries over
+  // the port (`HostLink.postHistory`), because on WebKit a move onto an entry the frame added
+  // fires the frame's load event a second time in the loader's page, which reads as the frame
+  // navigating away. Each is banned with any accessor: `.`, `?.`, or a bracket around a string.
   {
-    pattern: /\bnavigation\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])(?:navigate|reload|back|forward|traverseTo)\b/,
+    pattern: /\bnavigation\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])(?:navigate|reload|back|forward|traverseTo|updateCurrentEntry)\b/,
     samples: ['navigation.navigate(url);', 'window.navigation.navigate(url);', 'navigation.reload();', 'navigation.back();',
       'navigation.forward();', 'navigation.traverseTo(key);', 'navigation?.reload();', "navigation['back']();",
-      'self.navigation?.["traverseTo"](key);', 'navigation\n  .forward();'],
+      'self.navigation?.["traverseTo"](key);', 'navigation\n  .forward();', 'navigation.updateCurrentEntry({ state });',
+      "navigation?.['updateCurrentEntry']({ state });"],
   },
   {
-    pattern: /\bhistory\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])(?:go|back|forward)\b/,
+    pattern: /\bhistory\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])(?:go|back|forward|pushState|replaceState)\b/,
     samples: ['history.go(-1);', 'history.go(0);', 'history.go();', 'window.history.back();', 'history.forward();',
-      'history?.go(0);', "history['back']();", 'globalThis.history?.[`forward`]();', 'history\n  .go(0);'],
+      'history?.go(0);', "history['back']();", 'globalThis.history?.[`forward`]();', 'history\n  .go(0);',
+      "history.pushState(state, '');", "window.history.replaceState(state, '');", "history?.pushState(state, '');",
+      "history['replaceState'](state, '');", "self.history?.[`pushState`](state, '');", "history\n  .replaceState(state, '');"],
   },
   { pattern: /['"`]_self['"`]/, samples: ["form.target = '_self';", 'const target = "_self";'] },
   { pattern: /\b(?:window|self|globalThis)\.open\b/, samples: ['window.open(url);', "self.open(url, '_blank');"] },
@@ -175,7 +181,15 @@ const ALLOWED = [
   'const seen = new Map<object, string>();',
   'function first(xs: Array<object>): object | undefined { return xs[0]; }',
   'actions.back();',
-  ' * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or `back`',
+  'ctx.entries.back();',
+  "ctx.entries.replace(SESSIONS_ROUTE);",
+  'const entries = new HistoryLink((request) => link.postHistory(request));',
+  "this.#post({ op: 'back', move: this.#move });",
+  'const pushStateLater = true;',
+  ' * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or a move',
+  ' * to another history entry (`onRoute` in `actions/shell.ts`), so a fork or create the user has',
+  'if (host.history !== 1) throw new Error(NO_HISTORY);',
+  "? { t: 'history', op: 'back', move }",
   'const older = history.slice(0, n);',
   'const goBack = history.length > 0;',
 ];

@@ -1,10 +1,11 @@
 // The app frame as the loader hosts it, end to end: a frame that navigates away is torn down,
 // links the app asks to open go through the loader's sheet, the page's environment reaches the
-// app, and app messages make the round trip. WebKit as an iPhone and Chromium as an Android
-// phone, with the debug bundle.
+// app, app messages make the round trip, and an app that never asks for history entries gets
+// none. WebKit as an iPhone and Chromium as an Android phone, with the debug bundle.
 
 import {
-  appRoundTrip, deviceRoom, expect, frameText, pairViaFragment, test, waitForAppText,
+  appRoundTrip, deviceRoom, expect, frameText, pairViaFragment, readLoaderDB, submitName, test, waitForAppFrame,
+  waitForAppText,
 } from './fixtures.js';
 
 /** @typedef {import('@playwright/test').Page} Page */
@@ -220,4 +221,27 @@ test('the app\'s messages reach the laptop and its replies reach the app', async
   const { laptop } = await appRunning(page, server);
   expect(await frameText(page)).toContain('Sessions:');
   expect(laptop.appBodies[0]).toMatchObject({ kind: 'request', method: 'sessions.subscribe' });
+});
+
+test('an app that never asks for history entries gets none, and back leaves the page', async ({ page, server }) => {
+  const laptop = server.laptops[0];
+  const landing = `${server.origin}/__test/landing`;
+  await page.goto(landing);
+  await page.goto(server.pairingLink(laptop, { decision: 'allow' }));
+  await expect(page.locator('[data-state="name"]')).toBeVisible();
+  const before = await page.evaluate(() => history.length);
+  await submitName(page);
+  await waitForAppFrame(page);
+  await waitForAppText(page);
+
+  // The frame's start made the current entry the loader's, for this laptop's list, in place.
+  const [laptopID] = (await readLoaderDB(page)).laptops;
+  const entry = await page.evaluate(() => history.state);
+  expect(entry).toEqual({ tbdPhone: { v: 1, laptop: laptopID, doc: expect.any(String), step: 0, app: null } });
+  expect(await page.evaluate(() => history.length)).toBe(before);
+  expect(page.url()).toBe(`${server.origin}/`);
+
+  await page.goBack();
+  expect(page.url()).toBe(landing);
+  await expect(page.locator('body')).toContainText('Landing');
 });

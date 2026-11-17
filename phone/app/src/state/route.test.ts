@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PhoneGroupLayout, PhoneRow, PhoneSession, PhoneSessionRef } from '../protocol/types.ts';
-import { findSession, pendingOpenTarget, resolvePendingOpen, resolveRoute, sameRoute } from './route.ts';
+import { findSession, pendingOpenTarget, resolvePendingOpen, resolveRoute, restoreRef, sameRoute } from './route.ts';
 import { applySessionsChanged, applySnapshot } from './sessionsData.ts';
 import { SESSIONS_ROUTE } from './store.ts';
 import type { Route, SessionsData } from './store.ts';
@@ -174,4 +174,11 @@ test('sameRoute compares screens and sessions', () => {
   assert.equal(sameRoute({ screen: 'session', ref: R }, { screen: 'session', ref: R2 }), false);
   assert.equal(sameRoute({ screen: 'session', ref: R }, SESSIONS_ROUTE), false);
   assert.equal(sameRoute(SESSIONS_ROUTE, { screen: 'session', ref: R }), false);
+});
+
+test('restoreRef names the session a restore waits for, and nothing for any other open', () => {
+  assert.deepEqual(restoreRef({ ref: R, restore: true }), R);
+  assert.equal(restoreRef({ ref: R }), null);
+  assert.equal(restoreRef({ worktreeID: 'W1', toast: null }), null);
+  assert.equal(restoreRef(null), null);
 });

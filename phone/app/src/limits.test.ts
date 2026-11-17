@@ -1,14 +1,17 @@
 // Tests limits.ts against the limits it mirrors: the loader's frame limit and size check
 // (`phone/loader/channel/noise.js`, `phone/loader/protocol.js`, `sendApp` in
-// `phone/loader/connection.js`) and the daemon's request limits (`PhoneAppConstants.swift`).
+// `phone/loader/connection.js`), its cap on a history entry's route string
+// (`phone/loader/history.js`), and the daemon's request limits (`PhoneAppConstants.swift`).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { MAX_PLAINTEXT_LENGTH } from '../../loader/channel/noise.js';
+import { MAX_APP_STATE_LENGTH } from '../../loader/history.js';
 import { encodeMessage } from '../../loader/protocol.js';
 import {
-  fitsFrame, LOADER_WRAPPER_BYTES, MAX_BODY_BYTES, MAX_IN_FLIGHT, MAX_PLAINTEXT, RESEND_HORIZON_MS, utf8Length,
+  fitsFrame, LOADER_WRAPPER_BYTES, MAX_BODY_BYTES, MAX_IN_FLIGHT, MAX_PLAINTEXT, MAX_ROUTE_STATE_LENGTH, RESEND_HORIZON_MS,
+  utf8Length,
 } from './limits.ts';
 
 // Outside phone/: the classifier's `Sources/TBDDaemon/PhoneBridge/App/*` route
@@ -40,6 +43,10 @@ function random(seed: number): () => number {
 test("the app's frame limit is the loader's", () => {
   assert.equal(MAX_PLAINTEXT, MAX_PLAINTEXT_LENGTH); assert.equal(MAX_BODY_BYTES, MAX_PLAINTEXT - LOADER_WRAPPER_BYTES);
   assert.equal(MAX_BODY_BYTES, 65_497);
+});
+
+test("the app's cap on a route string is the loader's", () => {
+  assert.equal(MAX_ROUTE_STATE_LENGTH, MAX_APP_STATE_LENGTH);
 });
 
 test("LOADER_WRAPPER_BYTES is what the loader's encodeMessage adds around a body", () => {

@@ -1,15 +1,19 @@
 // Tests host.ts, the bundle's contract with the loader: what the runner hands the bundle
 // (`phone/loader/runner.js`), what AppFrame posts to the app and accepts from it
-// (`phone/loader/frame.js`), and that nothing else crosses the port either way.
+// (`phone/loader/frame.js`), the history requests and route messages the loader's history
+// module trades with the app (`phone/loader/history.js`), and that nothing else crosses the port
+// either way.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { appPortMessage } from '../../loader/frame.js';
+import { historyRequest } from '../../loader/history.js';
 import { isPlainRecord as loaderIsPlainRecord } from '../../loader/objects.js';
 import { decodeLoaderMessage, HostLink, isPlainRecord, readHost } from './host.ts';
-import type { HostHandlers } from './host.ts';
+import type { HistoryRequest, HostHandlers } from './host.ts';
 import type { HostEnv } from './env.ts';
+import { MAX_ROUTE_STATE_LENGTH } from './limits.ts';
 
 const ENV: HostEnv = {
   safeArea: { top: 0, right: 0, bottom: 34, left: 0 },
@@ -18,7 +22,7 @@ const ENV: HostEnv = {
   colorScheme: 'light',
 };
 
-const NOOP: HostHandlers = { onApp() {}, onChannel() {}, onEnv() {}, onSendFailed() {} };
+const NOOP: HostHandlers = { onApp() {}, onChannel() {}, onEnv() {}, onSendFailed() {}, onRoute() {} };
 
 interface FakePort {
   started: boolean;
@@ -58,6 +62,7 @@ function recorder(): { calls: Array<[string, unknown]>; handlers: HostHandlers }
       onChannel(up) { calls.push(['channel', up]); },
       onEnv(env) { calls.push(['env', env]); },
       onSendFailed(reason) { calls.push(['sendFailed', reason]); },
+      onRoute(state, move) { calls.push(['route', [state, move]]); },
     },
   };
 }
@@ -66,13 +71,31 @@ class Point { x = 1; }
 
 // --- decodeLoaderMessage -----------------------------------------------------------------------
 
-test('decodes the four loader messages', () => {
+test('decodes the five loader messages', () => {
   assert.deepEqual(decodeLoaderMessage({ t: 'app', body: { kind: 'event' } }), { t: 'app', body: { kind: 'event' } });
   assert.deepEqual(decodeLoaderMessage({ t: 'channel', state: 'up' }), { t: 'channel', up: true });
   assert.deepEqual(decodeLoaderMessage({ t: 'channel', state: 'down' }), { t: 'channel', up: false });
   assert.equal(decodeLoaderMessage({ t: 'env', ...ENV })?.t, 'env');
   assert.deepEqual(decodeLoaderMessage({ t: 'sendFailed', reason: 'tooLarge' }), { t: 'sendFailed', reason: 'tooLarge' });
   assert.deepEqual(decodeLoaderMessage({ t: 'sendFailed', reason: 'offline' }), { t: 'sendFailed', reason: 'offline' });
+  assert.deepEqual(decodeLoaderMessage({ t: 'route', state: null, move: 0 }), { t: 'route', state: null, move: 0 });
+  assert.deepEqual(decodeLoaderMessage({ t: 'route', state: '{"screen":"session"}', move: 3 }), { t: 'route', state: '{"screen":"session"}', move: 3 });
+});
+
+test('a route message carries a state within the cap, or null, and a move that is a non-negative safe integer', () => {
+  const longest = 'x'.repeat(MAX_ROUTE_STATE_LENGTH);
+  assert.deepEqual(decodeLoaderMessage({ t: 'route', state: longest, move: Number.MAX_SAFE_INTEGER }),
+    { t: 'route', state: longest, move: Number.MAX_SAFE_INTEGER });
+  assert.deepEqual(decodeLoaderMessage({ t: 'route', state: '', move: 0 }), { t: 'route', state: '', move: 0 });
+  for (const state of [`${longest}x`, 3, undefined, {}, [], true]) {
+    assert.equal(decodeLoaderMessage({ t: 'route', state, move: 0 }), null, `state = ${String(state)}`);
+  }
+  assert.equal(decodeLoaderMessage({ t: 'route', move: 0 }), null, 'no state');
+  for (const move of [-1, 1.5, '1', null, undefined, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, 1n]) {
+    assert.equal(decodeLoaderMessage({ t: 'route', state: null, move }), null, `move = ${String(move)}`);
+  }
+  // Rebuilt with only its known fields.
+  assert.deepEqual(decodeLoaderMessage({ t: 'route', state: 'a', move: 1, op: 'push', extra: 1 }), { t: 'route', state: 'a', move: 1 });
 });
 
 test("ignores the runner's own messages and malformed ones", () => {
@@ -187,14 +210,50 @@ test('each decoded message reaches its handler, and nothing else does', () => {
   port.emit({ t: 'env', ...ENV, extra: 1 });
   port.emit({ t: 'sendFailed', reason: 'tooLarge' });
   port.emit({ t: 'channel', state: 'down' });
+  port.emit({ t: 'route', state: 'x'.repeat(MAX_ROUTE_STATE_LENGTH + 1), move: 1 });
+  port.emit({ t: 'route', state: null, move: -1 });
+  port.emit({ t: 'route', state: 'a', move: 2, extra: 1 });
+  port.emit({ t: 'history', op: 'push', state: null, move: 0 });
   assert.deepEqual(calls, [
     ['app', { kind: 'event' }],
     ['channel', true],
     ['env', ENV],
     ['sendFailed', 'tooLarge'],
     ['channel', false],
+    ['route', ['a', 2]],
   ]);
   assert.deepEqual(port.posted, [], 'the link never answers the loader by itself');
+});
+
+test('postHistory posts the request with its known fields and t: history, and nothing else', () => {
+  const port = fakePort(); const link = new HostLink(asPort(port), NOOP);
+  const requests: HistoryRequest[] = [
+    { op: 'push', state: '{"screen":"session"}', move: 0 },
+    { op: 'replace', state: null, move: 4 },
+    { op: 'back', move: 7 },
+  ];
+  for (const request of requests) link.postHistory(request);
+  // A request built elsewhere may carry more than its type names; none of it goes out.
+  link.postHistory({ op: 'back', move: 8, state: 'x', url: 'https://acme.example/' } as HistoryRequest);
+  link.postHistory({ op: 'push', state: null, move: 9, url: 'https://acme.example/' } as HistoryRequest);
+  assert.deepEqual(port.posted, [
+    { t: 'history', op: 'push', state: '{"screen":"session"}', move: 0 },
+    { t: 'history', op: 'replace', state: null, move: 4 },
+    { t: 'history', op: 'back', move: 7 },
+    { t: 'history', op: 'back', move: 8 },
+    { t: 'history', op: 'push', state: null, move: 9 },
+  ]);
+});
+
+test("what postHistory posts is a history request the loader's history module accepts, unchanged", () => {
+  const port = fakePort(); const link = new HostLink(asPort(port), NOOP);
+  const requests: HistoryRequest[] = [
+    { op: 'push', state: 'x'.repeat(MAX_ROUTE_STATE_LENGTH), move: 0 },
+    { op: 'replace', state: null, move: Number.MAX_SAFE_INTEGER },
+    { op: 'back', move: 2 },
+  ];
+  for (const request of requests) link.postHistory(request);
+  assert.deepEqual(port.posted.map(historyRequest), requests);
 });
 
 // Node starts a port as soon as a `message` listener is added, so this test passes even if
@@ -236,6 +295,16 @@ test('readHost refuses a missing host and another protocol', () => {
   assert.throws(() => readHost({ tbdHost: { port: {}, protocol: 2 } }), /protocol 1/);
 });
 
+test('readHost refuses a protocol 1 host that keeps no history for the app, as an older loader hands', () => {
+  const port = fakePort();
+  const message = { message: 'TBD phone app: tbdHost has no history 1, so the loader is older than this app' };
+  for (const history of [undefined, null, 0, 2, '1', true, {}]) {
+    const tbdHost = history === undefined ? { port, protocol: 1 } : { port, protocol: 1, history };
+    assert.throws(() => readHost({ tbdHost }), message, `history = ${String(history)}`);
+  }
+  assert.equal(readHost({ tbdHost: { port, protocol: 1, history: 1 } }).history, 1);
+});
+
 test('readHost refuses every host but a protocol 1 one with a port, with the one message', () => {
   const port = fakePort();
   const message = { message: 'TBD phone app: no tbdHost with protocol 1' };
@@ -243,7 +312,8 @@ test('readHost refuses every host but a protocol 1 one with a port, with the one
     { port: null, protocol: 1 }, { port: {}, protocol: 1 }, { port: 'port', protocol: 1 },
     { port: { ...port, start: undefined }, protocol: 1 },
     { port: { ...port, postMessage: undefined }, protocol: 1 },
-    { port: { ...port, addEventListener: undefined }, protocol: 1 }]) {
+    { port: { ...port, addEventListener: undefined }, protocol: 1 },
+    { port: null, protocol: 1, history: 1 }, { port, protocol: 2, history: 1 }]) {
     assert.throws(() => readHost({ tbdHost }), message, JSON.stringify(tbdHost) ?? String(tbdHost));
   }
   assert.throws(() => readHost(globalThis), message, 'Node has no tbdHost');
@@ -253,18 +323,19 @@ test("readHost takes the runner's frozen, non-writable host", () => {
   const port = fakePort();
   const g = {};
   Object.defineProperty(g, 'tbdHost', {
-    value: Object.freeze({ port, protocol: 1 }), writable: false, configurable: false, enumerable: false,
+    value: Object.freeze({ port, protocol: 1, history: 1 }), writable: false, configurable: false, enumerable: false,
   });
   const host = readHost(g);
   assert.equal(host.port, port);
   assert.equal(host.protocol, 1);
-  assert.deepEqual(Object.keys(host).sort(), ['port', 'protocol']);
+  assert.equal(host.history, 1);
+  assert.deepEqual(Object.keys(host).sort(), ['history', 'port', 'protocol']);
 });
 
 test('readHost takes a real MessagePort', () => {
   const { port1, port2 } = new MessageChannel();
   try {
-    assert.equal(readHost({ tbdHost: { port: port2, protocol: 1 } }).port, port2);
+    assert.equal(readHost({ tbdHost: { port: port2, protocol: 1, history: 1 } }).port, port2);
   } finally {
     port1.close();
   }

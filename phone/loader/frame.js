@@ -1,15 +1,26 @@
 // The app frame host. It opens runner.html in <iframe sandbox="allow-scripts">, hands the
 // runner the bundle and one end of a MessageChannel, and from then on talks to the app only
 // over that channel. The runner's half of the handshake is runner.js.
+//
+// The bundle message carries `history: 1`: this page keeps the app's history entries
+// (history.js). The runner hands the app that field only when the message carries it, because
+// the runner loads again for every frame and a page from before the history code can start a
+// frame on a newer runner.
+//
+// From the app: `app` bodies for the laptop, `openLink`, and `history` requests for the
+// page's history entries (history.js). To the app: `app` bodies from the laptop, `channel`,
+// `env`, `sendFailed`, and `route`, the screen of the entry the browser is on.
 
 import { RUNNER_START_TIMEOUT_MS } from './constants.js';
 import { startVisibleTimer, systemClock } from './clock.js';
 import { base64urlEncode } from './channel/pairingLink.js';
+import { historyRequest } from './history.js';
 import { isObject, isPlainRecord } from './objects.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
 /** @typedef {import('./clock.js').Visibility} Visibility */
 /** @typedef {import('./types.js').EnvMessage} EnvMessage */
+/** @typedef {import('./history.js').HistoryRequest} HistoryRequest */
 
 /** @typedef {'navigated' | 'hash' | 'script' | 'timeout'} FaultReason */
 /** @typedef {{top: number, right: number, bottom: number, left: number}} Insets */
@@ -23,6 +34,8 @@ import { isObject, isPlainRecord } from './objects.js';
  * @property {(body: object) => 'sent' | 'offline' | 'tooLarge'} sendApp Sends an `app` body
  *   to the laptop. A throw is reported to the app as `tooLarge`.
  * @property {(url: string) => void} onOpenLink Gets a URL that passed `openableURL`.
+ * @property {(request: HistoryRequest) => void} [onHistory] Gets each well-formed `history`
+ *   request from the app. Without it, they are dropped.
  * @property {(reason: FaultReason) => void} onFault Called at most once. The frame is already
  *   destroyed when it is called.
  * @property {Visibility} visibility The page's visibility. Only time while the page is visible
@@ -46,6 +59,7 @@ const RUNNER_FAULTS = new Set(['hash', 'script']);
 export class AppFrame {
   #sendApp;
   #onOpenLink;
+  #onHistory;
   #onFault;
   #text;
   #sha256;
@@ -68,10 +82,11 @@ export class AppFrame {
 
   /** @param {AppFrameOptions} options */
   constructor({
-    host, runnerURL, text, sha256, sendApp, onOpenLink, onFault, visibility, clock = systemClock,
+    host, runnerURL, text, sha256, sendApp, onOpenLink, onHistory = () => {}, onFault, visibility, clock = systemClock,
   }) {
     this.#sendApp = sendApp;
     this.#onOpenLink = onOpenLink;
+    this.#onHistory = onHistory;
     this.#onFault = onFault;
     this.#text = text;
     this.#sha256 = sha256;
@@ -137,6 +152,17 @@ export class AppFrame {
     });
   }
 
+  /**
+   * Tells the app the screen of the history entry the browser is on: its route string, or
+   * null for the sessions list. `move` is the page's count of browser moves, which the app
+   * echoes in its `history` requests.
+   * @param {string | null} state
+   * @param {number} move
+   */
+  sendRoute(state, move) {
+    this.#post({ t: 'route', state, move });
+  }
+
   /** Removes the frame and every listener. Idempotent; no callback fires afterwards. */
   destroy() {
     if (this.#destroyed) return;
@@ -196,7 +222,7 @@ export class AppFrame {
     // An opaque origin cannot be named, so the target is '*'. The frame's window was
     // checked by identity above, and the bundle is not secret.
     frameWindow.postMessage(
-      { type: 'bundle', nonce: this.#nonce, text: this.#text, sha256: this.#sha256 },
+      { type: 'bundle', nonce: this.#nonce, text: this.#text, sha256: this.#sha256, history: 1 },
       '*',
       [this.#channel.port2],
     );
@@ -231,6 +257,8 @@ export class AppFrame {
         result = 'tooLarge';
       }
       if (result !== 'sent') this.#post({ t: 'sendFailed', reason: result });
+    } else if (message.t === 'history') {
+      this.#onHistory(message.request);
     } else {
       const url = openableURL(message.url);
       if (url !== null) this.#onOpenLink(url);
@@ -309,9 +337,11 @@ export function openableURL(value) {
 
 /**
  * The app-to-loader messages, rebuilt from only their known fields: `{t:'app', body}` with
- * a plain-object body, or `{t:'openLink', url}` with a string url. Anything else is null.
+ * a plain-object body, `{t:'openLink', url}` with a string url, or a `history` request as
+ * `historyRequest` rebuilds it. Anything else is null.
  * @param {unknown} data
- * @returns {{t: 'app', body: object} | {t: 'openLink', url: string} | null}
+ * @returns {{t: 'app', body: object} | {t: 'openLink', url: string}
+ *   | {t: 'history', request: HistoryRequest} | null}
  */
 export function appPortMessage(data) {
   if (!isObject(data)) return null;
@@ -321,6 +351,10 @@ export function appPortMessage(data) {
   }
   if (data.t === 'openLink') {
     return typeof data.url === 'string' ? { t: 'openLink', url: data.url } : null;
+  }
+  if (data.t === 'history') {
+    const request = historyRequest(data);
+    return request === null ? null : { t: 'history', request };
   }
   return null;
 }

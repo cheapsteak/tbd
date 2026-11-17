@@ -2,33 +2,63 @@
  * The bundle's contract with the loader. The runner (`phone/loader/runner.js`) gives the bundle
  * one handle, `globalThis.tbdHost`, and the bundle talks to the loader only over its port:
  * `AppFrame` in `phone/loader/frame.js` is the other end. Every message in is rebuilt from its
- * known fields here, and only two shapes ever go out.
+ * known fields here, and only three shapes ever go out.
+ *
+ * The loader keeps the browser's history for the app (`phone/loader/history.js`). The app asks
+ * it to add or rewrite an entry, or to go back, with a `history` message, and the loader names
+ * the entry the browser is on with a `route` message. The app never touches the History API
+ * itself.
  */
 
 import type { HostEnv } from './env.ts';
+import { MAX_ROUTE_STATE_LENGTH } from './limits.ts';
 
-export interface TbdHost { readonly port: MessagePort; readonly protocol: 1 }
+/**
+ * The runner's handle. `history: 1` says the loader keeps the app's history entries; a loader
+ * older than this app hands no such field.
+ */
+export interface TbdHost { readonly port: MessagePort; readonly protocol: 1; readonly history: 1 }
 
 const NO_HOST = 'TBD phone app: no tbdHost with protocol 1';
+const NO_HISTORY = 'TBD phone app: tbdHost has no history 1, so the loader is older than this app';
 
 /**
  * The runner's handle on `g` (the global object), checked. It throws when the handle is
  * missing, speaks another protocol, or has no usable port, so the bundle stops before it
- * draws anything it cannot connect.
+ * draws anything it cannot connect. It throws too when the loader keeps no history for the app:
+ * the loader then shows "Reload this page", and a reload fetches the current loader.
  */
 export function readHost(g: object): TbdHost {
   const host: unknown = (g as { tbdHost?: unknown }).tbdHost;
   if (!isObject(host) || host.protocol !== 1) throw new Error(NO_HOST);
   const port = host.port;
   if (!isPort(port)) throw new Error(NO_HOST);
-  return { port, protocol: 1 };
+  if (host.history !== 1) throw new Error(NO_HISTORY);
+  return { port, protocol: 1, history: 1 };
 }
 
 export type LoaderMessage =
   | { t: 'app'; body: Record<string, unknown> }
   | { t: 'channel'; up: boolean }
   | { t: 'env'; env: HostEnv }
-  | { t: 'sendFailed'; reason: 'offline' | 'tooLarge' };
+  | { t: 'sendFailed'; reason: 'offline' | 'tooLarge' }
+  | { t: 'route'; state: string | null; move: number };
+
+/**
+ * What the app asks of the loader's history (`HostLink.postHistory`):
+ * - `push` adds an entry after the current one, for the route `state` names;
+ * - `replace` rewrites the current entry to `state`'s route;
+ * - `back` is the app's back chevron. The loader goes back one entry when the entry before is
+ *   its own for this app, and otherwise rewrites the current entry to the list.
+ *
+ * `state` is the route's string (`encodeRoute` in `state/routeState.ts`), or null for the
+ * sessions list. `move` is the move count of the last `route` message the app received; the
+ * loader drops a request whose count is not its current one, because the browser has moved
+ * since.
+ */
+export type HistoryRequest =
+  | { op: 'push' | 'replace'; state: string | null; move: number }
+  | { op: 'back'; move: number };
 
 /**
  * One message from the loader, rebuilt from only its known fields, each checked; null for
@@ -57,6 +87,11 @@ export function decodeLoaderMessage(data: unknown): LoaderMessage | null {
       const reason = data.reason;
       return reason === 'offline' || reason === 'tooLarge' ? { t: 'sendFailed', reason } : null;
     }
+    case 'route': {
+      const { state, move } = data;
+      const stateOK = state === null || (typeof state === 'string' && state.length <= MAX_ROUTE_STATE_LENGTH);
+      return stateOK && isMove(move) ? { t: 'route', state, move } : null;
+    }
     default:
       return null;
   }
@@ -67,11 +102,17 @@ export interface HostHandlers {
   onChannel(up: boolean): void;
   onEnv(env: HostEnv): void;
   onSendFailed(reason: 'offline' | 'tooLarge'): void;
+  /**
+   * The browser is on the history entry whose route string is `state`, null for the sessions
+   * list: the frame started on it, the user went back or forward, or the loader answered `back`.
+   * `move` is the loader's move count, which the app's next history request carries.
+   */
+  onRoute(state: string | null, move: number): void;
 }
 
 /**
  * The app's end of the loader port. It turns loader messages into handler calls and posts the
- * only two messages the loader accepts from the app (`appPortMessage` in `frame.js`).
+ * only three messages the loader accepts from the app (`appPortMessage` in `frame.js`).
  */
 export class HostLink {
   readonly #port: MessagePort;
@@ -91,6 +132,7 @@ export class HostLink {
         case 'channel': handlers.onChannel(message.up); break;
         case 'env': handlers.onEnv(message.env); break;
         case 'sendFailed': handlers.onSendFailed(message.reason); break;
+        case 'route': handlers.onRoute(message.state, message.move); break;
       }
     });
     port.start();
@@ -112,6 +154,17 @@ export class HostLink {
    */
   openLink(url: string): void {
     this.#port.postMessage({ t: 'openLink', url });
+  }
+
+  /**
+   * Asks the loader's history for `request` (`HistoryRequest`). The message is built from the
+   * request's known fields, so nothing else a caller's object holds reaches the loader.
+   */
+  postHistory(request: HistoryRequest): void {
+    const { move } = request;
+    this.#port.postMessage(request.op === 'back'
+      ? { t: 'history', op: 'back', move }
+      : { t: 'history', op: request.op, state: request.state, move });
   }
 }
 
@@ -139,6 +192,11 @@ function numbers<K extends string>(value: unknown, keys: readonly K[]): Record<K
     out[key] = n;
   }
   return out;
+}
+
+/** A move count: a non-negative safe integer. */
+function isMove(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

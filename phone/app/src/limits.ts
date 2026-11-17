@@ -28,6 +28,15 @@ export const MAX_IN_FLIGHT = 32;
 export const RESEND_HORIZON_MS = 540_000;
 
 /**
+ * The most UTF-16 code units of the string the app keeps in a history entry for its route. The
+ * loader drops a history request whose string is longer (`MAX_APP_STATE_LENGTH` in
+ * `phone/loader/history.js`), and the app drops a route message that carries one
+ * (`decodeLoaderMessage` in `host.ts`). So the app never sends one: a session whose string would
+ * be longer gets the list's entry instead (`encodeRoute` in `state/routeState.ts`).
+ */
+export const MAX_ROUTE_STATE_LENGTH = 1_024;
+
+/**
  * The length of `s` in UTF-8, counted as `TextEncoder` encodes it, without making the bytes.
  * A surrogate pair is one 4-byte scalar. A lone surrogate becomes U+FFFD, 3 bytes.
  */

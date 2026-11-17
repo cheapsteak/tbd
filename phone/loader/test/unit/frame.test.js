@@ -131,6 +131,29 @@ test('appPortMessage keeps only the known fields', () => {
   assert.deepEqual(appPortMessage({ t: 'openLink', url: 'https://acme.example/', target: '_top' }), { t: 'openLink', url: 'https://acme.example/' });
 });
 
+test('appPortMessage rebuilds a history request from its known fields', () => {
+  assert.deepEqual(appPortMessage({ t: 'history', op: 'push', state: 'a', move: 0 }),
+    { t: 'history', request: { op: 'push', state: 'a', move: 0 } });
+  assert.deepEqual(appPortMessage({ t: 'history', op: 'replace', state: null, move: 3 }),
+    { t: 'history', request: { op: 'replace', state: null, move: 3 } });
+  assert.deepEqual(appPortMessage({ t: 'history', op: 'back', move: 1, state: 'a', url: '/x' }),
+    { t: 'history', request: { op: 'back', move: 1 } });
+  assert.deepEqual(appPortMessage({ t: 'history', op: 'push', state: 'a', move: 0, url: '/x', title: 'x' }),
+    { t: 'history', request: { op: 'push', state: 'a', move: 0 } });
+  for (const data of [
+    { t: 'history', op: 'go', move: 0 },
+    { t: 'history', op: 'push', state: 'a'.repeat(1025), move: 0 },
+    { t: 'history', op: 'push', state: 3, move: 0 },
+    { t: 'history', op: 'push', move: 0 },
+    { t: 'history', op: 'replace', state: null, move: -1 },
+    { t: 'history', op: 'back', move: 1.5 },
+    { t: 'history', op: 'back' },
+    { t: 'route', state: null, move: 0 },
+  ]) {
+    assert.equal(appPortMessage(data), null, JSON.stringify(data));
+  }
+});
+
 test('the sandbox is exactly allow-scripts', () => assert.equal(FRAME_SANDBOX, 'allow-scripts'));
 
 // --- AppFrame, in a fake DOM with a real MessageChannel, a fake clock and a fake page ----
@@ -141,15 +164,17 @@ const SHA256 = 'a'.repeat(64);
 
 /**
  * Opens an AppFrame in a fresh fake DOM, destroyed when the test ends. `reply` decides what
- * sendApp returns, or throws, for each body; `page` is the page's visibility.
+ * sendApp returns, or throws, for each body; `page` is the page's visibility. Without
+ * `withHistory`, the frame is given no onHistory.
  */
-function openFrame(t, { reply = () => 'sent', page = fakeVisibility() } = {}) {
+function openFrame(t, { reply = () => 'sent', page = fakeVisibility(), withHistory = true } = {}) {
   const doc = new FakeDocument();
   const host = doc.createElement('div');
   const clock = new FakeClock();
   const faults = [];
   const sent = [];
   const links = [];
+  const histories = [];
   const frame = new AppFrame({
     host,
     runnerURL: RUNNER_URL,
@@ -161,6 +186,7 @@ function openFrame(t, { reply = () => 'sent', page = fakeVisibility() } = {}) {
     },
     onOpenLink: (url) => links.push(url),
     onFault: (reason) => faults.push(reason),
+    ...(withHistory ? { onHistory: (request) => histories.push(request) } : {}),
     visibility: page,
     clock,
   });
@@ -172,7 +198,7 @@ function openFrame(t, { reply = () => 'sent', page = fakeVisibility() } = {}) {
   const ready = (fields = {}) => doc.defaultView.message({
     data: { type: 'ready', nonce }, source: frameWindow, origin: 'null', ...fields,
   });
-  return { win: doc.defaultView, host, iframe, frameWindow, clock, page, frame, faults, sent, links, nonce, ready };
+  return { win: doc.defaultView, host, iframe, frameWindow, clock, page, frame, faults, sent, links, histories, nonce, ready };
 }
 
 /**
@@ -233,7 +259,8 @@ test('AppFrame posts the bundle and port2 once, for the first valid ready', asyn
   f.ready();
   assert.equal(f.frameWindow.posts.length, 1);
   const [{ data, targetOrigin, transfer }] = f.frameWindow.posts;
-  assert.deepEqual(data, { type: 'bundle', nonce: f.nonce, text: TEXT, sha256: SHA256 });
+  // `history: 1`: this page keeps the app's history entries, and the runner tells the app so.
+  assert.deepEqual(data, { type: 'bundle', nonce: f.nonce, text: TEXT, sha256: SHA256, history: 1 });
   assert.equal(targetOrigin, '*');
   assert.equal(transfer.length, 1);
   assert.ok(transfer[0] instanceof MessagePort);
@@ -399,6 +426,45 @@ test('AppFrame opens only links that pass openableURL', async (t) => {
   assert.deepEqual(f.links, ['https://acme.example/docs']);
 });
 
+test('AppFrame passes a well-formed history request to onHistory, and drops a malformed one', async (t) => {
+  const f = openFrame(t);
+  const { port } = connect(t, f);
+  port.postMessage({ t: 'history', op: 'push', state: 'a', move: 0, url: '/x' });
+  port.postMessage({ t: 'history', op: 'push', state: 'a'.repeat(1025), move: 0 });
+  port.postMessage({ t: 'history', op: 'replace', state: null, move: -1 });
+  port.postMessage({ t: 'history', op: 'forward', move: 0 });
+  port.postMessage({ t: 'history', op: 'back', move: 2 });
+  port.postMessage({ t: 'app', body: { last: true } });
+  await until(() => f.sent.length === 1, 'the last app body');
+  assert.deepEqual(f.histories, [
+    { op: 'push', state: 'a', move: 0 },
+    { op: 'back', move: 2 },
+  ]);
+  assert.deepEqual(f.faults, []);
+});
+
+test('AppFrame without onHistory ignores a history request', async (t) => {
+  const f = openFrame(t, { withHistory: false });
+  const { port } = connect(t, f);
+  port.postMessage({ t: 'history', op: 'push', state: 'a', move: 0 });
+  port.postMessage({ t: 'app', body: { last: true } });
+  await until(() => f.sent.length === 1, 'the last app body');
+  assert.deepEqual(f.faults, []);
+  assert.deepEqual(f.host.children, [f.iframe]);
+});
+
+test('AppFrame sendRoute posts the route to the app', async (t) => {
+  const f = openFrame(t);
+  const { received } = connect(t, f);
+  f.frame.sendRoute(null, 0);
+  f.frame.sendRoute('acme', 3);
+  await until(() => received.length === 2, 'two routes');
+  assert.deepEqual(received, [
+    { t: 'route', state: null, move: 0 },
+    { t: 'route', state: 'acme', move: 3 },
+  ]);
+});
+
 test('AppFrame passes deliver, setChannel and sendEnv to the app', async (t) => {
   const f = openFrame(t);
   const { received } = connect(t, f);
@@ -460,11 +526,14 @@ test('AppFrame destroy removes the frame, its listeners and its timer, and nothi
   f.page.hide();
   f.page.show();
   await f.clock.advance(RUNNER_START_TIMEOUT_MS * 2);
+  port.postMessage({ t: 'history', op: 'push', state: 'late', move: 0 });
   f.frame.deliver({ late: true });
   f.frame.setChannel(true);
+  f.frame.sendRoute('late', 0);
   await settle();
   assert.deepEqual(f.faults, []);
   assert.deepEqual(f.sent, []);
+  assert.deepEqual(f.histories, []);
   assert.deepEqual(received, []);
   assert.doesNotThrow(() => f.frame.destroy());
 });

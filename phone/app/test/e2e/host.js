@@ -9,11 +9,18 @@
 // JSON both ways, as they do between a phone and a laptop, so neither side ever holds an
 // object the other made.
 //
+// This page owns the tab's history entries for the app as the loader page does, with the staged
+// history.js: each frame is attached to the page's history for one fake laptop, its `history`
+// requests go there, and the page's moves come back to it as `route` messages. So back and
+// forward from this page step through the app's screens as on a phone.
+//
 // The page's query:
 // - `scenario=<name>` loads `/__app/scenarios/<name>.json` (`mock` by default); an empty name
 //   starts the laptop with no data, for a test that passes its own to `loadScenario`.
 // - `channel=down` leaves the channel down until a test calls `setChannel(true)`. Otherwise
 //   it comes up at once.
+// - Anything else is ignored, such as the `visit` that `openApp` adds so each visit has its own
+//   URL.
 //
 // `window.__host`:
 // - `requests`: every request that reached the laptop, `{ requestID, method, params }`, in
@@ -24,6 +31,10 @@
 // - `setReply(method, reply | (params, state) => reply | null)`, `hold(name)`,
 //   `release(name)`: see fake-laptop-app.js. `state`: what the laptop holds.
 // - `setChannel(up)`: the channel comes up (a new connection) or goes down.
+// - `replaceFrame()`: a new app frame, running the same bundle, takes the old one's place, as
+//   the loader's does when a new bundle arrives: the channel goes down, the old frame lets go
+//   of the page's history and is destroyed, and the new one is attached to it and comes up on
+//   a new connection.
 // - `setSendResult('sent' | 'tooLarge')`: what the loader answers each later send that fits a
 //   frame while the channel is up. It refuses `offline`, which the loader answers only while the
 //   channel is down, to every send: a test takes the channel down with `setChannel(false)`.
@@ -35,6 +46,7 @@
 import { alwaysVisible } from '/clock.js';
 import { MAX_PLAINTEXT_LENGTH } from '/channel/noise.js';
 import { AppFrame, readEnv } from '/frame.js';
+import { PageHistory, windowHistory } from '/history.js';
 import { decodeMessage, encodeMessage } from '/protocol.js';
 import { renderStrip } from '/ui.js';
 import { createFakeLaptop } from '/__app/fake-laptop-app.js';
@@ -43,6 +55,8 @@ import { createFakeLaptop } from '/__app/fake-laptop-app.js';
 /** What a test may have it answer while the channel is up. @typedef {'sent' | 'tooLarge'} UpSendResult */
 
 const LAPTOP_NAME = 'acme-laptop';
+/** The fake laptop's ID, the same in every page load, as a paired laptop's record keeps it. */
+const LAPTOP_ID = 'acme-laptop-id';
 const SEND_RESULTS = new Set(['sent', 'tooLarge']);
 const SCENARIO_NAME = /^[A-Za-z0-9_-]+$/;
 /** As the laptop reads a frame's plaintext: UTF-8, nothing else. */
@@ -69,6 +83,10 @@ let envQueued = false;
 /** @type {string | null} */
 let lastEnvKey = null;
 
+/** The tab's history entries for app frames, as the loader page keeps them. */
+const pageHistory = new PageHistory({ port: windowHistory(window) });
+/** @type {import('/history.js').FrameHistory | null} The current frame's hold on `pageHistory`. */
+let frameHistory = null;
 /** @type {AppFrame | null} */
 let frame = null;
 const laptop = createFakeLaptop({
@@ -84,19 +102,7 @@ if (!bundle.ok) throw new Error(`TBD app host: app.js answered ${bundle.status}`
 const bundleBytes = new Uint8Array(await bundle.arrayBuffer());
 const sha256 = await sha256Hex(bundleBytes);
 const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bundleBytes);
-frame = new AppFrame({
-  host: frameHost,
-  runnerURL: `${location.origin}/runner.html`,
-  text,
-  sha256,
-  sendApp,
-  onOpenLink: (url) => links.push(url),
-  onFault: (reason) => {
-    faults.push(reason);
-    console.error(`TBD app host: the app frame failed: ${reason}`);
-  },
-  visibility: alwaysVisible,
-});
+startFrame();
 drawStrip();
 postEnv();
 
@@ -121,6 +127,7 @@ Object.defineProperty(window, '__host', {
     hold: laptop.hold,
     release: laptop.release,
     setChannel,
+    replaceFrame,
     setSendResult,
     sendEnv,
     loadScenario,
@@ -150,6 +157,54 @@ function sendApp(body) {
     laptop.handle(sent, connection);
   }, 0);
   return 'sent';
+}
+
+/**
+ * A new app frame in `#frame-host`, running the bundle, attached to the page's history, as the
+ * loader starts one (`#onBundle` in phone/loader/main.js): the frame first, then its hold on
+ * the history, whose route waits on the port until the app listens.
+ */
+function startFrame() {
+  const started = new AppFrame({
+    host: frameHost,
+    runnerURL: `${location.origin}/runner.html`,
+    text,
+    sha256,
+    sendApp,
+    onOpenLink: (url) => links.push(url),
+    onHistory: (request) => frameHistory?.apply(request),
+    onFault: (reason) => {
+      // As the loader's frame does when it fails (`#destroyFrame`), it lets go of the history.
+      if (frame === started) {
+        frameHistory?.detach();
+        frameHistory = null;
+      }
+      faults.push(reason);
+      console.error(`TBD app host: the app frame failed: ${reason}`);
+    },
+    visibility: alwaysVisible,
+  });
+  frame = started;
+  frameHistory = pageHistory.attach(LAPTOP_ID, (state, move) => started.sendRoute(state, move));
+}
+
+/**
+ * Replaces the app frame with a new one running the same bundle, as the loader does when a new
+ * bundle arrives (`#onBundle` and `#destroyFrame` in phone/loader/main.js): the channel goes
+ * down, the old frame lets go of the page's history and is destroyed, and the new frame starts
+ * on the entry the browser is on and comes up on a new connection.
+ */
+function replaceFrame() {
+  if (frame === null) return;
+  setChannel(false);
+  frameHistory?.detach();
+  frameHistory = null;
+  frame.destroy();
+  frame = null;
+  startFrame();
+  lastEnvKey = null;
+  postEnv();
+  setChannel(true);
 }
 
 /** @param {boolean} next */

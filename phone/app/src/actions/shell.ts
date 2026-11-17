@@ -1,16 +1,28 @@
 /**
  * The shell's actions: the channel and the subscription, navigation, sheets, menus, toasts
- * and links. `main.tsx` wires the client to three of them: `onEvent`, `onChannelUp` and
- * `onChannelDown`.
+ * and links. `main.tsx` wires the client to three of them, `onEvent`, `onChannelUp` and
+ * `onChannelDown`, and the loader's route messages to a fourth, `onRoute`.
+ *
+ * Navigation keeps the history entries the loader holds for the app (`ctx.entries`) in step
+ * with the route, so the phone's back button steps back through the worktrees the user moved
+ * between:
+ * - a move to another worktree adds an entry: from the list to a session, from a session to one
+ *   in another row, or a pending open that lands in another row;
+ * - a move within one worktree rewrites the current entry, so a tap on another tab, or a fork
+ *   that opens beside its session, adds none;
+ * - so does a move an event makes, such as the shown session leaving the list;
+ * - the back chevron (`back`) asks the loader to go back, and the route message that answers
+ *   sets the screen, as one does for the browser's own back and forward (`onRoute`).
  */
 
 import { AppError } from '../client/client.ts';
 import type { AppEvent, PhoneSessionRef, SessionsSubscribeParams, SessionsSubscribeResult } from '../protocol/types.ts';
 import { applyEvent, applySessions, withPendingOpen } from '../state/events.ts';
-import { findSession, sameRoute } from '../state/route.ts';
-import { applySnapshot } from '../state/sessionsData.ts';
+import { findSession, restoreRef, sameRoute } from '../state/route.ts';
+import { decodeRoute } from '../state/routeState.ts';
+import { applySnapshot, isComplete } from '../state/sessionsData.ts';
 import { emptyRecord, nextToast, SESSIONS_ROUTE } from '../state/store.ts';
-import type { AppState, MenuState, PendingOpen, SheetState, UIState } from '../state/store.ts';
+import type { AppState, MenuState, PendingOpen, Route, SessionsData, SheetState, UIState } from '../state/store.ts';
 import type { ActionContext, Actions } from './index.ts';
 
 export function shellActions(ctx: ActionContext, self: () => Actions) {
@@ -28,17 +40,40 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
   }
 
   /**
-   * Updates the state with `fn`, then opens or closes the transcript when that moved the route
-   * rather than a tap did: a pending open that became the route, or an open session that left
-   * every row.
+   * Updates the state with `fn`, then follows a move of the route that it made rather than a
+   * tap did: a pending open that became the route, or an open session that left every row. It
+   * opens or closes the transcript, and keeps the history entry in step (`record`). A restore
+   * (`PendingOpen`) adds no entry, because the entry it came from names its session already: one
+   * that lands rewrites that entry, and one the complete list dropped rewrites it to the list,
+   * which shows.
    */
   function updateAndFollowRoute(fn: (s: AppState) => AppState): void {
-    const before = store.get().ui.route;
+    const before = store.get();
     store.update(fn);
-    const after = store.get().ui.route;
-    if (sameRoute(before, after)) return;
-    if (after.screen === 'session') self().openTranscript(after.ref);
+    const after = store.get();
+    const route = after.ui.route;
+    const restore = restoreRef(before.ui.pendingOpen);
+    const restoreEnded = restore !== null && after.ui.pendingOpen === null;
+    if (sameRoute(before.ui.route, route)) {
+      if (restoreEnded) ctx.entries.replace(route);
+      return;
+    }
+    if (route.screen === 'session') self().openTranscript(route.ref);
     else self().closeTranscript();
+    if (restoreEnded && sameRoute(route, { screen: 'session', ref: restore })) ctx.entries.replace(route);
+    else record(before, after);
+  }
+
+  /**
+   * Asks the loader's history to match a move from the screen `before` showed to the one `after`
+   * shows: a new entry for a move to a session in another worktree, from the list or from
+   * another row; the current entry rewritten for anything else. Which row holds each session
+   * comes from `after`'s list when it holds the session (`sameWorktree`).
+   */
+  function record(before: AppState, after: AppState): void {
+    const route = after.ui.route;
+    if (route.screen === 'session' && !sameWorktree(before, after)) ctx.entries.push(route);
+    else ctx.entries.replace(route);
   }
 
   /**
@@ -143,16 +178,68 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
         nav: ui.nav + 1,
       }));
       self().openTranscript(ref);
+      record(s, store.get());
     },
 
     /**
-     * Back to the sessions list, closing the transcript, the menu and the sheet, and clearing
-     * any pending open, as `openSession` does. On the sessions list it does nothing.
+     * The back chevron. It asks the loader's history to go back and changes nothing itself: the
+     * route message that answers sets the screen (`onRoute`), going back one entry, or to the
+     * list when the entry before is not one of the app's. So the chevron and the browser's back
+     * agree, and the browser's forward returns to the session the chevron left. On the sessions
+     * list it does nothing.
      */
     back(): void {
       if (store.get().ui.route.screen === 'sessions') return;
-      setUI((ui) => ({ ...ui, route: SESSIONS_ROUTE, menu: null, sheet: null, pendingOpen: null, nav: ui.nav + 1 }));
-      self().closeTranscript();
+      ctx.entries.back();
+    },
+
+    /**
+     * The browser is on the history entry whose route string is `state` (null for the sessions
+     * list): the frame started on it, the user went back or forward, or the loader answered the
+     * chevron. It shows that screen as a tap would: it closes the menu and the sheet, clears any
+     * pending open, and counts as the user's navigation (`navMark`), so a fork or create still in
+     * flight never takes the user away afterwards. It asks for no entry for the move itself.
+     * - A session a row lists shows, and its transcript opens.
+     * - A session that the complete list does not hold, or a string that names no route, shows
+     *   the list, and the entry is rewritten to match.
+     * - A session the list may still bring, because it has not fully arrived, as at start, waits
+     *   as a restore (`PendingOpen`) while the list shows.
+     *
+     * When the screen it names shows already, the screen stays, and the rest is as for any route
+     * message: the menu and the sheet close, any pending open is cleared, and it counts as a
+     * navigation.
+     */
+    onRoute(state: string | null): void {
+      const s = store.get();
+      const decoded = state === null ? SESSIONS_ROUTE : decodeRoute(state);
+      let target: Route = decoded ?? SESSIONS_ROUTE;
+      let rewrite = decoded === null;
+      let rowID: string | null = null;
+      let restore: PendingOpen | null = null;
+      if (target.screen === 'session') {
+        const found = findSession(s.sessions, target.ref);
+        if (found !== null) {
+          rowID = found.row.id;
+        } else if (listComplete(s)) {
+          target = SESSIONS_ROUTE;
+          rewrite = true;
+        } else {
+          restore = { ref: target.ref, restore: true };
+        }
+      }
+      if (sameRoute(s.ui.route, target)) {
+        setUI((ui) => ({ ...ui, menu: null, sheet: null, pendingOpen: null, nav: ui.nav + 1 }));
+      } else {
+        const shown = restore === null ? target : SESSIONS_ROUTE;
+        setUI((ui) => ({
+          ...ui, route: shown, lastRowID: rowID ?? ui.lastRowID, menu: null, sheet: null, pendingOpen: restore, nav: ui.nav + 1,
+        }));
+        if (!sameRoute(s.ui.route, shown)) {
+          if (shown.screen === 'session') self().openTranscript(shown.ref);
+          else self().closeTranscript();
+        }
+      }
+      if (rewrite) ctx.entries.replace(SESSIONS_ROUTE);
     },
 
     /**
@@ -232,4 +319,37 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
       ctx.link.openLink(url);
     },
   };
+}
+
+/**
+ * Whether the list has fully arrived: a subscribe has answered, and every row the layout places
+ * is here. A session it does not hold then is gone, not on its way.
+ */
+function listComplete(s: AppState): boolean {
+  return s.conn.subscribed && isComplete(s.sessions);
+}
+
+/**
+ * Whether `before` and `after` both show a session, and one row holds both: the same worktree,
+ * or the same remote session's row. Both sessions are looked up in `after`'s list, the newer one,
+ * and the session `before` showed in `before`'s own list when `after`'s does not hold it. So a
+ * partial list that lacked the row `before` showed, whose row came back in `after`'s list, does
+ * not count as a move to another row.
+ */
+function sameWorktree(before: AppState, after: AppState): boolean {
+  const row = shownRowID(before.ui.route, after.sessions, before.sessions);
+  return row !== null && row === shownRowID(after.ui.route, after.sessions);
+}
+
+/**
+ * The ID of the row that lists the session `route` shows, in the first of `lists` that holds
+ * it, or null on the sessions list or when none of them does.
+ */
+function shownRowID(route: Route, ...lists: SessionsData[]): string | null {
+  if (route.screen === 'sessions') return null;
+  for (const d of lists) {
+    const found = findSession(d, route.ref);
+    if (found !== null) return found.row.id;
+  }
+  return null;
 }

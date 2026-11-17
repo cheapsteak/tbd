@@ -282,7 +282,7 @@ function flush() {
   return new Promise((resolve) => { setImmediate(resolve); });
 }
 
-test('a session whose row has not arrived yet shows the back button, which goes to the list', async (t) => {
+test('a session whose row has not arrived yet shows the back button, which asks the loader to go back', async (t) => {
   Object.assign(globalThis, { window: {}, IS_REACT_ACT_ENVIRONMENT: true });
   const errors = [];
   t.mock.method(console, 'error', (...args) => { errors.push(args.join(' ')); });
@@ -297,7 +297,10 @@ test('a session whose row has not arrived yet shows the back button, which goes 
     stream: null, lastSeq: null,
     request: (/** @type {string} */ method) => new Promise((resolve) => { sent.push({ method, resolve }); }),
   };
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  // The loader's history entries: the test records the chevron's request and plays the loader's answer.
+  let backs = 0;
+  const entries = { push() {}, replace() {}, back() { backs++; } };
+  const actions = createActions({ store, client, link: { openLink: () => {} }, entries, now: () => 0 });
   for (const name of ['openTranscript', 'closeTranscript', 'resumeTranscriptOnUp']) actions[name] = () => {};
 
   // The user opens W1's session. The channel drops, and the next snapshot, a new stream's, holds
@@ -329,6 +332,9 @@ test('a session whose row has not arrived yet shows the back button, which goes 
   assert.equal(back?.nodeName, 'BUTTON');
 
   await act(async () => { click(dom, /** @type {FakeElement} */ (back)); });
+  assert.equal(backs, 1);
+  assert.deepEqual(store.get().ui.route, { screen: 'session', ref }, 'the chevron changes nothing until the loader answers');
+  await act(async () => { actions.onRoute(null); });
   assert.equal(store.get().ui.route, SESSIONS_ROUTE);
   assert.equal(findByAttribute(dom, 'data-state', 'session-waiting'), null);
 

@@ -50,6 +50,10 @@ async function until(predicate, what) {
 class PageWindow extends FakeWindow {
   /** @type {string[]} Each URL `history.replaceState` was given. */
   replaced = [];
+  /** @type {Array<{ state: unknown, url: string }>} The tab's history entries, oldest first. */
+  entries;
+  /** The current entry's index in `entries`. */
+  at = 0;
 
   /**
    * @param {string} href
@@ -59,16 +63,50 @@ class PageWindow extends FakeWindow {
   constructor(href, log, framed) {
     super();
     this.location = { href, reload() {} };
+    this.entries = [{ state: null, url: href }];
+    const win = this;
+    // As in a browser, a write stores a copy of the state, and a write without a URL keeps
+    // the address.
     this.history = {
-      replaceState: (/** @type {unknown} */ _state, /** @type {string} */ _title, /** @type {string} */ url) => {
+      get state() {
+        return win.entries[win.at].state;
+      },
+      get length() {
+        return win.entries.length;
+      },
+      pushState: (/** @type {unknown} */ state, /** @type {string} */ _title, /** @type {string} */ url) => {
+        if (url !== undefined) this.location.href = url;
+        this.entries.splice(this.at + 1, Infinity, { state: structuredClone(state), url: this.location.href });
+        this.at += 1;
+      },
+      replaceState: (/** @type {unknown} */ state, /** @type {string} */ _title, /** @type {string} */ url) => {
         log.push('replaceState');
-        this.replaced.push(url);
-        this.location.href = url;
+        if (url !== undefined) {
+          this.replaced.push(url);
+          this.location.href = url;
+        }
+        this.entries[this.at] = { state: structuredClone(state), url: this.location.href };
+      },
+      back: () => {
+        setImmediate(() => this.traverse(-1));
       },
     };
     this.self = this;
     this.top = framed ? new FakeWindow() : this;
     this.navigator = { userAgent: IPHONE_UA, maxTouchPoints: 5 };
+  }
+
+  /**
+   * The browser's back (-1) or forward (1) within the page's own entries: the address follows
+   * the entry, and the page gets `popstate`.
+   * @param {number} delta
+   */
+  traverse(delta) {
+    const to = this.at + delta;
+    if (to < 0 || to >= this.entries.length) throw new RangeError('no such entry');
+    this.at = to;
+    this.location.href = this.entries[to].url;
+    this.dispatchEvent(new Event('popstate'));
   }
 
   innerWidth = 390;
@@ -85,11 +123,15 @@ class PageWindow extends FakeWindow {
 
   /**
    * Opens `href` on the page that is already open, as following a link to it does: only the
-   * fragment changes, so the page gets `hashchange` and does not load again.
+   * fragment changes, so the page does not load again. The link adds an entry with no state,
+   * and the page gets `popstate`, then `hashchange`.
    * @param {string} href
    */
   follow(href) {
     this.location.href = href;
+    this.entries.splice(this.at + 1, Infinity, { state: null, url: href });
+    this.at += 1;
+    this.dispatchEvent(new Event('popstate'));
     this.dispatchEvent(new Event('hashchange'));
   }
 }
@@ -880,7 +922,7 @@ test('the connecting screen takes the name the handshake reports, as the strip d
  * Boots on the scripted laptop and waits until the app frame runs its bundle and the page has
  * recorded the connection. The store answers the cache read (a miss), stalls the cache write
  * and answers the record of the visit. Returns the runner's end of the frame's channel, and
- * the `channel` messages it receives.
+ * the `channel`, `env` and `route` messages it receives.
  * @param {import('node:test').TestContext} t
  */
 async function readyWithFrame(t) {
@@ -901,12 +943,15 @@ async function readyWithFrame(t) {
   const channel = [];
   /** @type {any[]} */
   const envs = [];
+  /** @type {any[]} */
+  const routes = [];
   port.addEventListener('message', (event) => {
     if (event.data?.t === 'channel') channel.push(event.data.state);
     if (event.data?.t === 'env') envs.push(event.data);
+    if (event.data?.t === 'route') routes.push(event.data);
   });
   port.start();
-  return { ...env, channel, envs };
+  return { ...env, port, channel, envs, routes };
 }
 
 test('only a session that reaches ready records the visit, with the handshake\'s name, after its bundle', async (t) => {
@@ -973,4 +1018,82 @@ test('the app frame hears its channel go down once and come up once across a rec
   await quiet();
   assert.deepEqual(channel, ['up', 'down', 'up']);
   assert.equal(page.idb.calls.filter((c) => c.mode === 'readwrite' && c.names.join() === 'laptops').length, 2, 'each ready records a visit');
+});
+
+// --- the app's history entries ---------------------------------------------------------------
+
+/**
+ * The loader's fields of the current entry, with its random page-load ID checked and set
+ * aside.
+ * @param {PageWindow} win
+ */
+function currentEntry(win) {
+  const fields = /** @type {any} */ (win.history.state)?.tbdPhone;
+  assert.ok(fields !== undefined, 'the entry is the loader\'s');
+  assert.match(fields.doc, /^[A-Za-z0-9_-]{22}$/);
+  const { doc: _doc, ...rest } = fields;
+  return rest;
+}
+
+test('a frame that starts makes the current entry the laptop\'s list and sends the app its route', async (t) => {
+  const { page, record, routes } = await readyWithFrame(t);
+  await waitFor(() => routes.length === 1, 'the first route');
+  assert.deepEqual(routes, [{ t: 'route', state: null, move: 0 }]);
+  assert.deepEqual(currentEntry(page.win), { v: 1, laptop: record.id, step: 0, app: null });
+  assert.equal(page.win.entries.length, 1, 'the start adds no entry');
+  assert.equal(page.win.location.href, PAGE, 'nor changes the address');
+});
+
+test('the app\'s push, then the browser\'s back and forward, reach the app as routes', async (t) => {
+  const { page, record, port, routes } = await readyWithFrame(t);
+  port.postMessage({ t: 'history', op: 'push', state: 'acme-api', move: 0 });
+  await waitFor(() => page.win.entries.length === 2, 'the pushed entry');
+  assert.deepEqual(currentEntry(page.win), { v: 1, laptop: record.id, step: 1, app: 'acme-api' });
+  assert.equal(page.win.location.href, PAGE);
+
+  page.win.traverse(-1);
+  await waitFor(() => routes.length === 2, 'the route after back');
+  page.win.traverse(1);
+  await waitFor(() => routes.length === 3, 'the route after forward');
+  assert.deepEqual(routes, [
+    { t: 'route', state: null, move: 0 },
+    { t: 'route', state: null, move: 1 },
+    { t: 'route', state: 'acme-api', move: 2 },
+  ]);
+
+  // The chevron: the loader goes back itself, and the route follows.
+  port.postMessage({ t: 'history', op: 'back', move: 2 });
+  await waitFor(() => routes.length === 4, 'the route after the chevron');
+  assert.deepEqual(routes[3], { t: 'route', state: null, move: 4 });
+  assert.equal(page.win.at, 0);
+});
+
+test('once the frame is gone, the browser\'s moves write nothing', async (t) => {
+  const { page, port, routes } = await readyWithFrame(t);
+  await waitFor(() => routes.length === 1, 'the first route');
+  // The runner reports a bundle that would not start: the frame goes, and Reload shows.
+  port.postMessage({ t: 'fault', reason: 'script' });
+  await waitFor(() => page.screen() === 'reload', 'Reload this page');
+  page.win.history.pushState(null, '');
+  page.win.traverse(-1);
+  page.win.traverse(1);
+  await quiet();
+  assert.deepEqual(page.win.entries.map((e) => e.state === null), [false, true], 'the entry with no state stays so');
+  assert.deepEqual(routes, [{ t: 'route', state: null, move: 0 }]);
+});
+
+test('a pairing link opened under a running app leaves no state in its entry, and later moves write nothing', async (t) => {
+  const { page, routes } = await readyWithFrame(t);
+  await waitFor(() => routes.length === 1, 'the first route');
+  page.win.follow(V2.url);
+  await waitFor(() => page.screen() === 'name', 'the name screen');
+  assert.equal(page.doc.getElementById('frame-host')?.children.length, 0, 'the frame is gone');
+  assert.equal(page.win.location.href, PAGE, 'the link left the address');
+  assert.deepEqual(page.win.entries.map((e) => e.url), [PAGE, PAGE]);
+  assert.equal(page.win.history.state, null, 'and its entry holds no state');
+  page.win.traverse(-1);
+  page.win.traverse(1);
+  await quiet();
+  assert.equal(page.win.history.state, null);
+  assert.equal(page.screen(), 'name');
 });
