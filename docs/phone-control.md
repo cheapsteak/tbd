@@ -67,6 +67,12 @@ receives the pairing secret.
 The code works once and for 5 minutes. If the codes differ, click Deny. The laptop stores the
 phone only after you click Allow.
 
+## Go back and forward
+
+On the phone, the browser's back and forward steps through the worktrees you opened. That covers
+Safari's back button and edge swipe, and Android's back. Back from the sessions list leaves the
+page.
+
 ## Remove a phone
 
 - Open Settings → Phone and click Revoke next to the phone.
