@@ -305,17 +305,31 @@ test('a reload on a session’s entry opens that session again, and the entries 
   await expectNoReload(page, address);
 });
 
-test('a loader that keeps no history for the app makes the app fail at start, as a script fault', async ({ page, appHost, pageProblems }) => {
-  // The runner of a loader from before this design hands the app no `history: 1`.
-  const staged = await (await page.request.get(`${appHost.origin}/runner.js`)).text();
-  const old = staged.replace('Object.freeze({ port, protocol: 1, history: 1 })', 'Object.freeze({ port, protocol: 1 })');
-  expect(old, "the staged runner's handle").not.toBe(staged);
-  await page.route('**/runner.js', (route) => route.fulfill({ contentType: 'text/javascript; charset=utf-8', body: old }));
-  await page.goto(`${appHost.origin}/__app/host.html?scenario=mock`);
-  await page.waitForFunction(() => /** @type {any} */ (window).__host?.ready === true);
-  await expect.poll(() => page.evaluate(() => /** @type {any} */ (window).__host.faults)).toEqual(['script']);
-  await expect(page.locator('#frame-host iframe')).toHaveCount(0);
-  // The app's throw, and the host's report of the fault: expected here, and nowhere else.
-  expect(await takeProblems(pageProblems, /tbdHost has no history 1/)).toHaveLength(1);
-  expect(await takeProblems(pageProblems, /the app frame failed: script/)).toHaveLength(1);
-});
+/**
+ * Each part of a loader from before this design, as the staged file with one change. The page
+ * (frame.js) loads once per tab and the runner once per frame, so either can be the old one.
+ * @type {Array<[string, string, string, string]>} what it is, the file, and the change
+ */
+const OLD_LOADER_PARTS = [
+  // An old page's bundle message says nothing of history, so the new runner hands the app none.
+  ['an old loader page, whose bundle message carries no history,', 'frame.js',
+    'sha256: this.#sha256, history: 1 }', 'sha256: this.#sha256 }'],
+  // An old runner never sets the field, whatever the page says.
+  ['an old runner, which never hands the app history,', 'runner.js', 'if (keepsHistory) host.history = 1;', ''],
+];
+
+for (const [what, file, from, to] of OLD_LOADER_PARTS) {
+  test(`${what} makes the app fail at start, as a script fault`, async ({ page, appHost, pageProblems }) => {
+    const staged = await (await page.request.get(`${appHost.origin}/${file}`)).text();
+    const old = staged.replace(from, to);
+    expect(old, `the staged ${file}`).not.toBe(staged);
+    await page.route(`**/${file}`, (route) => route.fulfill({ contentType: 'text/javascript; charset=utf-8', body: old }));
+    await page.goto(`${appHost.origin}/__app/host.html?scenario=mock`);
+    await page.waitForFunction(() => /** @type {any} */ (window).__host?.ready === true);
+    await expect.poll(() => page.evaluate(() => /** @type {any} */ (window).__host.faults)).toEqual(['script']);
+    await expect(page.locator('#frame-host iframe')).toHaveCount(0);
+    // The app's throw, and the host's report of the fault: expected here, and nowhere else.
+    expect(await takeProblems(pageProblems, /tbdHost has no history 1/)).toHaveLength(1);
+    expect(await takeProblems(pageProblems, /the app frame failed: script/)).toHaveLength(1);
+  });
+}

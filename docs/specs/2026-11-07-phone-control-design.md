@@ -760,8 +760,9 @@ Research: `phone-app-stack.md`.
   It checks `event.source` and a nonce first.
 - The port carries the messages `app`, `openLink`, `channel`, `env` and `sendFailed`, plus two for
   history: `history` (app to loader) and `route` (loader to app). The runner gives the bundle a
-  `tbdHost` handle, `{port, protocol: 1, history: 1}`. The `history: 1` field tells the app that
-  the loader handles history. The fields of the two history messages are in
+  `tbdHost` handle, `{port, protocol: 1}`, and sets `history: 1` on it only when the loader
+  page's `bundle` message says the page keeps history. That field tells the app that the loader
+  handles history. The fields of the two history messages are in
   [the loader-history design](2026-11-11-phone-loader-history-design.md).
 - The runner checks the hash, creates a `blob:` URL inside the frame, and starts the bundle as one
   classic script.

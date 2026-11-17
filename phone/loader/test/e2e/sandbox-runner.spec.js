@@ -310,17 +310,29 @@ test.describe('framed with sandbox="allow-scripts" by the loader\'s origin', () 
     expect(await runner.frame.evaluate(() => self.origin)).toBe('null');
   });
 
-  test('the bundle\'s handle holds its port, protocol 1 and history 1, and nothing else', async ({ page, server }) => {
+  test('the bundle\'s handle holds its port and protocol 1, and history 1 only when the bundle message carries history 1', async ({ page, server }) => {
     await openHarness(page, server.origin);
-    const runner = await frameRunner(page, server, 'allow-scripts');
-    await waitReady(page, runner);
     const text = 'tbdHost.port.postMessage({ t: \'host\', keys: Object.keys(tbdHost), protocol: tbdHost.protocol, '
-      + 'history: tbdHost.history, port: tbdHost.port instanceof MessagePort });\n';
-    const sent = await post(page, runner.index, { type: 'bundle', nonce: NONCE, text, sha256: sha256(text) }, 1);
-    await expect.poll(() => portLog(page, runner.index, sent)).toEqual([[
-      { t: 'host', keys: ['port', 'protocol', 'history'], protocol: 1, history: 1, port: true },
-      { t: 'started' },
-    ]]);
+      + 'history: \'history\' in tbdHost ? tbdHost.history : \'absent\', port: tbdHost.port instanceof MessagePort });\n';
+    const withHistory = { t: 'host', keys: ['port', 'protocol', 'history'], protocol: 1, history: 1, port: true };
+    const without = { t: 'host', keys: ['port', 'protocol'], protocol: 1, history: 'absent', port: true };
+    /** @type {Array<[Record<string, unknown>, object]>} the bundle message's extra fields, and the handle the bundle sees */
+    const CASES = [
+      // The loader page that keeps the app's history says so.
+      [{ history: 1 }, withHistory],
+      // A page from before the history code says nothing, so the app gets no history field.
+      [{}, without],
+      [{ history: true }, without],
+      [{ history: '1' }, without],
+      [{ history: 2 }, without],
+    ];
+    for (const [fields, handle] of CASES) {
+      // One runner per bundle message: a runner takes one bundle.
+      const runner = await frameRunner(page, server, 'allow-scripts');
+      await waitReady(page, runner);
+      const sent = await post(page, runner.index, { type: 'bundle', nonce: NONCE, text, sha256: sha256(text), ...fields }, 1);
+      await expect.poll(() => portLog(page, runner.index, sent), JSON.stringify(fields)).toEqual([[handle, { t: 'started' }]]);
+    }
   });
 
   const refusedBase = bundleMessage('refused');

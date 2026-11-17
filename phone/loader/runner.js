@@ -1,8 +1,11 @@
 // The app runner. It loads in <iframe sandbox="allow-scripts">, so its origin is opaque.
 // It takes one `bundle` message from the loader, checks the bundle text against its
 // SHA-256, gives the bundle `globalThis.tbdHost`, and starts it from a blob: URL. The handle
-// is `{ port, protocol: 1, history: 1 }`: `history: 1` tells the app that this loader keeps
-// its history entries, through the `history` and `route` port messages.
+// is `{ port, protocol: 1 }`, and gains `history: 1` only when the bundle message carries
+// `history: 1`. That field tells the app that the loader page keeps its history entries,
+// through the `history` and `route` port messages. The page says so, not the runner: the
+// runner loads again for every frame while the page stays open, so a page from before the
+// history code can start a frame on this runner.
 //
 // A classic script, not a module: a module script from an opaque origin would need CORS.
 // Everything sits inside one function so that nothing here becomes a global the bundle
@@ -47,7 +50,7 @@
     if (typeof data.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(data.sha256)) return;
     if (event.ports.length !== 1) return;
     window.removeEventListener('message', onMessage);
-    start(event.ports[0], data.text, data.sha256);
+    start(event.ports[0], data.text, data.sha256, data.history === 1);
   }
   window.addEventListener('message', onMessage);
 
@@ -56,8 +59,9 @@
    * @param {MessagePort} port
    * @param {string} text
    * @param {string} sha256
+   * @param {boolean} keepsHistory The bundle message said the loader page keeps history.
    */
-  async function start(port, text, sha256) {
+  async function start(port, text, sha256, keepsHistory) {
     // 4. The text the script will run must be the text the loader checked. A digest
     //    that cannot be computed counts as a mismatch.
     let actual = '';
@@ -72,8 +76,11 @@
     }
 
     // 5. The bundle's one handle on the loader.
+    /** @type {{ port: MessagePort, protocol: 1, history?: 1 }} */
+    const host = { port, protocol: 1 };
+    if (keepsHistory) host.history = 1;
     Object.defineProperty(globalThis, 'tbdHost', {
-      value: Object.freeze({ port, protocol: 1, history: 1 }),
+      value: Object.freeze(host),
       writable: false,
       configurable: false,
       enumerable: false,

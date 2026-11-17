@@ -2,6 +2,11 @@
 // runner the bundle and one end of a MessageChannel, and from then on talks to the app only
 // over that channel. The runner's half of the handshake is runner.js.
 //
+// The bundle message carries `history: 1`: this page keeps the app's history entries
+// (history.js). The runner hands the app that field only when the message carries it, because
+// the runner loads again for every frame and a page from before the history code can start a
+// frame on a newer runner.
+//
 // From the app: `app` bodies for the laptop, `openLink`, and `history` requests for the
 // page's history entries (history.js). To the app: `app` bodies from the laptop, `channel`,
 // `env`, `sendFailed`, and `route`, the screen of the entry the browser is on.
@@ -217,7 +222,7 @@ export class AppFrame {
     // An opaque origin cannot be named, so the target is '*'. The frame's window was
     // checked by identity above, and the bundle is not secret.
     frameWindow.postMessage(
-      { type: 'bundle', nonce: this.#nonce, text: this.#text, sha256: this.#sha256 },
+      { type: 'bundle', nonce: this.#nonce, text: this.#text, sha256: this.#sha256, history: 1 },
       '*',
       [this.#channel.port2],
     );

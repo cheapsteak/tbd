@@ -259,7 +259,8 @@ test('AppFrame posts the bundle and port2 once, for the first valid ready', asyn
   f.ready();
   assert.equal(f.frameWindow.posts.length, 1);
   const [{ data, targetOrigin, transfer }] = f.frameWindow.posts;
-  assert.deepEqual(data, { type: 'bundle', nonce: f.nonce, text: TEXT, sha256: SHA256 });
+  // `history: 1`: this page keeps the app's history entries, and the runner tells the app so.
+  assert.deepEqual(data, { type: 'bundle', nonce: f.nonce, text: TEXT, sha256: SHA256, history: 1 });
   assert.equal(targetOrigin, '*');
   assert.equal(transfer.length, 1);
   assert.ok(transfer[0] instanceof MessagePort);
