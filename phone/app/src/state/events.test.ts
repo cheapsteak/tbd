@@ -204,6 +204,26 @@ test('a pending open the list already shows opens at once, and one it does not w
   assert.deepEqual(s2.ui.pendingOpen, { ref: R2 });
 });
 
+test('a restore opens as a { ref } open does, and a complete list without its session drops it', () => {
+  const restore = { ref: R, restore: true } as const;
+  const s0 = stateWith([row('W1', [OTHER])]);
+  // A { ref } open waits for its session whatever the list holds; a restore waits only while the
+  // list is incomplete.
+  const waiting = applyEvent({ ...s0, ui: { ...s0.ui, pendingOpen: { ref: R } } }, changed([row('W1', [OTHER], 'renamed')]));
+  assert.deepEqual(waiting.ui.pendingOpen, { ref: R });
+  const dropped = applyEvent({ ...s0, ui: { ...s0.ui, pendingOpen: restore } }, changed([row('W1', [OTHER], 'renamed')]));
+  assert.equal(dropped.ui.pendingOpen, null);
+  assert.equal(dropped.ui.route, SESSIONS_ROUTE);
+  // A row the layout places but that has not arrived may hold it.
+  const partial = applyEvent({ ...s0, ui: { ...s0.ui, pendingOpen: restore } }, changed([], [], ['W1', 'W3']));
+  assert.deepEqual(partial.ui.pendingOpen, restore);
+  const opened = applyEvent(partial, changed([row('W3', [R])]));
+  assert.deepEqual(opened.ui.route, { screen: 'session', ref: R });
+  assert.equal(opened.ui.lastRowID, 'W3');
+  assert.equal(opened.ui.pendingOpen, null);
+  assert.equal(opened.ui.toast, null);
+});
+
 test("a new list clears a prompt card's refusal once its session's answers turn back on", () => {
   const off = { available: false, reason: 'Answering prompts is turned off on the laptop.' };
   const withAnswer = (answer: typeof off | typeof CAN): PhoneRow => {

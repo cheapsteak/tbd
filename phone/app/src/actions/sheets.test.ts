@@ -21,6 +21,15 @@ import {
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState, SheetState } from '../state/store.ts';
 import { createActions } from './index.ts';
+import type { ActionContext, Actions } from './index.ts';
+
+/**
+ * The loader's history entries. They answer the back chevron as the loader does when the entry
+ * before is not one of the app's: with a route message for the list.
+ */
+function backToList(actions: () => Actions): ActionContext['entries'] {
+  return { push() {}, replace() {}, back() { actions().onRoute(null); } };
+}
 
 const CAN: PhoneCapability = { available: true };
 const R: PhoneSessionRef = { kind: 'local', terminalID: 'T-R' };
@@ -71,7 +80,7 @@ async function harness(options: { sessions?: PhoneSession[]; profiles?: PhonePro
     },
   };
   const store = createStore({ ...initialState(), sessions: applySnapshot(snapshot(options.sessions)) });
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions: Actions = createActions({ store, client, link: { openLink: () => {} }, entries: backToList(() => actions), now: () => 0 });
   const of = (method: Method): Sent[] => sent.filter((s) => s.method === method);
   const last = (method: Method): Sent => {
     const found = of(method).at(-1);

@@ -29,21 +29,28 @@ export type MenuState = { name: 'account'; askProfileID: string | null } | { nam
 
 /**
  * A session to open once the list shows it: one the laptop made for this phone (a fork, a
- * created remote session) but has not listed yet. The phone acts only on sessions its list
- * shows, so it opens one only then (`resolvePendingOpen` in `route.ts`).
+ * created remote session) but has not listed yet, or one a history entry names before the list
+ * has fully arrived. The phone acts only on sessions its list shows, so it opens one only then
+ * (`resolvePendingOpen` in `route.ts`).
  * - `{ ref }`: opens that session. It toasts nothing; the action that made it toasts when the
  *   laptop replies.
+ * - `{ ref, restore: true }`: a restore. The loader named the session's history entry in a
+ *   `route` message (`onRoute` in `actions/shell.ts`) while the list was still on its way, as
+ *   at start. It opens as `{ ref }` does, and is dropped once the list is complete without the
+ *   session (`applySessions` in `events.ts`). Either way the entry is rewritten to the screen
+ *   that shows, and none is added.
  * - `{ worktreeID, toast }`: waits for the worktree row with that ID to list a session, and
  *   opens its first one. `toast` is a template: when it is not null, opening shows it with
  *   every `{name}` replaced by the row's name, so `'Created {name}'` reads "Created fix-login".
  *
- * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or `back`
- * (`actions/shell.ts`), so a fork or create the user has moved away from never takes them to it.
- * A navigation made while the fork or create is still in flight counts too, though no open waits
- * yet: its action takes a mark (`navMark`) when it sends the request and passes it to
- * `openPending` with the reply, which drops the open when the user has navigated since (`nav`).
+ * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or a move
+ * to another history entry (`onRoute` in `actions/shell.ts`), so a fork or create the user has
+ * moved away from never takes them to it. A navigation made while the fork or create is still
+ * in flight counts too, though no open waits yet: its action takes a mark (`navMark`) when it
+ * sends the request and passes it to `openPending` with the reply, which drops the open when the
+ * user has navigated since (`nav`).
  */
-export type PendingOpen = { ref: PhoneSessionRef } | { worktreeID: string; toast: string | null };
+export type PendingOpen = { ref: PhoneSessionRef; restore?: true } | { worktreeID: string; toast: string | null };
 
 export interface UIState {
   route: Route;
@@ -58,8 +65,9 @@ export interface UIState {
   toast: { id: number; text: string } | null;
   pendingOpen: PendingOpen | null;
   /**
-   * How many navigations the user has made: each `openSession` or `back` that changed the
-   * route. A route change an event or a pending open makes does not count. `navMark` reads it.
+   * How many navigations the user has made: each `openSession` that changed the route, and each
+   * move to a history entry for another screen (`onRoute`), the back chevron's included. A route
+   * change an event or a pending open makes does not count. `navMark` reads it.
    */
   nav: number;
   /** Why the laptop refused the last action on a session, shown with it, by `refKey` of the session. */

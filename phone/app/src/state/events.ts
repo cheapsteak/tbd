@@ -6,8 +6,8 @@
 
 import type { AppEvent } from '../protocol/types.ts';
 import { applyPromptChanged, clearStaleRefusals } from './prompts.ts';
-import { findSession, pendingOpenTarget, resolveRoute, sameRoute } from './route.ts';
-import { applySessionsChanged } from './sessionsData.ts';
+import { findSession, pendingOpenTarget, resolveRoute, restoreRef, sameRoute } from './route.ts';
+import { applySessionsChanged, isComplete } from './sessionsData.ts';
 import { nextToast } from './store.ts';
 import type { AppState, PendingOpen, Route, SessionsData, UIState } from './store.ts';
 import { addReceipt, applyTranscriptEvent } from './transcript.ts';
@@ -64,7 +64,9 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
  * 1. A session route whose session no row lists goes back to the sessions list, once every
  *    row the layout places has arrived (`resolveRoute`).
  * 2. Then a pending open that the list now shows opens, and is cleared. A `{ worktreeID }`
- *    open with a toast template shows it, `{name}` replaced by the row's name.
+ *    open with a toast template shows it, `{name}` replaced by the row's name. A restore that a
+ *    complete list does not show is cleared too: the history entry that named its session is
+ *    stale, and the session must not open later, once the user has moved on.
  *
  * A prompt card's refusal goes once its session's `answer` capability turns from unavailable to
  * available (`clearStaleRefusals`).
@@ -98,7 +100,7 @@ function followList(ui: UIState, d: SessionsData): UIState {
   const pending = next.pendingOpen;
   if (pending === null) return next;
   const target = pendingOpenTarget(pending, d);
-  if (target === null) return next;
+  if (target === null) return restoreRef(pending) !== null && isComplete(d) ? { ...next, pendingOpen: null } : next;
   const done: UIState = { ...moveTo(next, target.route, target.row.id), pendingOpen: null };
   if ('ref' in pending || pending.toast === null) return done;
   const name = target.row.name;

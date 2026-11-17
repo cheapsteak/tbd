@@ -1,8 +1,10 @@
 // Tests shell.ts and createActions: subscribing on channel up, a refused subscribe and "Try
-// again", events that move the route opening or closing the transcript, navigation, sheets,
-// menus, toasts and links. A fake client records each request and hands back a promise the
-// test settles; the transcript actions are replaced on the actions object, which `self()`
-// returns, so the test sees each call.
+// again", events that move the route opening or closing the transcript, navigation and the
+// history entries it asks the loader for, route messages from the loader, sheets, menus, toasts
+// and links. A fake client records each request and hands back a promise the test settles; the
+// transcript actions are replaced on the actions object, which `self()` returns, so the test sees
+// each call. A fake `entries` records what the shell asks of the loader's history, and a test
+// plays the loader's answers by calling `onRoute`.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,9 +13,10 @@ import type {
   AppEvent, Method, ParamsOf, PhoneRow, PhoneSession, PhoneSessionRef, ResultOf, SessionsChangedData, SessionsSubscribeResult,
 } from '../protocol/types.ts';
 import { refKey } from '../protocol/wire.ts';
+import { encodeRoute } from '../state/routeState.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
 import { createStore, emptyRecord, initialState, SESSIONS_ROUTE } from '../state/store.ts';
-import type { AppState } from '../state/store.ts';
+import type { AppState, Route } from '../state/store.ts';
 import { createActions } from './index.ts';
 import type { ActionContext, Actions } from './index.ts';
 import { promptActions } from './prompts.ts';
@@ -41,6 +44,12 @@ function snapshot(rows: PhoneRow[], stream = 's1', seq = 10): SessionsSubscribeR
   };
 }
 
+/** The loader's history, for the tests that never look at what the shell asks of it. */
+const NO_ENTRIES: ActionContext['entries'] = { push() {}, replace() {}, back() {} };
+
+/** What the shell asked of the loader's history: an entry added or rewritten for a route, or the chevron's back. */
+type EntryCall = ['push' | 'replace', Route] | ['back'];
+
 const R: PhoneSessionRef = { kind: 'local', terminalID: 'T-R' };
 const R2: PhoneSessionRef = { kind: 'local', terminalID: 'T-R2' };
 const OTHER: PhoneSessionRef = { kind: 'local', terminalID: 'T-other' };
@@ -65,8 +74,14 @@ function harness() {
     },
   };
   const links: string[] = [];
+  const entryCalls: EntryCall[] = [];
+  const entries: ActionContext['entries'] = {
+    push(route) { entryCalls.push(['push', route]); },
+    replace(route) { entryCalls.push(['replace', route]); },
+    back() { entryCalls.push(['back']); },
+  };
   const store = createStore();
-  const ctx: ActionContext = { store, client, link: { openLink: (url) => { links.push(url); } }, now: () => 0 };
+  const ctx: ActionContext = { store, client, link: { openLink: (url) => { links.push(url); } }, entries, now: () => 0 };
   const actions = createActions(ctx);
   const calls: unknown[][] = [];
   actions.openTranscript = (ref) => { calls.push(['openTranscript', ref]); };
@@ -74,8 +89,10 @@ function harness() {
   actions.resumeTranscriptOnUp = () => { calls.push(['resumeTranscriptOnUp', sent.length]); };
   actions.onShowDetailsChanged = () => { calls.push(['onShowDetailsChanged', store.get().ui.showDetails]); };
   const requests = () => sent.map((s): [Method, unknown] => [s.method, s.params]);
-  return { sent, requests, client, store, actions, calls, links, state: (): AppState => store.get() };
+  return { sent, requests, client, store, actions, calls, links, entryCalls, state: (): AppState => store.get() };
 }
+
+type Harness = ReturnType<typeof harness>;
 
 /** Lets the promise handlers run. */
 function flush(): Promise<void> {
@@ -89,7 +106,17 @@ async function subscribed(rows: PhoneRow[]) {
   h.sent[0]!.resolve(snapshot(rows));
   await flush();
   h.calls.length = 0;
+  h.entryCalls.length = 0;
   return h;
+}
+
+/**
+ * The back chevron, then the loader's answer to it: a route message for the entry it went back
+ * to, the list unless `to` says otherwise.
+ */
+function goBack(h: Harness, to: Route = SESSIONS_ROUTE): void {
+  h.actions.back();
+  h.actions.onRoute(encodeRoute(to));
 }
 
 // MARK: - The channel and the subscription
@@ -370,7 +397,7 @@ test('a subscribe the client refuses before posting still resumes the transcript
     now: () => 0,
     newID: () => ids.shift() ?? 'spent',
   });
-  actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  actions = createActions({ store, client, link: { openLink: () => {} }, entries: NO_ENTRIES, now: () => 0 });
   const calls: string[] = [];
   actions.resumeTranscriptOnUp = () => { calls.push('resumeTranscriptOnUp'); };
   client.request('profiles.list', {}).catch(() => {});
@@ -455,11 +482,11 @@ test('openSession clears a pending open, so a fork the user moved away from neve
   assert.deepEqual(h.calls, []);
 });
 
-test('back clears a pending open, so a worktree the user moved away from never opens or toasts', async () => {
+test('going back clears a pending open, so a worktree the user moved away from never opens or toasts', async () => {
   const h = await subscribed([row('W1', [R])]);
   h.actions.openSession(R);
   h.actions.openPending({ worktreeID: WT, toast: 'Created {name}' });
-  h.actions.back();
+  goBack(h);
   assert.equal(h.state().ui.pendingOpen, null);
   h.calls.length = 0;
   h.actions.onEvent(changed([row(WT, [R2], 'fix-login')], [], ['W1', WT]));
@@ -477,7 +504,7 @@ test('a navigation between the mark and the reply drops the open', async () => {
   h.actions.openPending({ ref: R2 }, forkMark);
   assert.equal(h.state().ui.pendingOpen, null);
   const createMark = h.actions.navMark();
-  h.actions.back();
+  goBack(h);
   h.actions.openPending({ worktreeID: WT, toast: 'Created {name}' }, createMark);
   assert.equal(h.state().ui.pendingOpen, null);
   h.calls.length = 0;
@@ -512,7 +539,7 @@ test('openPending with no mark waits whatever the user did before', async () => 
   const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
   h.actions.openSession(R);
   h.actions.openSession(OTHER);
-  h.actions.back();
+  goBack(h);
   h.actions.openPending({ ref: R2 });
   assert.deepEqual(h.state().ui.pendingOpen, { ref: R2 });
   h.actions.onEvent(changed([row('W1', [R, R2])]));
@@ -529,7 +556,7 @@ test("only the user's navigations move the mark", async () => {
   h.actions.openSession(R);             // shown already
   assert.equal(h.actions.navMark(), 1);
   h.actions.openSession(OTHER);
-  h.actions.back();
+  goBack(h);
   assert.equal(h.actions.navMark(), 3);
   // A pending open that opens, and an event that sends the route back, are not the user's.
   h.actions.openPending({ ref: R });
@@ -543,7 +570,7 @@ test("a pending open that opens is not the user's navigation: the user's own sta
   const h = await subscribed([row('W1', [R])]);
   h.actions.openSession(R);
   h.actions.setShowDetails(true);
-  h.actions.back();
+  goBack(h);
   h.actions.toggleRepo('repo:R1');
   h.actions.openSheet({ name: 'new', repoID: 'R1', repoName: 'acme' });
   h.actions.openPending({ worktreeID: WT, toast: null });
@@ -607,29 +634,39 @@ test('openSession on the session already shown changes nothing and keeps its tra
   assert.deepEqual(h.calls, [['openTranscript', R2]]);
 });
 
-test('back on the sessions list changes nothing and closes no transcript', async () => {
+test('back on the sessions list changes nothing, closes no transcript, and asks nothing of the history', async () => {
   const h = await subscribed([row('W1', [R])]);
   h.actions.openPending({ worktreeID: WT, toast: 'Created {name}' });
   const before = h.state();
   h.actions.back();
   assert.equal(h.state(), before);
   assert.deepEqual(h.calls, []);
+  assert.deepEqual(h.entryCalls, []);
   // The user stayed put, so the worktree still opens and toasts.
   h.actions.onEvent(changed([row(WT, [R2], 'fix-login')], [], ['W1', WT]));
   assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R2 });
   assert.deepEqual(h.state().ui.toast, { id: 1, text: 'Created fix-login' });
 });
 
-test('back shows the sessions list and closes the transcript', async () => {
+test('back on a session asks the history to go back and changes nothing itself; the route message that answers shows the list', async () => {
   const h = await subscribed([row('W1', [R])]);
   h.actions.openSession(R);
   h.actions.openSheet({ name: 'menu' });
+  h.actions.openPending({ ref: R2 });
   h.calls.length = 0;
+  h.entryCalls.length = 0;
+  const before = h.state();
   h.actions.back();
+  assert.deepEqual(h.entryCalls, [['back']]);
+  assert.equal(h.state(), before);
+  assert.deepEqual(h.calls, []);
+  h.actions.onRoute(null);
   assert.equal(h.state().ui.route, SESSIONS_ROUTE);
   assert.equal(h.state().ui.sheet, null);
+  assert.equal(h.state().ui.pendingOpen, null);
   assert.equal(h.state().ui.lastRowID, 'W1');
   assert.deepEqual(h.calls, [['closeTranscript']]);
+  assert.deepEqual(h.entryCalls, [['back']], 'the route message asks for no entry');
 });
 
 test('setLastRow marks a row, and null marks none', () => {
@@ -707,6 +744,306 @@ test('openLink asks the loader to open the URL', () => {
   assert.deepEqual(h.links, ['https://acme.example/docs']);
 });
 
+// MARK: - The loader's history
+
+function shows(ref: PhoneSessionRef): Route {
+  return { screen: 'session', ref };
+}
+
+test('a move from the list to a session adds an entry', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  assert.deepEqual(h.entryCalls, [['push', shows(R)]]);
+});
+
+test('a move to a session in another worktree adds an entry, and a remote session is a worktree of its own', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openSession(OTHER);
+  assert.deepEqual(h.entryCalls, [['push', shows(R)], ['push', shows(OTHER)]]);
+  const REMOTE: PhoneSessionRef = { kind: 'remote', provider: 'acme-cloud', sessionID: 'rs-1' };
+  const remote: PhoneRow = { ...row('remote:acme-cloud/rs-1', [REMOTE]), kind: 'remoteSession', remote: true };
+  const h2 = await subscribed([row('W1', [R]), remote]);
+  h2.actions.openSession(R);
+  h2.actions.openSession(REMOTE);
+  assert.deepEqual(h2.entryCalls, [['push', shows(R)], ['push', shows(REMOTE)]]);
+});
+
+test('a move to another tab of the same worktree rewrites the entry, and a tap on the tab that shows asks nothing', async () => {
+  const h = await subscribed([row('W1', [R, R2]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openSession(R2);
+  h.actions.openSession(R);
+  h.actions.openSession(R);
+  assert.deepEqual(h.entryCalls, [['push', shows(R)], ['replace', shows(R2)], ['replace', shows(R)]]);
+});
+
+test('an event that takes the shown session off the list rewrites the entry, and one that leaves the route asks nothing', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.onEvent(changed([], ['W1'], ['W2']));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.deepEqual(h.entryCalls, [['push', shows(R)], ['replace', SESSIONS_ROUTE]]);
+  h.actions.onEvent(changed([row('W2', [OTHER], 'renamed')]));
+  assert.equal(h.entryCalls.length, 2);
+});
+
+test('a pending open adds an entry when it lands in another worktree, and rewrites it when it lands beside its session', async () => {
+  // A fork opens beside the session it forked, in the same worktree.
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openPending({ ref: R2 }, h.actions.navMark());
+  h.actions.onEvent(changed([row('W1', [R, R2])]));
+  assert.deepEqual(h.state().ui.route, shows(R2));
+  assert.deepEqual(h.entryCalls, [['push', shows(R)], ['replace', shows(R2)]]);
+  // One that lands in another worktree, whether it waits for the list or the list shows it already.
+  h.actions.openPending({ worktreeID: WT, toast: 'Created {name}' }, h.actions.navMark());
+  const R3: PhoneSessionRef = { kind: 'local', terminalID: 'T-R3' };
+  h.actions.onEvent(changed([row(WT, [R3], 'fix-login')], [], ['W1', 'W2', WT]));
+  assert.deepEqual(h.state().ui.route, shows(R3));
+  h.actions.openPending({ ref: R }, h.actions.navMark());
+  assert.deepEqual(h.state().ui.route, shows(R));
+  assert.deepEqual(h.entryCalls, [['push', shows(R)], ['replace', shows(R2)], ['push', shows(R3)], ['push', shows(R)]]);
+  // And a create from the list lands in a worktree the list did not show.
+  const fromList = await subscribed([row('W1', [R])]);
+  fromList.actions.openPending({ worktreeID: WT, toast: null }, fromList.actions.navMark());
+  fromList.actions.onEvent(changed([row(WT, [R2])], [], ['W1', WT]));
+  assert.deepEqual(fromList.entryCalls, [['push', shows(R2)]]);
+});
+
+test("a route message shows its entry's screen as a tap would, and asks for no entry", async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openSession(OTHER);
+  h.actions.openSheet({ name: 'menu' });
+  h.actions.openPending({ ref: R2 });
+  h.calls.length = 0;
+  h.entryCalls.length = 0;
+  const nav = h.actions.navMark();
+  h.actions.onRoute(encodeRoute(shows(R)));
+  let ui = h.state().ui;
+  assert.deepEqual(ui.route, shows(R));
+  assert.equal(ui.lastRowID, 'W1');
+  assert.equal(ui.sheet, null);
+  assert.equal(ui.pendingOpen, null);
+  assert.equal(h.actions.navMark(), nav + 1);
+  assert.deepEqual(h.calls, [['openTranscript', R]]);
+  // The menu closes too.
+  h.actions.openMenu({ name: 'model' });
+  h.actions.onRoute(null);
+  ui = h.state().ui;
+  assert.equal(ui.route, SESSIONS_ROUTE);
+  assert.equal(ui.menu, null);
+  assert.deepEqual(h.calls, [['openTranscript', R], ['closeTranscript']]);
+  h.actions.onRoute(encodeRoute(shows(R)));
+  h.actions.onRoute(encodeRoute(shows(OTHER)));
+  assert.deepEqual(h.state().ui.route, shows(OTHER));
+  assert.equal(h.state().ui.lastRowID, 'W2');
+  assert.deepEqual(h.calls, [['openTranscript', R], ['closeTranscript'], ['openTranscript', R], ['openTranscript', OTHER]]);
+  assert.equal(h.actions.navMark(), nav + 4);
+  assert.deepEqual(h.entryCalls, []);
+});
+
+test("a route message ends a fork's wait for its reply, so the fork never takes the user away", async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openSession(OTHER);
+  const forkMark = h.actions.navMark();
+  h.actions.onRoute(encodeRoute(shows(R)));
+  h.actions.openPending({ ref: R2 }, forkMark);
+  assert.equal(h.state().ui.pendingOpen, null);
+  h.actions.onEvent(changed([row('W2', [OTHER, R2])]));
+  assert.deepEqual(h.state().ui.route, shows(R));
+});
+
+test('a route message for the screen that shows only closes the menu and the sheet', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSheet({ name: 'new', repoID: 'R1', repoName: 'acme' });
+  h.actions.openPending({ worktreeID: WT, toast: null }, h.actions.navMark());
+  const nav = h.actions.navMark();
+  h.actions.onRoute(null);
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.equal(h.state().ui.sheet, null);
+  assert.deepEqual(h.state().ui.pendingOpen, { worktreeID: WT, toast: null });
+  assert.equal(h.actions.navMark(), nav);
+  // On a session too.
+  h.actions.openSession(R);
+  h.actions.openMenu({ name: 'model' });
+  h.calls.length = 0;
+  h.entryCalls.length = 0;
+  h.actions.onRoute(encodeRoute(shows(R)));
+  assert.deepEqual(h.state().ui.route, shows(R));
+  assert.equal(h.state().ui.menu, null);
+  assert.deepEqual(h.calls, []);
+  // With neither open, it changes nothing.
+  const before = h.state();
+  h.actions.onRoute(encodeRoute(shows(R)));
+  assert.equal(h.state(), before);
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(h.entryCalls, []);
+});
+
+test('a route message for a session no row of the complete list holds shows the list and rewrites the entry', async () => {
+  // Forward onto a session that has since left the list.
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openSession(OTHER);
+  h.actions.onRoute(encodeRoute(shows(R)));
+  h.actions.onEvent(changed([row('W1', [R])], ['W2'], ['W1']));
+  h.calls.length = 0;
+  h.entryCalls.length = 0;
+  const nav = h.actions.navMark();
+  h.actions.onRoute(encodeRoute(shows(OTHER)));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.equal(h.state().ui.pendingOpen, null);
+  assert.equal(h.actions.navMark(), nav + 1);
+  assert.deepEqual(h.calls, [['closeTranscript']]);
+  assert.deepEqual(h.entryCalls, [['replace', SESSIONS_ROUTE]]);
+  // From the list, it only rewrites the entry.
+  h.calls.length = 0;
+  h.entryCalls.length = 0;
+  h.actions.onRoute(encodeRoute(shows(OTHER)));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(h.entryCalls, [['replace', SESSIONS_ROUTE]]);
+});
+
+test('a route message whose string is not a route this app reads shows the list and rewrites the entry', async () => {
+  for (const state of ['', '{', '{"screen":"session"}', '{"screen":"sessions"}', '{"screen":"session","ref":{"kind":"local"}}', 'null']) {
+    const h = await subscribed([row('W1', [R])]);
+    h.actions.openSession(R);
+    h.calls.length = 0;
+    h.entryCalls.length = 0;
+    h.actions.onRoute(state);
+    assert.equal(h.state().ui.route, SESSIONS_ROUTE, state);
+    assert.deepEqual(h.calls, [['closeTranscript']], state);
+    assert.deepEqual(h.entryCalls, [['replace', SESSIONS_ROUTE]], state);
+  }
+});
+
+test('the chevron then forward: back changes nothing until the route message, and forward returns to the session', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openSession(OTHER);
+  h.calls.length = 0;
+  h.entryCalls.length = 0;
+  goBack(h, shows(R));
+  assert.deepEqual(h.state().ui.route, shows(R));
+  assert.deepEqual(h.entryCalls, [['back']]);
+  // The browser's forward reaches the entry the chevron left.
+  h.actions.onRoute(encodeRoute(shows(OTHER)));
+  assert.deepEqual(h.state().ui.route, shows(OTHER));
+  assert.deepEqual(h.calls, [['openTranscript', R], ['openTranscript', OTHER]]);
+  assert.deepEqual(h.entryCalls, [['back']]);
+});
+
+// A restore: a route message for a session the list may still bring.
+
+test('a route message before the first snapshot waits for the list, then opens its session without adding an entry', async () => {
+  const h = harness();
+  h.actions.onRoute(encodeRoute(shows(R)));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.deepEqual(h.state().ui.pendingOpen, { ref: R, restore: true });
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(h.entryCalls, []);
+  h.actions.onChannelUp();
+  assert.deepEqual(h.requests(), [['sessions.subscribe', {}]], 'no transcript is asked for before the list lists the session');
+  h.sent[0]!.resolve(snapshot([row('W1', [R]), row('W2', [OTHER])]));
+  await flush();
+  assert.deepEqual(h.state().ui.route, shows(R));
+  assert.equal(h.state().ui.lastRowID, 'W1');
+  assert.equal(h.state().ui.pendingOpen, null);
+  assert.deepEqual(h.calls, [['resumeTranscriptOnUp', 1], ['openTranscript', R]]);
+  // The entry names the session already: rewritten, never pushed.
+  assert.deepEqual(h.entryCalls, [['replace', shows(R)]]);
+});
+
+test('a restore whose session the complete list does not hold is dropped, and the entry rewritten to the list', async () => {
+  const h = harness();
+  h.actions.onRoute(encodeRoute(shows(R)));
+  h.actions.onChannelUp();
+  h.sent[0]!.resolve(snapshot([row('W2', [OTHER])]));
+  await flush();
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.equal(h.state().ui.pendingOpen, null);
+  assert.deepEqual(h.entryCalls, [['replace', SESSIONS_ROUTE]]);
+  // The session showing up later takes the user nowhere.
+  h.actions.onEvent(changed([row('W1', [R])], [], ['W1', 'W2']));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.deepEqual(h.entryCalls, [['replace', SESSIONS_ROUTE]]);
+});
+
+test('a restore waits through a partial snapshot until the row with its session arrives', async () => {
+  const h = harness();
+  h.actions.onRoute(encodeRoute(shows(R)));
+  h.actions.onChannelUp();
+  h.sent[0]!.resolve({ ...snapshot([row('W2', [OTHER])]), more: true,
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }] }] });
+  await flush();
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.deepEqual(h.state().ui.pendingOpen, { ref: R, restore: true });
+  assert.deepEqual(h.entryCalls, []);
+  h.actions.onEvent(changed([row('W1', [R])]));
+  assert.deepEqual(h.state().ui.route, shows(R));
+  assert.deepEqual(h.entryCalls, [['replace', shows(R)]]);
+});
+
+test("the user's own move cancels a restore", async () => {
+  const h = harness();
+  h.actions.onRoute(encodeRoute(shows(R)));
+  h.actions.onChannelUp();
+  h.sent[0]!.resolve({ ...snapshot([row('W2', [OTHER])]), more: true,
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }] }] });
+  await flush();
+  h.actions.openSession(OTHER);
+  assert.equal(h.state().ui.pendingOpen, null);
+  assert.deepEqual(h.entryCalls, [['push', shows(OTHER)]]);
+  h.actions.onEvent(changed([row('W1', [R])]));
+  assert.deepEqual(h.state().ui.route, shows(OTHER));
+  assert.deepEqual(h.entryCalls, [['push', shows(OTHER)]]);
+  // So does a later route message, even one for the screen that shows.
+  const h2 = harness();
+  h2.actions.onRoute(encodeRoute(shows(R)));
+  h2.actions.onRoute(null);
+  assert.equal(h2.state().ui.pendingOpen, null);
+  h2.actions.onChannelUp();
+  h2.sent[0]!.resolve(snapshot([row('W1', [R])]));
+  await flush();
+  assert.equal(h2.state().ui.route, SESSIONS_ROUTE);
+  assert.deepEqual(h2.entryCalls, []);
+});
+
+test('a route message while a row is on its way leaves the session that shows, and waits for its own', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(OTHER);
+  // A reconnect's snapshot brings W2 and leaves W1 to follow.
+  h.actions.onChannelDown();
+  h.actions.onChannelUp();
+  h.sent[1]!.resolve({ ...snapshot([row('W2', [OTHER])], 's2', 1), more: true,
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }] }] });
+  await flush();
+  h.calls.length = 0;
+  h.entryCalls.length = 0;
+  const nav = h.actions.navMark();
+  h.actions.onRoute(encodeRoute(shows(R)));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.deepEqual(h.state().ui.pendingOpen, { ref: R, restore: true });
+  assert.equal(h.actions.navMark(), nav + 1);
+  assert.deepEqual(h.calls, [['closeTranscript']]);
+  h.actions.onEvent(changed([row('W1', [R])]));
+  assert.deepEqual(h.state().ui.route, shows(R));
+  assert.deepEqual(h.calls, [['closeTranscript'], ['openTranscript', R]]);
+  assert.deepEqual(h.entryCalls, [['replace', shows(R)]]);
+});
+
+test('a restore counts as the navigation it is, so a create in flight never replaces it', async () => {
+  const h = harness();
+  const mark = h.actions.navMark();
+  h.actions.onRoute(encodeRoute(shows(R)));
+  h.actions.openPending({ worktreeID: WT, toast: null }, mark);
+  assert.deepEqual(h.state().ui.pendingOpen, { ref: R, restore: true });
+});
+
 // MARK: - createActions
 
 const NO_SELF = (): Actions => { throw new Error('unused'); };
@@ -729,6 +1066,7 @@ function refusingContext(): ActionContext {
       request: () => Promise.reject(new AppError('unavailable', 'The laptop cannot do that now.')),
     },
     link: { openLink: () => {} },
+    entries: NO_ENTRIES,
     now: () => 0,
   };
 }
@@ -753,7 +1091,7 @@ test('no two action modules share an action name', () => {
 test('createActions holds every action the plan names', () => {
   const actions = createActions(refusingContext());
   const names = [
-    'onEvent', 'onChannelUp', 'onChannelDown', 'retrySubscribe', 'openSession', 'back', 'navMark', 'openPending', 'openSheet',
+    'onEvent', 'onChannelUp', 'onChannelDown', 'retrySubscribe', 'openSession', 'back', 'onRoute', 'navMark', 'openPending', 'openSheet',
     'closeSheet', 'openMenu', 'closeMenu', 'toast', 'clearToast', 'setShowDetails', 'setLastRow', 'toggleRepo', 'openLink',
     'openTranscript', 'closeTranscript', 'resumeTranscriptOnUp', 'onShowDetailsChanged', 'loadOlder', 'toggleDetail',
     'answerPrompt', 'dismissPrompt', 'setDraft', 'sendMessage',

@@ -1,7 +1,8 @@
 /**
  * The app's actions: everything that sends a request, changes the state, or leaves the frame.
  * Components call them through `useActions` (`state/context.tsx`), and `main.tsx` wires the
- * client's callbacks to the shell's (`onEvent`, `onChannelUp`, `onChannelDown`).
+ * client's callbacks to the shell's (`onEvent`, `onChannelUp`, `onChannelDown`), and the
+ * loader's route messages to `onRoute`.
  *
  * Four modules make them, each owned by one part of plan 6: `shell.ts` (6a), `transcript.ts`
  * (6c), `prompts.ts` and `sheets.ts` (6d). Each exports
@@ -22,6 +23,7 @@
 
 import type { AppClient } from '../client/client.ts';
 import type { HostLink } from '../host.ts';
+import type { HistoryLink } from '../state/historyLink.ts';
 import type { Store } from '../state/store.ts';
 import { promptActions } from './prompts.ts';
 import { sheetActions } from './sheets.ts';
@@ -32,6 +34,12 @@ export interface ActionContext {
   store: Store;
   client: Pick<AppClient, 'request' | 'stream' | 'lastSeq'>;
   link: Pick<HostLink, 'openLink'>;
+  /**
+   * The history entries the loader keeps for the app. The shell's navigation asks for one to be
+   * added or rewritten, and the back chevron asks the loader to go back; `main.tsx` passes the
+   * loader's `route` messages to `onRoute`.
+   */
+  entries: Pick<HistoryLink, 'push' | 'replace' | 'back'>;
   /** The time in milliseconds, for anything that ages. */
   now: () => number;
 }

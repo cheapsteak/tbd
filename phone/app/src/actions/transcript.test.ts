@@ -16,7 +16,15 @@ import type { AppState, Store } from '../state/store.ts';
 import { applyPage, beginOpen, emptyTranscript, MAX_STALE_PAGES } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import { createActions } from './index.ts';
-import type { Actions } from './index.ts';
+import type { ActionContext, Actions } from './index.ts';
+
+/**
+ * The loader's history entries. They answer the back chevron as the loader does when the entry
+ * before is not one of the app's: with a route message for the list.
+ */
+function backToList(actions: () => Actions): ActionContext['entries'] {
+  return { push() {}, replace() {}, back() { actions().onRoute(null); } };
+}
 
 const CAN = { available: true };
 const R: PhoneSessionRef = { kind: 'local', terminalID: 'T-R' };
@@ -85,7 +93,7 @@ function harness() {
     },
   };
   const store = createStore(listed());
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions: Actions = createActions({ store, client, link: { openLink: () => {} }, entries: backToList(() => actions), now: () => 0 });
   const requests = () => sent.map((s): [Method, unknown] => [s.method, s.params]);
   /** The last request sent with `method`. */
   const last = (method: Method): Sent => {
@@ -920,7 +928,7 @@ function wired(): { client: AppClient; posted: Array<Record<string, unknown>>; s
     now: () => 0,
     newID: () => `r${++n}`,
   });
-  actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  actions = createActions({ store, client, link: { openLink: () => {} }, entries: backToList(() => actions!), now: () => 0 });
   return { client, posted, store, actions };
 }
 
