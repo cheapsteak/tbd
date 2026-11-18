@@ -30,7 +30,7 @@ struct PromptRailLayout: Equatable {
     /// Content no more than this taller than the rail does not overflow it.
     /// A pitch of `free / N` can make `N × pitch` round a hair past `free`,
     /// which must not window the rail, offset it or fade it. The lens's
-    /// `PromptRailLensGeometry.restOverflows` uses the same tolerance.
+    /// `PromptRailLensGeometry.restOverflows` reads `overflows`.
     static let overflowTolerance: CGFloat = 0.01
 
     let count: Int
@@ -44,9 +44,13 @@ struct PromptRailLayout: Equatable {
     /// `maxPitch`; long ones shrink toward `minPitch` and then window.
     var pitch: CGFloat {
         guard count > 0 else { return Self.maxPitch }
-        let free = railHeight - Self.topInset - Self.bottomInset
         let n = CGFloat(count)
-        return max(Self.minPitch, min(max(Self.maxPitch, Self.lensNeed / n), free / n))
+        return max(Self.minPitch, min(max(Self.maxPitch, Self.lensNeed / n), freeHeight / n))
+    }
+
+    /// The rail's height less its top and bottom insets, never below 0.
+    var freeHeight: CGFloat {
+        max(0, railHeight - Self.topInset - Self.bottomInset)
     }
 
     var contentHeight: CGFloat {

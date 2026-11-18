@@ -161,8 +161,6 @@ struct PromptRailLensGeometry: Equatable, Sendable {
     // `rows(centre:anchor:)` reads them. Equality stays sound: equal inputs
     // derive equal values.
 
-    /// The rail's height less its top and bottom insets.
-    let freeHeight: CGFloat
     /// The column the open lens fills: the resting column, or the free height
     /// on a windowed rail.
     let columnHeight: CGFloat
@@ -193,9 +191,8 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         let pitch = layout.pitch
         let rows = CGFloat(max(0, count))
         let sliver = Self.sliverFloor
-        let free = max(0, layout.railHeight - PromptRailLayout.topInset - PromptRailLayout.bottomInset)
-        let column = min(free, rows * pitch)
-        let overflows = CGFloat(count) * pitch > free + PromptRailLayout.overflowTolerance
+        let column = min(layout.freeHeight, rows * pitch)
+        let overflows = layout.overflows
         let bump = Self.bumpSum(around: rows / 2, count: count)
         let peak = max(Self.peak(column: column, bump: bump), sliver)
 
@@ -203,7 +200,6 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         railHeight = layout.railHeight
         restPitch = pitch
         self.restOffset = restOffset
-        freeHeight = free
         columnHeight = column
         restOverflows = overflows
         middleBump = bump
