@@ -1045,7 +1045,9 @@ struct TableTranscriptPaneTests {
     /// The table writes its prompt rail's lens coming and going to the
     /// pane's `PromptLensVisibility`, which the overlays above the rail read.
     /// Hosted through `LensVisibilityPane`, so the object reaches the table
-    /// as each pane hands it over.
+    /// as each pane hands it over. The lens is gone once it has shrunk away;
+    /// the shrink's frames are driven by hand, as an offscreen window's
+    /// display link need not fire.
     @Test("the prompt rail's lens coming and going reaches the pane's visibility object")
     func promptLensShownReachesPaneVisibility() async throws {
         let suite = TestDefaultsSuite("table-lens-shown")
@@ -1064,6 +1066,11 @@ struct TableTranscriptPaneTests {
             observed: { "isShown=\(visibility.isShown)" },
             until: { visibility.isShown })
         rail.lensOpenChanged(false)
+        let start = ProcessInfo.processInfo.systemUptime + 1
+        for frame in 1...120 where rail.lens != nil {
+            rail.advanceFrame(to: start + Double(frame) / 60)
+        }
+        try #require(rail.lens == nil, "precondition: the lens has shrunk away")
         try await Self.waitOnMain(
             "the pane's visibility object to read the lens gone",
             observed: { "isShown=\(visibility.isShown)" },
