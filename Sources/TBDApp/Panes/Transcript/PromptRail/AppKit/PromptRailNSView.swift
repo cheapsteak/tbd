@@ -59,6 +59,9 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     /// Whether frames come from a display link. Tests turn it off and drive
     /// frames with `advanceFrame(to:)`, so no live link runs in their windows.
     let usesDisplayLink: Bool
+    /// The current time, which the rows' time column and the accessibility
+    /// labels read "today" from. Tests pin it.
+    let now: @MainActor () -> Date
 
     /// The outline last delivered by the coordinator.
     private(set) var entries: [PromptOutlineEntry] = []
@@ -129,12 +132,14 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
         hover: PromptRailHoverModel,
         onJump: @escaping @MainActor (String) -> Void,
         reduceMotion: @escaping @MainActor () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-        usesDisplayLink: Bool = true
+        usesDisplayLink: Bool = true,
+        now: @escaping @MainActor () -> Date = Date.init
     ) {
         self.hover = hover
         self.onJump = onJump
         self.reduceMotion = reduceMotion
         self.usesDisplayLink = usesDisplayLink
+        self.now = now
         super.init(frame: .zero)
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
@@ -155,17 +160,6 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    deinit {
-        // A deinit is nonisolated, and the display link is main-actor state,
-        // so it is invalidated here only when the rail goes on the main
-        // thread, where it always does in practice. Elsewhere the link is
-        // left to its proxy, which invalidates it on its next fire, finding
-        // its rail gone. A rail that leaves its window has already
-        // invalidated its link (`viewWillMove(toWindow:)`).
-        guard Thread.isMainThread else { return }
-        MainActor.assumeIsolated { invalidateFrameLink() }
-    }
 
     override var isFlipped: Bool { true }
 
@@ -285,7 +279,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
             finishLensAnimation()
         } else if isRunningFrames {
             lensState.lastFrameTimestamp = nil
-            resumeFrameLink()
+            startFrameLink()
         }
     }
 
@@ -437,7 +431,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
 
     /// One button per entry, labelled "<first line>, <time>, <work>".
     private func makeAccessibilityButtons() -> [PromptRailAccessibilityButton] {
-        let now = Date()
+        let date = now()
         let layout = currentLayout()
         let buttons = entries.enumerated().map { index, entry in
             let id = entry.id
@@ -448,7 +442,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
             button.setAccessibilityElement(true)
             button.setAccessibilityRole(.button)
             button.setAccessibilityLabel(
-                PromptRailAccessibility.label(for: entry, workCount: workScale.count(at: index), now: now))
+                PromptRailAccessibility.label(for: entry, workCount: workScale.count(at: index), now: date))
             button.setAccessibilityParent(self)
             button.setAccessibilityFrameInParentSpace(accessibilityFrame(index, layout: layout))
             return button
@@ -461,11 +455,11 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     /// changes, so they match it one for one.
     private func updateAccessibilityLabels(where changed: (Int) -> Bool) {
         guard let accessibilityButtons else { return }
-        let now = Date()
+        let date = now()
         for (index, button) in accessibilityButtons.enumerated()
         where entries.indices.contains(index) && changed(index) {
             button.setAccessibilityLabel(
-                PromptRailAccessibility.label(for: entries[index], workCount: workScale.count(at: index), now: now))
+                PromptRailAccessibility.label(for: entries[index], workCount: workScale.count(at: index), now: date))
         }
     }
 

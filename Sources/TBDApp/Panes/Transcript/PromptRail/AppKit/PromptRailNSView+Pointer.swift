@@ -90,6 +90,7 @@ extension PromptRailNSView {
     func pointerExitedOverlay() {
         isPointerOverRail = false
         lensState.lastPointer = nil
+        lensState.lens?.pointerLeft()
         setPointerOverBox(false)
         hover.railHoverChanged(false)
         if lensState.hoveredRow != nil {
@@ -106,6 +107,10 @@ extension PromptRailNSView {
     /// move over the rail column or the box, where the lens may follow and
     /// the hovered row may change, or one that changes the hover; a move
     /// across the rest of a widened overlay needs none.
+    ///
+    /// A move over the rail column or the box reaches the lens with its
+    /// event time, which the lens measures the pointer's speed from; a move
+    /// off both tells the lens the pointer has left.
     private func trackPointer(_ event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let inside = bounds.contains(point)
@@ -114,7 +119,12 @@ extension PromptRailNSView {
         let wasOverRail = isPointerOverRail
         let wasOverBox = lensState.isPointerOverBox
         lensState.lastPointer = point
-        if overRail || overBox { pointerY = point.y }
+        if overRail || overBox {
+            pointerY = point.y
+            lensState.lens?.notePointer(y: point.y, time: event.timestamp)
+        } else {
+            lensState.lens?.pointerLeft()
+        }
 
         if overBox { setPointerOverBox(true) }
         if overRail {

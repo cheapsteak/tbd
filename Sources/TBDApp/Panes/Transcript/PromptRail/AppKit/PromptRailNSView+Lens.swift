@@ -40,6 +40,9 @@ struct PromptRailLensState {
     /// `openFraction`.
     var displayedRows = PromptRailLensRows.empty
     var shape = PromptRailLensShape.closed
+    /// Whether `shape` was laid out holding the box's width under the
+    /// pointer. A frame on which this changes lays the rows out again.
+    var heldBoxWidth = false
     var hoveredRow: Int?
 
     /// Whether the view wants frames: the lens is growing, shrinking or
@@ -51,10 +54,10 @@ struct PromptRailLensState {
     /// The last frame moved the lens, or held it still only for a flick, so
     /// the next may move it.
     var keepsStepping = false
-    /// The last frame stepped the lens, so its pointer tracking is current.
-    /// A frame that steps it after one that did not, or as frames start
-    /// again after a pause, first resumes its tracking where the pointer is.
-    var tracksPointer = false
+    /// The display link, only while frames run: it is released whenever they
+    /// stop, and the next run makes a new one. One still running when its
+    /// rail goes away stops itself on its next fire
+    /// (`PromptRailDisplayLinkProxy`).
     var frameLink: CADisplayLink?
     /// The rail is moving to another window, or out of one: no display link
     /// may start until it has arrived.
@@ -105,8 +108,11 @@ final class PromptRailDisplayLinkProxy: NSObject {
 ///   shrinks it to 0 and drops the lens. Reduce Motion, and a rail with no
 ///   window to animate in, do either at once.
 /// - **Frames** – a display link drives them while the lens grows, shrinks or
-///   moves, and pauses once it settles. `advanceFrame(to:)` is the link's
-///   callback and the tests' seam.
+///   moves, and is released once it settles. `advanceFrame(to:)` is the
+///   link's callback and the tests' seam.
+/// - **Speed** – the pointer's moves over the rail column and the box reach
+///   the lens with their event times, which it measures the pointer's speed
+///   from, so a flick freezes it whether or not frames are running.
 /// - **Hover** – the pointer over the box reports box hover, so the lens
 ///   stays open over its own rows, and the box never narrows under it.
 /// - **Clicks** – a click on a row jumps to its prompt and closes the lens.
@@ -131,7 +137,7 @@ extension PromptRailNSView {
     /// tall; it draws the hover fill.
     var hoveredRow: Int? { lensState.hoveredRow }
     /// Whether the view wants frames: a lens is growing, shrinking or moving.
-    /// While it does, the display link runs; it is paused otherwise.
+    /// While it does, a display link runs; otherwise there is none.
     var isRunningFrames: Bool { lensState.isRunningFrames }
     /// Whether a lens exists, so the overlay must be wide enough for its box.
     /// `onOpenWidthChange` reports each change.
@@ -162,7 +168,7 @@ extension PromptRailNSView {
     private func openLens() {
         guard !entries.isEmpty else { return }
         if lensState.lens == nil {
-            lensPainter.refreshTimeColumn(now: Date())
+            lensPainter.refreshTimeColumn(now: now())
             lensState.openFraction = 0
             setLens(PromptRailSteadyLens(geometry: currentLensGeometry(), pointerY: pointerY))
         }
@@ -195,10 +201,10 @@ extension PromptRailNSView {
         lensState.openFraction = 0
         lensState.displayedRows = .empty
         lensState.shape = .closed
+        lensState.heldBoxWidth = false
         lensState.hoveredRow = nil
         lensState.stepRequested = false
         lensState.keepsStepping = false
-        lensState.tracksPointer = false
         lensState.fade = .neither
         setLens(nil)
         // The resting rail sets its own fades, from its overflow offset.
@@ -293,10 +299,14 @@ extension PromptRailNSView {
     /// link's callback, and the tests' seam. The time since the last frame
     /// (`firstFrameInterval` on the first since frames started) advances the
     /// open fraction and, while the pointer is over the rail column or the
-    /// box of an open lens, the lens's steady motion. The first frame that
-    /// steps the lens after frames paused, or after the pointer was off both,
-    /// resumes its tracking where the pointer is, so where the pointer went
-    /// meanwhile does not read as a flick.
+    /// box of an open lens, the lens's steady motion. The lens measures the
+    /// pointer's speed from its moves' own event times
+    /// (`PromptRailNSView+Pointer.swift` notes them), so a pause in the
+    /// frames neither hides a flick nor makes one.
+    ///
+    /// A frame on which the lens did not move, the open fraction did not
+    /// change and the box's hold under the pointer did not either lays
+    /// nothing out again: only the hovered row can change.
     func advanceFrame(to timestamp: TimeInterval) {
         let dt = lensState.lastFrameTimestamp.map { max(0, timestamp - $0) }
             ?? PromptRailLensAnimation.firstFrameInterval
@@ -305,6 +315,7 @@ extension PromptRailNSView {
             updateFrameDemand()
             return
         }
+        let fraction = lensState.openFraction
         if var animation = lensState.animation {
             animation.elapsed += dt
             lensState.openFraction = animation.value
@@ -318,52 +329,52 @@ extension PromptRailNSView {
         var moved = false
         let driving = lensOpen && isPointerOverLens
         if driving {
-            if !lensState.tracksPointer { lens.resumeTracking(pointerY: pointerY) }
-            moved = lens.step(pointerY: pointerY, dt: dt)
+            moved = lens.step(dt: dt)
             lensState.lens = lens
         }
-        lensState.tracksPointer = driving
         // A flick holds the lens still without settling it: once the pointer
         // slows, the lens may still have to follow.
         lensState.keepsStepping = moved || (driving && lens.speed > PromptRailSteadyLens.flickSpeed)
-        refreshLensDisplay()
+        if moved || lensState.openFraction != fraction || holdsBoxWidth != lensState.heldBoxWidth {
+            refreshLensDisplay()
+        } else {
+            refreshHoveredRow()
+        }
         updateFrameDemand()
     }
 
-    /// Runs frames exactly while the lens is growing, shrinking or moving.
+    /// Runs frames exactly while the lens is growing, shrinking or moving,
+    /// with a display link that exists only for that run.
     func updateFrameDemand() {
         let wants = lensState.lens != nil
             && (lensState.animation != nil || lensState.stepRequested || lensState.keepsStepping)
         guard wants != lensState.isRunningFrames else { return }
         lensState.isRunningFrames = wants
         // A run of frames starts afresh: its first frame measures from no
-        // earlier one, and resumes the lens's pointer tracking.
+        // earlier one.
         lensState.lastFrameTimestamp = nil
-        lensState.tracksPointer = false
         if wants {
-            resumeFrameLink()
+            startFrameLink()
         } else {
-            lensState.frameLink?.isPaused = true
+            invalidateFrameLink()
         }
     }
 
-    /// Unpauses the display link, making one first if need be. Only in a
-    /// window the rail is not leaving, since the link follows the window's
+    /// Makes the display link for a run of frames, unless one exists. Only in
+    /// a window the rail is not leaving, since the link follows the window's
     /// screen: a link made on the way out would outlive the move.
-    func resumeFrameLink() {
-        guard usesDisplayLink, window != nil, !lensState.isLeavingWindow else { return }
-        if lensState.frameLink == nil {
-            let link = displayLink(
-                target: PromptRailDisplayLinkProxy(self),
-                selector: #selector(PromptRailDisplayLinkProxy.fired(_:)))
-            link.add(to: .main, forMode: .common)
-            lensState.frameLink = link
-        }
-        lensState.frameLink?.isPaused = false
+    func startFrameLink() {
+        guard usesDisplayLink, window != nil, !lensState.isLeavingWindow, lensState.frameLink == nil else { return }
+        let link = displayLink(
+            target: PromptRailDisplayLinkProxy(self),
+            selector: #selector(PromptRailDisplayLinkProxy.fired(_:)))
+        link.add(to: .main, forMode: .common)
+        lensState.frameLink = link
     }
 
-    /// Drops the display link: the rail is leaving its window, and a new
-    /// window means a new link, or the rail is going away.
+    /// Drops the display link: the frames stopped, the rail is leaving its
+    /// window, where a new window means a new link, or the rail is going
+    /// away.
     func invalidateFrameLink() {
         lensState.frameLink?.invalidate()
         lensState.frameLink = nil
@@ -389,10 +400,12 @@ extension PromptRailNSView {
         // it, which would close the lens. Over the rail column, which sits in
         // front of the box's leading end, no narrowing can leave the pointer
         // outside, so there, as anywhere off the box, the box fits its rows.
-        if lensState.isPointerOverBox, !isPointerOverRail {
+        let holds = holdsBoxWidth
+        if holds {
             shape = shape.widened(toAtLeast: min(lensState.shape.width, boxMaxWidth))
         }
         lensState.shape = shape
+        lensState.heldBoxWidth = holds
         // The box moves and grows under a still pointer, which sends no
         // event, so its hover follows the box here.
         if let point = lensState.lastPointer {
@@ -401,6 +414,31 @@ extension PromptRailNSView {
         lensState.hoveredRow = rowUnderPointer(in: rows)
         updateLensFade(rows)
         setNeedsDisplay(Self.lensRedrawRect(railColumn: railColumnRect, previousBox: previousBox, box: shape.box))
+    }
+
+    /// Whether the box holds its width: the pointer is over the box and off
+    /// the rail column.
+    private var holdsBoxWidth: Bool { lensState.isPointerOverBox && !isPointerOverRail }
+
+    /// A frame on which no row moved: the hovered row is all that can change,
+    /// and only its fill redraws, where it was and where it is. The notches,
+    /// the box and the text stay where they were.
+    private func refreshHoveredRow() {
+        let previous = lensState.hoveredRow
+        let rows = lensState.displayedRows
+        let row = rowUnderPointer(in: rows)
+        guard row != previous else { return }
+        lensState.hoveredRow = row
+        for changed in [previous, row].compactMap({ $0 }) where rows.heights.indices.contains(changed) {
+            setNeedsDisplay(Self.hoverRedrawRect(row: changed, in: rows, width: lensState.shape.width))
+        }
+    }
+
+    /// What the hovered fill of `row` in `rows` covers, in a box `width`
+    /// wide, with a point to spare for its antialiased edge.
+    static func hoverRedrawRect(row: Int, in rows: PromptRailLensRows, width: CGFloat) -> NSRect {
+        let band = PromptRailLensPainter.textBand(row: row, in: rows)
+        return NSRect(x: 0, y: band.minY, width: width, height: band.height).insetBy(dx: -1, dy: -1)
     }
 
     /// What one step of an existing lens redraws: the rail column, where the

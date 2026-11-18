@@ -197,25 +197,146 @@ struct PromptRailLensViewTests {
         #expect(followed > opened + 1, "the lens stayed at \(followed) after a push from \(opened)")
     }
 
-    /// The frames pause once the lens settles, and the lens's last pointer
-    /// height is where it settled. A move made then must not read, on the
-    /// first frame after, as a flick from there.
-    @Test("a pointer that moved while the frames were paused is no flick: the first frame follows it")
-    func pausedFramesResumeWithoutFlick() async throws {
+    /// The lens measures the pointer's speed from its moves' own times, not
+    /// from frames. A move made a second after the last, while the frames
+    /// were stopped, is measured over that second: 148pt in it is slow, and
+    /// the first frame follows.
+    @Test("a move after a pause in the frames is measured over the pause, and the first frame follows it")
+    func moveAfterPausedFramesIsNoFlick() async throws {
         let mount = LensMount()
         defer { mount.host.tearDown() }
         try await Self.openLens(mount)
         mount.frames(Self.wholeAnimation)
+        try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 2))
+        mount.frame()
         try #require(!mount.rail.isRunningFrames, "precondition: the open lens settled")
         let opened = try #require(mount.rail.lens).centre
 
+        mount.wait(1)
         try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 150))
         try #require(mount.rail.isRunningFrames, "precondition: a move over the open lens asked for a frame")
         mount.frame()
         let lens = try #require(mount.rail.lens)
         #expect(lens.speed <= PromptRailSteadyLens.flickSpeed,
-                "the move made while the frames were paused read as a flick, at \(lens.speed)pt/ms")
+                "a move a second after the last read as a flick, at \(lens.speed)pt/ms")
         #expect(lens.centre > opened + 1, "the first frame left the lens at \(lens.centre), from \(opened)")
+    }
+
+    /// A flick that starts while the frames are stopped freezes the lens on
+    /// the first frame after it. The lens settles and its frames stop; a
+    /// second later the pointer moves 1pt, and 10ms after that 99pt on, past
+    /// the dead zone. The same move made a second after the 1pt one is slow,
+    /// and the first frame follows it.
+    @Test("a flick that starts while the frames are stopped freezes the lens on the first frame")
+    func flickWhileFramesStoppedFreezes() async throws {
+        func push(after gap: TimeInterval) async throws -> (opened: CGFloat, lens: PromptRailSteadyLens) {
+            let mount = LensMount()
+            defer { mount.host.tearDown() }
+            try await Self.openLens(mount)
+            mount.frames(Self.wholeAnimation)
+            try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 1))
+            mount.frame()
+            try #require(!mount.rail.isRunningFrames, "precondition: the open lens settled")
+            let opened = try #require(mount.rail.lens).centre
+
+            mount.wait(1)
+            try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 2))
+            mount.wait(gap)
+            try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 101))
+            mount.frame()
+            let lens = try #require(mount.rail.lens)
+            return (opened, lens)
+        }
+        let flick = try await push(after: 0.010)
+        #expect(flick.lens.centre == flick.opened,
+                "the first frame after a flick moved the lens from \(flick.opened) to \(flick.lens.centre)")
+        #expect(flick.lens.speed > PromptRailSteadyLens.flickSpeed,
+                "99pt in 10ms read as \(flick.lens.speed)pt/ms")
+
+        let slow = try await push(after: 1)
+        #expect(slow.lens.speed <= PromptRailSteadyLens.flickSpeed, "99pt in 1s read as \(slow.lens.speed)pt/ms")
+        #expect(slow.lens.centre > slow.opened,
+                "the first frame after the same move, made slowly, left the lens at \(slow.lens.centre)")
+    }
+
+    /// Where the pointer went while it was off the rail column and the box
+    /// was no move over the rail. Back 150pt lower 60ms after it left, before
+    /// the close grace ends, it is no flick, though 150pt in 60ms would be.
+    @Test("a pointer that comes back after leaving the rail and the box is no flick")
+    func returnAfterLeavingIsNoFlick() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 1))
+        mount.frame()
+        let opened = try #require(mount.rail.lens).centre
+
+        try mount.move(to: Self.offLens)
+        mount.wait(0.06)
+        try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 150))
+        try #require(mount.hover.isOpen && mount.rail.lensOpen, "precondition: the lens is still open")
+        mount.frame()
+        let lens = try #require(mount.rail.lens)
+        #expect(lens.speed <= PromptRailSteadyLens.flickSpeed,
+                "the pointer's return read as a flick, at \(lens.speed)pt/ms")
+        #expect(lens.centre > opened + 1, "the first frame left the lens at \(lens.centre), from \(opened)")
+    }
+
+    /// The display link exists only while frames run: once the lens settles
+    /// it is released, and the next movement makes a new one. The rail has a
+    /// real link here, and the test runs without suspending, so the link
+    /// never fires.
+    @Test("the display link is released once the lens settles, and the next movement makes a new one")
+    func frameLinkReleasedWhenSettled() throws {
+        let mount = LensMount(usesDisplayLink: true)
+        defer { mount.host.tearDown() }
+        #expect(mount.rail.lensState.frameLink == nil, "a rail with no lens holds a display link")
+
+        mount.rail.lensOpenChanged(true)
+        let opening = try #require(mount.rail.lensState.frameLink, "an opening lens made no display link")
+        mount.frames(Self.wholeAnimation)
+        try #require(mount.rail.openFraction == 1, "precondition: the lens opened")
+        #expect(!mount.rail.isRunningFrames)
+        #expect(mount.rail.lensState.frameLink == nil, "the settled lens kept its display link")
+
+        mount.rail.lensPointerMoved()
+        let moving = try #require(mount.rail.lensState.frameLink, "a move over the settled lens made no display link")
+        #expect(moving !== opening, "the next run of frames reused the released link")
+        mount.frame()
+        #expect(mount.rail.lensState.frameLink == nil, "the link outlived the frame that settled the lens")
+    }
+
+    /// A frame on which no row moves changes only the hovered row, and
+    /// redraws only its fill, where it was and where it is. The pointer moves
+    /// a row down inside the dead zone: the hover follows it, and the rows
+    /// and the box stay. The redraw covers the fill `drawHoverFill` draws, a
+    /// point in from each side of the box over the row's text band, and
+    /// reaches a point past the box at most.
+    @Test("a frame on which no row moves changes only the hovered row, and redraws only its fill")
+    func stillFrameMovesOnlyTheHover() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        let rows = mount.rail.displayedRows
+        let box = try #require(mount.rail.boxRect, "the open lens has no box")
+        let hovered = try #require(mount.rail.hoveredRow, "precondition: the open lens hovers the row under the pointer")
+        let next = hovered + 1
+        try #require(rows.heights.indices.contains(next))
+
+        try mount.move(to: NSPoint(x: Self.onRail.x, y: rows.tops[next] + rows.heights[next] / 2))
+        mount.frame()
+        #expect(mount.rail.hoveredRow == next, "the hover stayed on row \(String(describing: mount.rail.hoveredRow))")
+        #expect(mount.rail.displayedRows == rows, "a move inside the dead zone moved the rows")
+        #expect(mount.rail.boxRect == box, "a move inside the dead zone moved the box")
+
+        let width = mount.rail.lensState.shape.width
+        let band = PromptRailLensPainter.textBand(row: next, in: rows)
+        let fill = CGRect(x: 1, y: band.minY, width: width - 2, height: band.height)
+        let rect = PromptRailNSView.hoverRedrawRect(row: next, in: rows, width: width)
+        #expect(rect.contains(fill), "the redraw \(rect) misses the fill \(fill)")
+        #expect(rect.maxX <= width + 1, "the redraw \(rect) reaches past the box, \(width) wide")
     }
 
     @Test("the pointer leaving the overlay takes the hovered row's fill away at once")
@@ -945,7 +1066,8 @@ struct PromptRailLensViewTests {
 /// A 400×601 (or `width`) transcript container in an offscreen window, the
 /// rail installed as `makeNSView` installs it but with the test's seams: an
 /// event-driven clock, a private notification center, a fake Escape monitor,
-/// no display link, and a Reduce Motion switch.
+/// no display link unless asked for, a Reduce Motion switch, and one time
+/// that both frames and pointer events are stamped with.
 @MainActor
 private final class LensMount {
     let host: OffscreenHost<EmptyView>
@@ -955,10 +1077,12 @@ private final class LensMount {
     let clock: EventDrivenTestClock
     let center: NotificationCenter
     let jumps: LensJumpRecorder
-    /// The last frame's timestamp.
-    private var frameTime: TimeInterval = 0
+    /// The time frames and pointer events are stamped with, in seconds.
+    /// Each frame moves it on 1/120s, and `wait(_:)` moves it on with no
+    /// frame.
+    private(set) var now: TimeInterval = 0
 
-    init(width: CGFloat = 400, entryCount: Int = 40, reduceMotion: Bool = false) {
+    init(width: CGFloat = 400, entryCount: Int = 40, reduceMotion: Bool = false, usesDisplayLink: Bool = false) {
         let clock = EventDrivenTestClock()
         let center = NotificationCenter()
         let jumps = LensJumpRecorder()
@@ -975,7 +1099,7 @@ private final class LensMount {
                 jumps.then?(id)
             },
             reduceMotion: { reduceMotion },
-            usesDisplayLink: false)
+            usesDisplayLink: usesDisplayLink)
         container.installPromptRail(
             rail: rail, hover: hover,
             escapeMonitor: PromptRailEscapeMonitor(install: { _ in NSObject() }, remove: { _ in }),
@@ -1012,10 +1136,16 @@ private final class LensMount {
         rail.mouseUp(with: try event(.leftMouseUp, at: point))
     }
 
-    /// One frame, 1/120s after the last.
+    /// One frame, 1/120s on.
     func frame() {
-        frameTime += 1.0 / 120
-        rail.advanceFrame(to: frameTime)
+        now += 1.0 / 120
+        rail.advanceFrame(to: now)
+    }
+
+    /// `seconds` pass with no frame: the frames are stopped, or the next one
+    /// has not come yet.
+    func wait(_ seconds: TimeInterval) {
+        now += seconds
     }
 
     func frames(_ count: Int) {
@@ -1025,7 +1155,7 @@ private final class LensMount {
     private func event(_ type: NSEvent.EventType, at point: NSPoint) throws -> NSEvent {
         let pressed = type != .mouseMoved
         return try #require(NSEvent.mouseEvent(
-            with: type, location: rail.convert(point, to: nil), modifierFlags: [], timestamp: 0,
+            with: type, location: rail.convert(point, to: nil), modifierFlags: [], timestamp: now,
             windowNumber: host.window.windowNumber, context: nil, eventNumber: 0,
             clickCount: pressed ? 1 : 0, pressure: pressed ? 1 : 0))
     }

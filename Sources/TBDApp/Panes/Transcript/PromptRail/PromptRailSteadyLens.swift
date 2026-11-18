@@ -2,13 +2,15 @@ import CoreGraphics
 import Foundation
 
 /// The open lens's motion (lens spec, "The lens" → "Steady motion"): it holds
-/// still while the pointer moves near its centre and follows when pushed. The
-/// pointer's height and the elapsed time go in, and the new centre comes out;
+/// still while the pointer moves near its centre and follows when pushed, but
+/// not during a flick. The caller notes each move of the pointer with its
+/// event time and steps the lens on each frame by the time since the last;
 /// it reads time only from what it is given, so a 60Hz and a 120Hz display
 /// move it the same way in the same time.
 ///
 /// A port of the approved HTML mock's `initLens`, `trackSpeed`, `steady` and
-/// `steadyTarget`, with the ease and the speed smoothing made time-based.
+/// `steadyTarget`, with the ease and the speed smoothing made time-based, and
+/// the speed measured from the pointer's own moves rather than from frames.
 struct PromptRailSteadyLens: Equatable, Sendable {
     /// The dead zone's half-width, as a share of the lens radius: 2.7 rows.
     static let deadZoneShare: CGFloat = 0.45
@@ -18,12 +20,21 @@ struct PromptRailSteadyLens: Equatable, Sendable {
     /// A smoothed pointer speed above this, in pt per ms, is a flick, and the
     /// lens holds still.
     static let flickSpeed: CGFloat = 0.45
-    /// A step that would move the centre less than this many rows moves it
-    /// not at all, so the lens settles.
+    /// Once the centre is within this many rows of its target, it moves onto
+    /// the target and stops there.
     static let settleRows: CGFloat = 0.002
-    /// The speed smoothing keeps this share of the old speed per 60Hz frame:
-    /// `v ← 0.6 × v + 0.4 × instantaneous`.
+    /// The shortest time a move's speed is measured over. Moves that arrive
+    /// closer together, or with the same time, count as this far apart.
+    static let shortestMoveGap: TimeInterval = 0.004
+    /// The speed smoothing keeps this share of the old speed per 60Hz
+    /// frame's worth of time: `v ← 0.6 × v + 0.4 × instantaneous`.
     private static let speedKeptPerFrame: CGFloat = 0.6
+    /// Bisection steps for the target the centre eases toward, and for the
+    /// one it settles on, which runs until the interval stops shrinking, so
+    /// that the settled centre does not depend on where the bisection
+    /// started.
+    private static let followSteps = 24
+    private static let settleSteps = 64
 
     private(set) var geometry: PromptRailLensGeometry
     private(set) var anchor: PromptRailLensAnchor
@@ -33,8 +44,23 @@ struct PromptRailSteadyLens: Equatable, Sendable {
     private(set) var rows: PromptRailLensRows
     /// The pointer's smoothed speed, in pt per ms.
     private(set) var speed: CGFloat = 0
-    /// The pointer's height at the last step, or where tracking last resumed.
-    private var lastPointerY: CGFloat
+    /// The pointer's height at its last noted move, or where the lens opened.
+    private(set) var pointerY: CGFloat
+    /// The last noted move's event time; nil before the first.
+    private var lastMoveTime: TimeInterval?
+    /// Whether the next move is measured against the last. Not from the
+    /// lens's opening, nor from the pointer leaving the rail column and the
+    /// box, until a move starts a new run.
+    private var measuresNextMove = false
+    /// A move was noted since the last step, so that step does not decay the
+    /// speed.
+    private var movedSinceStep = false
+    /// How much of the time since the last move the steps have decayed the
+    /// speed over already.
+    private var decayedSinceMove: TimeInterval = 0
+    /// The centre sits on its target for the pointer where it is. No step
+    /// moves it until the pointer moves or the lens is rebased.
+    private var isSettled = false
 
     /// Opens the lens on the centre whose own layout puts the pointed row
     /// under the pointer.
@@ -45,52 +71,89 @@ struct PromptRailSteadyLens: Equatable, Sendable {
         self.anchor = anchor
         self.centre = centre
         rows = geometry.rows(centre: centre, anchor: anchor)
-        lastPointerY = pointerY
+        self.pointerY = pointerY
     }
 
-    /// Advances the lens by `dt` seconds with the pointer at `pointerY`.
-    /// Returns true when the centre moved.
+    /// Notes a move of the pointer over the rail column or the box, to `y`
+    /// in rail coordinates, at `time` seconds on the events' clock
+    /// (`NSEvent.timestamp`).
     ///
-    /// A rail that keeps its resting rows (spec step 0) never moves, so its
-    /// lens only tracks the pointer's speed. Otherwise the lens holds still
-    /// during a flick, and while the pointer is within the dead zone of its
-    /// centre. Past the dead zone, the centre eases toward the centre whose
-    /// layout puts the pointer exactly on the dead zone's edge, by
-    /// `1 − exp(−dt / easeTimeConstant)` of the way.
-    mutating func step(pointerY: CGFloat, dt: TimeInterval) -> Bool {
-        guard dt > 0, !pointerY.isNaN else { return false }
-        let elapsed = CGFloat(dt)
-        let instant = abs(pointerY - lastPointerY) / (elapsed * 1000)
-        speed += (instant - speed) * (1 - pow(Self.speedKeptPerFrame, elapsed * 60))
-        lastPointerY = pointerY
-        guard !geometry.keepsRestingRows, speed <= Self.flickSpeed else { return false }
+    /// The move's speed is its distance over the time since the last move,
+    /// at least `shortestMoveGap`, and the smoothing runs over that same
+    /// time, so a move after a pause reads as slow as it was. The steps since
+    /// the last move have already decayed the speed over part of that time,
+    /// and the old speed decays over only the rest. The first move after the
+    /// lens opens or the pointer leaves starts a new run: it decays the
+    /// speed over the time since the last move and reads none of its own,
+    /// since where the pointer went meanwhile was no move over the rail.
+    mutating func notePointer(y: CGFloat, time: TimeInterval) {
+        guard !y.isNaN, !time.isNaN else { return }
+        if y != pointerY { isSettled = false }
+        if let lastMoveTime {
+            let gap = max(Self.shortestMoveGap, time - lastMoveTime)
+            let kept = Self.speedKept(over: max(0, gap - decayedSinceMove))
+            if measuresNextMove {
+                let instant = abs(y - pointerY) / CGFloat(gap * 1000)
+                speed = speed * kept + instant * (1 - Self.speedKept(over: gap))
+            } else {
+                speed *= kept
+            }
+        }
+        pointerY = y
+        lastMoveTime = time
+        measuresNextMove = true
+        movedSinceStep = true
+        decayedSinceMove = 0
+    }
+
+    /// The pointer left the rail column and the box: its next move starts a
+    /// new run.
+    mutating func pointerLeft() {
+        measuresNextMove = false
+    }
+
+    /// Advances the lens by `dt` seconds of frame time. Returns true when the
+    /// centre moved.
+    ///
+    /// A step with no move noted since the last decays the speed toward zero
+    /// over `dt`, by the smoothing's own factor: the pointer is still. A rail
+    /// that keeps its resting rows (spec step 0) never moves. Otherwise the
+    /// lens holds still during a flick, and while the pointer is within the
+    /// dead zone of its centre. Past the dead zone, the centre eases toward
+    /// the centre whose layout puts the pointer exactly on the dead zone's
+    /// edge, by `1 − exp(−dt / easeTimeConstant)` of the way. Once within
+    /// `settleRows` of it, the centre moves onto it and stops there, so it
+    /// settles in the same place at any frame rate.
+    mutating func step(dt: TimeInterval) -> Bool {
+        guard dt > 0 else { return false }
+        if movedSinceStep {
+            movedSinceStep = false
+        } else {
+            speed *= Self.speedKept(over: dt)
+            decayedSinceMove += dt
+        }
+        guard !geometry.keepsRestingRows, !isSettled, speed <= Self.flickSpeed else { return false }
 
         let pointed = rows.fraction(atY: pointerY)
         let deadZone = Self.deadZoneShare * PromptRailLayout.lensRadius
-        let target: CGFloat
+        let below: Bool
         if pointed > centre + deadZone {
-            target = steadyTarget(pointerY: pointerY, below: true)
+            below = true
         } else if pointed < centre - deadZone {
-            target = steadyTarget(pointerY: pointerY, below: false)
+            below = false
         } else {
             return false
         }
-        let moved = centre + (target - centre) * CGFloat(1 - exp(-dt / Self.easeTimeConstant))
-        guard abs(moved - centre) >= Self.settleRows else { return false }
-        centre = moved
-        rows = geometry.rows(centre: moved, anchor: anchor)
+        let target = steadyTarget(below: below, steps: Self.followSteps)
+        guard abs(target - centre) >= Self.settleRows else {
+            isSettled = true
+            let settled = steadyTarget(below: below, steps: Self.settleSteps)
+            guard settled != centre else { return false }
+            moveCentre(to: settled)
+            return true
+        }
+        moveCentre(to: centre + (target - centre) * CGFloat(1 - exp(-dt / Self.easeTimeConstant)))
         return true
-    }
-
-    /// Starts tracking the pointer afresh at `pointerY`, at rest. Steps that
-    /// stopped, because the frames paused or the pointer left the rail and
-    /// the box, say nothing about how fast the pointer moved meanwhile; read
-    /// as one frame's motion, the whole gap would look like a flick and
-    /// freeze the lens.
-    mutating func resumeTracking(pointerY: CGFloat) {
-        guard !pointerY.isNaN else { return }
-        lastPointerY = pointerY
-        speed = 0
     }
 
     /// The lens on a new geometry, after the outline or the rail's height
@@ -105,20 +168,32 @@ struct PromptRailSteadyLens: Equatable, Sendable {
         var lens = self
         lens.geometry = geometry
         lens.anchor = anchor
-        lens.centre = centre
-        lens.rows = geometry.rows(centre: centre, anchor: anchor)
+        lens.isSettled = false
+        lens.moveCentre(to: centre)
         return lens
     }
 
-    /// The centre whose own layout puts `pointerY` exactly on the dead zone's
-    /// edge: below the centre when `below`, above it otherwise. A 24-step
-    /// bisection between the centre and that end of the rail.
-    private func steadyTarget(pointerY: CGFloat, below: Bool) -> CGFloat {
+    private mutating func moveCentre(to centre: CGFloat) {
+        self.centre = centre
+        rows = geometry.rows(centre: centre, anchor: anchor)
+    }
+
+    /// The share of the speed the smoothing keeps over `time` seconds.
+    private static func speedKept(over time: TimeInterval) -> CGFloat {
+        pow(speedKeptPerFrame, CGFloat(time) * 60)
+    }
+
+    /// The centre whose own layout puts the pointer exactly on the dead
+    /// zone's edge: below the centre when `below`, above it otherwise. A
+    /// bisection of at most `steps` steps between the centre and that end of
+    /// the rail.
+    private func steadyTarget(below: Bool, steps: Int) -> CGFloat {
         let edge = (below ? 1 : -1) * Self.deadZoneShare * PromptRailLayout.lensRadius
         var low = below ? centre : 0
         var high = below ? CGFloat(geometry.count) : centre
-        for _ in 0..<24 {
+        for _ in 0..<steps {
             let middle = (low + high) / 2
+            guard middle > low, middle < high else { break }
             let pointed = geometry.rows(centre: middle, anchor: anchor).fraction(atY: pointerY)
             if pointed - middle - edge > 0 { low = middle } else { high = middle }
         }
