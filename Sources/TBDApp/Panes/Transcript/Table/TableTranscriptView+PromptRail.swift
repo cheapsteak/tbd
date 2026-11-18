@@ -251,27 +251,39 @@ extension TableTranscriptView.Coordinator {
         }
     }
 
-    /// Passes `container`'s reports of whether the rail's lens is on screen
-    /// to the pane's `promptLensVisibility`, through
-    /// `reportPromptLensShown(_:)`. The container holds the coordinator, so
-    /// the close of a lens whose table is being torn down still reaches the
-    /// pane; the coordinator holds the container only weakly, so no cycle
-    /// forms.
-    func observePromptLensShown(of container: TranscriptContainerView) {
-        container.onPromptRailLensShownChange = { shown in self.reportPromptLensShown(shown) }
+    /// Passes `container`'s reports of whether the rail's lens is drawn to
+    /// the pane's `promptLensVisibility`, through `reportPromptLensDrawn(_:)`.
+    /// The container holds the coordinator, so the end of a lens whose table
+    /// is being torn down still reaches the pane; the coordinator holds the
+    /// container only weakly, so no cycle forms.
+    func observePromptLensDrawn(of container: TranscriptContainerView) {
+        container.onPromptRailLensDrawnChange = { drawn in self.reportPromptLensDrawn(drawn) }
     }
 
-    /// Writes whether the rail's lens is on screen to `promptLensVisibility`
-    /// on the next main-queue turn, never in place: an outline change inside
+    /// Hands the lens's drawn state to `visibility` from now on, as each
+    /// `updateNSView` passes the pane's object. The rail reports only
+    /// changes, so a new object hears the state now, `lensDrawn`, through
+    /// `reportPromptLensDrawn(_:)`; a report still queued for the old one is
+    /// dropped.
+    func usePromptLensVisibility(_ visibility: PromptLensVisibility?, lensDrawn: Bool) {
+        guard visibility !== promptLensVisibility else { return }
+        promptLensVisibility = visibility
+        reportPromptLensDrawn(lensDrawn)
+    }
+
+    /// Writes whether the rail's lens is drawn to `promptLensVisibility` on
+    /// the next main-queue turn, never in place: an outline change inside
     /// SwiftUI's update can give an open lens its first prompt or take its
     /// last, and a state write made there is dropped or warned about. Each
-    /// report carries its own value, so reports arrive in order and the last
-    /// one stands. Only a change is written, so the overlays that read it
-    /// re-render only when it changes.
-    func reportPromptLensShown(_ shown: Bool) {
+    /// report carries its own value and the object it was made for, so
+    /// reports arrive in order, the last one stands, and one made for an
+    /// object the pane has since replaced writes nothing. Only a change is
+    /// written, so the overlays that read it re-render only when it changes.
+    func reportPromptLensDrawn(_ drawn: Bool) {
+        let receiver = promptLensVisibility
         DispatchQueue.main.async {
-            guard let visibility = self.promptLensVisibility, visibility.isShown != shown else { return }
-            visibility.isShown = shown
+            guard let receiver, receiver === self.promptLensVisibility, receiver.isShown != drawn else { return }
+            receiver.isShown = drawn
         }
     }
 

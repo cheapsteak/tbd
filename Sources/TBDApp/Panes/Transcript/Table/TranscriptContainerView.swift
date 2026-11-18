@@ -22,12 +22,12 @@ import AppKit
 /// - **Prompt rail** – `installPromptRail` makes this view the hub between
 ///   the rail and its hover model: the hover model's open and close reach the
 ///   rail as the lens's open state, and the Escape monitor runs only while
-///   the rail reports the lens on screen — an open lens with no prompts is
-///   not. `onPromptRailLensShownChange` passes the same report on. The lens
-///   closes at once when this view leaves its window (a pane rebuilt under a
-///   new identity, as on session rollover) or when that window resigns key,
-///   so a lens in a background window never holds the app-wide Escape
-///   monitor.
+///   the rail reports the lens shown — an open lens with no prompts is not.
+///   `onPromptRailLensDrawnChange` reports instead whether the lens is drawn,
+///   which a dismissed lens still is while it shrinks. The lens closes at
+///   once when this view leaves its window (a pane rebuilt under a new
+///   identity, as on session rollover) or when that window resigns key, so a
+///   lens in a background window never holds the app-wide Escape monitor.
 ///
 /// Coordinates are flipped (y grows downward), matching the table.
 final class TranscriptContainerView: NSView {
@@ -62,11 +62,15 @@ final class TranscriptContainerView: NSView {
     private var promptRailNotificationCenter: NotificationCenter = .default
     /// The window whose resign-key notification is observed.
     private weak var observedKeyWindow: NSWindow?
-    /// Called with whether the rail's lens is on screen, on each change: the
-    /// report that also runs the Escape monitor. `TableTranscriptView` passes
-    /// it to the pane's `PromptLensVisibility`, which the overlays above the
-    /// rail read to hide meanwhile.
-    var onPromptRailLensShownChange: (@MainActor (Bool) -> Void)?
+    /// Called with whether the rail's lens is drawn, from when it starts to
+    /// grow until it has shrunk away, on each change. `TableTranscriptView`
+    /// passes it to the pane's `PromptLensVisibility`, which the overlays
+    /// above the rail read to hide meanwhile, so they never return over a
+    /// lens still shrinking. The Escape monitor follows the lens's open state
+    /// instead.
+    var onPromptRailLensDrawnChange: (@MainActor (Bool) -> Void)?
+    /// Whether the rail's lens is drawn; false with no rail mounted.
+    var isPromptRailLensDrawn: Bool { promptRailNSView?.isLensDrawn ?? false }
 
     private var promptRailNSView: PromptRailNSView? { railView as? PromptRailNSView }
 
@@ -142,9 +146,7 @@ final class TranscriptContainerView: NSView {
         promptRailNotificationCenter = notificationCenter
         rail.wheelTarget = scrollView
         rail.onLensShownChange = { [weak self] shown in self?.promptRailLensShownChanged(shown) }
-        // A lens starting to open widens the overlay to take its box, and
-        // one that has closed narrows it back to the gutter.
-        rail.onOpenWidthChange = { [weak self] in self?.layoutContent() }
+        rail.onOpenWidthChange = { [weak self] in self?.promptRailLensDrawnChanged() }
         railView = rail
         hover.onOpenChange = { [weak self] open in self?.promptRailNSView?.lensOpenChanged(open) }
         startObservingKeyWindow()
@@ -162,7 +164,14 @@ final class TranscriptContainerView: NSView {
         } else {
             promptRailEscape?.stop()
         }
-        onPromptRailLensShownChange?(shown)
+    }
+
+    /// The lens started to grow, or has shrunk away: the overlay widens to
+    /// take its box or narrows back to the gutter, and the overlays above the
+    /// rail hear of it.
+    private func promptRailLensDrawnChanged() {
+        layoutContent()
+        onPromptRailLensDrawnChange?(isPromptRailLensDrawn)
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {

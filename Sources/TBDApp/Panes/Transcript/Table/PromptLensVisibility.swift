@@ -3,8 +3,9 @@ import SwiftUI
 
 /// Whether a transcript pane's prompt rail lens is on screen, for the
 /// overlays above the rail that hide while it is (lens spec, "Overlays above
-/// the rail"). Each pane that mounts the rail owns one in `@State` and hands
-/// it to its `TableTranscriptView`, whose coordinator sets `isShown`.
+/// the rail"): drawn, from when it starts to grow until it has shrunk away.
+/// Each pane that mounts the rail owns one in `@State` and hands it to its
+/// `TableTranscriptView`, whose coordinator sets `isShown`.
 ///
 /// Only those overlays read `isShown`, each in its own body. The pane never
 /// does: a pane re-render reruns `updateNSView`, and with it the table's

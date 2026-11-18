@@ -76,10 +76,11 @@ struct TableTranscriptView: NSViewRepresentable {
     /// a table that is already in the window as an update rather than as a
     /// mount (`TranscriptTailFirstOpen`). Nil where nothing waits on the open.
     var onOpenSettled: (@MainActor () -> Void)?
-    /// The pane's record of whether the prompt rail's lens is on screen. The
-    /// coordinator sets it on each change, a main-queue turn later and
-    /// outside any SwiftUI update (`Coordinator.reportPromptLensShown(_:)`),
-    /// and only the overlays above the rail read it. Nil where nothing does.
+    /// The pane's record of whether the prompt rail's lens is drawn, from
+    /// when it starts to grow until it has shrunk away. The coordinator sets
+    /// it on each change, a main-queue turn later and outside any SwiftUI
+    /// update (`Coordinator.reportPromptLensDrawn(_:)`), and only the
+    /// overlays above the rail read it. Nil where nothing does.
     var promptLensVisibility: PromptLensVisibility?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
@@ -249,7 +250,7 @@ struct TableTranscriptView: NSViewRepresentable {
         let rail = PromptRailNSView(hover: hover, onJump: onJump)
         container.installPromptRail(rail: rail, hover: hover)
         coordinator.promptRailPresenter = rail
-        coordinator.observePromptLensShown(of: container)
+        coordinator.observePromptLensDrawn(of: container)
     }
 
     func updateNSView(_ container: TranscriptContainerView, context ctx: Context) {
@@ -262,7 +263,7 @@ struct TableTranscriptView: NSViewRepresentable {
             coordinator.scrollToEnd(animated: true)
         }
         coordinator.onNearTop = onNearTop
-        coordinator.promptLensVisibility = promptLensVisibility
+        coordinator.usePromptLensVisibility(promptLensVisibility, lensDrawn: container.isPromptRailLensDrawn)
         let nodes = nodesProvider()
         coordinator.update(
             nodes: nodes,

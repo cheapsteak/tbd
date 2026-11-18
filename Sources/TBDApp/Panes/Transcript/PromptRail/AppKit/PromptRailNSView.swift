@@ -36,9 +36,11 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 ///   box — which is what keeps Escape and click suppression in force while
 ///   the pointer is still on the rail.
 /// - **Lens** – the hover model's open state arrives through
-///   `lensOpenChanged(_:)`. The lens is on screen while it is open and there
-///   is a prompt to show; `onLensShownChange` reports that, and the container
-///   runs the Escape monitor off it.
+///   `lensOpenChanged(_:)`. The lens is shown while it is open and there is a
+///   prompt to show; `onLensShownChange` reports that, and the container runs
+///   the Escape monitor off it. A dismissed lens is still drawn while it
+///   shrinks (`isLensDrawn`), and `onOpenWidthChange` reports when it starts
+///   and stops being drawn.
 /// - **Clicks** – a click on a row, or on a notch of the bare rail, jumps to
 ///   its prompt.
 /// - **Wheel** – the rail never scrolls under the wheel; it hands wheel
@@ -90,9 +92,10 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     private(set) var offset: CGFloat = 0
 
     /// Whether the hover model has the lens open. An open lens with no
-    /// prompts is not on screen; `isLensShown` says whether it is.
+    /// prompts shows nothing; `isLensShown` says whether it shows.
     private(set) var lensOpen = false
-    /// Whether the lens is on screen: open, with at least one prompt.
+    /// Whether the lens shows: open, with at least one prompt. A closed lens
+    /// is still drawn while it shrinks away (`isLensDrawn`).
     private(set) var isLensShown = false
     /// Called on every change of `isLensShown`, and only on a change — when
     /// the lens opens or closes with prompts, and when an open lens gains its

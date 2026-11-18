@@ -140,9 +140,13 @@ extension PromptRailNSView {
     /// Whether the view wants frames: a lens is growing, shrinking or moving.
     /// While it does, a display link runs; otherwise there is none.
     var isRunningFrames: Bool { lensState.isRunningFrames }
-    /// Whether a lens exists, so the overlay must be wide enough for its box.
-    /// `onOpenWidthChange` reports each change.
-    var wantsOpenWidth: Bool { lensState.lens != nil }
+    /// Whether the lens is drawn: from when it starts to grow until it has
+    /// shrunk away, however soon it was dismissed. `onOpenWidthChange`
+    /// reports each change.
+    var isLensDrawn: Bool { lensState.lens != nil }
+    /// Whether a lens is drawn, so the overlay must be wide enough for its
+    /// box. `onOpenWidthChange` reports each change.
+    var wantsOpenWidth: Bool { isLensDrawn }
 
     func currentLensGeometry() -> PromptRailLensGeometry {
         PromptRailLensGeometry(layout: currentLayout(), restOffset: offset)

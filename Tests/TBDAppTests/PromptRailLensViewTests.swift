@@ -444,29 +444,61 @@ struct PromptRailLensViewTests {
         #expect(!mount.rail.isRunningFrames, "a move off the rail column and the box asked for a frame")
     }
 
-    /// The overlays above the rail hide while the lens shows. The container
-    /// reports the lens coming and going, and the table's coordinator writes
-    /// each report to the pane's `PromptLensVisibility` a main-queue turn
-    /// later, outside any SwiftUI update.
-    @Test("the lens coming and going reaches the pane's visibility object through the container and the coordinator")
-    func lensShownReachesPane() async throws {
+    /// The overlays above the rail hide while the lens is drawn, from when
+    /// it starts to grow until it has shrunk away. The container reports the
+    /// lens coming and going, and the table's coordinator writes each report
+    /// to the pane's `PromptLensVisibility` a main-queue turn later, outside
+    /// any SwiftUI update. A dismissed lens still shrinks, and the overlays
+    /// stay hidden until it is gone.
+    @Test("the lens coming and going reaches the pane's visibility object, which stays set while a dismissed lens shrinks")
+    func lensDrawnReachesPane() async throws {
         let mount = LensMount()
         defer { mount.host.tearDown() }
-        let coordinator = TableTranscriptView.Coordinator(context: TranscriptCardContext(
-            terminalID: nil, openTranscriptOverlay: nil, appState: nil, linkResolver: nil, onLinkClicked: nil))
+        let coordinator = Self.makeCoordinator()
         defer { withExtendedLifetime(coordinator) {} }
         let visibility = PromptLensVisibility()
         coordinator.promptLensVisibility = visibility
-        coordinator.observePromptLensShown(of: mount.container)
+        coordinator.observePromptLensDrawn(of: mount.container)
 
         try await Self.openLens(mount)
         await drainMainQueue()
         #expect(visibility.isShown, "the open never reached the pane")
+        mount.frames(Self.wholeAnimation)
 
         mount.hover.dismiss(.escape)
-        #expect(visibility.isShown, "the close reached the pane inside the change rather than a turn later")
+        try #require(mount.rail.lens != nil && mount.rail.isRunningFrames, "precondition: the dismissed lens shrinks")
         await drainMainQueue()
-        #expect(!visibility.isShown, "the close never reached the pane")
+        #expect(visibility.isShown, "the overlays came back over a lens still shrinking")
+
+        mount.frames(Self.wholeAnimation)
+        try #require(mount.rail.lens == nil, "precondition: the lens has shrunk away")
+        #expect(visibility.isShown, "the end reached the pane inside the change rather than a turn later")
+        await drainMainQueue()
+        #expect(!visibility.isShown, "the end of the lens never reached the pane")
+    }
+
+    /// The rail reports only changes, so a visibility object the pane hands
+    /// the table while the lens is drawn hears the drawn state from the
+    /// table, a main-queue turn later.
+    @Test("a new visibility object handed over while the lens is drawn hears it is drawn")
+    func newVisibilityHearsDrawnLens() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        let coordinator = Self.makeCoordinator()
+        defer { withExtendedLifetime(coordinator) {} }
+        let first = PromptLensVisibility()
+        coordinator.promptLensVisibility = first
+        coordinator.observePromptLensDrawn(of: mount.container)
+        try await Self.openLens(mount)
+        await drainMainQueue()
+        try #require(first.isShown && mount.container.isPromptRailLensDrawn, "precondition: the lens is drawn")
+
+        let second = PromptLensVisibility()
+        coordinator.usePromptLensVisibility(second, lensDrawn: mount.container.isPromptRailLensDrawn)
+        #expect(coordinator.promptLensVisibility === second)
+        #expect(!second.isShown, "the hand-over wrote the new object in place rather than a turn later")
+        await drainMainQueue()
+        #expect(second.isShown, "the new visibility object never heard the lens is drawn")
     }
 
     @Test("an empty rail grows no lens, and an open lens appears with the first prompt and goes with the last")
@@ -1190,6 +1222,12 @@ struct PromptRailLensViewTests {
     }
 
     // MARK: Helpers
+
+    /// A table coordinator with no table, for the lens's visibility reports.
+    private static func makeCoordinator() -> TableTranscriptView.Coordinator {
+        TableTranscriptView.Coordinator(context: TranscriptCardContext(
+            terminalID: nil, openTranscriptOverlay: nil, appState: nil, linkResolver: nil, onLinkClicked: nil))
+    }
 
     /// `count` prompts, every other one stamped, so rows carry a time column.
     /// One prompt per id, in order, with no timestamps.
