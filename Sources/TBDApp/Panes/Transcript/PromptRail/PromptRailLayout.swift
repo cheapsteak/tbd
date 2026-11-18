@@ -103,8 +103,7 @@ struct PromptRailLayout: Equatable {
     /// Nearest notch to a point in rail coordinates, or nil when there are none.
     func index(atRailY y: CGFloat, offset: CGFloat) -> Int? {
         guard count > 0 else { return nil }
-        let raw = ((y + offset - Self.topInset) / pitch).rounded(.down)
-        return min(max(Int(raw), 0), count - 1)
+        return min(max(Int(band(atRailY: y, offset: offset)), 0), count - 1)
     }
 
     /// The notch whose band holds a point in rail coordinates, or nil when
@@ -112,8 +111,15 @@ struct PromptRailLayout: Equatable {
     /// outside the resting column points at no notch.
     func indexInColumn(atRailY y: CGFloat, offset: CGFloat) -> Int? {
         guard count > 0 else { return nil }
-        let raw = ((y + offset - Self.topInset) / pitch).rounded(.down)
+        let raw = band(atRailY: y, offset: offset)
         guard raw >= 0, raw < CGFloat(count) else { return nil }
         return Int(raw)
+    }
+
+    /// The band a point in rail coordinates falls in, counted from the first
+    /// notch's and unbounded: negative above the column, `count` or more
+    /// below it.
+    private func band(atRailY y: CGFloat, offset: CGFloat) -> CGFloat {
+        ((y + offset - Self.topInset) / pitch).rounded(.down)
     }
 }

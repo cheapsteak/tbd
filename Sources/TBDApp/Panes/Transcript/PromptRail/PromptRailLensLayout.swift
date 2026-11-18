@@ -297,23 +297,26 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         let roomBelow = top + column - centreY
         let fitsAbove = roomAbove >= minAbove - 1e-9
         let fitsBelow = roomBelow >= minBelow - 1e-9
+        // One side's base, from a sliver to the peak, that fills the room on
+        // its side of the centre given the other side's base. The room above
+        // the centre holds `ka × upper + kab × lower` of base, and the room
+        // below it `(ta − ka) × upper + (tb − kab) × lower`.
+        let restBelowCentre = tb - kab
+        func solveUpper(lower: CGFloat) -> CGFloat {
+            ka > 1e-6 ? min(peak, max(sliver, (roomAbove - peak * fa - kab * lower) / ka)) : sliver
+        }
+        func solveLower(upper: CGFloat) -> CGFloat {
+            restBelowCentre > 1e-6
+                ? min(peak, max(sliver, (roomBelow - peak * fb - (ta - ka) * upper) / restBelowCentre))
+                : sliver
+        }
         var upper = sliver
         var lower = sliver
         if slides {
             // A sliding column: each side of the centre fills the room the
-            // slide leaves it, with bases from a sliver to the peak. Rows
-            // below the centre weigh `(ta − ka) × upper + (tb − kab) × lower`;
-            // only one of `kab` and `ta − ka` is nonzero, so solving the side
-            // that does not depend on the other first is exact.
-            let restBelowCentre = tb - kab
-            func solveUpper(lower: CGFloat) -> CGFloat {
-                ka > 1e-6 ? min(peak, max(sliver, (roomAbove - peak * fa - kab * lower) / ka)) : sliver
-            }
-            func solveLower(upper: CGFloat) -> CGFloat {
-                restBelowCentre > 1e-6
-                    ? min(peak, max(sliver, (roomBelow - peak * fb - (ta - ka) * upper) / restBelowCentre))
-                    : sliver
-            }
+            // slide leaves it. Only one of `kab` and `ta − ka` is nonzero, so
+            // solving the side that does not depend on the other first is
+            // exact.
             if CGFloat(centreRow) + 0.5 < c {
                 upper = solveUpper(lower: sliver)
                 lower = solveLower(upper: upper)
@@ -344,14 +347,9 @@ struct PromptRailLensGeometry: Equatable, Sendable {
                 upper = ta > 1e-6 ? (restRoom - tb * sliver) / ta : sliver
             }
         } else if fitsBelow {
-            let restBelowCentre = tb - kab
-            lower = restBelowCentre > 1e-6
-                ? min(peak, max(sliver, (roomBelow - peak * fb - (ta - ka) * sliver) / restBelowCentre))
-                : sliver
+            lower = solveLower(upper: sliver)
         } else if fitsAbove {
-            upper = ka > 1e-6
-                ? min(peak, max(sliver, (roomAbove - peak * fa - kab * sliver) / ka))
-                : sliver
+            upper = solveUpper(lower: sliver)
         }
 
         var heights = [CGFloat](repeating: 0, count: count)
