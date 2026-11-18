@@ -235,6 +235,31 @@ struct PromptRailLensViewTests {
         #expect(!mount.hover.isOpen, "the lens stayed open after the pointer left the overlay")
     }
 
+    /// The live pane hides its jump-to-latest button while the lens shows.
+    /// The container reports the lens coming and going, and the table's
+    /// coordinator passes each report up to the pane a main-queue turn later,
+    /// outside any SwiftUI update.
+    @Test("the lens coming and going reaches the pane through the container and the table's coordinator")
+    func lensShownReachesPane() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        let coordinator = TableTranscriptView.Coordinator(context: TranscriptCardContext(
+            terminalID: nil, openTranscriptOverlay: nil, appState: nil, linkResolver: nil, onLinkClicked: nil))
+        defer { withExtendedLifetime(coordinator) {} }
+        let reports = LensShownRecorder()
+        coordinator.onPromptLensShownChange = { shown in reports.values.append(shown) }
+        coordinator.observePromptLensShown(of: mount.container)
+
+        try await Self.openLens(mount)
+        await drainMainQueue()
+        #expect(reports.values == [true], "the open reached the pane as \(reports.values)")
+
+        mount.hover.dismiss(.escape)
+        #expect(reports.values == [true], "the close reached the pane inside the change rather than a turn later")
+        await drainMainQueue()
+        #expect(reports.values == [true, false], "the close reached the pane as \(reports.values)")
+    }
+
     @Test("an empty rail grows no lens, and an open lens appears with the first prompt and goes with the last")
     func emptyOutlineNoLens() async throws {
         let mount = LensMount(entryCount: 0)
@@ -792,6 +817,12 @@ private final class LensMount {
             windowNumber: host.window.windowNumber, context: nil, eventNumber: 0,
             clickCount: pressed ? 1 : 0, pressure: pressed ? 1 : 0))
     }
+}
+
+/// The lens-shown reports a coordinator passes up, in order.
+@MainActor
+private final class LensShownRecorder {
+    var values: [Bool] = []
 }
 
 @MainActor

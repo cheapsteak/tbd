@@ -251,6 +251,25 @@ extension TableTranscriptView.Coordinator {
         }
     }
 
+    /// Passes `container`'s reports of whether the rail's lens is on screen
+    /// up to the pane, through `reportPromptLensShown(_:)`. The container
+    /// holds the coordinator, so the close of a lens whose table is being
+    /// torn down still reaches the pane; the coordinator holds the container
+    /// only weakly, so no cycle forms.
+    func observePromptLensShown(of container: TranscriptContainerView) {
+        container.onPromptRailLensShownChange = { shown in self.reportPromptLensShown(shown) }
+    }
+
+    /// Reports whether the rail's lens is on screen to
+    /// `onPromptLensShownChange` on the next main-queue turn, never in place:
+    /// an outline change inside SwiftUI's update can give an open lens its
+    /// first prompt or take its last, and SwiftUI drops a state write made
+    /// there. Each report carries its own value, so reports arrive in order
+    /// and the last one stands.
+    func reportPromptLensShown(_ shown: Bool) {
+        DispatchQueue.main.async { self.onPromptLensShownChange?(shown) }
+    }
+
     /// Stops holding the last jump's target, as a pin and as the active
     /// prompt, and records why when something was held. Every caller
     /// re-derives the active prompt on its own path.

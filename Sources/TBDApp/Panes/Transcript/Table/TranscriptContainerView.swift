@@ -23,10 +23,11 @@ import AppKit
 ///   the rail and its hover model: the hover model's open and close reach the
 ///   rail as the lens's open state, and the Escape monitor runs only while
 ///   the rail reports the lens on screen — an open lens with no prompts is
-///   not. The lens closes at once when this view leaves its window (a pane
-///   rebuilt under a new identity, as on session rollover) or when that
-///   window resigns key, so a lens in a background window never holds the
-///   app-wide Escape monitor.
+///   not. `onPromptRailLensShownChange` passes the same report on. The lens
+///   closes at once when this view leaves its window (a pane rebuilt under a
+///   new identity, as on session rollover) or when that window resigns key,
+///   so a lens in a background window never holds the app-wide Escape
+///   monitor.
 ///
 /// Coordinates are flipped (y grows downward), matching the table.
 final class TranscriptContainerView: NSView {
@@ -61,6 +62,10 @@ final class TranscriptContainerView: NSView {
     private var promptRailNotificationCenter: NotificationCenter = .default
     /// The window whose resign-key notification is observed.
     private weak var observedKeyWindow: NSWindow?
+    /// Called with whether the rail's lens is on screen, on each change: the
+    /// report that also runs the Escape monitor. `TableTranscriptView` passes
+    /// it up to the pane, which hides its jump-to-latest button meanwhile.
+    var onPromptRailLensShownChange: (@MainActor (Bool) -> Void)?
 
     private var promptRailNSView: PromptRailNSView? { railView as? PromptRailNSView }
 
@@ -156,6 +161,7 @@ final class TranscriptContainerView: NSView {
         } else {
             promptRailEscape?.stop()
         }
+        onPromptRailLensShownChange?(shown)
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {

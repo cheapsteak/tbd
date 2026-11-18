@@ -13,10 +13,10 @@ import TestSupport
 /// cells, and feeding it updates. They pin render == measure for chat bubbles,
 /// the per-block height cache, cell dispatch, the disclosure and prepend
 /// anchors, tail-follow, cache bounds, the near-top signal, and the arithmetic
-/// estimate's image term. The jump-to-bottom test instead hosts the whole
-/// `TableTranscriptView` in an `OffscreenHost`, under a pane-shaped view
-/// whose state is real (`JumpPane`), because what it pins is a SwiftUI state
-/// write.
+/// estimate's image term. The jump-to-bottom and lens-shown tests instead
+/// host the whole `TableTranscriptView` in an `OffscreenHost`, under a
+/// pane-shaped view whose state is real (`JumpPane`, `LensShownPane`),
+/// because what they pin is a SwiftUI state write.
 ///
 /// The visual harness that shares the scene — real-session oracle runs,
 /// fixed-versus-unfixed proofs and PNG snapshots — is `TableTranscriptHarness`,
@@ -988,6 +988,67 @@ struct TableTranscriptPaneTests {
             until: { box.renderedAtBottom == true })
     }
 
+    /// The live pane's jump-to-bottom button sits over the rail's end of the
+    /// transcript, where the prompt rail's open lens draws its bottom rows,
+    /// so it hides while the lens shows.
+    @Test("the jump-to-bottom button shows only scrolled up, and never while the prompt rail's lens shows")
+    func jumpToBottomHidesUnderLens() {
+        #expect(TableTranscriptPaneView.showsJumpToBottom(atBottom: false, promptLensShown: false))
+        #expect(!TableTranscriptPaneView.showsJumpToBottom(atBottom: false, promptLensShown: true))
+        #expect(!TableTranscriptPaneView.showsJumpToBottom(atBottom: true, promptLensShown: false))
+        #expect(!TableTranscriptPaneView.showsJumpToBottom(atBottom: true, promptLensShown: true))
+    }
+
+    /// The table reports its prompt rail's lens coming and going up to the
+    /// pane's own state, which the live pane's jump-to-bottom button reads.
+    /// Hosted through `LensShownPane`, whose flag is real `@State`, because a
+    /// write made inside SwiftUI's update would be dropped.
+    @Test("the prompt rail's lens coming and going reaches the pane's state")
+    func promptLensShownReachesPaneState() async throws {
+        let suite = TestDefaultsSuite("table-lens-shown")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = PromptRailFixtures.conversation(prompts: 12, replySentences: { _ in 3 })
+        let box = LensShownPaneBox()
+        let context = TranscriptCardContext(
+            terminalID: nil,
+            openTranscriptOverlay: nil,
+            appState: appState,
+            linkResolver: nil,
+            onLinkClicked: nil)
+        let host = OffscreenHost(
+            root: LensShownPane(box: box, context: context, nodes: transcriptRenderNodes(from: items)),
+            size: NSSize(width: TableTranscriptScene.width, height: TableTranscriptScene.viewportHeight))
+        defer { host.tearDown() }
+
+        try await Self.waitOnMain(
+            "the table's prompt rail to hold the prompts",
+            observed: { "rail mounted=\(Self.promptRail(in: host) != nil), "
+                + "prompts=\(Self.promptRail(in: host)?.entries.count ?? 0)" },
+            until: { Self.promptRail(in: host)?.entries.isEmpty == false })
+        let rail = try #require(Self.promptRail(in: host))
+        #expect(box.renderedLensShown == false, "the pane read a lens before one opened")
+
+        // The hover model's open and close, as they reach the rail.
+        rail.lensOpenChanged(true)
+        try await Self.waitOnMain(
+            "the pane to read the lens shown",
+            observed: { "renderedLensShown=\(String(describing: box.renderedLensShown))" },
+            until: { box.renderedLensShown == true })
+        rail.lensOpenChanged(false)
+        try await Self.waitOnMain(
+            "the pane to read the lens gone",
+            observed: { "renderedLensShown=\(String(describing: box.renderedLensShown))" },
+            until: { box.renderedLensShown == false })
+    }
+
+    /// The prompt rail inside `host`'s transcript container, once mounted.
+    private static func promptRail(in host: OffscreenHost<LensShownPane>) -> PromptRailNSView? {
+        host.firstDescendant(TranscriptContainerView.self)?.railView as? PromptRailNSView
+    }
+
     /// Polls `condition` on the main actor through `pollUntilTrue`, and throws
     /// `BoundedWaitTimeout` with `observed()` when it never holds, so the
     /// failure line says what the wait saw.
@@ -1128,6 +1189,48 @@ private struct JumpPane: View {
             onOpenSettled: { box.openSettled = true })
             .onAppear { box.jump = { scrollToBottomToken &+= 1 } }
             .onChange(of: atBottom, initial: true) { _, value in box.renderedAtBottom = value }
+    }
+}
+
+// MARK: - Lens-shown pane
+
+/// What `promptLensShownReachesPaneState` reads `LensShownPane` through: the
+/// lens-shown flag its body last rendered. Not `@Observable`, so the pane's
+/// writes to it never re-render the pane.
+@MainActor
+private final class LensShownPaneBox {
+    var renderedLensShown: Bool?
+}
+
+/// The live pane's lens-shown shape: the table mounts the prompt rail, and
+/// the flag its button reads is the pane's own `@State`, written from the
+/// table's report.
+private struct LensShownPane: View {
+    let box: LensShownPaneBox
+    let context: TranscriptCardContext
+    let nodes: [TranscriptRenderNode]
+    @State private var atBottom = true
+    @State private var promptLensShown = false
+
+    init(box: LensShownPaneBox, context: TranscriptCardContext, nodes: [TranscriptRenderNode]) {
+        self.box = box
+        self.context = context
+        self.nodes = nodes
+    }
+
+    var body: some View {
+        let box = self.box
+        let nodes = self.nodes
+        TableTranscriptView(
+            context: context,
+            atBottom: $atBottom,
+            scrollToBottomToken: 0,
+            activityToggleToken: 0,
+            linkRoot: "",
+            nodesProvider: { nodes },
+            promptRail: .rail,
+            onPromptLensShownChange: { shown in promptLensShown = shown })
+            .onChange(of: promptLensShown, initial: true) { _, value in box.renderedLensShown = value }
     }
 }
 

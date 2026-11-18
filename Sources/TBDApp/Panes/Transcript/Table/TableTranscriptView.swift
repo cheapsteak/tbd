@@ -76,6 +76,12 @@ struct TableTranscriptView: NSViewRepresentable {
     /// a table that is already in the window as an update rather than as a
     /// mount (`TranscriptTailFirstOpen`). Nil where nothing waits on the open.
     var onOpenSettled: (@MainActor () -> Void)?
+    /// Called with whether the prompt rail's lens is on screen, on each
+    /// change, a main-queue turn later and outside any SwiftUI update
+    /// (`Coordinator.reportPromptLensShown(_:)`). The live pane hides its
+    /// jump-to-latest button while the lens shows, since the button would
+    /// cover the lens's bottom rows. Nil where nothing waits on the lens.
+    var onPromptLensShownChange: (@MainActor (Bool) -> Void)?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
@@ -150,6 +156,7 @@ struct TableTranscriptView: NSViewRepresentable {
         // pane's already-bumped token as a prepend.
         coordinator.lastPrependToken = prependToken
         coordinator.onNearTop = onNearTop
+        coordinator.onPromptLensShownChange = onPromptLensShownChange
         // Seed the root the first composition below happens against, so the
         // first `updateNSView` does not read as a transition.
         coordinator.lastLinkRoot = linkRoot
@@ -234,6 +241,7 @@ struct TableTranscriptView: NSViewRepresentable {
         let rail = PromptRailNSView(hover: hover, onJump: onJump)
         container.installPromptRail(rail: rail, hover: hover)
         coordinator.promptRailPresenter = rail
+        coordinator.observePromptLensShown(of: container)
     }
 
     func updateNSView(_ container: TranscriptContainerView, context ctx: Context) {
@@ -243,6 +251,7 @@ struct TableTranscriptView: NSViewRepresentable {
             coordinator.scrollToEnd(animated: true)
         }
         coordinator.onNearTop = onNearTop
+        coordinator.onPromptLensShownChange = onPromptLensShownChange
         let nodes = nodesProvider()
         coordinator.update(
             nodes: nodes,
@@ -298,6 +307,9 @@ struct TableTranscriptView: NSViewRepresentable {
         /// The near-top answer last reported, so `onNearTop` fires on transitions
         /// only. Nil until the first report.
         private var lastNearTop: Bool?
+        /// See `TableTranscriptView.onPromptLensShownChange`. Refreshed every
+        /// `updateNSView`.
+        var onPromptLensShownChange: (@MainActor (Bool) -> Void)?
 
         /// How many rows the table held when `makeNSView` built it, which is
         /// what the first layout, inside the window insertion, realizes from.

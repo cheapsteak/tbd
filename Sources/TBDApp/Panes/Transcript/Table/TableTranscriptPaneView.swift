@@ -53,6 +53,9 @@ struct TableTranscriptPaneView: View {
 
     /// Within ~120pt of the bottom. Drives the floating jump-to-bottom button.
     @State private var atBottom: Bool = true
+    /// The prompt rail's lens is on screen, which hides the jump-to-bottom
+    /// button (`showsJumpToBottom`).
+    @State private var promptLensShown = false
 
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row.
@@ -393,7 +396,8 @@ struct TableTranscriptPaneView: View {
                     promptRail: .rail,
                     // The rest arrives as an update to the table now in the
                     // window, as the backfill after a tail-first fetch does.
-                    onOpenSettled: { [identity] in widenedPane = identity }
+                    onOpenSettled: { [identity] in widenedPane = identity },
+                    onPromptLensShownChange: { shown in promptLensShown = shown }
                 )
                 // Compose the terminal with its current Claude session so a session
                 // rollover within one terminal tears down and rebuilds the stateful
@@ -519,9 +523,17 @@ struct TableTranscriptPaneView: View {
 
     // MARK: - Jump-to-Bottom
 
+    /// Whether the jump-to-bottom button shows: the transcript is scrolled
+    /// up from its newest message, and the prompt rail's lens is not on
+    /// screen. The button sits over the rail's gutter end of the transcript,
+    /// where it would cover the lens's bottom rows and take their clicks.
+    static func showsJumpToBottom(atBottom: Bool, promptLensShown: Bool) -> Bool {
+        !atBottom && !promptLensShown
+    }
+
     @ViewBuilder
     private var jumpToBottomButton: some View {
-        if !atBottom {
+        if Self.showsJumpToBottom(atBottom: atBottom, promptLensShown: promptLensShown) {
             Button {
                 scrollToBottomToken &+= 1
             } label: {
