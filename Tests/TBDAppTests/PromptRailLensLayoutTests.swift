@@ -185,6 +185,43 @@ struct PromptRailLensLayoutTests {
         #expect(misses.isEmpty, "\(misses.prefix(5))")
     }
 
+    /// A windowed rail never keeps its resting rows (spec step 0), however
+    /// short: 20 prompts in a 52pt rail rest 4pt apart in a 28pt column,
+    /// where a bump in mid-column would draw a peak under 4pt. Its lens
+    /// slides past the floor (step 6), so wherever it is centred and
+    /// wherever it opened, the centre's row lies on the column and the rows
+    /// cover the column.
+    @Test func windowedShortRailSlides() {
+        let geometry = PromptRailLensGeometry(layout: PromptRailLayout(count: 20, railHeight: 52), restOffset: 0)
+        #expect(geometry.restOverflows, "precondition: 20 prompts window a 52pt rail")
+        #expect(!geometry.keepsRestingRows, "a windowed rail kept its resting rows")
+        #expect(geometry.slidesPastFloor, "20 prompts at the floor overfill a 28pt column but do not slide")
+        let end = Self.top + geometry.columnHeight
+        var misses: [String] = []
+        for share in [0, 0.5, 1] as [CGFloat] {
+            let anchor = Self.anchor(geometry, at: share)
+            for centre in Self.centres(20) {
+                let rows = geometry.rows(centre: centre, anchor: anchor)
+                guard rows.tops.count == 20, rows.heights.count == 20 else {
+                    misses.append("centre \(centre): \(rows.tops.count) tops, \(rows.heights.count) heights")
+                    continue
+                }
+                let row = PromptRailLensMath.row(containing: centre, count: 20)
+                let bandTop = rows.tops[row]
+                let bandBottom = bandTop + rows.heights[row]
+                if !(bandBottom >= Self.top && bandTop <= end) {
+                    misses.append("opened at \(share), centre \(centre): row \(row) at \(bandTop)…\(bandBottom)")
+                }
+                let first = rows.tops[0]
+                let bottom = rows.tops[19] + rows.heights[19]
+                if !(first <= Self.top + 1 && bottom >= end - 1) {
+                    misses.append("opened at \(share), centre \(centre): the rows span \(first)…\(bottom)")
+                }
+            }
+        }
+        #expect(misses.isEmpty, "rows off the \(Self.top)…\(end) column: \(misses.prefix(5))")
+    }
+
     /// A short rail that squeezes rather than slides holds both ends, even
     /// where half a bump near an end would draw a peak the slivers cannot pay
     /// for at full height.
@@ -225,7 +262,10 @@ struct PromptRailLensLayoutTests {
                 misses.append("centre \(centre): \(rows.tops.count) tops, \(rows.heights.count) heights")
                 continue
             }
-            if !rows.overflows { misses.append("centre \(centre) does not overflow") }
+            let total = rows.heights.reduce(0, +)
+            if !(total > geometry.columnHeight + 0.5) {
+                misses.append("centre \(centre): the rows fill \(total)pt of a \(geometry.columnHeight)pt column")
+            }
             let tallest = rows.heights.max() ?? .nan
             if !(tallest <= 26.5) { misses.append("centre \(centre): a row is \(tallest)pt") }
             let row = min(Int(centre), 599)
@@ -243,12 +283,12 @@ struct PromptRailLensLayoutTests {
 
     /// Whether a rail slides is decided once for the rail (spec step 6). 450
     /// prompts overfill 577pt with a whole bump but not with the half bump at
-    /// an end, and deciding per centre made the column jump about 50pt there.
-    /// From one sampled centre to the next, neither the column's top nor the
-    /// centre's height moves more than 3pt, the centre never moves up, no row
-    /// passes the peak, and the column covers the rail to within 1pt. The
-    /// centres are 0.05 rows apart within 12 rows of either end, where the
-    /// bump is cut off, and 0.25 rows apart between.
+    /// an end, so deciding per centre would make the column jump up to about
+    /// 40pt there. From one sampled centre to the next, neither the column's
+    /// top nor the centre's height moves more than 3pt, the centre never
+    /// moves up, no row passes the peak, and the column covers the rail to
+    /// within 0.1pt. The centres are 0.05 rows apart within 12 rows of
+    /// either end, where the bump is cut off, and 0.25 rows apart between.
     @Test(arguments: [true, false])
     func slideIsContinuous(openedAtTop: Bool) {
         let geometry = Self.geometry(450)
@@ -277,7 +317,7 @@ struct PromptRailLensLayoutTests {
             }
             let tallest = rows.heights.max() ?? .nan
             if !(tallest <= 26.5) { misses.append("centre \(centre): a row is \(tallest)pt") }
-            if !(first <= Self.top + 1 && bottom >= end - 1) {
+            if !(first <= Self.top + 0.1 && bottom >= end - 0.1) {
                 misses.append("centre \(centre): the column \(first)…\(bottom) leaves the rail uncovered")
             }
             previousTop = first
@@ -294,11 +334,9 @@ struct PromptRailLensLayoutTests {
 
         let closed = resting.blended(toward: lens, fraction: 0)
         #expect(Self.isClose(closed.tops, resting.tops) && Self.isClose(closed.heights, resting.heights))
-        #expect(closed.overflows == resting.overflows)
 
         let open = resting.blended(toward: lens, fraction: 1)
         #expect(Self.isClose(open.tops, lens.tops) && Self.isClose(open.heights, lens.heights))
-        #expect(open.overflows == lens.overflows)
 
         let half = resting.blended(toward: lens, fraction: 0.5)
         let midTops = zip(resting.tops, lens.tops).map { ($0 + $1) / 2 }
@@ -317,8 +355,8 @@ struct PromptRailLensLayoutTests {
         #expect(rows.tops.first == Self.top - 100)
         #expect(abs(rows.tops[1] - rows.tops[0] - 4) <= 1e-9)
         #expect(rows.heights.first == 4)
-        #expect(rows.overflows)
-        #expect(!PromptRailLensRows.resting(Self.geometry(40)).overflows)
+        #expect(windowed.restOverflows)
+        #expect(!Self.geometry(40).restOverflows)
     }
 
     /// `y(ofFraction:)` inverts `fraction(atY:)` inside the column, and

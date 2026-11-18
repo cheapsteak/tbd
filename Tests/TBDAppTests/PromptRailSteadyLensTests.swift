@@ -136,6 +136,65 @@ struct PromptRailSteadyLensTests {
         #expect(lens.centre == settled)
     }
 
+    /// After a pause the lens resumes tracking where the pointer is, at rest:
+    /// a 150pt move made while it was not stepping is no flick, and the first
+    /// step follows the pointer. Without the resume, the same step reads the
+    /// whole move as one frame's motion and freezes.
+    @Test func resumedTrackingIsNoFlick() {
+        var lens = Self.opened()
+        let start = lens.centre
+        let far = Self.restingCentre(of: 20) + 150
+
+        var stale = lens
+        let staleMoved = stale.step(pointerY: far, dt: Self.frame)
+        #expect(!staleMoved, "precondition: an unresumed step reads a flick")
+        #expect(stale.speed > PromptRailSteadyLens.flickSpeed)
+
+        lens.resumeTracking(pointerY: far)
+        #expect(lens.speed == 0)
+        let moved = lens.step(pointerY: far, dt: Self.frame)
+        #expect(moved, "the first step after resuming froze")
+        #expect(lens.centre > start + 1, "the lens moved only from \(start) to \(lens.centre)")
+        #expect(lens.speed <= PromptRailSteadyLens.flickSpeed)
+    }
+
+    /// A lens moved away from the anchor it opened with, on a windowed rail,
+    /// keeps its centre where it is drawn when the outline grows or shrinks
+    /// by one, or the rail's height changes: the rebase re-anchors on the
+    /// centre's drawn height, not its resting one. 200 prompts window a 600pt
+    /// rail at a 200pt offset; the lens opens on row 150 and is drawn up the
+    /// rail to about row 74, which re-anchoring on the resting height would
+    /// move some 43pt.
+    @Test func rebaseKeepsCentreWhereDrawn() throws {
+        func windowed(_ count: Int, railHeight: CGFloat = 600) -> PromptRailLensGeometry {
+            PromptRailLensGeometry(layout: PromptRailLayout(count: count, railHeight: railHeight), restOffset: 200)
+        }
+        let geometry = windowed(200)
+        try #require(geometry.restOverflows && !geometry.keepsRestingRows,
+                     "precondition: 200 prompts window a 600pt rail and squeeze")
+        var pointer = PromptRailLayout.topInset + 150.5 * geometry.restPitch - geometry.restOffset
+        var lens = PromptRailSteadyLens(geometry: geometry, pointerY: pointer)
+        let opened = lens.centre
+        // The pointer is drawn up the rail at 2pt a frame, then held until
+        // the lens settles.
+        while pointer > 150 {
+            pointer = max(150, pointer - 2)
+            _ = lens.step(pointerY: pointer, dt: Self.frame)
+        }
+        var frames = 0
+        while frames < 600, lens.step(pointerY: pointer, dt: Self.frame) { frames += 1 }
+        try #require(lens.centre < opened - 20, "precondition: the lens moved only from \(opened) to \(lens.centre)")
+        let drawn = lens.rows.y(ofFraction: lens.centre)
+
+        for (label, next) in [("201 prompts", windowed(201)), ("199 prompts", windowed(199)),
+                              ("a 500pt rail", windowed(200, railHeight: 500))] {
+            let rebased = lens.rebased(to: next)
+            #expect(abs(rebased.centre - lens.centre) <= 1e-9, "\(label): the centre moved from \(lens.centre)")
+            let now = rebased.rows.y(ofFraction: rebased.centre)
+            #expect(abs(now - drawn) <= 1, "\(label): the centre moved from \(drawn)pt to \(now)pt")
+        }
+    }
+
     /// A rail that keeps its resting rows never moves (spec step 0), so `step`
     /// reports no movement and the caller can stop stepping: 5 prompts, with
     /// the pointer drawn steadily from notch 0 to notch 4, then held.

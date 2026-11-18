@@ -43,6 +43,20 @@ struct PromptRailLayoutTests {
         #expect(!short.overflows)
     }
 
+    /// 19 prompts in a 108pt rail rest at `84 / 19`, and `19 × (84 / 19)`
+    /// rounds past 84 by about 1e-14. That is no overflow: the rail neither
+    /// windows nor offsets its notches.
+    @Test func roundedPitchDoesNotOverflow() throws {
+        let layout = PromptRailLayout(count: 19, railHeight: 108)
+        try #require(layout.pitch == 84 / CGFloat(19), "precondition: 19 prompts in 108pt rest at the free pitch")
+        try #require(layout.contentHeight > 108,
+                     "precondition: the content rounds past the rail, by \(layout.contentHeight - 108)")
+        #expect(!layout.overflows, "a rounding error windowed the rail")
+        #expect(layout.scrollOffset(keepingVisible: 18, current: 0) == 0)
+        let geometry = PromptRailLensGeometry(layout: layout, restOffset: 0)
+        #expect(!geometry.restOverflows)
+    }
+
     @Test func overflowOffsetKeepsActiveInsideMargins() {
         let layout = PromptRailLayout(count: 300, railHeight: 600)
         #expect(layout.overflows)

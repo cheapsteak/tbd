@@ -1,16 +1,17 @@
 import CoreGraphics
 import Foundation
 
-/// Where the lens opened: the fractional row the pointer was over and that
-/// row's resting y. `PromptRailLensGeometry.rows(centre:anchor:)` maps a lens
-/// centre to a height on the rail through it, so the notch the lens opened on
-/// stays under the pointer and, on a windowed rail, every row stays reachable.
-/// Rail coordinates, flipped.
+/// Where the lens is anchored: a fractional row and the height on the rail
+/// it is pinned to. `PromptRailLensGeometry.rows(centre:anchor:)` maps a lens
+/// centre to a height on the rail through it, so the anchored row stays where
+/// it is and, on a windowed rail, every row stays reachable. A lens anchors as
+/// it opens, on the row under the pointer at that row's resting y, and again
+/// when it moves onto a new column, on its centre at the height it was drawn,
+/// so the centre stays under the pointer. Rail coordinates, flipped.
 struct PromptRailLensAnchor: Equatable, Sendable {
-    /// The fractional row under the pointer when the lens opened, in
-    /// `0...count`.
+    /// The anchored fractional row, in `0...count`.
     let row: CGFloat
-    /// That row's resting y, clamped to the column.
+    /// The height the row is pinned to, inside the column.
     let y: CGFloat
     /// The resting column's bottom end.
     let columnEnd: CGFloat
@@ -18,16 +19,14 @@ struct PromptRailLensAnchor: Equatable, Sendable {
 
 /// One height and top per prompt, in rail coordinates (flipped). The resting
 /// rail and the open lens are each one of these, and the view draws a blend of
-/// the two while the lens opens and closes.
+/// the two while the lens opens and closes. On a windowed resting rail, or a
+/// lens past the sliver floor, whose column slides, the rows are taller than
+/// the column, and their ends lie outside the rail, behind its fades.
 struct PromptRailLensRows: Equatable, Sendable {
     let heights: [CGFloat]
     let tops: [CGFloat]
-    /// The rows are taller than the column they fill: a windowed resting rail,
-    /// or a lens past the sliver floor, whose column slides. Their ends can
-    /// lie outside the rail, behind its fades.
-    let overflows: Bool
 
-    static let empty = PromptRailLensRows(heights: [], tops: [], overflows: false)
+    static let empty = PromptRailLensRows(heights: [], tops: [])
 
     /// The resting rail: every row one resting pitch tall, from the top inset,
     /// moved up by the rail's overflow offset.
@@ -37,10 +36,7 @@ struct PromptRailLensRows: Equatable, Sendable {
         let tops = (0..<count).map { index in
             PromptRailLayout.topInset + CGFloat(index) * pitch - geometry.restOffset
         }
-        return PromptRailLensRows(
-            heights: Array(repeating: pitch, count: count),
-            tops: tops,
-            overflows: CGFloat(count) * pitch > geometry.columnHeight + PromptRailLensGeometry.overflowSlack)
+        return PromptRailLensRows(heights: Array(repeating: pitch, count: count), tops: tops)
     }
 
     /// Each top and height moved `fraction` of the way from these rows to
@@ -51,8 +47,7 @@ struct PromptRailLensRows: Equatable, Sendable {
         guard fraction < 1 else { return lens }
         return PromptRailLensRows(
             heights: zip(heights, lens.heights).map { rest, target in rest + (target - rest) * fraction },
-            tops: zip(tops, lens.tops).map { rest, target in rest + (target - rest) * fraction },
-            overflows: overflows || lens.overflows)
+            tops: zip(tops, lens.tops).map { rest, target in rest + (target - rest) * fraction })
     }
 
     /// The row whose band holds `y`, clamped to the first and last rows; nil
@@ -121,13 +116,14 @@ struct PromptRailLensGeometry: Equatable, Sendable {
     /// A sliding column moves at least this far per row of lens centre, so
     /// the lens cannot race through rows with no pointer movement.
     static let slideMinPerRow: CGFloat = 0.25
-    /// Rows taller than their column by more than this overflow it.
-    fileprivate static let overflowSlack: CGFloat = 0.5
 
     let count: Int
     let railHeight: CGFloat
     let restPitch: CGFloat
-    /// The rail's overflow offset when the lens opened.
+    /// The anchor offset: the rail's overflow offset the lens was last
+    /// anchored at, as it opened or as it last moved onto a new column. The
+    /// rail's own offset moves on under an open lens with the active prompt,
+    /// and that alone does not re-anchor it.
     let restOffset: CGFloat
 
     init(layout: PromptRailLayout, restOffset: CGFloat) {
@@ -148,16 +144,20 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         min(freeHeight, CGFloat(max(0, count)) * restPitch)
     }
 
-    /// The resting rail is windowed: its notches do not all fit.
+    /// The resting rail is windowed: its notches do not all fit, past
+    /// `PromptRailLayout.overflowTolerance`, as `PromptRailLayout.overflows`
+    /// decides.
     var restOverflows: Bool {
-        CGFloat(count) * restPitch > freeHeight + 0.01
+        CGFloat(count) * restPitch > freeHeight + PromptRailLayout.overflowTolerance
     }
 
     /// Few prompts (spec step 0): the resting pitch is already at least the
     /// peak a bump in mid-column would draw, so the open lens keeps the
     /// resting rows. A short rail lowers that peak, so it covers more rails.
+    /// A windowed rail never keeps them, however short: its lens squeezes
+    /// every prompt into the column (step 5), so the pointer can reach each.
     var keepsRestingRows: Bool {
-        count > 0 && restPitch >= middlePeak
+        count > 0 && !restOverflows && restPitch >= middlePeak
     }
 
     /// Past the floor (spec step 6): even 1pt slivers around a whole bump in
@@ -191,6 +191,17 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         let row = PromptRailLensMath.clamp((pointerY - top + restOffset) / restPitch, 0, CGFloat(count))
         let y = PromptRailLensMath.clamp(top + row * restPitch - restOffset, top, end)
         return PromptRailLensAnchor(row: row, y: y, columnEnd: end)
+    }
+
+    /// The anchor that pins fractional row `row` at height `y`, both held to
+    /// the column: a lens moving onto a new column anchors on its centre at
+    /// the height it was drawn, so the centre does not jump.
+    func anchor(row: CGFloat, atY y: CGFloat) -> PromptRailLensAnchor {
+        let top = PromptRailLayout.topInset
+        let end = top + columnHeight
+        let heldRow = row.isNaN ? 0 : PromptRailLensMath.clamp(row, 0, CGFloat(max(0, count)))
+        let heldY = y.isNaN ? top : PromptRailLensMath.clamp(y, top, end)
+        return PromptRailLensAnchor(row: heldRow, y: heldY, columnEnd: end)
     }
 
     /// The open lens centred on fractional row `centre`: a cosine bump of
@@ -349,10 +360,7 @@ struct PromptRailLensGeometry: Equatable, Sendable {
             let spill = top + column - total
             firstTop = PromptRailLensMath.clamp(centreY - aboveCentre, min(spill, top), max(spill, top))
         }
-        return PromptRailLensRows(
-            heights: heights,
-            tops: offsets.map { firstTop + $0 },
-            overflows: total > column + Self.overflowSlack)
+        return PromptRailLensRows(heights: heights, tops: offsets.map { firstTop + $0 })
     }
 
     /// The centre a lens opens on: the one whose own layout puts the pointer's
@@ -420,8 +428,12 @@ struct PromptRailLensGeometry: Equatable, Sendable {
     }
 
     /// For a sliding column, the highest (`top`) or lowest place the centre
-    /// may sit with half its bump and up to `lensRadius` slivers beside it
-    /// still inside the rail.
+    /// may sit with half its bump and the rows up to `lensRadius` beside it,
+    /// at their least, still inside the rail. A row of bump weight `f` is at
+    /// least `sliver + (peak − sliver) × f` tall, so the rows within
+    /// `lensRadius` above the centre take at least `peak × fa + sliver ×
+    /// (min(c, R) − fa)`, and those below it the same with `fb` and
+    /// `min(count − c, R)`. Exact, so the end rows meet the rail's end.
     private func slideBound(_ c: CGFloat, top: Bool) -> CGFloat {
         let radius = PromptRailLayout.lensRadius
         let centreRow = PromptRailLensMath.row(containing: c, count: count)
@@ -436,8 +448,10 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         let column = columnHeight
         let peak = Self.peak(column: column, bump: bump)
         let inset = PromptRailLayout.topInset
-        if top { return inset + peak * fa + Self.sliverFloor * min(c, radius) }
-        return inset + column - peak * (bump - fa) - Self.sliverFloor * min(CGFloat(count) - c, radius)
+        let sliver = Self.sliverFloor
+        if top { return inset + peak * fa + sliver * (min(c, radius) - fa) }
+        let fb = bump - fa
+        return inset + column - peak * fb - sliver * (min(CGFloat(count) - c, radius) - fb)
     }
 
     /// Where the centre of a sliding column sits (spec step 6): two straight

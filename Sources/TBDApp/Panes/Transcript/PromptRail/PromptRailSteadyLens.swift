@@ -33,6 +33,7 @@ struct PromptRailSteadyLens: Equatable, Sendable {
     private(set) var rows: PromptRailLensRows
     /// The pointer's smoothed speed, in pt per ms.
     private(set) var speed: CGFloat = 0
+    /// The pointer's height at the last step, or where tracking last resumed.
     private var lastPointerY: CGFloat
 
     /// Opens the lens on the centre whose own layout puts the pointed row
@@ -81,13 +82,26 @@ struct PromptRailSteadyLens: Equatable, Sendable {
         return true
     }
 
+    /// Starts tracking the pointer afresh at `pointerY`, at rest. Steps that
+    /// stopped, because the frames paused or the pointer left the rail and
+    /// the box, say nothing about how fast the pointer moved meanwhile; read
+    /// as one frame's motion, the whole gap would look like a flick and
+    /// freeze the lens.
+    mutating func resumeTracking(pointerY: CGFloat) {
+        guard !pointerY.isNaN else { return }
+        lastPointerY = pointerY
+        speed = 0
+    }
+
     /// The lens on a new geometry, after the outline or the rail's height
     /// changed: the same centre, held to `0...count`, re-anchored on that
-    /// centre's resting y.
+    /// centre at the height it is drawn at now, held to the new column. On a
+    /// windowed rail the drawn height is not the resting one, because the
+    /// anchor the lens opened with bends the mapping, so anchoring on the
+    /// resting height would move the centre out from under a still pointer.
     func rebased(to geometry: PromptRailLensGeometry) -> PromptRailSteadyLens {
         let centre = PromptRailLensMath.clamp(self.centre, 0, CGFloat(max(0, geometry.count)))
-        let restingY = PromptRailLayout.topInset + centre * geometry.restPitch - geometry.restOffset
-        let anchor = geometry.anchor(pointerY: restingY)
+        let anchor = geometry.anchor(row: centre, atY: rows.y(ofFraction: centre))
         var lens = self
         lens.geometry = geometry
         lens.anchor = anchor

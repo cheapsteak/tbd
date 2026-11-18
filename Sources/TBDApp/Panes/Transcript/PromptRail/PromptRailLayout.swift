@@ -27,6 +27,11 @@ struct PromptRailLayout: Equatable {
     static let activeNotchHeight: CGFloat = 3
     static let edgeMargin: CGFloat = 40
     static let fadeHeight: CGFloat = 24
+    /// Content no more than this taller than the rail does not overflow it.
+    /// A pitch of `free / N` can make `N × pitch` round a hair past `free`,
+    /// which must not window the rail, offset it or fade it. The lens's
+    /// `PromptRailLensGeometry.restOverflows` uses the same tolerance.
+    static let overflowTolerance: CGFloat = 0.01
 
     let count: Int
     let railHeight: CGFloat
@@ -48,7 +53,9 @@ struct PromptRailLayout: Equatable {
         Self.topInset + CGFloat(count) * pitch + Self.bottomInset
     }
 
-    var overflows: Bool { contentHeight > railHeight }
+    /// The notches do not all fit: the rail windows them, past
+    /// `overflowTolerance`.
+    var overflows: Bool { contentHeight > railHeight + Self.overflowTolerance }
 
     /// Centre of a notch in content coordinates.
     func notchCenterY(_ index: Int) -> CGFloat {
