@@ -157,8 +157,13 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     deinit {
-        // The run loop keeps a display link until it is invalidated, and a
-        // paused one never fires to find its rail gone.
+        // A deinit is nonisolated, and the display link is main-actor state,
+        // so it is invalidated here only when the rail goes on the main
+        // thread, where it always does in practice. Elsewhere the link is
+        // left to its proxy, which invalidates it on its next fire, finding
+        // its rail gone. A rail that leaves its window has already
+        // invalidated its link (`viewWillMove(toWindow:)`).
+        guard Thread.isMainThread else { return }
         MainActor.assumeIsolated { invalidateFrameLink() }
     }
 

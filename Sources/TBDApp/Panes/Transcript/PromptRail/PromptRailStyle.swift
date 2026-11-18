@@ -108,9 +108,6 @@ enum PromptRailRowMetrics {
 
     /// Where row text starts: after the dash column and its gap.
     static var textLeading: CGFloat { dashColumnLeading + dashColumnWidth + dashGap }
-    /// Where the dash column ends: the rail's own trailing edge, since a
-    /// row's dash is its notch.
-    static var dashColumnTrailing: CGFloat { dashColumnLeading + dashColumnWidth }
 
     // MARK: Text
 

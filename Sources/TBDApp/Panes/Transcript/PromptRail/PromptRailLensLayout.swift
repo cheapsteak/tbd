@@ -126,58 +126,59 @@ struct PromptRailLensGeometry: Equatable, Sendable {
     /// and that alone does not re-anchor it.
     let restOffset: CGFloat
 
-    init(layout: PromptRailLayout, restOffset: CGFloat) {
-        count = layout.count
-        railHeight = layout.railHeight
-        restPitch = layout.pitch
-        self.restOffset = restOffset
-    }
+    // Derived from the four above once, in `init`, since every
+    // `rows(centre:anchor:)` reads them. Equality stays sound: equal inputs
+    // derive equal values.
 
     /// The rail's height less its top and bottom insets.
-    var freeHeight: CGFloat {
-        max(0, railHeight - PromptRailLayout.topInset - PromptRailLayout.bottomInset)
-    }
-
+    let freeHeight: CGFloat
     /// The column the open lens fills: the resting column, or the free height
     /// on a windowed rail.
-    var columnHeight: CGFloat {
-        min(freeHeight, CGFloat(max(0, count)) * restPitch)
-    }
-
+    let columnHeight: CGFloat
     /// The resting rail is windowed: its notches do not all fit, past
     /// `PromptRailLayout.overflowTolerance`, as `PromptRailLayout.overflows`
     /// decides.
-    var restOverflows: Bool {
-        CGFloat(count) * restPitch > freeHeight + PromptRailLayout.overflowTolerance
-    }
-
+    let restOverflows: Bool
     /// Few prompts (spec step 0): the resting pitch is already at least the
     /// peak a bump in mid-column would draw, so the open lens keeps the
     /// resting rows. A short rail lowers that peak, so it covers more rails.
     /// A windowed rail never keeps them, however short: its lens squeezes
     /// every prompt into the column (step 5), so the pointer can reach each.
-    var keepsRestingRows: Bool {
-        count > 0 && !restOverflows && restPitch >= middlePeak
-    }
-
+    let keepsRestingRows: Bool
     /// Past the floor (spec step 6): even 1pt slivers around a whole bump in
     /// mid-column overfill the column, so the open column slides. Decided
     /// once for the rail, never per lens position, so the column cannot
     /// switch between squeezing and sliding as the lens nears an end.
-    var slidesPastFloor: Bool {
-        guard count > 0 else { return false }
-        let sliver = Self.sliverFloor
-        return CGFloat(count) * sliver + (middlePeak - sliver) * middleBump > columnHeight + 1e-6
-    }
-
+    let slidesPastFloor: Bool
     /// The total weight of a bump in mid-column.
-    private var middleBump: CGFloat {
-        bumpSum(around: CGFloat(count) / 2)
-    }
-
+    private let middleBump: CGFloat
     /// The peak a bump in mid-column draws (spec step 1), at least a sliver.
-    private var middlePeak: CGFloat {
-        max(Self.peak(column: columnHeight, bump: middleBump), Self.sliverFloor)
+    private let middlePeak: CGFloat
+
+    init(layout: PromptRailLayout, restOffset: CGFloat) {
+        // Locals throughout: `&&` takes its right side as a closure, which
+        // may not capture `self` before every stored property is set.
+        let count = layout.count
+        let pitch = layout.pitch
+        let rows = CGFloat(max(0, count))
+        let sliver = Self.sliverFloor
+        let free = max(0, layout.railHeight - PromptRailLayout.topInset - PromptRailLayout.bottomInset)
+        let column = min(free, rows * pitch)
+        let overflows = CGFloat(count) * pitch > free + PromptRailLayout.overflowTolerance
+        let bump = Self.bumpSum(around: rows / 2, count: count)
+        let peak = max(Self.peak(column: column, bump: bump), sliver)
+
+        self.count = count
+        railHeight = layout.railHeight
+        restPitch = pitch
+        self.restOffset = restOffset
+        freeHeight = free
+        columnHeight = column
+        restOverflows = overflows
+        middleBump = bump
+        middlePeak = peak
+        keepsRestingRows = count > 0 && !overflows && pitch >= peak
+        slidesPastFloor = count > 0 && CGFloat(count) * sliver + (peak - sliver) * bump > column + 1e-6
     }
 
     /// The anchor for a lens opened with the pointer at `pointerY`, in rail
@@ -392,14 +393,22 @@ struct PromptRailLensGeometry: Equatable, Sendable {
 
     /// The rows a bump centred on `c` can weigh; `c` lies in `0...count`.
     private func bumpRows(around c: CGFloat) -> StrideThrough<Int> {
+        Self.bumpRows(around: c, count: count)
+    }
+
+    /// The rows a bump centred on `c` can weigh, of `count`; none when
+    /// `count` is 0.
+    private static func bumpRows(around c: CGFloat, count: Int) -> StrideThrough<Int> {
+        guard count > 0 else { return stride(from: 0, through: -1, by: 1) }
         let radius = PromptRailLayout.lensRadius
         let first = PromptRailLensMath.row(containing: (c - radius).rounded(.down), count: count)
         let last = PromptRailLensMath.row(containing: (c + radius).rounded(.up), count: count)
         return stride(from: first, through: last, by: 1)
     }
 
-    private func bumpSum(around c: CGFloat) -> CGFloat {
-        bumpRows(around: c).reduce(0) { $0 + Self.bumpWeight(row: $1, centre: c) }
+    /// The total weight of a bump centred on `c`, over `count` rows.
+    private static func bumpSum(around c: CGFloat, count: Int) -> CGFloat {
+        bumpRows(around: c, count: count).reduce(0) { $0 + bumpWeight(row: $1, centre: c) }
     }
 
     /// The peak for a bump of total weight `bump`: `lensPeak`, lowered to
