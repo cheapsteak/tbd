@@ -3,9 +3,10 @@ import AppKit
 /// The rail's pointer handling: hit-testing, clicks, hover and the wheel.
 ///
 /// - **Hit-testing** – the overlay answers over the rail column, and over the
-///   lens's box while the lens is open. Clicks and the wheel anywhere else,
-///   the box of a closing lens among them, fall through to the transcript,
-///   whatever the overlay's frame covers.
+///   lens's box, inside its drawn shape, while the lens is open. Clicks and
+///   the wheel anywhere else, the clear area outside the box's rounded
+///   corners and the box of a closing lens among them, fall through to the
+///   transcript, whatever the overlay's frame covers.
 /// - **Clicks** – a mouse-up over the rail column or the open lens's box
 ///   jumps to the prompt its mouse-down landed on. Above the first row and
 ///   below the last, the column has ended, and a click there lands on none;

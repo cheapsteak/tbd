@@ -25,8 +25,9 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 ///   notch; while a lens exists the painter fades the notches alone, so the
 ///   box and its text keep their full opacity at the rail's ends.
 /// - **Hit-testing** – the overlay answers over the rail column, and over the
-///   lens's box while the lens is open. Clicks and the wheel anywhere else
-///   fall through to the transcript, whatever the overlay's frame covers.
+///   lens's box, inside its drawn shape, while the lens is open. Clicks and
+///   the wheel anywhere else fall through to the transcript, whatever the
+///   overlay's frame covers.
 /// - **Hover** – one `NSTrackingArea` covers the whole overlay, and code
 ///   decides whether the pointer is over the rail column or the box. Entering
 ///   the column and every move inside it report

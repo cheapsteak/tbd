@@ -673,6 +673,28 @@ struct PromptRailLensViewTests {
                 "the overlay took a point below the box")
     }
 
+    /// The box takes clicks only inside its drawn shape (lens spec,
+    /// "Elsewhere"). A point half a point in from the box's trailing edge and
+    /// 3.5pt below its top lies in the clear area outside the rounded corner,
+    /// though inside the box's rect.
+    @Test("a click in the clear area outside the box's rounded corner reaches the transcript")
+    func boxCornerTakesNoClicks() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        let box = try #require(mount.rail.boxRect)
+        try #require(box.width > PromptRailLayout.width + 4 * PromptRailRowMetrics.boxCornerRadius,
+                     "precondition: the box is \(box.width)pt wide, wide enough for whole corners")
+        let corner = NSPoint(x: box.maxX - 0.5, y: box.minY + 3.5)
+        try #require(box.contains(corner), "precondition: \(corner) lies inside the box's rect \(box)")
+        #expect(mount.rail.hitTest(corner) == nil, "the clear corner took a click")
+        #expect(mount.rail.clickRow(at: corner) == nil, "a click in the clear corner found a row")
+        #expect(!mount.rail.isOverBox(corner), "the clear corner counts as over the box")
+        let centre = NSPoint(x: box.midX, y: box.midY)
+        #expect(mount.rail.hitTest(centre) === mount.rail, "the box's middle let a click through")
+    }
+
     @Test("once the lens starts to close, its shrinking box takes no clicks, and the rail column still does")
     func closingBoxTakesNoClicks() async throws {
         let mount = LensMount()

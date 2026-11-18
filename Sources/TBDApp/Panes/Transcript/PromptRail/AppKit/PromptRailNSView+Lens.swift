@@ -504,9 +504,12 @@ extension PromptRailNSView {
     /// Whether the pointer is over the rail column or the box.
     var isPointerOverLens: Bool { isPointerOverRail || lensState.isPointerOverBox }
 
-    /// Whether `point`, in rail coordinates, is over the lens's box.
+    /// Whether `point`, in rail coordinates, is over the lens's box: inside
+    /// its drawn shape (`PromptRailLensPainter.boxPath(_:)`), so the clear
+    /// area outside a rounded corner is not over it (lens spec, "Elsewhere").
     func isOverBox(_ point: NSPoint) -> Bool {
-        lensState.shape.box?.contains(point) ?? false
+        guard let box = lensState.shape.box, box.contains(point) else { return false }
+        return PromptRailLensPainter.boxPath(box).contains(point)
     }
 
     /// Reports box hover to the hover model on a change, and only while the
