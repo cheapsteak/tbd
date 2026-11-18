@@ -429,6 +429,42 @@ struct PromptRailLensLayoutTests {
         }
     }
 
+    /// On a rail too short for `slideMinPerRow`, no run of the slide goes
+    /// flat (spec step 6): each rises at least half the slope the slide
+    /// averages, its travel over the prompt count, so 1pt of pointer
+    /// movement moves the centre at most `2 × count / travel` rows. The
+    /// travel runs from where the centre sits `lensRadius` rows from the top
+    /// to where it sits `lensRadius` rows from the end. 3,000 prompts in a
+    /// 600pt rail, prompt 1564 active, opened with the pointer at 100pt over
+    /// notch 1449, near the top: with the opened-on notch held at the
+    /// pointer, the head run would rise about 7pt across some 1,440 rows.
+    /// Sampled every 4 rows, where the runs are straight.
+    @Test func denseRailRunsNeverGoFlat() {
+        let count = 3000
+        let layout = PromptRailLayout(count: count, railHeight: 600)
+        let geometry = PromptRailLensGeometry(
+            layout: layout, restOffset: layout.scrollOffset(keepingVisible: 1564, current: 0))
+        let anchor = geometry.anchor(pointerY: 100)
+        func drawnY(_ centre: CGFloat) -> CGFloat {
+            geometry.rows(centre: centre, anchor: anchor).y(ofFraction: centre)
+        }
+        let radius = PromptRailLayout.lensRadius
+        let travel = drawnY(CGFloat(count) - radius) - drawnY(radius)
+        let leastRise = travel / CGFloat(count) / 2
+        #expect(travel > 100, "the slide travels only \(travel)pt")
+        var misses: [String] = []
+        var previous = drawnY(0)
+        for step in 1...(count / 4) {
+            let centre = CGFloat(step * 4)
+            let y = drawnY(centre)
+            if !(y - previous >= 4 * leastRise * 0.99) {
+                misses.append("centres \(centre - 4)…\(centre) rise \(y - previous)pt, under \(4 * leastRise)pt")
+            }
+            previous = y
+        }
+        #expect(misses.isEmpty, "a run went flatter than \(leastRise)pt per row: \(misses.prefix(5))")
+    }
+
     @Test func emptyIsEmpty() {
         let geometry = Self.geometry(0)
         let anchor = geometry.anchor(pointerY: 100)
