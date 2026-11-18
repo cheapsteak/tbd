@@ -7,7 +7,8 @@ import AppKit
 ///   the box of a closing lens among them, fall through to the transcript,
 ///   whatever the overlay's frame covers.
 /// - **Clicks** – a mouse-up over the rail column or the open lens's box
-///   jumps to the row its mouse-down landed on.
+///   jumps to the prompt its mouse-down landed on. Above the first row and
+///   below the last, the column has ended, and a click there lands on none.
 /// - **Hover** – the one tracking area covers the whole overlay, and
 ///   `trackPointer` decides whether the pointer is over the rail column or
 ///   the box, and reports each to the hover model. Only a move over either,
@@ -43,19 +44,22 @@ extension PromptRailNSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        lensState.mouseDownRow = clickRow(at: convert(event.locationInWindow, from: nil))
+        let row = clickRow(at: convert(event.locationInWindow, from: nil))
+        lensState.mouseDownID = row.flatMap { entries.indices.contains($0) ? entries[$0].id : nil }
     }
 
     /// A mouse-up over the rail column or the open lens's box jumps to the
-    /// row its mouse-down landed on. The rows can move between the two, under a
-    /// still pointer, as the lens grows, eases or follows, so the mouse-up
-    /// does not look for its own row: on a moving row it would not find the
-    /// pressed one, and the click would be lost.
+    /// prompt its mouse-down landed on. The rows can move between the two,
+    /// under a still pointer, as the lens grows, eases or follows, so the
+    /// mouse-up does not look for its own row: on a moving row it would not
+    /// find the pressed one, and the click would be lost. The press keeps
+    /// the prompt's id, so an outline change in between still jumps to the
+    /// pressed prompt, or nowhere once it is gone.
     override func mouseUp(with event: NSEvent) {
-        let pressed = lensState.mouseDownRow
-        lensState.mouseDownRow = nil
+        let pressed = lensState.mouseDownID
+        lensState.mouseDownID = nil
         guard let pressed, isOverRailOrBox(convert(event.locationInWindow, from: nil)) else { return }
-        jump(toRow: pressed)
+        jump(toID: pressed)
     }
 
     // MARK: Hover

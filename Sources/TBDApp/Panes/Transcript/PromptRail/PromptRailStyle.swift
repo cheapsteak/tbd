@@ -175,6 +175,10 @@ enum PromptRailRowMetrics {
     static let boxBorderWidth: CGFloat = 0.5
     static let boxShadowRadius: CGFloat = 8
     static let boxShadowOpacity: CGFloat = 0.2
+    /// How far the box's drawing can reach past its rect: the taper, the
+    /// shadow's blur, which is taken at twice its radius so the soft edge is
+    /// covered in full, and the shadow's 2pt offset.
+    static var boxDrawingOutset: CGFloat { boxTaper + 2 * boxShadowRadius + 2 }
 }
 
 /// The rail's accessibility.

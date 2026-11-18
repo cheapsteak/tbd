@@ -106,4 +106,14 @@ struct PromptRailLayout: Equatable {
         let raw = ((y + offset - Self.topInset) / pitch).rounded(.down)
         return min(max(Int(raw), 0), count - 1)
     }
+
+    /// The notch whose band holds a point in rail coordinates, or nil when
+    /// the point lies above the first band or below the last: a pointer
+    /// outside the resting column points at no notch.
+    func indexInColumn(atRailY y: CGFloat, offset: CGFloat) -> Int? {
+        guard count > 0 else { return nil }
+        let raw = ((y + offset - Self.topInset) / pitch).rounded(.down)
+        guard raw >= 0, raw < CGFloat(count) else { return nil }
+        return Int(raw)
+    }
 }

@@ -57,6 +57,16 @@ struct PromptRailLensRows: Equatable, Sendable {
         return y < first ? 0 : lastRow(atOrAbove: y)
     }
 
+    /// The row whose band holds `y`, or nil when `y` lies above the first
+    /// row's top or below the last row's bottom: a pointer outside the column
+    /// points at no row.
+    func indexInColumn(atY y: CGFloat) -> Int? {
+        guard let first = tops.first, let lastTop = tops.last, let lastHeight = heights.last,
+              y >= first, y < lastTop + lastHeight
+        else { return nil }
+        return lastRow(atOrAbove: y)
+    }
+
     /// The fractional row under `y`: the row's index plus how far down its
     /// band `y` lies. 0 above the first row and `count` below the last.
     func fraction(atY y: CGFloat) -> CGFloat {

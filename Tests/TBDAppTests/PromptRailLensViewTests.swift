@@ -323,7 +323,7 @@ struct PromptRailLensViewTests {
         #expect(!mount.rail.isRunningFrames, "a move off the rail column and the box asked for a frame")
     }
 
-    /// The live pane hides its jump-to-latest button while the lens shows.
+    /// Each transcript pane hides its jump-to-latest button while the lens shows.
     /// The container reports the lens coming and going, and the table's
     /// coordinator passes each report up to the pane a main-queue turn later,
     /// outside any SwiftUI update.
@@ -504,6 +504,103 @@ struct PromptRailLensViewTests {
         #expect(mount.rail.hitTest(inside) == nil, "the shrinking box took a click")
         #expect(mount.rail.clickRow(at: inside) == nil, "a click on the shrinking box found a row")
         #expect(mount.rail.hitTest(Self.onRail) === mount.rail, "the rail column stopped taking clicks")
+    }
+
+    /// A short session's column ends well above the rail's bottom: two
+    /// prompts in a 601pt rail rest from 12pt to 196pt. A pointer below the
+    /// last row points at no row, however far the rows would clamp it.
+    @Test("a pointer on the rail below the last row hovers no row, and a click there jumps nowhere")
+    func pointerPastColumnPointsAtNoRow() async throws {
+        let mount = LensMount(entryCount: 2)
+        defer { mount.host.tearDown() }
+        let layout = PromptRailLayout(count: 2, railHeight: 601)
+        let end = PromptRailLayout.topInset + 2 * layout.pitch
+        let below = NSPoint(x: Self.onRail.x, y: 500)
+        try #require(below.y > end + 100, "precondition: y \(below.y) lies well below the column's end, \(end)")
+        try await Self.openLens(mount, at: NSPoint(x: Self.onRail.x, y: end - layout.pitch / 2))
+        mount.frames(Self.wholeAnimation)
+        try #require(mount.rail.hoveredRow == 1, "precondition: the pointer on the last row hovers it")
+
+        try mount.move(to: below)
+        var frames = 0
+        while mount.rail.isRunningFrames, frames < 1200 {
+            mount.frame()
+            frames += 1
+        }
+        #expect(mount.hover.isOpen, "a pointer on the rail column below the rows closed the lens")
+        #expect(mount.rail.hoveredRow == nil,
+                "a pointer below the column hovers row \(String(describing: mount.rail.hoveredRow))")
+        #expect(mount.rail.clickRow(at: below) == nil, "a click below the column found a row")
+        try mount.click(at: below)
+        #expect(mount.jumps.ids.isEmpty, "a click below the column jumped to \(mount.jumps.ids)")
+    }
+
+    @Test("a click on the bare rail below the last notch jumps nowhere, and one on the notch's band jumps to it")
+    func bareRailClickPastColumn() throws {
+        let mount = LensMount(entryCount: 2)
+        defer { mount.host.tearDown() }
+        let layout = PromptRailLayout(count: 2, railHeight: 601)
+        let end = PromptRailLayout.topInset + 2 * layout.pitch
+        let below = NSPoint(x: Self.onRail.x, y: 500)
+        try #require(below.y > end + 100, "precondition: y \(below.y) lies well below the column's end, \(end)")
+
+        try mount.click(at: below)
+        #expect(mount.jumps.ids.isEmpty, "a click below the bare rail's column jumped to \(mount.jumps.ids)")
+        try mount.click(at: NSPoint(x: Self.onRail.x, y: end - layout.pitch / 2))
+        #expect(mount.jumps.ids == ["p-1"], "a click on the last notch's band jumped to \(mount.jumps.ids)")
+    }
+
+    /// The press keeps the pressed prompt's id, so prompts arriving above it
+    /// before the release, which hand its row to another prompt, still let
+    /// the click jump to the prompt pressed.
+    @Test("an outline change between press and release jumps to the pressed prompt")
+    func pressSurvivesOutlineChange() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        let row = try #require(mount.rail.displayedRows.index(atY: Self.onRail.y))
+
+        try mount.press(at: Self.onRail)
+        let prepended = (0..<3).map { "n-\($0)" } + (0..<40).map { "p-\($0)" }
+        mount.rail.promptRail(entriesDidChange: Self.entries(ids: prepended))
+        try mount.release(at: Self.onRail)
+        #expect(mount.jumps.ids == ["p-\(row)"], "a press on p-\(row) jumped to \(mount.jumps.ids)")
+    }
+
+    @Test("a press whose prompt leaves the outline before the release jumps nowhere")
+    func pressOnRemovedPromptJumpsNowhere() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+
+        try mount.press(at: Self.onRail)
+        mount.rail.promptRail(entriesDidChange: Self.entries(ids: (0..<40).map { "q-\($0)" }))
+        try mount.release(at: Self.onRail)
+        #expect(mount.jumps.ids.isEmpty, "a press on a prompt now gone jumped to \(mount.jumps.ids)")
+    }
+
+    /// A step of an existing lens redraws only what can change: the rail
+    /// column and the box before and after the step, each widened for the
+    /// taper and the shadow. AppKit offers no readback of the dirty rect, so
+    /// this checks the helper that picks it.
+    @Test("a lens step redraws the rail column and the box before and after it, widened for taper and shadow")
+    func lensRedrawRectCoversColumnAndBoxes() {
+        let column = NSRect(x: 0, y: 0, width: PromptRailLayout.width, height: 601)
+        let outset = PromptRailRowMetrics.boxDrawingOutset
+        #expect(outset >= PromptRailRowMetrics.boxTaper + PromptRailRowMetrics.boxShadowRadius + 2)
+        let bare = PromptRailNSView.lensRedrawRect(railColumn: column, previousBox: nil, box: nil)
+        #expect(bare == column, "a step with no box redraws \(bare)")
+
+        let before = CGRect(x: 0, y: 100, width: 200, height: 80)
+        let after = CGRect(x: 0, y: 140, width: 120, height: 60)
+        let rect = PromptRailNSView.lensRedrawRect(railColumn: column, previousBox: before, box: after)
+        #expect(rect.contains(column), "the redraw \(rect) misses the rail column")
+        #expect(rect.contains(before.insetBy(dx: -outset, dy: -outset)), "the redraw \(rect) misses the old box")
+        #expect(rect.contains(after.insetBy(dx: -outset, dy: -outset)), "the redraw \(rect) misses the new box")
+        #expect(abs(rect.maxX - (before.maxX + outset)) < 0.001,
+                "the redraw \(rect) reaches past the widest box's drawing, to \(rect.maxX)")
     }
 
     @Test("the wheel over the box scrolls the transcript")
@@ -811,6 +908,13 @@ struct PromptRailLensViewTests {
     // MARK: Helpers
 
     /// `count` prompts, every other one stamped, so rows carry a time column.
+    /// One prompt per id, in order, with no timestamps.
+    fileprivate static func entries(ids: [String]) -> [PromptOutlineEntry] {
+        ids.enumerated().map { index, id in
+            PromptOutlineEntry(id: id, rowIndex: index * 2, kind: .prompt, firstLine: "Prompt \(id)", timestamp: nil)
+        }
+    }
+
     fileprivate static func entries(_ count: Int) -> [PromptOutlineEntry] {
         (0..<count).map { index in
             PromptOutlineEntry(
@@ -820,10 +924,10 @@ struct PromptRailLensViewTests {
         }
     }
 
-    /// Moves the pointer onto the rail column and fires the open timer: the
-    /// lens exists, not yet grown.
-    private static func openLens(_ mount: LensMount) async throws {
-        try mount.move(to: onRail)
+    /// Moves the pointer onto the rail column, at `point`, and fires the
+    /// open timer: the lens exists, not yet grown.
+    private static func openLens(_ mount: LensMount, at point: NSPoint = PromptRailLensViewTests.onRail) async throws {
+        try mount.move(to: point)
         try await mount.clock.requireAdvanceWhenArmed(by: openDelay, timeout: mainActorHop)
         await mount.hover._drainForTesting()
         try #require(mount.hover.isOpen, "the hover model did not open")

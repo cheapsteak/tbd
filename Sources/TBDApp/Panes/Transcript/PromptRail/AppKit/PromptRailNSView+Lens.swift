@@ -66,8 +66,10 @@ struct PromptRailLensState {
     /// The pointer's last position over the overlay, in rail coordinates;
     /// nil once it has left.
     var lastPointer: NSPoint?
-    /// The row a mouse-down landed on, which the mouse-up jumps to.
-    var mouseDownRow: Int?
+    /// The prompt a mouse-down landed on, which the mouse-up jumps to. Its
+    /// id, not its row: an outline change between the two can give the row
+    /// to another prompt.
+    var mouseDownID: String?
     /// The ends whose notches the painter fades, because a displayed row
     /// runs past them.
     var fade = PromptRailEndFades.neither
@@ -205,10 +207,15 @@ extension PromptRailNSView {
         updateFrameDemand()
     }
 
+    /// Builds or drops the lens. Either one redraws the whole overlay: the
+    /// rail switches between its resting drawing and the lens's, which
+    /// `lensRedrawRect` does not bound.
     private func setLens(_ lens: PromptRailSteadyLens?) {
         let had = lensState.lens != nil
         lensState.lens = lens
-        if had != (lens != nil) { onOpenWidthChange?() }
+        guard had != (lens != nil) else { return }
+        needsDisplay = true
+        onOpenWidthChange?()
     }
 
     /// Finishes a grow or shrink at once: the rail has left its window, where
@@ -372,6 +379,7 @@ extension PromptRailNSView {
     /// to the new ones when the lens drops.
     private func refreshLensDisplay() {
         guard let lens = lensState.lens else { return }
+        let previousBox = lensState.shape.box
         let fraction = lensState.openFraction
         let rows = PromptRailLensRows.resting(currentLensGeometry()).blended(toward: lens.rows, fraction: fraction)
         lensState.displayedRows = rows
@@ -392,12 +400,28 @@ extension PromptRailNSView {
         }
         lensState.hoveredRow = rowUnderPointer(in: rows)
         updateLensFade(rows)
-        needsDisplay = true
+        setNeedsDisplay(Self.lensRedrawRect(railColumn: railColumnRect, previousBox: previousBox, box: shape.box))
+    }
+
+    /// What one step of an existing lens redraws: the rail column, where the
+    /// notches move and fade, and the box before and after the step, each
+    /// widened by `PromptRailRowMetrics.boxDrawingOutset` for the taper and
+    /// the shadow. The hovered row's fill and the row text lie inside the
+    /// box, so nothing else the lens draws changes. Building or dropping the
+    /// lens redraws the whole overlay instead (`setLens`), as does an
+    /// appearance change.
+    static func lensRedrawRect(railColumn: NSRect, previousBox: CGRect?, box: CGRect?) -> NSRect {
+        let outset = PromptRailRowMetrics.boxDrawingOutset
+        var rect = railColumn
+        for drawn in [previousBox, box].compactMap({ $0 }) {
+            rect = rect.union(drawn.insetBy(dx: -outset, dy: -outset))
+        }
+        return rect
     }
 
     private func rowUnderPointer(in rows: PromptRailLensRows) -> Int? {
         guard lensOpen, lensState.openFraction > PromptRailRowMetrics.hoverMinOpenFraction, isPointerOverLens,
-              let row = rows.index(atY: pointerY),
+              let row = rows.indexInColumn(atY: pointerY),
               rows.heights[row] >= PromptRailRowMetrics.hoverMinRowHeight
         else { return nil }
         return row
@@ -451,21 +475,22 @@ extension PromptRailNSView {
     /// The row a click at `point`, in rail coordinates, lands on: over the
     /// rail column of a lens that has started to grow, or over an open
     /// lens's box, the displayed row there; over the bare rail, the resting
-    /// notch there. nil anywhere else, the box of a closing lens among it.
+    /// notch there. nil anywhere else: the box of a closing lens, and above
+    /// the first row or below the last, where the column has ended.
     func clickRow(at point: NSPoint) -> Int? {
         guard !entries.isEmpty, isOverRailOrBox(point) else { return nil }
         if lensState.lens != nil, lensState.openFraction > 0 {
-            return lensState.displayedRows.index(atY: point.y)
+            return lensState.displayedRows.indexInColumn(atY: point.y)
         }
         guard isInRailColumn(point) else { return nil }
-        return currentLayout().index(atRailY: point.y, offset: offset)
+        return currentLayout().indexInColumn(atRailY: point.y, offset: offset)
     }
 
-    /// Jumps to row `row`'s prompt and closes the lens, which then does not
-    /// grow again until the pointer has left the rail.
-    func jump(toRow row: Int) {
-        guard entries.indices.contains(row) else { return }
-        let id = entries[row].id
+    /// Jumps to the prompt `id` names and closes the lens, which then does
+    /// not grow again until the pointer has left the rail. Nothing happens
+    /// when the outline no longer holds `id`.
+    func jump(toID id: String) {
+        guard entries.contains(where: { $0.id == id }) else { return }
         lensLogger.debug("rail click jumps to id=\(id, privacy: .public)")
         onJump(id)
         hover.dismiss(.click)
