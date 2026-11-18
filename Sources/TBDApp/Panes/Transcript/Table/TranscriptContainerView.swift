@@ -1,26 +1,30 @@
 import AppKit
 
 /// The view `TableTranscriptView` hands SwiftUI: the transcript's scroll
-/// view, inset from the leading edge by a fixed gutter, plus the prompt rail
-/// in that gutter and its card stacked above both.
+/// view, inset from the leading edge by a fixed gutter, plus the prompt rail's
+/// overlay stacked above it.
 ///
 /// - **Gutter** – `leadingGutter` is `PromptRailLayout.width` with the rail
 ///   mounted and 0 without it, set once from the mount when the view is made.
 ///   The scroll view always fills the rest, so the table's width is fixed from
 ///   creation whatever the prompt count.
+/// - **Overlay** – the rail view starts at the leading edge and is as wide as
+///   the lens's box can grow (`PromptRailRowMetrics.overlayWidth(paneWidth:)`),
+///   so it covers the gutter and the transcript's leading strip. It draws over
+///   the transcript and answers clicks only where it shows something, so the
+///   table's width never changes on its account.
 /// - **Stacking** – subview order settles it: the scroll view at the bottom,
-///   the rail above it, the card above everything.
+///   the rail's overlay above it.
 /// - **Coordinator** – a weak handle back to the table's coordinator, for
 ///   code that reaches the transcript through its view hierarchy.
-/// - **Prompt rail** – `installPromptRail` makes this view the hub
-///   between the rail, the card and their shared hover model: the rail's
-///   outline changes reach the card through here, the hover model's open and
-///   close show and hide the card, and the Escape monitor runs only while the
-///   card is on screen — an open card with no rows is not. The card closes at
-///   once when this view leaves its window
-///   (a pane rebuilt under a new identity, as on session rollover) or when
-///   that window resigns key, so a card in a background window never holds
-///   the app-wide Escape monitor.
+/// - **Prompt rail** – `installPromptRail` makes this view the hub between
+///   the rail and its hover model: the hover model's open and close reach the
+///   rail as the lens's open state, and the Escape monitor runs only while
+///   the rail reports the lens on screen — an open lens with no prompts is
+///   not. The lens closes at once when this view leaves its window (a pane
+///   rebuilt under a new identity, as on session rollover) or when that
+///   window resigns key, so a lens in a background window never holds the
+///   app-wide Escape monitor.
 ///
 /// Coordinates are flipped (y grows downward), matching the table.
 final class TranscriptContainerView: NSView {
@@ -36,50 +40,27 @@ final class TranscriptContainerView: NSView {
 
     weak var coordinator: TableTranscriptView.Coordinator?
 
-    /// The rail, laid out to fill the gutter. Installed with the prompt rail;
-    /// kept below `cardView`.
+    /// The rail's overlay, above the scroll view. Installed with the prompt
+    /// rail.
     var railView: NSView? {
         didSet {
             guard railView !== oldValue else { return }
             oldValue?.removeFromSuperview()
-            if let railView {
-                if let cardView, cardView.superview === self {
-                    addSubview(railView, positioned: .below, relativeTo: cardView)
-                } else {
-                    addSubview(railView, positioned: .above, relativeTo: scrollView)
-                }
-            }
+            if let railView { addSubview(railView, positioned: .above, relativeTo: nil) }
             layoutContent()
-        }
-    }
-
-    /// The card, stacked above the scroll view and the rail. Installed with
-    /// the prompt rail; an open `PromptRailCardNSView` is re-laid out against
-    /// this view's size whenever it changes.
-    var cardView: NSView? {
-        didSet {
-            guard cardView !== oldValue else { return }
-            oldValue?.removeFromSuperview()
-            if let cardView { addSubview(cardView, positioned: .above, relativeTo: nil) }
         }
     }
 
     // MARK: Prompt rail
 
-    /// The hover model the rail and card share. Nil with no rail mounted.
+    /// The hover model the rail feeds. Nil with no rail mounted.
     private(set) var promptRailHover: PromptRailHoverModel?
-    /// The Remote pane's earlier-history state for the card's Load row,
-    /// refreshed by every `updateNSView`.
-    var promptRailEarlier: PromptRailEarlierHistory? {
-        didSet { pushOutlineToCard() }
-    }
     private var promptRailEscape: PromptRailEscapeMonitor?
     private var promptRailNotificationCenter: NotificationCenter = .default
     /// The window whose resign-key notification is observed.
     private weak var observedKeyWindow: NSWindow?
 
     private var promptRailNSView: PromptRailNSView? { railView as? PromptRailNSView }
-    private var promptRailCard: PromptRailCardNSView? { cardView as? PromptRailCardNSView }
 
     init(scrollView: NSScrollView, leadingGutter: CGFloat) {
         self.scrollView = scrollView
@@ -106,88 +87,61 @@ final class TranscriptContainerView: NSView {
         layoutContent()
     }
 
-    /// The scroll view takes everything right of the gutter; the rail fills
-    /// the gutter; an open card is sized against the whole view. A gutter
-    /// wider than the view leaves the scroll view zero wide rather than
-    /// negative.
+    /// The scroll view takes everything right of the gutter; the rail's
+    /// overlay starts at the leading edge and is as wide as the lens's box can
+    /// grow. A gutter wider than the view leaves the scroll view zero wide
+    /// rather than negative.
     private func layoutContent() {
         let gutter = min(max(leadingGutter, 0), bounds.width)
         let scrollFrame = NSRect(
             x: gutter, y: 0, width: bounds.width - gutter, height: bounds.height)
         if scrollView.frame != scrollFrame { scrollView.frame = scrollFrame }
         if let railView {
-            let railFrame = NSRect(x: 0, y: 0, width: gutter, height: bounds.height)
+            let railFrame = NSRect(
+                x: 0, y: 0,
+                width: PromptRailRowMetrics.overlayWidth(paneWidth: bounds.width),
+                height: bounds.height)
             if railView.frame != railFrame { railView.frame = railFrame }
         }
-        if let card = promptRailCard, card.isOpen { card.layoutCard(maxSize: bounds.size) }
     }
 
     // MARK: Prompt rail wiring
 
-    /// Mounts the prompt rail: `rail` in the gutter, `card` above
-    /// everything, both driven by `hover`. Wheel events over the rail go to
-    /// the transcript, and the rail's outline changes reach the card.
+    /// Mounts the prompt rail: `rail` as the overlay above the scroll view,
+    /// driven by `hover`. Wheel events over the rail go to the transcript, and
+    /// the hover model's open state reaches the rail's lens.
     ///
     /// `escapeMonitor` and `notificationCenter` default to the production
     /// ones; tests pass their own to count installs and to post a resign-key
     /// notification without reaching `.default`'s other observers.
     func installPromptRail(
         rail: PromptRailNSView,
-        card: PromptRailCardNSView,
         hover: PromptRailHoverModel,
-        earlier: PromptRailEarlierHistory?,
         escapeMonitor: PromptRailEscapeMonitor = PromptRailEscapeMonitor(),
         notificationCenter: NotificationCenter = .default
     ) {
         stopObservingKeyWindow()
         promptRailHover?.onOpenChange = nil
-        promptRailCard?.onShownChange = nil
+        promptRailNSView?.onLensShownChange = nil
         promptRailEscape?.stop()
 
         promptRailHover = hover
         promptRailEscape = escapeMonitor
         promptRailNotificationCenter = notificationCenter
         rail.wheelTarget = scrollView
-        rail.onOutlineChange = { [weak self] in self?.pushOutlineToCard() }
-        card.onShownChange = { [weak self] shown in self?.promptRailCardShownChanged(shown) }
-        cardView = card
+        rail.onLensShownChange = { [weak self] shown in self?.promptRailLensShownChanged(shown) }
         railView = rail
-        hover.onOpenChange = { [weak self] open in self?.promptRailOpenChanged(open) }
-        promptRailEarlier = earlier
+        hover.onOpenChange = { [weak self] open in self?.promptRailNSView?.lensOpenChanged(open) }
         startObservingKeyWindow()
     }
 
-    /// Hands the rail's outline, work counts and active prompt, and the
-    /// earlier-history state, to the card.
-    private func pushOutlineToCard() {
-        guard let rail = promptRailNSView, let card = promptRailCard else { return }
-        card.update(
-            entries: rail.entries, workCounts: rail.workCounts, activeIndex: rail.activeIndex,
-            earlier: promptRailEarlier)
-    }
-
-    /// The hover model opened or closed the card. Opening lays it out against
-    /// this view and the pointer's place on the rail; closing hides it. The
-    /// Escape monitor follows what is on screen, not this: see
-    /// `promptRailCardShownChanged`.
-    private func promptRailOpenChanged(_ open: Bool) {
-        if open {
-            let rail = promptRailNSView
-            promptRailCard?.open(
-                pointedIndex: rail?.pointedIndex, pointerY: rail?.pointerY ?? 0, maxSize: bounds.size)
-        } else {
-            promptRailCard?.close()
-            promptRailEscape?.stop()
-        }
-    }
-
-    /// Runs the Escape monitor exactly while the card is on screen. The rail
-    /// reports hover with no prompts too, so the hover model can open a card
-    /// that has no rows and stays hidden; a monitor started then would take
-    /// Escape from every view in the window — a terminal's interrupt among
-    /// them — with nothing visible to dismiss. An open card that gains its
-    /// first row shows, and starts the monitor then.
-    private func promptRailCardShownChanged(_ shown: Bool) {
+    /// Runs the Escape monitor exactly while the lens is on screen. The rail
+    /// reports hover with no prompts too, so the hover model can open a lens
+    /// that has nothing to show; a monitor started then would take Escape
+    /// from every view in the window — a terminal's interrupt among them —
+    /// with nothing visible to dismiss. An open lens that gains its first
+    /// prompt shows, and starts the monitor then.
+    private func promptRailLensShownChanged(_ shown: Bool) {
         if shown {
             promptRailEscape?.start { [weak self] in self?.promptRailHover?.dismiss(.escape) }
         } else {
@@ -200,7 +154,7 @@ final class TranscriptContainerView: NSView {
         guard newWindow !== window else { return }
         stopObservingKeyWindow()
         // Leaving the window — a pane torn down or rebuilt under a new
-        // identity — closes the card with it.
+        // identity — closes the lens with it.
         promptRailHover?.closeNow()
     }
 
@@ -236,7 +190,7 @@ final class TranscriptContainerView: NSView {
         self.observedKeyWindow = nil
     }
 
-    /// The Escape monitor is app-wide, so a card left open in a window that
+    /// The Escape monitor is app-wide, so a lens left open in a window that
     /// is no longer key would swallow Escape typed elsewhere.
     @objc private func promptRailWindowDidResignKey() {
         promptRailHover?.closeNow()

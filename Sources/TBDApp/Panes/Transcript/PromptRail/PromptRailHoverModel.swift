@@ -3,22 +3,22 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 
-/// Opens and closes the prompt rail's card. The rail and the card feed it
-/// hover; `TranscriptContainerView` listens on `onOpenChange` to show and hide
-/// the card.
+/// Opens and closes the prompt rail's lens. The rail view feeds it hover on
+/// two surfaces, the rail column and the lens's box; `TranscriptContainerView`
+/// hands `onOpenChange` to the rail, which grows and shrinks the lens.
 ///
 /// - **Opening** – `openDelay` after the pointer enters the rail, so sweeping
-///   the pointer across the pane's edge does not flash the card open.
+///   the pointer across the pane's edge does not grow the lens.
 /// - **Closing** – `closeGrace` after the pointer has left both the rail and
-///   the card. The grace bridges the move from rail to card, and a jittery
-///   pointer, without snapping the card shut.
-/// - **Dismissal** – Escape and a row click close the card at once. While the
-///   pointer stays on the rail the card does not reopen: hovering the rail is
+///   the box. The grace bridges the move from rail to box, and a jittery
+///   pointer, without snapping the lens shut.
+/// - **Dismissal** – Escape and a row click close the lens at once. While the
+///   pointer stays on the rail the lens does not regrow: hovering the rail is
 ///   what opened it, so without the suppression it would reopen `openDelay`
 ///   after being dismissed. Leaving the rail lifts the suppression.
-/// - **App deactivation** – closes the card at once. `NSTrackingArea` is an
+/// - **App deactivation** – closes the lens at once. `NSTrackingArea` is an
 ///   active-app concept: Cmd-Tab moves no pointer, so no exit event arrives
-///   and hover alone would leave the card up.
+///   and hover alone would leave the lens up.
 ///
 /// The timers sleep on the injected `clock` and are cancel-and-replace, so a
 /// test drives them in virtual time.
@@ -35,9 +35,9 @@ final class PromptRailHoverModel {
     var onOpenChange: (@MainActor (Bool) -> Void)?
 
     private var isRailHovered = false
-    private var isCardHovered = false
+    private var isBoxHovered = false
     /// Set by `dismiss` while the pointer is on the rail; cleared when it
-    /// leaves. While set, rail hover does not open the card.
+    /// leaves. While set, rail hover does not open the lens.
     private var suppressed = false
 
     private var openTask: Task<Void, Never>?
@@ -59,8 +59,8 @@ final class PromptRailHoverModel {
     // nonisolated(unsafe): written in `init` on the main actor and read in
     // `deinit`, which is nonisolated and runs wherever ARC drops the last
     // strong reference. What keeps that single-threaded is an ownership
-    // invariant, not a language guarantee: the rail, the card and their
-    // container view own the model on the main actor, and release it there.
+    // invariant, not a language guarantee: the rail and its container view
+    // own the model on the main actor, and release it there.
     // Releasing it off the main actor would break that. Same precedent, and
     // same caveat, as `HoverMenuModel`.
     nonisolated(unsafe) private var deactivationObserver: (any NSObjectProtocol)?
@@ -96,30 +96,30 @@ final class PromptRailHoverModel {
     }
 
     /// The pointer entered or left the rail. The rail is its whole column,
-    /// including the part the open card covers: the card's dash column sits
-    /// over the rail's notches, and a pointer there is still on the rail for
-    /// Escape and click suppression.
+    /// including the part the open box covers: the box sits behind the rail's
+    /// notches, and a pointer there is still on the rail for Escape and click
+    /// suppression.
     func railHoverChanged(_ hovering: Bool) {
         isRailHovered = hovering
         if !hovering { suppressed = false }
         reconcile()
     }
 
-    /// The pointer entered or left the card.
-    func cardHoverChanged(_ hovering: Bool) {
-        isCardHovered = hovering
+    /// The pointer entered or left the lens's box.
+    func boxHoverChanged(_ hovering: Bool) {
+        isBoxHovered = hovering
         reconcile()
     }
 
     /// Escape or a row click: close now, and suppress reopening while the
     /// pointer stays on the rail.
     func dismiss(_ reason: Dismissal) {
-        logger.debug("card dismissed by \(reason.rawValue, privacy: .public)")
+        logger.debug("lens dismissed by \(reason.rawValue, privacy: .public)")
         cancelTasks()
-        // The card is gone, so the pointer is no longer over it. A hidden view
-        // sends no exit event, and a stale flag would keep the next card open
-        // after the pointer leaves the rail.
-        isCardHovered = false
+        // The box is gone, so the pointer is no longer over it. A shrinking
+        // box sends no exit event, and a stale flag would keep the next lens
+        // open after the pointer leaves the rail.
+        isBoxHovered = false
         suppressed = isRailHovered
         setOpen(false)
     }
@@ -127,11 +127,11 @@ final class PromptRailHoverModel {
     /// Close at once and forget the hover state: app deactivation, teardown.
     /// No exit events follow a deactivation, so the flags are cleared rather
     /// than trusted; a stale one would let the next hover event of any kind
-    /// reopen the card from it.
+    /// reopen the lens from it.
     func closeNow() {
         cancelTasks()
         isRailHovered = false
-        isCardHovered = false
+        isBoxHovered = false
         suppressed = false
         setOpen(false)
     }
@@ -139,7 +139,7 @@ final class PromptRailHoverModel {
     private func setOpen(_ value: Bool) {
         guard isOpen != value else { return }
         isOpen = value
-        logger.debug("card \(value ? "opened" : "closed", privacy: .public)")
+        logger.debug("lens \(value ? "opened" : "closed", privacy: .public)")
         onOpenChange?(value)
     }
 
@@ -151,7 +151,7 @@ final class PromptRailHoverModel {
     private func reconcile() {
         if isOpen {
             openTask?.cancel(); openTask = nil
-            if isRailHovered || isCardHovered {
+            if isRailHovered || isBoxHovered {
                 closeTask?.cancel(); closeTask = nil
             } else if closeTask == nil {
                 scheduleClose()
@@ -189,7 +189,7 @@ final class PromptRailHoverModel {
             try? await clock.sleep(for: grace)
             guard let self else { return }
             if self.closeTaskGeneration == generation { self.closeTask = nil }
-            guard !Task.isCancelled, !self.isRailHovered, !self.isCardHovered else { return }
+            guard !Task.isCancelled, !self.isRailHovered, !self.isBoxHovered else { return }
             self.setOpen(false)
         }
     }
@@ -206,11 +206,11 @@ final class PromptRailHoverModel {
 
 /// Installs an `NSEvent` local keyDown monitor while started; Escape (keyCode 53)
 /// calls `onEscape` and is consumed. `TranscriptContainerView` runs it while the
-/// card is on screen.
+/// lens is on screen.
 ///
 /// A local monitor sees every key-down the app dispatches, whichever view has
-/// focus, so the card needs no first responder of its own; it is also why the
-/// monitor must exist only while the card is open, and why `start` replaces
+/// focus, so the lens needs no first responder of its own; it is also why the
+/// monitor must exist only while the lens is open, and why `start` replaces
 /// rather than adds and `deinit` removes a monitor still installed.
 @MainActor
 final class PromptRailEscapeMonitor {

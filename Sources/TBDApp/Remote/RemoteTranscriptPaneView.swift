@@ -288,8 +288,7 @@ struct RemoteTranscriptPaneView: View {
                     isNearTop = near
                     onNearTop(near)
                 },
-                promptRail: .rail(
-                    earlier: PromptRailEarlierHistory(hasEarlier: hasEarlier, load: onLoadEarlier))
+                promptRail: .rail
             )
             .overlay(alignment: .top) {
                 let content = RemoteTranscriptEarlierHeader.Content.resolve(

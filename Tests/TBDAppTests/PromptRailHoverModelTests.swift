@@ -46,9 +46,9 @@ struct PromptRailHoverModelTests {
         await model._drainForTesting()
     }
 
-    /// Hovers the rail and fires the open timer, leaving the card open with
+    /// Hovers the rail and fires the open timer, leaving the lens open with
     /// the pointer on the rail.
-    private static func openCard(_ model: PromptRailHoverModel, _ clock: EventDrivenTestClock) async throws {
+    private static func openLens(_ model: PromptRailHoverModel, _ clock: EventDrivenTestClock) async throws {
         model.railHoverChanged(true)
         try await fire(clock, by: openDelay, model)
         try #require(model.isOpen)
@@ -75,7 +75,7 @@ struct PromptRailHoverModelTests {
         for _ in 0..<10 { await Task.yield() }
     }
 
-    @Test("the card opens 80ms after the pointer enters the rail")
+    @Test("the lens opens 80ms after the pointer enters the rail")
     func opensAfterDelay() async throws {
         let clock = EventDrivenTestClock()
         let model = Self.makeModel(clock)
@@ -91,7 +91,7 @@ struct PromptRailHoverModelTests {
         #expect(model.isOpen)
     }
 
-    @Test("a hover that ends before the delay never opens the card")
+    @Test("a hover that ends before the delay never opens the lens")
     func briefHoverNeverOpens() async {
         let clock = EventDrivenTestClock()
         let model = Self.makeModel(clock)
@@ -102,11 +102,11 @@ struct PromptRailHoverModelTests {
         #expect(!model.isOpen)
     }
 
-    @Test("the card closes 100ms after the pointer leaves")
+    @Test("the lens closes 100ms after the pointer leaves")
     func closesAfterGrace() async throws {
         let clock = EventDrivenTestClock()
         let model = Self.makeModel(clock)
-        try await Self.openCard(model, clock)
+        try await Self.openLens(model, clock)
 
         model.railHoverChanged(false)
         try await clock.requireAdvanceWhenArmed(by: .milliseconds(99), timeout: Self.mainActorHop)
@@ -119,76 +119,76 @@ struct PromptRailHoverModelTests {
         #expect(!model.isOpen)
     }
 
-    @Test("reaching the card within the grace keeps it open")
-    func cardHoverWithinGraceKeepsOpen() async throws {
+    @Test("reaching the box within the grace keeps the lens open")
+    func boxHoverWithinGraceKeepsOpen() async throws {
         let clock = EventDrivenTestClock()
         let model = Self.makeModel(clock)
-        try await Self.openCard(model, clock)
+        try await Self.openLens(model, clock)
 
-        // The pointer leaves the rail and is on its way to the card: the close
+        // The pointer leaves the rail and is on its way to the box: the close
         // timer is running when it arrives.
         model.railHoverChanged(false)
         try await clock.requireAdvanceWhenArmed(by: .milliseconds(50), timeout: Self.mainActorHop)
-        model.cardHoverChanged(true)
+        model.boxHoverChanged(true)
         // Cancelling a sleep removes it from the ledger synchronously.
-        #expect(!clock.hasSleeper, "reaching the card left the close timer running")
+        #expect(!clock.hasSleeper, "reaching the box left the close timer running")
 
         await clock.advance(by: .milliseconds(50))
         await model._drainForTesting()
         #expect(model.isOpen)
     }
 
-    @Test("after Escape the card stays shut until the pointer leaves the rail")
+    @Test("after Escape the lens stays shut until the pointer leaves the rail")
     func escapeSuppressesUntilRailExit() async throws {
         let clock = EventDrivenTestClock()
         let model = Self.makeModel(clock)
-        try await Self.openCard(model, clock)
+        try await Self.openLens(model, clock)
 
         model.dismiss(.escape)
-        #expect(!model.isOpen, "Escape closes the card at once")
+        #expect(!model.isOpen, "Escape closes the lens at once")
 
         // The pointer is still on the rail, and the rail reports it again.
         model.railHoverChanged(true)
-        await Self.expectNoTimer(clock, by: Self.openDelay, model, "the card rearmed while the pointer stayed on the rail")
+        await Self.expectNoTimer(clock, by: Self.openDelay, model, "the lens rearmed while the pointer stayed on the rail")
         #expect(!model.isOpen)
 
         model.railHoverChanged(false)
         model.railHoverChanged(true)
         try await Self.fire(clock, by: Self.openDelay, model)
-        #expect(model.isOpen, "leaving the rail and coming back reopens the card")
+        #expect(model.isOpen, "leaving the rail and coming back reopens the lens")
     }
 
-    @Test("a row click off the rail does not hold the card shut")
+    @Test("a row click off the rail does not hold the lens shut")
     func clickOffRailDoesNotSuppress() async throws {
         let clock = EventDrivenTestClock()
         let model = Self.makeModel(clock)
-        try await Self.openCard(model, clock)
+        try await Self.openLens(model, clock)
 
         model.railHoverChanged(false)
-        model.cardHoverChanged(true)
+        model.boxHoverChanged(true)
         model.dismiss(.click)
-        #expect(!model.isOpen, "a row click closes the card at once")
+        #expect(!model.isOpen, "a row click closes the lens at once")
 
         model.railHoverChanged(true)
         try await Self.fire(clock, by: Self.openDelay, model)
         #expect(model.isOpen)
     }
 
-    @Test("the app resigning active closes the card with the pointer still on the rail")
+    @Test("the app resigning active closes the lens with the pointer still on the rail")
     func appDeactivationCloses() async throws {
         let clock = EventDrivenTestClock()
         let center = NotificationCenter()
         let model = Self.makeModel(clock, center: center)
-        try await Self.openCard(model, clock)
+        try await Self.openLens(model, clock)
 
         // The pointer stays on the rail: no exit event will come.
         await Self.postDeactivation(to: center)
         #expect(!model.isOpen)
 
         // The hover state went with it. A stray hover event must not reopen
-        // the card from a rail flag that no exit event will ever clear.
-        model.cardHoverChanged(false)
-        await Self.expectNoTimer(clock, by: Self.openDelay, model, "a stale rail flag rearmed the card after deactivation")
+        // the lens from a rail flag that no exit event will ever clear.
+        model.boxHoverChanged(false)
+        await Self.expectNoTimer(clock, by: Self.openDelay, model, "a stale rail flag rearmed the lens after deactivation")
         #expect(!model.isOpen)
     }
 
@@ -199,10 +199,10 @@ struct PromptRailHoverModelTests {
         let changes = FireRecorder<Bool>()
         model.onOpenChange = { changes.record($0) }
 
-        try await Self.openCard(model, clock)
+        try await Self.openLens(model, clock)
         model.railHoverChanged(true)
-        model.cardHoverChanged(true)
-        model.cardHoverChanged(false)
+        model.boxHoverChanged(true)
+        model.boxHoverChanged(false)
         #expect(changes.values == [true], "a hover that changed nothing was reported")
 
         model.railHoverChanged(false)

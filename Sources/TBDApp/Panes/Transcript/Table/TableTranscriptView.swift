@@ -62,8 +62,7 @@ struct TableTranscriptView: NSViewRepresentable {
     /// earlier history.
     var onNearTop: (@MainActor (Bool) -> Void)?
     /// The prompt rail to mount. `makeNSView` fixes the container's gutter
-    /// from it for the life of the view and installs the rail and its card;
-    /// each `updateNSView` hands the card the mount's earlier-history state.
+    /// from it for the life of the view and installs the rail's overlay.
     /// `.none` (the default) mounts no rail and no gutter.
     var promptRail: PromptRailMount = .none
     /// Called once, when the table's open has settled: two main-queue turns
@@ -222,20 +221,18 @@ struct TableTranscriptView: NSViewRepresentable {
     }
 
     /// Installs the mounted rail and connects it to the coordinator: a rail
-    /// view in the gutter and a card view above everything, sharing one hover
-    /// model, whose jumps go to this table. The rail becomes the presenter and
-    /// the container hands its outline on to the card. Attaching the presenter
-    /// pushes it the current outline and active prompt at once. With no rail
-    /// mounted, this does nothing.
+    /// overlay above the transcript with its own hover model, whose jumps go
+    /// to this table. The rail becomes the presenter; attaching it pushes it
+    /// the current outline and active prompt at once. With no rail mounted,
+    /// this does nothing.
     private func attachPromptRail(to coordinator: Coordinator, container: TranscriptContainerView) {
-        guard case .rail(let earlier) = promptRail else { return }
+        guard case .rail = promptRail else { return }
         let onJump: @MainActor (String) -> Void = { [weak coordinator] id in
             coordinator?.jump(toNodeID: id)
         }
         let hover = PromptRailHoverModel()
         let rail = PromptRailNSView(hover: hover, onJump: onJump)
-        let card = PromptRailCardNSView(hover: hover, onJump: onJump)
-        container.installPromptRail(rail: rail, card: card, hover: hover, earlier: earlier)
+        container.installPromptRail(rail: rail, hover: hover)
         coordinator.promptRailPresenter = rail
     }
 
@@ -257,11 +254,6 @@ struct TableTranscriptView: NSViewRepresentable {
         if let request = scrollToItem, request.token != coordinator.lastScrollItemToken {
             coordinator.lastScrollItemToken = request.token
             coordinator.scrollToRow(withNodeID: request.itemID)
-        }
-        // The Remote pane's earlier-history state changes as pages load; the
-        // card's Load row follows it.
-        if case .rail(let earlier) = promptRail {
-            container.promptRailEarlier = earlier
         }
     }
 

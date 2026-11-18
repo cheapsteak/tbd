@@ -390,7 +390,7 @@ struct TableTranscriptPaneView: View {
                         registeredTable.view = table
                         appState.registerTranscriptView(table, for: terminalID)
                     },
-                    promptRail: .rail(earlier: nil),
+                    promptRail: .rail,
                     // The rest arrives as an update to the table now in the
                     // window, as the backfill after a tail-first fetch does.
                     onOpenSettled: { [identity] in widenedPane = identity }

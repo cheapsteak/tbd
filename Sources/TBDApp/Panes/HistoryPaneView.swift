@@ -539,7 +539,7 @@ struct SessionTranscriptView: View {
                         activityToggleToken: activityToggleToken,
                         linkRoot: linkRoot,
                         nodesProvider: { tableNodes },
-                        promptRail: .rail(earlier: nil),
+                        promptRail: .rail,
                         // The rest arrives as an update to the table now in
                         // the window, as the live pane's backfill does.
                         onOpenSettled: { [sessionId] in widenedSessionID = sessionId }
