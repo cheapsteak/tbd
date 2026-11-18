@@ -69,7 +69,7 @@ The count reads node data only, like the rest of the outline.
 ### Geometry
 
 - **Gutter** – a fixed 20pt column on the leading edge of the transcript area, running from the top of the table to the top of the composer. It exists from the moment the table is created, with zero prompts as with two hundred, so the table's width never changes on its account.
-- **Notches** – stacked from 12pt below the top of the rail, leaving 12pt free at the bottom. The pitch is the free height divided by the prompt count, clamped between 4pt and 8pt. A short session spreads its notches wider than 8pt, so the column is tall enough for the lens to open without moving either end (see "The resting rail" in the lens spec).
+- **Notches** – stacked from 12pt below the top of the rail, leaving 12pt free at the bottom. The pitch is the free height divided by the prompt count, at most 8pt for a mid-length session and at least 4pt, below which the rail windows. A short session spreads its notches wider than 8pt, up to the height the lens needs, so the column is tall enough for the lens to open without moving either end. The exact rule is in "The resting rail" in the lens spec.
   - Every notch starts 2pt from the rail's leading edge and is as long as its turn's work (4–16pt).
   - An inactive notch is 2pt tall in the tertiary label color.
   - The active notch keeps its length and is marked by thickness and color instead: 3pt tall in the accent color.
