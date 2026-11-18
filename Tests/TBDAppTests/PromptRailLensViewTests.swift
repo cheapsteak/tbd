@@ -57,7 +57,7 @@ struct PromptRailLensViewTests {
         #expect(mount.rail.isRunningFrames, "an opening lens wants no frames")
         #expect(mount.rail.boxMaxWidth == PromptRailRowMetrics.boxMaxWidth(paneWidth: 400))
         #expect(mount.rail.frame.width == PromptRailRowMetrics.openOverlayWidth(paneWidth: 400))
-        #expect(mount.rail.frame.width == 332)
+        #expect(mount.rail.frame.width == 338)
         #expect(mount.rail.frame.height == 601)
     }
 
@@ -980,7 +980,7 @@ struct PromptRailLensViewTests {
         try await Self.openLens(narrow)
         narrow.frames(Self.wholeAnimation)
         #expect(narrow.rail.boxMaxWidth == 36)
-        #expect(narrow.rail.frame.width == 48)
+        #expect(narrow.rail.frame.width == 54)
         let box = try #require(narrow.rail.boxRect)
         #expect(box.width <= 36, "the box is \(box.width) wide in a 60pt pane")
         try Self.drawOnce(narrow.rail)

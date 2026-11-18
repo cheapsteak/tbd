@@ -41,13 +41,34 @@ struct PromptRailMountTests {
         #expect(PromptRailRowMetrics.boxMaxWidth(paneWidth: 0) == PromptRailLayout.width)
     }
 
-    @Test("an open lens's overlay is the box's widest plus 12pt of shadow room, capped at the pane, never below the rail")
+    @Test("an open lens's overlay is the box's widest plus the shadow's 18pt reach, capped at the pane, never below the rail")
     func openOverlayWidthCaps() {
-        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 680) == 332)
-        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 300) == 288)
-        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 60) == 48)
+        #expect(PromptRailRowMetrics.boxShadowReach == 18)
+        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 680) == 338)
+        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 300) == 294)
+        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 60) == 54)
         #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 30) == 30)
         #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 0) == PromptRailLayout.width)
+    }
+
+    /// The overlay's layer clips to its bounds, so the overlay keeps the
+    /// box's whole shadow wherever the pane has the room: the same reach
+    /// `boxDrawingOutset` counts for a redraw.
+    @Test("an open lens's overlay holds the box's shadow whole wherever the pane is wide enough")
+    func openOverlayHoldsShadow() {
+        let reach = PromptRailRowMetrics.boxShadowReach
+        #expect(PromptRailRowMetrics.boxDrawingOutset == PromptRailRowMetrics.boxTaper + reach)
+        for paneWidth in stride(from: CGFloat(0), through: 1200, by: 4) {
+            let box = PromptRailRowMetrics.boxMaxWidth(paneWidth: paneWidth)
+            let overlay = PromptRailRowMetrics.openOverlayWidth(paneWidth: paneWidth)
+            if paneWidth >= box + reach {
+                #expect(overlay >= box + reach,
+                        "a \(paneWidth)pt pane's overlay is \(overlay)pt, short of its \(box)pt box and \(reach)pt of shadow")
+            }
+            if paneWidth >= PromptRailLayout.width {
+                #expect(overlay <= paneWidth, "a \(paneWidth)pt pane's overlay is \(overlay)pt wide")
+            }
+        }
     }
 
     /// The overlay draws over the transcript; only the gutter narrows the

@@ -70,9 +70,6 @@ enum PromptRailRowMetrics {
     static let maxWidth: CGFloat = 320
     /// The box leaves this much of the pane's width uncovered.
     static let paneInset: CGFloat = 24
-    /// Room the overlay keeps past the box's widest for the box's shadow,
-    /// which the overlay's layer would otherwise clip.
-    static let shadowRoom: CGFloat = 12
 
     /// The widest the box grows over a pane `paneWidth` wide: `maxWidth`
     /// capped at the pane's width less `paneInset`, and never narrower than
@@ -82,11 +79,12 @@ enum PromptRailRowMetrics {
     }
 
     /// The rail overlay's width while a lens exists, opening, open or
-    /// closing: the box's widest plus `shadowRoom`, capped at the pane's
-    /// width, and never narrower than the rail. With no lens the overlay is
-    /// the rail column alone.
+    /// closing: the box's widest plus `boxShadowReach`, so the overlay's
+    /// layer, which clips to its bounds, keeps the box's shadow whole; capped
+    /// at the pane's width, and never narrower than the rail. With no lens
+    /// the overlay is the rail column alone.
     static func openOverlayWidth(paneWidth: CGFloat) -> CGFloat {
-        max(PromptRailLayout.width, min(paneWidth, boxMaxWidth(paneWidth: paneWidth) + shadowRoom))
+        max(PromptRailLayout.width, min(paneWidth, boxMaxWidth(paneWidth: paneWidth) + boxShadowReach))
     }
 
     // MARK: Row layout
@@ -175,10 +173,13 @@ enum PromptRailRowMetrics {
     static let boxBorderWidth: CGFloat = 0.5
     static let boxShadowRadius: CGFloat = 8
     static let boxShadowOpacity: CGFloat = 0.2
-    /// How far the box's drawing can reach past its rect: the taper, the
-    /// shadow's blur, which is taken at twice its radius so the soft edge is
-    /// covered in full, and the shadow's 2pt offset.
-    static var boxDrawingOutset: CGFloat { boxTaper + 2 * boxShadowRadius + 2 }
+    /// How far the box's shadow can reach past its rect: its blur, taken at
+    /// twice its radius so the soft edge is covered in full, and its 2pt
+    /// offset.
+    static var boxShadowReach: CGFloat { 2 * boxShadowRadius + 2 }
+    /// How far the box's drawing can reach past its rect: the taper, and the
+    /// shadow's reach.
+    static var boxDrawingOutset: CGFloat { boxTaper + boxShadowReach }
 }
 
 /// The rail's accessibility.
