@@ -74,7 +74,7 @@ The count reads node data only, like the rest of the outline.
   - An inactive notch is 2pt tall in the tertiary label color.
   - The active notch keeps its length and is marked by thickness and color instead: 3pt tall in the accent color.
   - A peer notch is lavender at reduced opacity, and full lavender at 3pt tall when active.
-- **Overflow** – at the 4pt floor a 600pt rail holds 144 notches. Past that, the rail offsets its notches to keep the active one at least 40pt from either end, and fades the clipped edges over 24pt. The rail never scrolls under the wheel: a wheel over it scrolls the transcript, so the gutter is no dead zone, and the lens is where the whole list is browsed.
+- **Overflow** – at the 4pt floor a 600pt rail holds 144 notches. Past that, the rail offsets its notches to keep the active one 40pt from either end where the offset can reach that: it never scrolls past the first or last notch, so an active notch near either end of the session sits closer to the rail's end. The rail fades the clipped edges over 24pt. The rail never scrolls under the wheel: a wheel over it scrolls the transcript, so the gutter is no dead zone, and the lens is where the whole list is browsed.
 
 ### The active prompt
 

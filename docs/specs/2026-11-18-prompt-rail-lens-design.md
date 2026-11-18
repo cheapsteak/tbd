@@ -44,11 +44,17 @@ The lens has one fixed strength, with no setting:
 - **Reduce Motion** – the lens opens and closes at once.
 - **Staying open** – the lens stays open while the pointer is over the rail column or the box.
 - **Grace** – the lens starts closing 100ms after the pointer leaves both, so a jittery pointer does not snap it shut.
-- **Closing at once** – Escape, a click, app deactivation and the window resigning key close the lens at once. After Escape or a click, the lens does not grow again until the pointer has left the rail. A backgrounded app receives no pointer-exit event, so hover alone is never the only way out.
+- **Closing without the grace** – Escape, a click, app deactivation and the window resigning key start the close straight away, with no 100ms grace. The box still shrinks over its 150ms, or vanishes at once under Reduce Motion.
+  - After Escape or a click, the lens does not grow again until the pointer has left the rail.
+  - Deactivation and resigning key instead forget the hover state, so the lens grows again on the pointer's next move over the rail. A backgrounded app receives no pointer-exit event, so hover alone is never the only way out.
 
 ### Layout
 
-The open lens fills exactly the resting column, from the rail's top inset to where the resting notches end (or to the bottom inset when the rail is windowed). **Neither end of the column moves** while the lens opens, moves or closes. Far notches squeeze to pay for the rows that grow.
+The open lens fills exactly the resting column, from the rail's top inset to where the resting notches end (or to the bottom inset when the rail is windowed). Far notches squeeze to pay for the rows that grow. Which ends hold still depends on the rail:
+
+- **A rail that is not windowed** – **neither end of the column moves** while the lens opens, moves or closes.
+- **A windowed rail** – the resting column already runs past the rail's ends behind the fades, and the open lens fits every prompt between the insets. As the lens opens, the notches beyond the window slide in from behind the fades; the column's visible ends stay at the rail's ends.
+- **A rail past the floor** – the column slides with the lens (step 6).
 
 For a lens centred on fractional row `c`:
 
@@ -58,7 +64,7 @@ For a lens centred on fractional row `c`:
 3. **Two-sided squeeze.** The lens centre sits where the resting rail draws row `c`. The upper base is solved so that the rows above the centre fill exactly the space above it. The lower base is solved so that the whole column fills exactly `H`. So the notch under the pointer stays under it as the lens opens.
 4. **Near the ends.** Close to either end there is no room above or below the centre for half a bump. There, the centre is held inward, far enough that the rows on the cramped side keep at least half the squeeze they would get with the lens in the middle. So scrubbing near an end stays smooth. The cost is **edge drift**: pointing near an end opens the lens on a row a few rows nearer that end than the pointed notch. With 40 prompts, pointing at notch 8 opens on row 3, notches 12 to 24 open exactly, and notch 36 opens on row 38. This was accepted.
 5. **Long sessions.** On a windowed rail, the open lens squeezes every prompt into the rail at down to the sliver floor, so the pointer can reach any prompt. The far notches rearrange as they squeeze; the notch under the pointer stays.
-6. **Past the floor.** When even 1pt slivers do not fit (about 400 prompts in a 600pt rail), the column is taller than the rail. Whether a rail is past the floor is decided once for the rail, from its prompt count at the floor plus a whole bump in mid-column, never per lens position: a rail that switched between squeezing and sliding as the lens neared an end would make the column jump. It slides with the lens and is clipped behind 24pt fades at the rail's ends. The slide maps the lens centre to a height in two straight runs, from the rail's top to the notch the lens opened on and from there to the bottom. Each run is steepened near its end so the end rows come fully into view, and never drops below 0.25pt per row, so the lens cannot race through rows with no pointer movement. A rail that is not past the floor but cannot fit a whole bump beside an end lowers the peak there, so neither end of the column moves.
+6. **Past the floor.** When even 1pt slivers do not fit (about 400 prompts in a 600pt rail), the column is taller than the rail. Whether a rail is past the floor is decided once for the rail, from its prompt count at the floor plus a whole bump in mid-column, never per lens position: a rail that switched between squeezing and sliding as the lens neared an end would make the column jump. It slides with the lens and is clipped behind 24pt fades at the rail's ends. The slide maps the lens centre to a height in two straight runs, from the rail's top to the notch the lens opened on and from there to the bottom. Each run is steepened near its end so the end rows come fully into view, and never drops below 0.25pt per row, so the lens cannot race through rows with no pointer movement. That minimum needs 0.25pt for every prompt: in a rail too short for it (about 2,300 prompts in a 600pt rail), the opened-on notch stays under the pointer and each run takes the steepest slope its own room allows. A rail that is not past the floor but cannot fit a whole bump beside an end lowers the peak there, so neither end of the column moves.
 
 ### Steady motion
 
@@ -76,6 +82,7 @@ Rows are drawn at their layout height, and each shows as much as its height allo
 
 - **Notch** – every row draws its notch at its work length, from 2pt in from the rail's leading edge. The active notch is 3pt thick in the accent colour (lavender for a peer) and the rest 2pt, as at rest. A row thinner than its notch draws it at the row's height less 1pt, at least 0.5pt; the active notch keeps at least 2pt, so the active prompt stays visible in a squeezed column.
 - **Text** – a row's first line and time fade in as the row grows: opacity is `(h − 10.5) / 2.5`, clamped to 0…1, where `h` is the row height. Below 15pt the text is 10.5pt; from 15pt it is 13pt.
+- **Room** – while the box is too narrow for a row's first line and time, as during the width reveal, that row's text also fades with the room the box gives it. A row whose text fits draws it in full, however narrow the box: a one-word title in a narrow box is still drawn.
 - **Readable row layout** – it repeats the card's row:
   - the notch as the row's dash, in an 18pt dash column;
   - an 8pt gap;
@@ -97,15 +104,15 @@ Rows are drawn at their layout height, and each shows as much as its height allo
 - **Click on the bare rail** – a click on the rail before the lens has grown jumps to the pointed notch's prompt.
 - **Outside the column** – a pointer above the first row or below the last points at no row: it draws no hover fill, and a click there jumps nowhere. A short session's column ends well above the rail's bottom, so this is common.
 - **Wheel** – a wheel over the rail column or the box scrolls the transcript. Neither the rail nor the lens scrolls under the wheel.
-- **Elsewhere** – clicks and the wheel outside the rail column and the box reach the transcript, whatever the overlay's frame covers. Once the lens starts to close, its shrinking box takes no clicks: they reach the transcript.
-- **Overlays above the rail** – each transcript pane's jump-to-latest button (live, History and Remote) and the Remote pane's earlier-history header (its loading capsule and retry button) hide while the lens is open, so they never cover the lens's rows or take their clicks. Only those overlays observe the lens's state; the pane itself never does, because a pane re-render reruns the table's whole-transcript comparison (see the rail spec's "Views").
+- **Elsewhere** – clicks and the wheel outside the rail column and the box reach the transcript, whatever the overlay's frame covers. The box takes clicks only inside its drawn shape, so a click in the clear area outside a rounded corner reaches the transcript. Once the lens starts to close, its shrinking box takes no clicks: they reach the transcript.
+- **Overlays above the rail** – each transcript pane's jump-to-latest button (live, History and Remote) and the Remote pane's earlier-history header (its loading capsule and retry button) hide while the lens is drawn, from when it starts to grow until it has shrunk away, so they never cover the lens's rows or take their clicks. The Escape monitor still follows the open state. Only those overlays observe the lens's drawn state; the pane itself never does, because a pane re-render reruns the table's whole-transcript comparison (see the rail spec's "Views").
 - **Keyboard** – the Go menu's Previous Prompt and Next Prompt are unchanged.
 - **VoiceOver** – the "Prompts" group, with one button per entry, is unchanged.
 
 ### Live updates
 
 - **Active prompt** – a change while the lens is open restyles the rows in place.
-- **New prompt** – a new prompt adds a row, and the lens keeps its centre. On a short session the resting column grows by one pitch, so its bottom moves down with the new notch.
+- **New prompt** – a new prompt adds a row, and the lens keeps its centre. The resting column is laid out again for the new count. While the pitch is the lens's need divided by the count (up to about 22 prompts), the column keeps its height and the pitch shrinks. Past that, the column grows by one pitch, so its bottom moves down with the new notch.
 - **Tool calls** – a turn's tool count changes its notch length in place.
 
 ## Structure
@@ -134,7 +141,7 @@ The rail spec's four lazy-rendering rules still hold:
 1. **The lens reads node data only.** Nothing measures or builds a table cell to draw it.
 2. **The gutter stays a fixed 20pt.** The overlay draws over the transcript and never changes the table's column width.
 3. **Jumps pin; nothing pre-measures.**
-4. **The rail never loads pages.** With the Load row gone, nothing on the rail loads history. The Remote pane's own "Load earlier messages" button does that, and so does a jump to the earliest loaded prompt, which starts the ordinary page load.
+4. **The rail never loads pages.** With the Load row gone, nothing on the rail loads history. In the Remote pane, history loads as the transcript nears its top, as it always has, and a jump to the earliest loaded prompt starts that same load. The pane's "Load earlier messages" button appears only to retry a load that failed.
 
 ## Evidence from the mock
 
@@ -153,7 +160,7 @@ An HTML mock ported the prototype's lens onto a fake transcript with the rail's 
 
 - **`PromptRailLensLayout`:**
   - No gaps or overlaps.
-  - Both ends within 0.5pt of the resting column for every centre and open fraction.
+  - On a rail that is not windowed, both ends within 0.5pt of the resting column for every centre and open fraction.
   - The peak row 26pt when the column has room.
   - No base below the 1pt floor.
   - The slide once the floor is reached.
@@ -172,7 +179,7 @@ An HTML mock ported the prototype's lens onto a fake transcript with the rail's 
   - no lens before 80ms, and the lens after it;
   - the box counts as hover, and the lens closes 100ms after the pointer leaves both;
   - a click on a row jumps and closes the lens, and a click on the bare rail jumps;
-  - Escape and deactivation close the lens at once and suppress regrowth until the pointer leaves the rail;
+  - Escape and a click close the lens without the grace and suppress regrowth until the pointer leaves the rail, and deactivation closes it and clears the hover state;
   - clicks and the wheel outside the rail and the box reach the transcript, and the wheel over the box scrolls it;
   - the display link is released once the lens settles;
   - the accessibility buttons are unchanged;
