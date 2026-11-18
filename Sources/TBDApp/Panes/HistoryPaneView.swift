@@ -370,6 +370,9 @@ struct SessionTranscriptView: View {
     /// the transcript content. Drives the floating jump-to-bottom button:
     /// shown only when the user has consciously scrolled up.
     @State private var atBottom: Bool = true
+    /// The prompt rail's lens is on screen, which hides the jump-to-bottom
+    /// button (`TableTranscriptView.showsJumpToBottom`).
+    @State private var promptLensShown = false
 
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row (NSTableView renderer path).
@@ -542,10 +545,12 @@ struct SessionTranscriptView: View {
                         promptRail: .rail,
                         // The rest arrives as an update to the table now in
                         // the window, as the live pane's backfill does.
-                        onOpenSettled: { [sessionId] in widenedSessionID = sessionId }
+                        onOpenSettled: { [sessionId] in widenedSessionID = sessionId },
+                        onPromptLensShownChange: { shown in promptLensShown = shown }
                     )
                     .overlay(alignment: .bottomTrailing) {
-                        if !atBottom {
+                        if TableTranscriptView.showsJumpToBottom(
+                            atBottom: atBottom, promptLensShown: promptLensShown) {
                             Button {
                                 scrollToBottomToken &+= 1
                             } label: {

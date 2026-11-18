@@ -61,6 +61,9 @@ struct RemoteTranscriptPaneView: View {
     @State private var tail = RemoteTranscriptTail()
     @State private var presentationMemo = TranscriptPresentationMemo()
     @State private var atBottom = true
+    /// The prompt rail's lens is on screen, which hides the jump-to-bottom
+    /// button (`TableTranscriptView.showsJumpToBottom`).
+    @State private var promptLensShown = false
     @State private var scrollToBottomToken = 0
     @State private var promptScroll: TranscriptScrollRequest?
     @State private var activityGroupExpansion: [String: Bool] = [:]
@@ -288,7 +291,8 @@ struct RemoteTranscriptPaneView: View {
                     isNearTop = near
                     onNearTop(near)
                 },
-                promptRail: .rail
+                promptRail: .rail,
+                onPromptLensShownChange: { shown in promptLensShown = shown }
             )
             .overlay(alignment: .top) {
                 let content = RemoteTranscriptEarlierHeader.Content.resolve(
@@ -298,7 +302,7 @@ struct RemoteTranscriptPaneView: View {
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                if !atBottom {
+                if TableTranscriptView.showsJumpToBottom(atBottom: atBottom, promptLensShown: promptLensShown) {
                     Button {
                         scrollToBottomToken &+= 1
                     } label: {

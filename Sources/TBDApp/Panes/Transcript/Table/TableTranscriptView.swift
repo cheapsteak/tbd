@@ -78,12 +78,20 @@ struct TableTranscriptView: NSViewRepresentable {
     var onOpenSettled: (@MainActor () -> Void)?
     /// Called with whether the prompt rail's lens is on screen, on each
     /// change, a main-queue turn later and outside any SwiftUI update
-    /// (`Coordinator.reportPromptLensShown(_:)`). The live pane hides its
-    /// jump-to-latest button while the lens shows, since the button would
-    /// cover the lens's bottom rows. Nil where nothing waits on the lens.
+    /// (`Coordinator.reportPromptLensShown(_:)`). Each pane that mounts the
+    /// rail hides its jump-to-latest button while the lens shows
+    /// (`showsJumpToBottom`). Nil where nothing waits on the lens.
     var onPromptLensShownChange: (@MainActor (Bool) -> Void)?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
+
+    /// Whether a pane's jump-to-bottom button shows: the transcript is
+    /// scrolled up from its newest message, and the prompt rail's lens is not
+    /// on screen. The live, History and Remote panes all ask this, since the
+    /// button would cover the lens's rows and take their clicks.
+    static func showsJumpToBottom(atBottom: Bool, promptLensShown: Bool) -> Bool {
+        !atBottom && !promptLensShown
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(context: context)

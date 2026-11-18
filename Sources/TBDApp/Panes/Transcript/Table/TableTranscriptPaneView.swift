@@ -54,7 +54,7 @@ struct TableTranscriptPaneView: View {
     /// Within ~120pt of the bottom. Drives the floating jump-to-bottom button.
     @State private var atBottom: Bool = true
     /// The prompt rail's lens is on screen, which hides the jump-to-bottom
-    /// button (`showsJumpToBottom`).
+    /// button (`TableTranscriptView.showsJumpToBottom`).
     @State private var promptLensShown = false
 
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
@@ -523,17 +523,9 @@ struct TableTranscriptPaneView: View {
 
     // MARK: - Jump-to-Bottom
 
-    /// Whether the jump-to-bottom button shows: the transcript is scrolled
-    /// up from its newest message, and the prompt rail's lens is not on
-    /// screen. The button sits over the rail's gutter end of the transcript,
-    /// where it would cover the lens's bottom rows and take their clicks.
-    static func showsJumpToBottom(atBottom: Bool, promptLensShown: Bool) -> Bool {
-        !atBottom && !promptLensShown
-    }
-
     @ViewBuilder
     private var jumpToBottomButton: some View {
-        if Self.showsJumpToBottom(atBottom: atBottom, promptLensShown: promptLensShown) {
+        if TableTranscriptView.showsJumpToBottom(atBottom: atBottom, promptLensShown: promptLensShown) {
             Button {
                 scrollToBottomToken &+= 1
             } label: {

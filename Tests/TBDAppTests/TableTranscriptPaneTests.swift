@@ -988,19 +988,19 @@ struct TableTranscriptPaneTests {
             until: { box.renderedAtBottom == true })
     }
 
-    /// The live pane's jump-to-bottom button sits over the rail's end of the
-    /// transcript, where the prompt rail's open lens draws its bottom rows,
-    /// so it hides while the lens shows.
+    /// Each pane's jump-to-bottom button (live, History and Remote) can
+    /// cover the rows the prompt rail's open lens draws, so it hides while
+    /// the lens shows. The three panes ask the one helper.
     @Test("the jump-to-bottom button shows only scrolled up, and never while the prompt rail's lens shows")
     func jumpToBottomHidesUnderLens() {
-        #expect(TableTranscriptPaneView.showsJumpToBottom(atBottom: false, promptLensShown: false))
-        #expect(!TableTranscriptPaneView.showsJumpToBottom(atBottom: false, promptLensShown: true))
-        #expect(!TableTranscriptPaneView.showsJumpToBottom(atBottom: true, promptLensShown: false))
-        #expect(!TableTranscriptPaneView.showsJumpToBottom(atBottom: true, promptLensShown: true))
+        #expect(TableTranscriptView.showsJumpToBottom(atBottom: false, promptLensShown: false))
+        #expect(!TableTranscriptView.showsJumpToBottom(atBottom: false, promptLensShown: true))
+        #expect(!TableTranscriptView.showsJumpToBottom(atBottom: true, promptLensShown: false))
+        #expect(!TableTranscriptView.showsJumpToBottom(atBottom: true, promptLensShown: true))
     }
 
     /// The table reports its prompt rail's lens coming and going up to the
-    /// pane's own state, which the live pane's jump-to-bottom button reads.
+    /// pane's own state, which each pane's jump-to-bottom button reads.
     /// Hosted through `LensShownPane`, whose flag is real `@State`, because a
     /// write made inside SwiftUI's update would be dropped.
     @Test("the prompt rail's lens coming and going reaches the pane's state")
