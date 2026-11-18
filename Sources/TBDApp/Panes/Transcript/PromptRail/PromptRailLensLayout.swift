@@ -298,9 +298,8 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         let fitsAbove = roomAbove >= minAbove - 1e-9
         let fitsBelow = roomBelow >= minBelow - 1e-9
         // One side's base, from a sliver to the peak, that fills the room on
-        // its side of the centre given the other side's base. The room above
-        // the centre holds `ka × upper + kab × lower` of base, and the room
-        // below it `(ta − ka) × upper + (tb − kab) × lower`.
+        // its side of the centre given the other side's base, by step 2's
+        // sums: below the centre lie `(ta − ka) × upper + (tb − kab) × lower`.
         let restBelowCentre = tb - kab
         func solveUpper(lower: CGFloat) -> CGFloat {
             ka > 1e-6 ? min(peak, max(sliver, (roomAbove - peak * fa - kab * lower) / ka)) : sliver
