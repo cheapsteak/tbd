@@ -444,6 +444,40 @@ struct PromptRailLensViewTests {
         #expect(!mount.rail.isRunningFrames, "a move off the rail column and the box asked for a frame")
     }
 
+    /// A box that grows under a still pointer brings the pointer onto the
+    /// lens, with no event: the row under it is hovered. Two prompts, the
+    /// lens open over the first; the pointer rests just past the box's edge
+    /// at the second's height, inside the overlay, and longer titles then
+    /// widen the box under it.
+    @Test("a box that grows under a still pointer hovers the row under it")
+    func boxGrowingUnderPointerHovers() async throws {
+        let mount = LensMount(entryCount: 2)
+        defer { mount.host.tearDown() }
+        let layout = PromptRailLayout(count: 2, railHeight: 601)
+        try await Self.openLens(mount, at: NSPoint(x: Self.onRail.x, y: layout.notchCenterY(0)))
+        mount.frames(Self.wholeAnimation)
+        try #require(mount.rail.hoveredRow == 0, "precondition: the pointer on the first row hovers it")
+        let box = try #require(mount.rail.boxRect)
+        let band = PromptRailLensPainter.textBand(row: 1, in: mount.rail.displayedRows)
+        let past = NSPoint(x: box.maxX + 4, y: band.midY)
+        try #require(past.x + 40 < mount.rail.frame.width, "precondition: \(past) lies well inside the overlay")
+        try mount.move(to: past)
+        mount.frame()
+        try #require(!mount.rail.isPointerOverLens, "precondition: \(past) is off the rail column and the box")
+
+        let longer = Self.entries(2).map { entry in
+            PromptOutlineEntry(
+                id: entry.id, rowIndex: entry.rowIndex, kind: entry.kind,
+                firstLine: entry.firstLine + " with a far longer first line", timestamp: entry.timestamp)
+        }
+        mount.rail.promptRail(entriesDidChange: longer)
+        let grown = try #require(mount.rail.boxRect)
+        try #require(grown.contains(past), "precondition: the box \(grown) grew under the pointer at \(past)")
+        #expect(mount.rail.isPointerOverLens, "the box grew under the pointer, yet the pointer is not over it")
+        #expect(mount.rail.hoveredRow == 1,
+                "the box grew under the pointer on row 1, which hovers row \(String(describing: mount.rail.hoveredRow))")
+    }
+
     /// The overlays above the rail hide while the lens is drawn, from when
     /// it starts to grow until it has shrunk away. The container reports the
     /// lens coming and going, and the table's coordinator writes each report

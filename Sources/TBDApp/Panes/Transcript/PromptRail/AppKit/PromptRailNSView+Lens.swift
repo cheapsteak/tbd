@@ -429,9 +429,19 @@ extension PromptRailNSView {
         lensState.shape = shape
         lensState.heldBoxWidth = holds
         // The box moves and grows under a still pointer, which sends no
-        // event, so its hover follows the box here.
+        // event, so its hover follows the box here. A box that grows under
+        // the pointer brings the pointer onto the lens: the hovered row and
+        // the lens's target follow it there, though it made no move to read
+        // a speed from.
         if let point = lensState.lastPointer {
+            let wasOverBox = lensState.isPointerOverBox
             setPointerOverBox(bounds.contains(point) && isOverBox(point))
+            if lensState.isPointerOverBox, !wasOverBox, !isPointerOverRail, point.y != pointerY {
+                pointerY = point.y
+                lensState.lens?.placePointer(y: point.y)
+                lensState.stepRequested = true
+                updateFrameDemand()
+            }
         }
         lensState.hoveredRow = rowUnderPointer(in: rows)
         updateLensFade(rows)

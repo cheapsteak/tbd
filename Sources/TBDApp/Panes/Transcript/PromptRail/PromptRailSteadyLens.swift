@@ -112,6 +112,17 @@ struct PromptRailSteadyLens: Equatable, Sendable {
         measuresNextMove = false
     }
 
+    /// The pointer is at `y` with no move of its own: the box grew under a
+    /// still pointer, which now points into the lens. The lens follows it as
+    /// after a move, but reads no speed from it, and the pointer's next move
+    /// starts a new run.
+    mutating func placePointer(y: CGFloat) {
+        guard !y.isNaN else { return }
+        if y != pointerY { isSettled = false }
+        pointerY = y
+        measuresNextMove = false
+    }
+
     /// Advances the lens by `dt` seconds of frame time. Returns true when the
     /// centre moved.
     ///
