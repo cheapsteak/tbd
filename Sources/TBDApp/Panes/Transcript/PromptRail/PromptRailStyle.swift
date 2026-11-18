@@ -128,10 +128,10 @@ enum PromptRailRowMetrics {
     /// A row's text shows only above this opacity, and the box spans only
     /// the rows whose text shows.
     static let textVisibleOpacity: CGFloat = 0.01
-    /// Row text fades out as the room between `textLeading` and the box's
-    /// trailing padding shrinks from twice this to this, and is gone below
-    /// it: a box too narrow for any of a title shows no text rather than a
-    /// bare time.
+    /// Row text that does not fit fades out as the room between
+    /// `textLeading` and the box's trailing padding shrinks from twice this
+    /// to this, and is gone below it: a box too narrow for any of a long
+    /// title shows no text rather than a bare time.
     static let textRoomFadeLength: CGFloat = 48
 
     /// A row `h` tall's text opacity, before the lens's open fraction:
@@ -147,9 +147,15 @@ enum PromptRailRowMetrics {
         return t * t * (3 - 2 * t)
     }
 
-    /// How much of a row's text shows in a box `boxWidth` wide, by the room
-    /// left for it: none up to `textRoomFadeLength`, all from twice that.
-    static func textRoomOpacity(boxWidth: CGFloat) -> CGFloat {
+    /// How much of a row's text shows in a box `boxWidth` wide, for a row
+    /// whose natural width (`PromptRailLensPainter.naturalWidth(at:)`) is
+    /// `naturalWidth` (lens spec, "Room"). Text that fits, its first line and
+    /// its time and their gap within the room the box leaves it, shows in
+    /// full, however narrow the box. Text that does not fit shows by the
+    /// room left for it: none up to `textRoomFadeLength`, all from twice
+    /// that.
+    static func textRoomOpacity(boxWidth: CGFloat, naturalWidth: CGFloat) -> CGFloat {
+        if naturalWidth - naturalWidthSlack <= boxWidth { return 1 }
         let room = boxWidth - textLeading - trailingPadding
         return min(1, max(0, (room - textRoomFadeLength) / textRoomFadeLength))
     }

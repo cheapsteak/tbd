@@ -220,10 +220,10 @@ final class PromptRailLensPainter {
 
     /// Draws the lens: the box, the hovered row's fill, every notch `dirtyRect`
     /// reaches (the active one last, on top) faded at the ends `fades` names,
-    /// and the text of the rows that show any, faded by `openFraction` and by
-    /// the box's room. Call it from `draw(_:)`, where row text resolves its
-    /// colours in the view's appearance; `notchColors` and `colors` are
-    /// resolved in it already.
+    /// and the text of the rows that show any, at
+    /// `textOpacity(row:in:boxWidth:openFraction:)`. Call it from `draw(_:)`,
+    /// where row text resolves its colours in the view's appearance;
+    /// `notchColors` and `colors` are resolved in it already.
     func draw(
         rows: PromptRailLensRows,
         shape: PromptRailLensShape,
@@ -247,8 +247,6 @@ final class PromptRailLensPainter {
             dirtyRect: dirtyRect, in: context)
 
         guard let textRows = shape.textRows else { return }
-        let roomOpacity = Metrics.textRoomOpacity(boxWidth: shape.width)
-        guard roomOpacity > 0 else { return }
         for index in textRows {
             let band = Self.textBand(row: index, in: rows)
             // Text in the rail's insets would sit past its notches' fades.
@@ -256,10 +254,18 @@ final class PromptRailLensPainter {
                   band.minY < railHeight - PromptRailLayout.bottomInset,
                   band.minY <= dirtyRect.maxY, band.maxY >= dirtyRect.minY
             else { continue }
-            let alpha = Metrics.textOpacity(rowHeight: rows.heights[index]) * openFraction * roomOpacity
+            let alpha = textOpacity(row: index, in: rows, boxWidth: shape.width, openFraction: openFraction)
             guard alpha > Metrics.textVisibleOpacity else { continue }
             drawText(row: index, rows: rows, width: shape.width, alpha: alpha, in: context)
         }
+    }
+
+    /// Row `index`'s text opacity in `rows`, in a box `boxWidth` wide with
+    /// the lens `openFraction` open: its height's fade, the open fraction,
+    /// and the room the box gives its text (lens spec, "Text" and "Room").
+    func textOpacity(row index: Int, in rows: PromptRailLensRows, boxWidth: CGFloat, openFraction: CGFloat) -> CGFloat {
+        Metrics.textOpacity(rowHeight: rows.heights[index]) * openFraction
+            * Metrics.textRoomOpacity(boxWidth: boxWidth, naturalWidth: naturalWidth(at: index))
     }
 
     /// Row `index`'s notch in `rows`: from `notchLeading`, `length` long and

@@ -1147,6 +1147,48 @@ struct PromptRailLensViewTests {
         #expect(Metrics.textOpacity(rowHeight: 26) == 1)
     }
 
+    /// Text that fits the box shows in full, however narrow the box. Text
+    /// that does not fades with the room the box leaves it, as the box widens
+    /// (lens spec, "Room").
+    @Test("text that fits its box shows in full, and text that does not fades with the box's room")
+    func textRoomRule() {
+        typealias Metrics = PromptRailRowMetrics
+        let slack = Metrics.naturalWidthSlack
+        // A one-word title in a box sized to it, and in a box a point short.
+        #expect(Metrics.textRoomOpacity(boxWidth: 44, naturalWidth: 44) == 1)
+        #expect(Metrics.textRoomOpacity(boxWidth: 44, naturalWidth: 44 + slack) == 1)
+        #expect(Metrics.textRoomOpacity(boxWidth: 44, naturalWidth: 44 + slack + 1) == 0)
+        // A long title in a box still widening: none of it with 48pt of
+        // room, half with 72pt, all of it with 96pt.
+        let edges = Metrics.textLeading + Metrics.trailingPadding
+        #expect(Metrics.textRoomOpacity(boxWidth: edges + 48, naturalWidth: 300) == 0)
+        #expect(abs(Metrics.textRoomOpacity(boxWidth: edges + 72, naturalWidth: 300) - 0.5) < 0.0001)
+        #expect(Metrics.textRoomOpacity(boxWidth: edges + 96, naturalWidth: 300) == 1)
+    }
+
+    /// One prompt titled "i", with no time: the box is sized to the one
+    /// glyph, far too narrow to show a long title, yet the title fits it.
+    @Test("a one-word title in a box sized to it draws in full")
+    func shortTitleDraws() async throws {
+        typealias Metrics = PromptRailRowMetrics
+        let mount = LensMount(entryCount: 0)
+        defer { mount.host.tearDown() }
+        mount.rail.promptRail(entriesDidChange: [
+            PromptOutlineEntry(id: "i", rowIndex: 0, kind: .prompt, firstLine: "i", timestamp: nil),
+        ])
+        let layout = PromptRailLayout(count: 1, railHeight: 601)
+        try await Self.openLens(mount, at: NSPoint(x: Self.onRail.x, y: layout.notchCenterY(0)))
+        mount.frames(Self.wholeAnimation)
+        let box = try #require(mount.rail.boxRect, "the open lens has no box")
+        let longTitleWidth = Metrics.textLeading + Metrics.trailingPadding + 2 * Metrics.textRoomFadeLength
+        try #require(box.width < longTitleWidth,
+                     "precondition: the box is \(box.width)pt wide, too narrow to show a long title in full")
+        let opacity = mount.rail.lensPainter.textOpacity(
+            row: 0, in: mount.rail.displayedRows, boxWidth: box.width, openFraction: mount.rail.openFraction)
+        #expect(opacity == 1, "the title \"i\" draws at opacity \(opacity) in a \(box.width)pt box")
+        try Self.drawOnce(mount.rail)
+    }
+
     // MARK: Helpers
 
     /// `count` prompts, every other one stamped, so rows carry a time column.
