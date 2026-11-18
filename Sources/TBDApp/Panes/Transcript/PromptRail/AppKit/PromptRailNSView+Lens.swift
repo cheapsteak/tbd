@@ -242,7 +242,9 @@ extension PromptRailNSView {
         rebaseLens()
     }
 
-    /// A new active prompt restyles the rows in place.
+    /// A new active prompt restyles the rows in place. It can also move the
+    /// resting rail's overflow offset, which the rows blend from as the lens
+    /// grows and shrinks; the open lens's own rows stay where they are.
     func lensActiveChanged() {
         if lensState.lens != nil { refreshLensDisplay() }
     }
@@ -252,15 +254,27 @@ extension PromptRailNSView {
         if lensState.lens != nil { refreshLensDisplay() }
     }
 
-    /// Moves the lens onto the rail's current geometry, when it changed, and
-    /// lays the rows out again either way: an outline of the same count can
-    /// still bring new titles, and with them a new box width.
+    /// Moves the lens onto the rail's current column when its count, height or
+    /// pitch changed, re-anchored at the current overflow offset, and lays the
+    /// rows out again either way: an outline of the same count can still bring
+    /// new titles, and with them a new box width.
+    ///
+    /// The offset alone never rebases the lens. It moves under an open lens
+    /// whenever the active prompt does, as on a row click or Previous and
+    /// Next Prompt; re-anchoring on it would move the open rows at some later,
+    /// unrelated outline change.
     private func rebaseLens() {
         guard let lens = lensState.lens else { return }
         let geometry = currentLensGeometry()
-        if geometry != lens.geometry { lensState.lens = lens.rebased(to: geometry) }
+        if !Self.sameColumn(geometry, lens.geometry) { lensState.lens = lens.rebased(to: geometry) }
         refreshLensDisplay()
         updateFrameDemand()
+    }
+
+    /// Whether two geometries lay out the same column, whatever their
+    /// overflow offsets.
+    private static func sameColumn(_ a: PromptRailLensGeometry, _ b: PromptRailLensGeometry) -> Bool {
+        a.count == b.count && a.railHeight == b.railHeight && a.restPitch == b.restPitch
     }
 
     // MARK: Frames
@@ -340,10 +354,16 @@ extension PromptRailNSView {
 
     /// Lays the displayed rows out for the current open fraction and lens,
     /// and with them the box, box hover, the hovered row and the edge fades.
+    ///
+    /// The rows blend from the rail's resting rows as they are now, at the
+    /// current overflow offset, not at the offset the lens opened with: a row
+    /// click moves the active prompt, and with it the offset, before the lens
+    /// shrinks, and a shrink toward the old resting rows would end in a jump
+    /// to the new ones when the lens drops.
     private func refreshLensDisplay() {
         guard let lens = lensState.lens else { return }
         let fraction = lensState.openFraction
-        let rows = PromptRailLensRows.resting(lens.geometry).blended(toward: lens.rows, fraction: fraction)
+        let rows = PromptRailLensRows.resting(currentLensGeometry()).blended(toward: lens.rows, fraction: fraction)
         lensState.displayedRows = rows
         lensState.shape = lensPainter.shape(for: rows, openFraction: fraction, maxWidth: boxMaxWidth)
         // The box moves and grows under a still pointer, which sends no

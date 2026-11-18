@@ -335,6 +335,99 @@ struct PromptRailLensViewTests {
 
     // MARK: Live changes
 
+    /// The table's jump makes the clicked prompt active before the lens
+    /// shrinks, which on a windowed rail moves the resting offset. The shrink
+    /// must end on the rail at that new offset, not jump to it.
+    @Test("a click that scrolls a windowed rail shrinks the lens onto the new window, with no jump when it drops")
+    func clickOnWindowedRailClosesWithoutJump() async throws {
+        let mount = LensMount(entryCount: 300)
+        defer { mount.host.tearDown() }
+        mount.rail.promptRail(activeIndexDidChange: 2)
+        try #require(mount.rail.offset == 0, "precondition: the window starts at the top")
+        mount.jumps.then = { [weak rail = mount.rail] id in
+            guard let index = Int(id.dropFirst(2)) else { return }
+            rail?.promptRail(activeIndexDidChange: index)
+        }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        let lens = try #require(mount.rail.lens)
+        try #require(lens.geometry.restOverflows, "precondition: 300 prompts window the rail")
+
+        let target = NSPoint(x: Self.onRail.x, y: 580)
+        let row = try #require(mount.rail.displayedRows.index(atY: target.y))
+        let layout = PromptRailLayout(count: 300, railHeight: 601)
+        try #require(layout.notchCenterY(row) > 601 - PromptRailLayout.edgeMargin,
+                     "precondition: row \(row) lies below the window at offset 0")
+        let openRows = mount.rail.displayedRows
+
+        try mount.click(at: target)
+        try #require(mount.jumps.ids == ["p-\(row)"])
+        try #require(mount.rail.activeIndex == row)
+        #expect(mount.rail.offset > 0, "the jump left the window at the top")
+        #expect(mount.rail.displayedRows == openRows, "the active prompt's move shifted the open lens's rows")
+
+        var before: [CGRect] = []
+        var frames = 0
+        while mount.rail.lens != nil && frames < 60 {
+            before = mount.rail.displayedNotchRects
+            mount.frame()
+            frames += 1
+        }
+        try #require(mount.rail.lens == nil, "the lens had not dropped after \(frames) frames")
+        let after = mount.rail.displayedNotchRects
+        try #require(before.count == 300 && after.count == 300)
+
+        var jumped: [Int] = []
+        var visible = 0
+        for index in after.indices where after[index].maxY > 0 && after[index].minY < 601 {
+            visible += 1
+            let was = before[index]
+            let now = after[index]
+            if abs(was.midY - now.midY) > 0.5 || abs(was.height - now.height) > 0.5
+                || abs(was.minX - now.minX) > 0.5 || abs(was.width - now.width) > 0.5 {
+                jumped.append(index)
+            }
+        }
+        #expect(visible > 100, "only \(visible) notches are visible on the resting rail")
+        #expect(jumped.isEmpty, "\(jumped.count) notches jumped as the lens dropped, from row \(jumped.first ?? -1)")
+
+        // The window followed the jump: the new active notch rests on the
+        // rail, not past its end.
+        let active = after[row]
+        #expect(active.minY >= 0 && active.maxY <= 601, "the new active notch rests at \(active), out of view")
+    }
+
+    /// The overflow offset moves under an open lens with the active prompt.
+    /// That alone must not re-anchor the lens; a real column change rebases
+    /// it at the offset the rail has now.
+    @Test("a moved overflow offset leaves an open lens's rows alone, and a later rebase anchors at the current offset")
+    func movedOffsetDoesNotReanchorLens() async throws {
+        let mount = LensMount(entryCount: 300)
+        defer { mount.host.tearDown() }
+        mount.rail.promptRail(activeIndexDidChange: 2)
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        let opened = try #require(mount.rail.lens)
+        let openRows = mount.rail.displayedRows
+
+        mount.rail.promptRail(activeIndexDidChange: 250)
+        try #require(mount.rail.offset > 0, "precondition: the active prompt's move scrolled the window")
+        #expect(mount.rail.displayedRows == openRows)
+
+        // The same outline again: same column, so no rebase.
+        mount.rail.promptRail(entriesDidChange: Self.entries(300))
+        let kept = try #require(mount.rail.lens)
+        #expect(kept.anchor == opened.anchor, "an outline of the same size re-anchored the lens on the moved offset")
+        #expect(mount.rail.displayedRows == openRows, "an outline of the same size moved the open lens's rows")
+
+        // One more prompt: a new column, rebased at the current offset.
+        mount.rail.promptRail(entriesDidChange: Self.entries(301))
+        let rebased = try #require(mount.rail.lens)
+        #expect(rebased.geometry.count == 301)
+        #expect(rebased.geometry.restOffset == mount.rail.offset,
+                "the rebase anchored at offset \(rebased.geometry.restOffset), not the rail's \(mount.rail.offset)")
+    }
+
     @Test("a new outline under an open lens keeps its centre, clamped to the new count")
     func outlineChangeWhileOpen() async throws {
         let mount = LensMount()
@@ -489,7 +582,10 @@ private final class LensMount {
         let hover = PromptRailHoverModel(notificationCenter: center, clock: clock)
         let rail = PromptRailNSView(
             hover: hover,
-            onJump: { id in jumps.ids.append(id) },
+            onJump: { id in
+                jumps.ids.append(id)
+                jumps.then?(id)
+            },
             reduceMotion: { reduceMotion },
             usesDisplayLink: false)
         container.installPromptRail(
@@ -540,6 +636,9 @@ private final class LensMount {
 @MainActor
 private final class LensJumpRecorder {
     var ids: [String] = []
+    /// Runs after each jump is recorded, inside the jump, as the table's
+    /// jump runs before the rail dismisses its lens.
+    var then: (@MainActor (String) -> Void)?
 }
 
 /// Counts wheel events handed to it.
