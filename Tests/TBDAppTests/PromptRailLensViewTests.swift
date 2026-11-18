@@ -438,7 +438,7 @@ struct PromptRailLensViewTests {
         (0..<count).map { index in
             PromptOutlineEntry(
                 id: "p-\(index)", rowIndex: index * 2, kind: .prompt,
-                firstLine: "Prompt \(index)", excerpt: "Prompt \(index)",
+                firstLine: "Prompt \(index)",
                 timestamp: index.isMultiple(of: 2) ? Date(timeIntervalSince1970: 1_700_000_000 + Double(index) * 60) : nil)
         }
     }

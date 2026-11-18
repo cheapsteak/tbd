@@ -174,7 +174,7 @@ struct PromptRailAppKitTests {
             timeZone: TimeZone(identifier: "UTC"), year: 2020, month: 1, day: 2, hour: 12)))
         var entries = Self.entries(3)
         entries[0] = PromptOutlineEntry(
-            id: "p-0", rowIndex: 0, kind: .prompt, firstLine: "Prompt 0", excerpt: "Prompt 0", timestamp: dated)
+            id: "p-0", rowIndex: 0, kind: .prompt, firstLine: "Prompt 0", timestamp: dated)
         rail.promptRail(entriesDidChange: entries)
         rail.promptRail(workCountsDidChange: [40, 1, 0])
 
@@ -436,7 +436,7 @@ struct PromptRailAppKitTests {
         (0..<count).map { index in
             PromptOutlineEntry(
                 id: "p-\(index)", rowIndex: index * 2, kind: .prompt,
-                firstLine: "Prompt \(index)", excerpt: "Prompt \(index)", timestamp: nil)
+                firstLine: "Prompt \(index)", timestamp: nil)
         }
     }
 
