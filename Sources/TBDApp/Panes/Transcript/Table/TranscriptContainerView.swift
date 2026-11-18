@@ -8,11 +8,13 @@ import AppKit
 ///   mounted and 0 without it, set once from the mount when the view is made.
 ///   The scroll view always fills the rest, so the table's width is fixed from
 ///   creation whatever the prompt count.
-/// - **Overlay** – the rail view starts at the leading edge and is as wide as
-///   the lens's box can grow (`PromptRailRowMetrics.overlayWidth(paneWidth:)`),
-///   so it covers the gutter and the transcript's leading strip. It draws over
-///   the transcript and answers clicks only where it shows something, so the
-///   table's width never changes on its account.
+/// - **Overlay** – the rail view starts at the leading edge. With no lens it
+///   is the gutter alone; while the rail has a lens (`wantsOpenWidth`) it is
+///   as wide as the lens's box can grow plus room for its shadow
+///   (`PromptRailRowMetrics.openOverlayWidth(paneWidth:)`), so it covers the
+///   transcript's leading strip too. It draws over the transcript and answers
+///   clicks and the wheel only over the rail column, and over the box while
+///   the lens is open, so the table's width never changes on its account.
 /// - **Stacking** – subview order settles it: the scroll view at the bottom,
 ///   the rail's overlay above it.
 /// - **Coordinator** – a weak handle back to the table's coordinator, for
@@ -88,19 +90,21 @@ final class TranscriptContainerView: NSView {
     }
 
     /// The scroll view takes everything right of the gutter; the rail's
-    /// overlay starts at the leading edge and is as wide as the lens's box can
-    /// grow. A gutter wider than the view leaves the scroll view zero wide
-    /// rather than negative.
+    /// overlay starts at the leading edge, as wide as the rail column, or as
+    /// the lens's box can grow while the rail has a lens. A gutter wider than
+    /// the view leaves the scroll view zero wide rather than negative.
     private func layoutContent() {
         let gutter = min(max(leadingGutter, 0), bounds.width)
         let scrollFrame = NSRect(
             x: gutter, y: 0, width: bounds.width - gutter, height: bounds.height)
         if scrollView.frame != scrollFrame { scrollView.frame = scrollFrame }
         if let railView {
-            let railFrame = NSRect(
-                x: 0, y: 0,
-                width: PromptRailRowMetrics.overlayWidth(paneWidth: bounds.width),
-                height: bounds.height)
+            var width = PromptRailLayout.width
+            if let rail = railView as? PromptRailNSView {
+                rail.boxMaxWidth = PromptRailRowMetrics.boxMaxWidth(paneWidth: bounds.width)
+                if rail.wantsOpenWidth { width = PromptRailRowMetrics.openOverlayWidth(paneWidth: bounds.width) }
+            }
+            let railFrame = NSRect(x: 0, y: 0, width: width, height: bounds.height)
             if railView.frame != railFrame { railView.frame = railFrame }
         }
     }
@@ -108,8 +112,9 @@ final class TranscriptContainerView: NSView {
     // MARK: Prompt rail wiring
 
     /// Mounts the prompt rail: `rail` as the overlay above the scroll view,
-    /// driven by `hover`. Wheel events over the rail go to the transcript, and
-    /// the hover model's open state reaches the rail's lens.
+    /// driven by `hover`. Wheel events over the rail go to the transcript, the
+    /// hover model's open state reaches the rail's lens, and the rail's lens
+    /// reframes the overlay as it comes and goes.
     ///
     /// `escapeMonitor` and `notificationCenter` default to the production
     /// ones; tests pass their own to count installs and to post a resign-key
@@ -123,6 +128,7 @@ final class TranscriptContainerView: NSView {
         stopObservingKeyWindow()
         promptRailHover?.onOpenChange = nil
         promptRailNSView?.onLensShownChange = nil
+        promptRailNSView?.onOpenWidthChange = nil
         promptRailEscape?.stop()
 
         promptRailHover = hover
@@ -130,6 +136,9 @@ final class TranscriptContainerView: NSView {
         promptRailNotificationCenter = notificationCenter
         rail.wheelTarget = scrollView
         rail.onLensShownChange = { [weak self] shown in self?.promptRailLensShownChanged(shown) }
+        // A lens starting to open widens the overlay to take its box, and
+        // one that has closed narrows it back to the gutter.
+        rail.onOpenWidthChange = { [weak self] in self?.layoutContent() }
         railView = rail
         hover.onOpenChange = { [weak self] open in self?.promptRailNSView?.lensOpenChanged(open) }
         startObservingKeyWindow()

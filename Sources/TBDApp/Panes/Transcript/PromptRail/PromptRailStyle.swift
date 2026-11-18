@@ -70,12 +70,23 @@ enum PromptRailRowMetrics {
     static let maxWidth: CGFloat = 320
     /// The box leaves this much of the pane's width uncovered.
     static let paneInset: CGFloat = 24
+    /// Room the overlay keeps past the box's widest for the box's shadow,
+    /// which the overlay's layer would otherwise clip.
+    static let shadowRoom: CGFloat = 12
 
-    /// The rail overlay's width over a pane `paneWidth` wide: as wide as the
-    /// box can grow, `maxWidth` capped at the pane's width less `paneInset`,
-    /// and never narrower than the rail itself.
-    static func overlayWidth(paneWidth: CGFloat) -> CGFloat {
+    /// The widest the box grows over a pane `paneWidth` wide: `maxWidth`
+    /// capped at the pane's width less `paneInset`, and never narrower than
+    /// the rail itself.
+    static func boxMaxWidth(paneWidth: CGFloat) -> CGFloat {
         max(PromptRailLayout.width, min(maxWidth, paneWidth - paneInset))
+    }
+
+    /// The rail overlay's width while a lens exists, opening, open or
+    /// closing: the box's widest plus `shadowRoom`, capped at the pane's
+    /// width, and never narrower than the rail. With no lens the overlay is
+    /// the rail column alone.
+    static func openOverlayWidth(paneWidth: CGFloat) -> CGFloat {
+        max(PromptRailLayout.width, min(paneWidth, boxMaxWidth(paneWidth: paneWidth) + shadowRoom))
     }
 
     // MARK: Row layout
@@ -116,6 +127,34 @@ enum PromptRailRowMetrics {
     /// `widthRevealEnd`.
     static let widthRevealStart: CGFloat = 8.5
     static let widthRevealEnd: CGFloat = 14
+    /// A row's text shows only above this opacity, and the box spans only
+    /// the rows whose text shows.
+    static let textVisibleOpacity: CGFloat = 0.01
+    /// Row text fades out as the room between `textLeading` and the box's
+    /// trailing padding shrinks from twice this to this, and is gone below
+    /// it: a box too narrow for any of a title shows no text rather than a
+    /// bare time.
+    static let textRoomFadeLength: CGFloat = 48
+
+    /// A row `h` tall's text opacity, before the lens's open fraction:
+    /// `(h − textFadeStart) / textFadeLength`, clamped to 0…1.
+    static func textOpacity(rowHeight h: CGFloat) -> CGFloat {
+        min(1, max(0, (h - textFadeStart) / textFadeLength))
+    }
+
+    /// How far a row `h` tall has grown from the rail's width toward its full
+    /// width: a smoothstep from `widthRevealStart` to `widthRevealEnd`.
+    static func widthReveal(rowHeight h: CGFloat) -> CGFloat {
+        let t = min(1, max(0, (h - widthRevealStart) / (widthRevealEnd - widthRevealStart)))
+        return t * t * (3 - 2 * t)
+    }
+
+    /// How much of a row's text shows in a box `boxWidth` wide, by the room
+    /// left for it: none up to `textRoomFadeLength`, all from twice that.
+    static func textRoomOpacity(boxWidth: CGFloat) -> CGFloat {
+        let room = boxWidth - textLeading - trailingPadding
+        return min(1, max(0, (room - textRoomFadeLength) / textRoomFadeLength))
+    }
 
     // MARK: Hovered row
 

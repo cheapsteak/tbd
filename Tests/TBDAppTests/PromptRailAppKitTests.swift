@@ -272,7 +272,8 @@ struct PromptRailAppKitTests {
     }
 
     /// The overlay reaches past the rail column, and its one tracking area
-    /// with it; code keeps the rail's hover to the column.
+    /// with it; code keeps the rail's hover to the column. The point off the
+    /// column lies past the open lens's box too, which would hold it open.
     @Test("a move off the rail column inside the overlay leaves the rail")
     func moveOffRailColumnLeavesRail() async throws {
         let clock = EventDrivenTestClock()
@@ -282,7 +283,7 @@ struct PromptRailAppKitTests {
         rail.promptRail(entriesDidChange: Self.entries(5))
 
         let onRail = try Self.mouseMoved(to: NSPoint(x: 8, y: 300))
-        let offRail = try Self.mouseMoved(to: NSPoint(x: 100, y: 300))
+        let offRail = try Self.mouseMoved(to: NSPoint(x: 340, y: 300))
         rail.mouseMoved(with: onRail)
         #expect(rail.isPointerOverRail)
         #expect(rail.pointedIndex != nil, "a move over the rail column pointed at no notch")
@@ -418,8 +419,7 @@ struct PromptRailAppKitTests {
 
         #expect(coordinator.promptRailPresenter === rail)
         #expect(rail.entries == coordinator.promptEntries)
-        #expect(rail.frame == NSRect(
-            x: 0, y: 0, width: PromptRailRowMetrics.overlayWidth(paneWidth: 680), height: 600))
+        #expect(rail.frame == NSRect(x: 0, y: 0, width: PromptRailLayout.width, height: 600))
         #expect(container.scrollView.frame.minX == PromptRailLayout.width)
         #expect(rail.displayedNotchRects.count == 3)
         #expect(container.subviews == [container.scrollView, rail])
@@ -509,7 +509,7 @@ struct PromptRailAppKitTests {
             scrollView: NSScrollView(), leadingGutter: PromptRailLayout.width)
         container.frame = host.contentView.bounds
         host.contentView.addSubview(container)
-        let rail = PromptRailNSView(hover: hover, onJump: { _ in })
+        let rail = PromptRailNSView(hover: hover, onJump: { _ in }, usesDisplayLink: false)
         container.installPromptRail(
             rail: rail, hover: hover, escapeMonitor: escape.makeMonitor(), notificationCenter: center)
         container.layoutSubtreeIfNeeded()

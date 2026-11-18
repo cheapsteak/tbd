@@ -31,17 +31,27 @@ struct PromptRailMountTests {
         #expect(bare.scrollView.frame.width == 680)
     }
 
-    @Test("the overlay is as wide as the box can grow: 320pt, capped at the pane's width less 24pt, never below the rail")
-    func overlayWidthCaps() {
-        #expect(PromptRailRowMetrics.overlayWidth(paneWidth: 680) == 320)
-        #expect(PromptRailRowMetrics.overlayWidth(paneWidth: 344) == 320)
-        #expect(PromptRailRowMetrics.overlayWidth(paneWidth: 300) == 276)
-        #expect(PromptRailRowMetrics.overlayWidth(paneWidth: 30) == PromptRailLayout.width)
-        #expect(PromptRailRowMetrics.overlayWidth(paneWidth: 0) == PromptRailLayout.width)
+    @Test("the box grows to 320pt, capped at the pane's width less 24pt, never below the rail")
+    func boxMaxWidthCaps() {
+        #expect(PromptRailRowMetrics.boxMaxWidth(paneWidth: 680) == 320)
+        #expect(PromptRailRowMetrics.boxMaxWidth(paneWidth: 344) == 320)
+        #expect(PromptRailRowMetrics.boxMaxWidth(paneWidth: 300) == 276)
+        #expect(PromptRailRowMetrics.boxMaxWidth(paneWidth: 60) == 36)
+        #expect(PromptRailRowMetrics.boxMaxWidth(paneWidth: 30) == PromptRailLayout.width)
+        #expect(PromptRailRowMetrics.boxMaxWidth(paneWidth: 0) == PromptRailLayout.width)
+    }
+
+    @Test("an open lens's overlay is the box's widest plus 12pt of shadow room, capped at the pane, never below the rail")
+    func openOverlayWidthCaps() {
+        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 680) == 332)
+        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 300) == 288)
+        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 60) == 48)
+        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 30) == 30)
+        #expect(PromptRailRowMetrics.openOverlayWidth(paneWidth: 0) == PromptRailLayout.width)
     }
 
     /// The overlay draws over the transcript; only the gutter narrows the
-    /// table.
+    /// table. With no lens it is the gutter alone.
     @Test("the rail overlays the scroll view from the leading edge while the scroll view keeps the gutter")
     func containerStacksRailOverScrollView() {
         let container = TranscriptContainerView(
@@ -51,17 +61,15 @@ struct PromptRailMountTests {
         container.railView = rail
         container.layoutSubtreeIfNeeded()
 
-        #expect(rail.frame == NSRect(
-            x: 0, y: 0, width: PromptRailRowMetrics.overlayWidth(paneWidth: 680), height: 600))
+        #expect(rail.frame == NSRect(x: 0, y: 0, width: PromptRailLayout.width, height: 600))
         #expect(container.scrollView.frame.minX == PromptRailLayout.width)
         #expect(container.scrollView.frame.width == 660)
         #expect(container.subviews == [container.scrollView, rail])
 
-        // A narrower pane narrows the overlay with it.
+        // A resized pane keeps the overlay in the gutter, as tall as the pane.
         container.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
         container.layoutSubtreeIfNeeded()
-        #expect(rail.frame == NSRect(
-            x: 0, y: 0, width: PromptRailRowMetrics.overlayWidth(paneWidth: 300), height: 400))
+        #expect(rail.frame == NSRect(x: 0, y: 0, width: PromptRailLayout.width, height: 400))
         #expect(container.scrollView.frame.minX == PromptRailLayout.width)
     }
 
@@ -89,8 +97,8 @@ struct PromptRailMountTests {
         let coordinator = try #require(container.coordinator, "the container has no coordinator")
         let rail = try #require(container.railView as? PromptRailNSView, "the mount installed no rail")
         #expect(coordinator.promptRailPresenter === rail, "the mount did not make its rail the presenter")
-        #expect(rail.frame == NSRect(
-            x: 0, y: 0, width: PromptRailRowMetrics.overlayWidth(paneWidth: 680), height: 600))
+        #expect(rail.frame == NSRect(x: 0, y: 0, width: PromptRailLayout.width, height: 600))
+        #expect(rail.boxMaxWidth == PromptRailRowMetrics.boxMaxWidth(paneWidth: 680))
         #expect(container.subviews == [container.scrollView, rail])
         let delivered = await host.settle { rail.entries.count == 3 }
         #expect(delivered, "the rail never received the outline (entries: \(rail.entries.count))")
