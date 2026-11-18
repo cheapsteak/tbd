@@ -515,10 +515,12 @@ extension PromptRailNSView {
     var isPointerOverLens: Bool { isPointerOverRail || lensState.isPointerOverBox }
 
     /// Whether `point`, in rail coordinates, is over the lens's box: inside
-    /// its drawn shape (`PromptRailLensPainter.boxPath(_:)`), so the clear
-    /// area outside a rounded corner is not over it (lens spec, "Elsewhere").
+    /// the overlay and its drawn shape (`PromptRailLensPainter.boxPath(_:)`),
+    /// taper included, so the taper above and below the box is over it and
+    /// the clear area outside a rounded corner is not (lens spec,
+    /// "Elsewhere").
     func isOverBox(_ point: NSPoint) -> Bool {
-        guard let box = lensState.shape.box, box.contains(point) else { return false }
+        guard let box = lensState.shape.box, bounds.contains(point) else { return false }
         return PromptRailLensPainter.boxPath(box).contains(point)
     }
 

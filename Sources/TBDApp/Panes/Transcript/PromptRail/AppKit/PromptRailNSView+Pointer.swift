@@ -3,7 +3,8 @@ import AppKit
 /// The rail's pointer handling: hit-testing, clicks, hover and the wheel.
 ///
 /// - **Hit-testing** – the overlay answers over the rail column, and over the
-///   lens's box, inside its drawn shape, while the lens is open. Clicks and
+///   lens's box, inside its drawn shape, taper included, while the lens is
+///   open. Clicks and
 ///   the wheel anywhere else, the clear area outside the box's rounded
 ///   corners and the box of a closing lens among them, fall through to the
 ///   transcript, whatever the overlay's frame covers.

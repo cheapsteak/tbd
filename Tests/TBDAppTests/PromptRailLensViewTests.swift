@@ -733,6 +733,29 @@ struct PromptRailLensViewTests {
         #expect(mount.rail.hitTest(centre) === mount.rail, "the box's middle let a click through")
     }
 
+    /// The box's drawn shape includes the 45° taper that joins it to the rail
+    /// column above and below (lens spec, "Elsewhere"), outside the box's
+    /// rect. A point 2pt above the box and 4pt right of the rail column lies
+    /// in the upper taper; one 6pt above the box and 20pt right of the column
+    /// lies in the clear area past it.
+    @Test("the box's taper takes clicks and box hover, and the clear area past it does not")
+    func boxTaperTakesClicks() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        let box = try #require(mount.rail.boxRect)
+        try #require(box.width >= PromptRailLayout.width + 2 * PromptRailRowMetrics.boxTaper,
+                     "precondition: the box is \(box.width)pt wide, wide enough for a whole taper")
+        let inTaper = NSPoint(x: PromptRailLayout.width + 4, y: box.minY - 2)
+        try #require(!box.contains(inTaper), "precondition: \(inTaper) lies outside the box's rect \(box)")
+        #expect(mount.rail.isOverBox(inTaper), "the taper does not count as over the box")
+        #expect(mount.rail.hitTest(inTaper) === mount.rail, "a click on the taper reached the transcript")
+        let pastTaper = NSPoint(x: PromptRailLayout.width + 20, y: box.minY - 6)
+        #expect(!mount.rail.isOverBox(pastTaper), "the clear area past the taper counts as over the box")
+        #expect(mount.rail.hitTest(pastTaper) == nil, "the clear area past the taper took a click")
+    }
+
     @Test("once the lens starts to close, its shrinking box takes no clicks, and the rail column still does")
     func closingBoxTakesNoClicks() async throws {
         let mount = LensMount()
