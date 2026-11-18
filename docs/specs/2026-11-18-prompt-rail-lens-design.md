@@ -95,9 +95,10 @@ Rows are drawn at their layout height, and each shows as much as its height allo
 
 - **Click on a row** – jumps to its prompt, as the card's rows did, and closes the lens.
 - **Click on the bare rail** – a click on the rail before the lens has grown jumps to the pointed notch's prompt.
+- **Outside the column** – a pointer above the first row or below the last points at no row: it draws no hover fill, and a click there jumps nowhere. A short session's column ends well above the rail's bottom, so this is common.
 - **Wheel** – a wheel over the rail column or the box scrolls the transcript. Neither the rail nor the lens scrolls under the wheel.
 - **Elsewhere** – clicks and the wheel outside the rail column and the box reach the transcript, whatever the overlay's frame covers. Once the lens starts to close, its shrinking box takes no clicks: they reach the transcript.
-- **Jump-to-latest button** – the live pane's button that scrolls to the newest message hides while the lens is open, so it never covers the lens's bottom rows or takes their clicks.
+- **Jump-to-latest button** – each transcript pane's button that scrolls to the newest message (live, History and Remote) hides while the lens is open, so it never covers the lens's rows or takes their clicks.
 - **Keyboard** – the Go menu's Previous Prompt and Next Prompt are unchanged.
 - **VoiceOver** – the "Prompts" group, with one button per entry, is unchanged.
 

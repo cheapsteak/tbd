@@ -140,7 +140,7 @@ Everything with logic in it is kept out of the views. It lives under `Sources/TB
 `TableTranscriptView`'s view is a container `NSView`, `TranscriptContainerView`, holding the scroll view right of the 20pt gutter and the rail stacked above it. The rail view lives under `PromptRail/AppKit/`.
 
 - **Rail** – `PromptRailNSView` is the presenter, so an active-entry change goes straight from the coordinator to the rail. It hands wheel events to the scroll view. Its drawing, hover tracking and lens are specified in the lens spec.
-- **Wiring** – the container runs the Escape monitor only while the lens is open, and closes the lens when the container leaves its window or the window resigns key. The monitor is app-wide, so a lens left open in a background window would take Escape from every view in the key one.
+- **Wiring** – the container runs the Escape monitor only while the lens is on screen (open, with at least one prompt), and closes the lens when the container leaves its window or the window resigns key. The monitor is app-wide, so a lens left open in a background window would take Escape from every view in the key one.
 - **Stacking** – settled by AppKit subview order: the scroll view, then the rail.
 
 **Mounting.** The table's `promptRail` parameter says whether to build the views. The three call sites mount the rail on the table directly. A harness that drives the table alone mounts nothing and gets no gutter. Because the views live inside the table's view, a pane's `.id` that rebuilds the table, as on session rollover, rebuilds the rail with it. A pane's overlays span the gutter too, so the live pane insets its bottom-leading jump-to-bottom button by the gutter's width to keep it clear of the rail.
