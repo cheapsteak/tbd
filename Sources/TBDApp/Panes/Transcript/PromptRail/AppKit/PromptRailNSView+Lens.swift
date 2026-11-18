@@ -343,8 +343,10 @@ extension PromptRailNSView {
             lensState.lens = lens
         }
         // A flick holds the lens still without settling it: once the pointer
-        // slows, the lens may still have to follow.
-        lensState.keepsStepping = moved || (driving && lens.speed > PromptRailSteadyLens.flickSpeed)
+        // slows, the lens may still have to follow. A lens that keeps the
+        // resting rows never follows, so a flick over it wants no frames.
+        lensState.keepsStepping = moved
+            || (driving && !lens.geometry.keepsRestingRows && lens.speed > PromptRailSteadyLens.flickSpeed)
         if moved || lensState.openFraction != fraction || holdsBoxWidth != lensState.heldBoxWidth {
             refreshLensDisplay()
         } else {
@@ -398,11 +400,16 @@ extension PromptRailNSView {
     /// click moves the active prompt, and with it the offset, before the lens
     /// shrinks, and a shrink toward the old resting rows would end in a jump
     /// to the new ones when the lens drops.
+    ///
+    /// A fully open lens shows its own rows, so the resting rows are built
+    /// only while it grows or shrinks.
     private func refreshLensDisplay() {
         guard let lens = lensState.lens else { return }
         let previousBox = lensState.shape.box
         let fraction = lensState.openFraction
-        let rows = PromptRailLensRows.resting(currentLensGeometry()).blended(toward: lens.rows, fraction: fraction)
+        let rows = fraction >= 1 && lens.rows.tops.count == entries.count
+            ? lens.rows
+            : PromptRailLensRows.resting(currentLensGeometry()).blended(toward: lens.rows, fraction: fraction)
         lensState.displayedRows = rows
         var shape = lensPainter.shape(for: rows, openFraction: fraction, maxWidth: boxMaxWidth)
         // While the pointer is over the box, the box never narrows: moving

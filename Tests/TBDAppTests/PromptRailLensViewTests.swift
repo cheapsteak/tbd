@@ -743,6 +743,35 @@ struct PromptRailLensViewTests {
         #expect(mount.rail.clickRow(at: centre) == 1, "a click on row 1's band found no row 1")
     }
 
+    /// A lens that keeps the resting rows never follows the pointer, so a
+    /// flick over it keeps no frames running once its frame has passed. The
+    /// same flick over a lens that follows keeps them running, for the lens
+    /// may have to follow once the pointer slows.
+    @Test("a flick keeps frames running over a lens that follows, and not over one that keeps the resting rows")
+    func flickOverRestingLensStopsFrames() async throws {
+        func flick(prompts: Int) async throws -> (keepsRestingRows: Bool, speed: CGFloat, running: Bool) {
+            let mount = LensMount(entryCount: prompts)
+            defer { mount.host.tearDown() }
+            try await Self.openLens(mount)
+            mount.frames(Self.wholeAnimation)
+            try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 1))
+            mount.wait(0.010)
+            try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 61))
+            mount.frame()
+            let lens = try #require(mount.rail.lens)
+            return (lens.geometry.keepsRestingRows, lens.speed, mount.rail.isRunningFrames)
+        }
+        let few = try await flick(prompts: 3)
+        try #require(few.keepsRestingRows, "precondition: three prompts keep the resting rows")
+        try #require(few.speed > PromptRailSteadyLens.flickSpeed, "precondition: 60pt in 10ms read as \(few.speed)pt/ms")
+        #expect(!few.running, "a flick over a lens that never follows kept the frames running")
+
+        let many = try await flick(prompts: 40)
+        try #require(!many.keepsRestingRows, "precondition: forty prompts' lens follows the pointer")
+        try #require(many.speed > PromptRailSteadyLens.flickSpeed, "precondition: 60pt in 10ms read as \(many.speed)pt/ms")
+        #expect(many.running, "a flick over a lens that follows stopped the frames")
+    }
+
     /// The press keeps the pressed prompt's id, so prompts arriving above it
     /// before the release, which hand its row to another prompt, still let
     /// the click jump to the prompt pressed.
