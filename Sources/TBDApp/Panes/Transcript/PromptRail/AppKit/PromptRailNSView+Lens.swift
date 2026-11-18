@@ -49,7 +49,8 @@ struct PromptRailLensState {
     /// moving.
     var isRunningFrames = false
     var lastFrameTimestamp: TimeInterval?
-    /// The pointer moved over the lens since the last frame.
+    /// A frame is due: the pointer moved over the lens, or the lens moved
+    /// onto a new column, since the last frame.
     var stepRequested = false
     /// The last frame moved the lens, or held it still only for a flick, so
     /// the next may move it.
@@ -487,12 +488,11 @@ extension PromptRailNSView {
     /// not the layer mask the resting rail uses, which would fade the box
     /// and its text at that end too, so the mask comes off.
     private func updateLensFade(_ rows: PromptRailLensRows) {
-        guard let first = rows.tops.first, let lastTop = rows.tops.last, let lastHeight = rows.heights.last
-        else { return }
+        guard let column = rows.columnSpan else { return }
         if hasFadeMask { setFade(top: false, bottom: false) }
         lensState.fade = PromptRailEndFades(
-            top: first < PromptRailLayout.topInset - 0.5,
-            bottom: lastTop + lastHeight > bounds.height - PromptRailLayout.bottomInset + 0.5)
+            top: column.top < PromptRailLayout.topInset - 0.5,
+            bottom: column.bottom > bounds.height - PromptRailLayout.bottomInset + 0.5)
     }
 
     // MARK: Hover

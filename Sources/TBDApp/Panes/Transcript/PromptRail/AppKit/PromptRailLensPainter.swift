@@ -210,12 +210,10 @@ final class PromptRailLensPainter {
             box: CGRect(x: 0, y: top, width: width, height: bottom - top))
     }
 
-    /// Row `index`'s text band in `rows`, in rail coordinates, as a
-    /// zero-width rect at x 0 (`PromptRailLensRows.textBand(row:)`). The box
-    /// hugs the text in it rather than a row up to 184pt tall.
+    /// Row `index`'s text band in `rows` (`PromptRailLensRows.textBand(row:)`).
+    /// The box hugs the text in it rather than a row up to 184pt tall.
     static func textBand(row index: Int, in rows: PromptRailLensRows) -> CGRect {
-        let band = rows.textBand(row: index)
-        return CGRect(x: 0, y: band.top, width: 0, height: band.height)
+        rows.textBand(row: index)
     }
 
     // MARK: Drawing
