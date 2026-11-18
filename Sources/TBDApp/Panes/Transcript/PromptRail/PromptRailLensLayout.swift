@@ -121,8 +121,11 @@ struct PromptRailLensRows: Equatable, Sendable {
 
 /// The open lens's layout on one rail (lens spec, "The lens" → "Layout"): the
 /// column it fills, and each row's height and top for a lens centred on a
-/// fractional row. The open lens fills exactly the resting column, so neither
-/// end moves; far rows squeeze to pay for the rows that grow.
+/// fractional row. On a rail that is not windowed, the open lens fills exactly
+/// the resting column, so neither end moves. A windowed rail's lens fits every
+/// prompt between the insets, and the notches beyond the window slide in from
+/// behind the fades; a rail past the floor slides its column with the lens.
+/// Far rows squeeze to pay for the rows that grow.
 ///
 /// A port of the approved HTML mock's `computeLens` and its helpers, with
 /// rules from the spec that the mock does not follow:

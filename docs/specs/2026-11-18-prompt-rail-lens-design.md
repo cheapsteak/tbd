@@ -112,7 +112,7 @@ Rows are drawn at their layout height, and each shows as much as its height allo
 ### Live updates
 
 - **Active prompt** – a change while the lens is open restyles the rows in place.
-- **New prompt** – a new prompt adds a row, and the lens keeps its centre. The resting column is laid out again for the new count. While the pitch is the lens's need divided by the count (up to about 22 prompts), the column keeps its height and the pitch shrinks. Past that, the column grows by one pitch, so its bottom moves down with the new notch.
+- **New prompt** – a new prompt adds a row, and the lens keeps its centre. The resting column is laid out again for the new count. Where the pitch is the lens's need divided by the count (up to about 22 prompts in a tall rail), or the rail's free height divided by the count (a session that already fills the rail, from about 73 prompts in a 600pt rail), the column keeps its height and the pitch shrinks. At the fixed 8pt pitch in between, the column grows by one pitch, so its bottom moves down with the new notch.
 - **Tool calls** – a turn's tool count changes its notch length in place.
 
 ## Structure
