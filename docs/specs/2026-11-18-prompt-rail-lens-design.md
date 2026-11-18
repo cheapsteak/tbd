@@ -74,7 +74,7 @@ The lens holds still while the pointer moves near its centre and follows when pu
 
 Rows are drawn at their layout height, and each shows as much as its height allows:
 
-- **Notch** – every row draws its notch at its work length, from 2pt in from the rail's leading edge. The active notch is 3pt thick in the accent colour (lavender for a peer) and the rest 2pt, as at rest. A row thinner than its notch draws it at the row's height less 1pt, at least 0.5pt.
+- **Notch** – every row draws its notch at its work length, from 2pt in from the rail's leading edge. The active notch is 3pt thick in the accent colour (lavender for a peer) and the rest 2pt, as at rest. A row thinner than its notch draws it at the row's height less 1pt, at least 0.5pt; the active notch keeps at least 2pt, so the active prompt stays visible in a squeezed column.
 - **Text** – a row's first line and time fade in as the row grows: opacity is `(h − 10.5) / 2.5`, clamped to 0…1, where `h` is the row height. Below 15pt the text is 10.5pt; from 15pt it is 13pt.
 - **Readable row layout** – it repeats the card's row:
   - the notch as the row's dash, in an 18pt dash column;
