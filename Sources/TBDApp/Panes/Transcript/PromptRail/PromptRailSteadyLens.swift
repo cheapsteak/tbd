@@ -135,13 +135,24 @@ struct PromptRailSteadyLens: Equatable, Sendable {
     /// edge, by `1 − exp(−dt / easeTimeConstant)` of the way. Once within
     /// `settleRows` of it, the centre moves onto it and stops there, so it
     /// settles in the same place at any frame rate.
+    ///
+    /// A step during which the decaying speed falls to `flickSpeed` eases
+    /// only for the part of `dt` after it did, worked out from the decay
+    /// curve: until then the lens was held still by the flick. So a late
+    /// frame after a flick moves the lens as far as the frames it stands
+    /// for would have.
     mutating func step(dt: TimeInterval) -> Bool {
         guard dt > 0 else { return false }
+        var easeTime = dt
         if movedSinceStep {
             movedSinceStep = false
         } else {
+            let before = speed
             speed *= Self.speedKept(over: dt)
             decayedSinceMove += dt
+            if before > Self.flickSpeed, speed <= Self.flickSpeed {
+                easeTime = dt - min(dt, Self.decayTime(from: before, to: Self.flickSpeed))
+            }
         }
         guard !geometry.keepsRestingRows, !isSettled, speed <= Self.flickSpeed else { return false }
 
@@ -163,7 +174,7 @@ struct PromptRailSteadyLens: Equatable, Sendable {
             moveCentre(to: settled)
             return true
         }
-        moveCentre(to: centre + (target - centre) * CGFloat(1 - exp(-dt / Self.easeTimeConstant)))
+        moveCentre(to: centre + (target - centre) * CGFloat(1 - exp(-easeTime / Self.easeTimeConstant)))
         return true
     }
 
@@ -192,6 +203,13 @@ struct PromptRailSteadyLens: Equatable, Sendable {
     /// The share of the speed the smoothing keeps over `time` seconds.
     private static func speedKept(over time: TimeInterval) -> CGFloat {
         pow(speedKeptPerFrame, CGFloat(time) * 60)
+    }
+
+    /// The time, in seconds, over which the smoothing decays a speed `from`
+    /// to `to`, both positive and `to` no more than `from`: the inverse of
+    /// `speedKept(over:)`.
+    private static func decayTime(from: CGFloat, to: CGFloat) -> TimeInterval {
+        TimeInterval(log(to / from) / (60 * log(speedKeptPerFrame)))
     }
 
     /// The centre whose own layout puts the pointer exactly on the dead

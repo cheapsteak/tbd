@@ -139,6 +139,33 @@ struct PromptRailSteadyLensTests {
         #expect(frames < 10, "the lens never followed once the flick ended")
     }
 
+    /// A late frame that spans the end of a flick moves the lens as far as
+    /// the frames it stands for: it eases only for the part of its time after
+    /// the speed fell to `flickSpeed`. A 90pt move in 10ms reads about
+    /// 2.4pt/ms, which decays to the flick speed some 54ms later; one 150ms
+    /// frame and nine 1/60s frames then leave the centre in the same place.
+    @Test func lateFrameAfterFlickEasesFromItsEnd() throws {
+        var lens = Self.opened()
+        let start = lens.centre
+        let pushed = lens.rows.y(ofFraction: start + 6)
+        lens.notePointer(y: pushed - 90, time: 1)
+        lens.notePointer(y: pushed, time: 1.010)
+        _ = lens.step(dt: 1.0 / 120)
+        try #require(lens.speed > PromptRailSteadyLens.flickSpeed,
+                     "precondition: a 90pt move in 10ms is a flick, read as \(lens.speed)pt/ms")
+        try #require(lens.centre == start, "precondition: the flick held the lens still")
+
+        var late = lens
+        _ = late.step(dt: 0.150)
+        var paced = lens
+        for _ in 0..<9 { _ = paced.step(dt: Self.frame) }
+        let lateMoved = late.centre - start
+        let pacedMoved = paced.centre - start
+        try #require(pacedMoved > 0.5, "precondition: nine frames moved the lens only \(pacedMoved) rows")
+        #expect(abs(lateMoved - pacedMoved) <= 0.01 * pacedMoved,
+                "one 150ms frame moved the lens \(lateMoved) rows, nine 1/60s frames \(pacedMoved)")
+    }
+
     /// A flick that starts while the frames are paused freezes the lens on
     /// the first step: its speed comes from the moves' own times, not from
     /// frames. The pointer rests inside the dead zone and the frames stop; a
