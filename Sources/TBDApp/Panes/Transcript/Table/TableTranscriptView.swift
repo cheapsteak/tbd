@@ -254,7 +254,9 @@ struct TableTranscriptView: NSViewRepresentable {
 
     func updateNSView(_ container: TranscriptContainerView, context ctx: Context) {
         let coordinator = ctx.coordinator
+        #if DEBUG
         coordinator.updateCount += 1
+        #endif
         if scrollToBottomToken != coordinator.lastScrollToken {
             coordinator.lastScrollToken = scrollToBottomToken
             coordinator.scrollToEnd(animated: true)
@@ -319,9 +321,12 @@ struct TableTranscriptView: NSViewRepresentable {
         /// See `TableTranscriptView.promptLensVisibility`. Refreshed every
         /// `updateNSView`.
         var promptLensVisibility: PromptLensVisibility?
+        #if DEBUG
         /// How many times `updateNSView` has run against this coordinator.
-        /// Tests read it to show what does not re-render the table.
+        /// Tests read it to show what does not re-render the table; debug
+        /// builds only, as the tests are.
         var updateCount = 0
+        #endif
 
         /// How many rows the table held when `makeNSView` built it, which is
         /// what the first layout, inside the window insertion, realizes from.
