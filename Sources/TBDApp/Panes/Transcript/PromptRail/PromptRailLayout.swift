@@ -2,14 +2,25 @@ import CoreGraphics
 import Foundation
 
 /// Geometry of the prompt rail: one notch per prompt, packed at a pitch that
-/// shrinks as prompts accumulate and scrolls once it hits the minimum.
-/// Coordinates are flipped (y grows downward), matching NSTableView.
+/// shrinks as prompts accumulate and scrolls once it hits the minimum. A short
+/// session spreads its notches so the resting column is tall enough to hold
+/// the lens. Coordinates are flipped (y grows downward), matching NSTableView.
 struct PromptRailLayout: Equatable {
     static let width: CGFloat = 20
     static let topInset: CGFloat = 12
     static let bottomInset: CGFloat = 12
+    /// The pitch of a mid-length session. A shorter one rests wider apart so
+    /// its column holds the lens; see `pitch`.
     static let maxPitch: CGFloat = 8
     static let minPitch: CGFloat = 4
+    /// The open lens's peak row height, `T` in the lens spec's "Strength".
+    static let lensPeak: CGFloat = 26
+    /// Rows on each side of the lens centre that grow, `R` in the lens spec's
+    /// "Strength".
+    static let lensRadius: CGFloat = 6
+    /// The column height the lens needs to show its rows at full size,
+    /// `lensPeak × lensRadius / 0.85`: about 184pt.
+    static let lensNeed: CGFloat = lensPeak * lensRadius / 0.85
     static let notchLeading: CGFloat = 2
     static let inactiveNotchHeight: CGFloat = 2
     /// The active notch keeps its length and is marked by thickness instead.
@@ -20,11 +31,17 @@ struct PromptRailLayout: Equatable {
     let count: Int
     let railHeight: CGFloat
 
-    /// Free height divided by count, clamped to `minPitch...maxPitch`.
+    /// The resting pitch, `max(minPitch, min(max(maxPitch, lensNeed / N),
+    /// free / N))` for `N` prompts and the rail's free height (lens spec,
+    /// "The resting rail"). A short session spreads its notches over the
+    /// height the lens needs, capped at the free height, so the lens can open
+    /// without moving either end of the column. Mid-length sessions keep
+    /// `maxPitch`; long ones shrink toward `minPitch` and then window.
     var pitch: CGFloat {
         guard count > 0 else { return Self.maxPitch }
         let free = railHeight - Self.topInset - Self.bottomInset
-        return min(Self.maxPitch, max(Self.minPitch, free / CGFloat(count)))
+        let n = CGFloat(count)
+        return max(Self.minPitch, min(max(Self.maxPitch, Self.lensNeed / n), free / n))
     }
 
     var contentHeight: CGFloat {
