@@ -133,6 +133,10 @@ enum PromptRailRowMetrics {
     /// to this, and is gone below it: a box too narrow for any of a long
     /// title shows no text rather than a bare time.
     static let textRoomFadeLength: CGFloat = 48
+    /// Over the last this many points of box width before a row's text fits,
+    /// its room fade ramps up to full, so text that comes to fit never jumps
+    /// to full in one frame.
+    static let textFitRampLength: CGFloat = 12
 
     /// A row `h` tall's text opacity, before the lens's open fraction:
     /// `(h − textFadeStart) / textFadeLength`, clamped to 0…1.
@@ -153,11 +157,16 @@ enum PromptRailRowMetrics {
     /// its time and their gap within the room the box leaves it, shows in
     /// full, however narrow the box. Text that does not fit shows by the
     /// room left for it: none up to `textRoomFadeLength`, all from twice
-    /// that.
+    /// that. Within `textFitRampLength` of fitting, it ramps from that up to
+    /// full, so the opacity follows the box's width without a jump and never
+    /// falls below the room's own.
     static func textRoomOpacity(boxWidth: CGFloat, naturalWidth: CGFloat) -> CGFloat {
-        if naturalWidth - naturalWidthSlack <= boxWidth { return 1 }
+        let fit = naturalWidth - naturalWidthSlack
+        if fit <= boxWidth { return 1 }
         let room = boxWidth - textLeading - trailingPadding
-        return min(1, max(0, (room - textRoomFadeLength) / textRoomFadeLength))
+        let byRoom = min(1, max(0, (room - textRoomFadeLength) / textRoomFadeLength))
+        let ramp = max(0, 1 - (fit - boxWidth) / textFitRampLength)
+        return byRoom + (1 - byRoom) * ramp
     }
 
     // MARK: Hovered row

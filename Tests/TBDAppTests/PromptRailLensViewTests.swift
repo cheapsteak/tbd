@@ -1263,22 +1263,53 @@ struct PromptRailLensViewTests {
     }
 
     /// Text that fits the box shows in full, however narrow the box. Text
-    /// that does not fades with the room the box leaves it, as the box widens
-    /// (lens spec, "Room").
+    /// that does not fades with the room the box leaves it, as the box widens,
+    /// and ramps up to full over the last 12pt before it fits (lens spec,
+    /// "Room").
     @Test("text that fits its box shows in full, and text that does not fades with the box's room")
     func textRoomRule() {
         typealias Metrics = PromptRailRowMetrics
         let slack = Metrics.naturalWidthSlack
-        // A one-word title in a box sized to it, and in a box a point short.
+        // A one-word title in a box sized to it, and in boxes 1pt, 6pt and
+        // 12pt short of it, where the room alone would show none of it.
         #expect(Metrics.textRoomOpacity(boxWidth: 44, naturalWidth: 44) == 1)
         #expect(Metrics.textRoomOpacity(boxWidth: 44, naturalWidth: 44 + slack) == 1)
-        #expect(Metrics.textRoomOpacity(boxWidth: 44, naturalWidth: 44 + slack + 1) == 0)
+        #expect(abs(Metrics.textRoomOpacity(boxWidth: 44, naturalWidth: 44 + slack + 1) - 11.0 / 12) < 0.0001)
+        #expect(abs(Metrics.textRoomOpacity(boxWidth: 44, naturalWidth: 44 + slack + 6) - 0.5) < 0.0001)
+        #expect(Metrics.textRoomOpacity(boxWidth: 44, naturalWidth: 44 + slack + 12) == 0)
         // A long title in a box still widening: none of it with 48pt of
         // room, half with 72pt, all of it with 96pt.
         let edges = Metrics.textLeading + Metrics.trailingPadding
         #expect(Metrics.textRoomOpacity(boxWidth: edges + 48, naturalWidth: 300) == 0)
         #expect(abs(Metrics.textRoomOpacity(boxWidth: edges + 72, naturalWidth: 300) - 0.5) < 0.0001)
         #expect(Metrics.textRoomOpacity(boxWidth: edges + 96, naturalWidth: 300) == 1)
+    }
+
+    /// A row's text opacity follows the box's width without a jump as its
+    /// text comes to fit, and is full once it does (lens spec, "Room"). A
+    /// row 100pt wide fits a 98pt box; sampled every 0.5pt from 40pt to
+    /// 130pt, neighbouring widths never differ by more than 0.15, and no
+    /// width shows less than the room alone would, which a title far too
+    /// long to fit reads.
+    @Test("text that comes to fit ramps to full opacity rather than jumping")
+    func textRoomRampIsContinuous() {
+        typealias Metrics = PromptRailRowMetrics
+        let natural: CGFloat = 100
+        let fit = natural - Metrics.naturalWidthSlack
+        var misses: [String] = []
+        var previous: CGFloat?
+        for step in 0...180 {
+            let width = 40 + CGFloat(step) / 2
+            let opacity = Metrics.textRoomOpacity(boxWidth: width, naturalWidth: natural)
+            if let previous, !(abs(opacity - previous) <= 0.15) {
+                misses.append("\(width - 0.5)pt → \(width)pt: \(previous) → \(opacity)")
+            }
+            let byRoom = Metrics.textRoomOpacity(boxWidth: width, naturalWidth: 10_000)
+            if !(opacity >= byRoom) { misses.append("\(width)pt: \(opacity), below the room's \(byRoom)") }
+            if width >= fit, opacity != 1 { misses.append("\(width)pt fits, yet shows \(opacity)") }
+            previous = opacity
+        }
+        #expect(misses.isEmpty, "\(misses.prefix(5))")
     }
 
     /// One prompt titled "i", with no time: the box is sized to the one
