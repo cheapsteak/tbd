@@ -83,7 +83,7 @@ Rows are drawn at their layout height, and each shows as much as its height allo
   - the time, right-aligned in the secondary label colour with monospaced digits, 8pt after the first line, with 10pt trailing padding;
   - for the active row, medium weight;
   - for the row under the pointer, a quaternary-fill background with a 6pt corner radius.
-  - a row taller than the peak (a few-prompts rail) draws its text, its hover fill and its share of the box in a band the peak's height, centred on the row, so the box hugs the text rather than the row's whole height.
+  - a row taller than the peak (a few-prompts rail) draws its text, its hover fill and its share of the box in a band the peak's height, centred on the row, so the box hugs the text rather than the row's whole height. Such a row is pointed at only within its band; between bands the pointer points at no row.
 - **Time column** – the time column follows the rail spec's rule: today's rows show their time, and an earlier day's first row shows its date.
 - **The box:**
   - **Rows** – it spans the rows whose text shows at all, from 3pt above the first to 3pt below the last.
