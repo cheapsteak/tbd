@@ -13,10 +13,10 @@ import TestSupport
 /// cells, and feeding it updates. They pin render == measure for chat bubbles,
 /// the per-block height cache, cell dispatch, the disclosure and prepend
 /// anchors, tail-follow, cache bounds, the near-top signal, and the arithmetic
-/// estimate's image term. The jump-to-bottom test instead hosts the whole
-/// `TableTranscriptView` in an `OffscreenHost`, under a pane-shaped view
-/// whose state is real (`JumpPane`), because what it pins is a SwiftUI state
-/// write.
+/// estimate's image term. The jump-to-bottom and lens-visibility tests
+/// instead host the whole `TableTranscriptView` in an `OffscreenHost`, under a
+/// pane-shaped view whose state is real (`JumpPane`, `LensVisibilityPane`),
+/// because what they pin is a SwiftUI state write or what it re-renders.
 ///
 /// The visual harness that shares the scene — real-session oracle runs,
 /// fixed-versus-unfixed proofs and PNG snapshots — is `TableTranscriptHarness`,
@@ -988,6 +988,201 @@ struct TableTranscriptPaneTests {
             until: { box.renderedAtBottom == true })
     }
 
+    /// Each pane's jump-to-bottom button (live, History and Remote) can
+    /// cover the rows the prompt rail's open lens draws, so it hides while
+    /// the lens shows. The three panes show it through
+    /// `TranscriptJumpToLatestButton`, which asks the one helper.
+    @Test("the jump-to-bottom button shows only scrolled up, and never while the prompt rail's lens shows")
+    func jumpToBottomHidesUnderLens() {
+        #expect(TableTranscriptView.showsJumpToBottom(atBottom: false, promptLensShown: false))
+        #expect(!TableTranscriptView.showsJumpToBottom(atBottom: false, promptLensShown: true))
+        #expect(!TableTranscriptView.showsJumpToBottom(atBottom: true, promptLensShown: false))
+        #expect(!TableTranscriptView.showsJumpToBottom(atBottom: true, promptLensShown: true))
+    }
+
+    /// The overlays above the rail read the lens's visibility themselves:
+    /// scrolled up, the jump-to-latest button shows only while the lens does
+    /// not, and the remote earlier-history header, with something to say,
+    /// likewise. Each is measured fresh against the object in either state.
+    @Test("the jump-to-latest button and the remote earlier-history header hide while the lens shows")
+    func overlaysHideUnderLens() {
+        let visibility = PromptLensVisibility()
+        let room = CGSize(width: 600, height: 400)
+        let buttonShown = NSHostingController(
+            rootView: TranscriptJumpToLatestButton(atBottom: false, lensVisibility: visibility) {}
+        ).sizeThatFits(in: room)
+        let headerShown = NSHostingController(
+            rootView: RemoteTranscriptEarlierHeaderOverlay(
+                content: .text(RemoteTranscriptEarlierHeader.Content.startText),
+                lensVisibility: visibility, onRetry: {})
+        ).sizeThatFits(in: room)
+        #expect(buttonShown.height > 20, "scrolled up with no lens, the button measured \(buttonShown)")
+        #expect(headerShown.height > 10, "with no lens, the header measured \(headerShown)")
+
+        visibility.isShown = true
+        let buttonHidden = NSHostingController(
+            rootView: TranscriptJumpToLatestButton(atBottom: false, lensVisibility: visibility) {}
+        ).sizeThatFits(in: room)
+        let headerHidden = NSHostingController(
+            rootView: RemoteTranscriptEarlierHeaderOverlay(
+                content: .text(RemoteTranscriptEarlierHeader.Content.startText),
+                lensVisibility: visibility, onRetry: {})
+        ).sizeThatFits(in: room)
+        #expect(buttonHidden.height < 1, "under the lens, the button measured \(buttonHidden)")
+        #expect(headerHidden.height < 1, "under the lens, the header measured \(headerHidden)")
+    }
+
+    /// The header's condition: something to say, and no lens.
+    @Test("the remote earlier-history header shows only with something to say, and never while the lens shows")
+    func earlierHeaderHidesUnderLens() {
+        let text = RemoteTranscriptEarlierHeader.Content.text(RemoteTranscriptEarlierHeader.Content.startText)
+        #expect(RemoteTranscriptEarlierHeaderOverlay.shows(content: text, promptLensShown: false))
+        #expect(!RemoteTranscriptEarlierHeaderOverlay.shows(content: text, promptLensShown: true))
+        #expect(!RemoteTranscriptEarlierHeaderOverlay.shows(content: .hidden, promptLensShown: false))
+        #expect(!RemoteTranscriptEarlierHeaderOverlay.shows(content: .spinner, promptLensShown: true))
+    }
+
+    /// The table writes its prompt rail's lens coming and going to the
+    /// pane's `PromptLensVisibility`, which the overlays above the rail read.
+    /// Hosted through `LensVisibilityPane`, so the object reaches the table
+    /// as each pane hands it over. The lens is gone once it has shrunk away;
+    /// the shrink's frames are driven by hand, as an offscreen window's
+    /// display link need not fire.
+    @Test("the prompt rail's lens coming and going reaches the pane's visibility object")
+    func promptLensShownReachesPaneVisibility() async throws {
+        let suite = TestDefaultsSuite("table-lens-shown")
+        defer { suite.tearDown() }
+        let mounted = try await Self.mountLensVisibilityPane(defaults: suite.defaults)
+        let host = mounted.host
+        defer { host.tearDown() }
+        let visibility = mounted.visibility
+        let rail = try #require(Self.promptRail(in: host))
+        #expect(!visibility.isShown, "the pane read a lens before one opened")
+
+        // The hover model's open and close, as they reach the rail.
+        rail.lensOpenChanged(true)
+        try await Self.waitOnMain(
+            "the pane's visibility object to read the lens shown",
+            observed: { "isShown=\(visibility.isShown)" },
+            until: { visibility.isShown })
+        rail.lensOpenChanged(false)
+        let start = ProcessInfo.processInfo.systemUptime + 1
+        for frame in 1...120 where rail.lens != nil {
+            rail.advanceFrame(to: start + Double(frame) / 60)
+        }
+        try #require(rail.lens == nil, "precondition: the lens has shrunk away")
+        try await Self.waitOnMain(
+            "the pane's visibility object to read the lens gone",
+            observed: { "isShown=\(visibility.isShown)" },
+            until: { !visibility.isShown })
+    }
+
+    /// The lens coming and going re-renders only the overlays that read the
+    /// pane's `PromptLensVisibility`, never the pane, so the table's
+    /// `updateNSView`, and the whole-transcript comparison it runs, never
+    /// runs on the lens's account (rail spec, "Views"). Three counts are read:
+    /// the pane's body, a probe overlay that reads the object, and the
+    /// coordinator's `updateCount`, the number of `updateNSView` calls.
+    ///
+    /// Each negative gets the same fixed window as its controls (see
+    /// `renderWindow`): the probe re-renders inside it on each flip, and a
+    /// bump of the pane's own state re-runs both the pane and the table.
+    @Test("the lens coming and going re-renders the overlays that read it, never the pane or the table")
+    func promptLensShownLeavesPaneAlone() async throws {
+        let suite = TestDefaultsSuite("table-lens-pane-alone")
+        defer { suite.tearDown() }
+        let mounted = try await Self.mountLensVisibilityPane(defaults: suite.defaults)
+        let host = mounted.host
+        defer { host.tearDown() }
+        let box = mounted.box
+        let visibility = mounted.visibility
+        let container = host.firstDescendant(TranscriptContainerView.self)
+        let coordinator = try #require(container?.coordinator, "the table has no coordinator")
+
+        // The mount's own renders end first: a whole window with no pane
+        // render and no table update.
+        var quiet = false
+        for _ in 0..<20 {
+            let bodies = box.paneBodies.count
+            let updates = coordinator.updateCount
+            await Self.renderWindow(host)
+            if box.paneBodies.count == bodies, coordinator.updateCount == updates {
+                quiet = true
+                break
+            }
+        }
+        try #require(quiet, "the pane never stopped re-rendering after its mount")
+
+        for shown in [true, false] {
+            let bodies = box.paneBodies.count
+            let updates = coordinator.updateCount
+            let overlays = box.overlayBodies.count
+            visibility.isShown = shown
+            await Self.renderWindow(host)
+            #expect(box.overlayBodies.count > overlays,
+                    "isShown = \(shown) re-rendered no overlay that reads it, so the window saw nothing")
+            #expect(box.paneBodies.count == bodies,
+                    "isShown = \(shown) re-ran the pane's body \(box.paneBodies.count - bodies) times")
+            #expect(coordinator.updateCount == updates,
+                    "isShown = \(shown) re-ran the table's updateNSView \(coordinator.updateCount - updates) times")
+        }
+
+        // The control: the pane's own state re-runs the pane and the table
+        // inside the same window.
+        let bodies = box.paneBodies.count
+        let updates = coordinator.updateCount
+        let jump = try #require(box.jump, "the pane never handed over its scroll action")
+        jump()
+        await Self.renderWindow(host)
+        #expect(box.paneBodies.count > bodies, "a bump of the pane's own state did not re-run its body")
+        #expect(coordinator.updateCount > updates, "a bump of the pane's own state did not reach updateNSView")
+    }
+
+    /// `LensVisibilityPane` over a 12-prompt conversation, once its prompt
+    /// rail holds the prompts and its table's open has settled.
+    private static func mountLensVisibilityPane(defaults: UserDefaults) async throws -> (
+        host: OffscreenHost<LensVisibilityPane>, box: LensVisibilityPaneBox, visibility: PromptLensVisibility
+    ) {
+        let appState = AppState(userDefaults: defaults)
+        let items = PromptRailFixtures.conversation(prompts: 12, replySentences: { _ in 3 })
+        let box = LensVisibilityPaneBox()
+        let visibility = PromptLensVisibility()
+        let context = TranscriptCardContext(
+            terminalID: nil,
+            openTranscriptOverlay: nil,
+            appState: appState,
+            linkResolver: nil,
+            onLinkClicked: nil)
+        let host = OffscreenHost(
+            root: LensVisibilityPane(
+                box: box, visibility: visibility, context: context, nodes: transcriptRenderNodes(from: items)),
+            size: NSSize(width: TableTranscriptScene.width, height: TableTranscriptScene.viewportHeight))
+        do {
+            try await Self.waitOnMain(
+                "the table's prompt rail to hold the prompts, and its open to settle",
+                observed: { "rail mounted=\(Self.promptRail(in: host) != nil), "
+                    + "prompts=\(Self.promptRail(in: host)?.entries.count ?? 0), openSettled=\(box.openSettled)" },
+                until: { Self.promptRail(in: host)?.entries.isEmpty == false && box.openSettled })
+        } catch {
+            host.tearDown()
+            throw error
+        }
+        return (host, box, visibility)
+    }
+
+    /// The fixed window a render assertion gets, the same for a negative and
+    /// its control: five pumps, then a layout pass, so a re-render SwiftUI
+    /// scheduled lands inside it.
+    private static func renderWindow(_ host: OffscreenHost<LensVisibilityPane>) async {
+        await host.pump(times: 5)
+        host.hostingView.layoutSubtreeIfNeeded()
+    }
+
+    /// The prompt rail inside `host`'s transcript container, once mounted.
+    private static func promptRail(in host: OffscreenHost<LensVisibilityPane>) -> PromptRailNSView? {
+        host.firstDescendant(TranscriptContainerView.self)?.railView as? PromptRailNSView
+    }
+
     /// Polls `condition` on the main actor through `pollUntilTrue`, and throws
     /// `BoundedWaitTimeout` with `observed()` when it never holds, so the
     /// failure line says what the wait saw.
@@ -1128,6 +1323,90 @@ private struct JumpPane: View {
             onOpenSettled: { box.openSettled = true })
             .onAppear { box.jump = { scrollToBottomToken &+= 1 } }
             .onChange(of: atBottom, initial: true) { _, value in box.renderedAtBottom = value }
+    }
+}
+
+// MARK: - Lens-visibility pane
+
+/// What the lens-visibility tests read `LensVisibilityPane` through: how
+/// many times its body and its probe overlay have run, its scroll action, and
+/// whether the table's open has settled. Not `@Observable`, so the pane's
+/// writes to it never re-render the pane.
+@MainActor
+private final class LensVisibilityPaneBox {
+    let paneBodies = BodyEvaluationCounter()
+    let overlayBodies = BodyEvaluationCounter()
+    var jump: (@MainActor () -> Void)?
+    var openSettled = false
+}
+
+/// The panes' lens-visibility shape: the pane owns its `PromptLensVisibility`
+/// in `@State` and hands it to the table, which mounts the prompt rail, and
+/// lays over the table the overlays that read it: the remote earlier-history
+/// header, the jump-to-latest button, and a probe that counts its own
+/// evaluations. The pane's body never reads the object's property.
+private struct LensVisibilityPane: View {
+    let box: LensVisibilityPaneBox
+    let context: TranscriptCardContext
+    let nodes: [TranscriptRenderNode]
+    @State private var atBottom = true
+    @State private var scrollToBottomToken = 0
+    @State private var visibility: PromptLensVisibility
+
+    init(
+        box: LensVisibilityPaneBox, visibility: PromptLensVisibility,
+        context: TranscriptCardContext, nodes: [TranscriptRenderNode]
+    ) {
+        self.box = box
+        self.context = context
+        self.nodes = nodes
+        _visibility = State(initialValue: visibility)
+    }
+
+    var body: some View {
+        let box = self.box
+        let nodes = self.nodes
+        let _ = box.paneBodies.bump()
+        TableTranscriptView(
+            context: context,
+            atBottom: $atBottom,
+            scrollToBottomToken: scrollToBottomToken,
+            activityToggleToken: 0,
+            linkRoot: "",
+            nodesProvider: { nodes },
+            promptRail: .rail,
+            onOpenSettled: { box.openSettled = true },
+            promptLensVisibility: visibility)
+            .overlay(alignment: .top) {
+                RemoteTranscriptEarlierHeaderOverlay(
+                    content: .text(RemoteTranscriptEarlierHeader.Content.startText),
+                    lensVisibility: visibility,
+                    onRetry: {})
+            }
+            .overlay(alignment: .bottomTrailing) {
+                TranscriptJumpToLatestButton(atBottom: atBottom, lensVisibility: visibility) {
+                    scrollToBottomToken &+= 1
+                }
+            }
+            .overlay {
+                LensVisibilityProbe(counter: box.overlayBodies, visibility: visibility)
+            }
+            .onAppear { box.jump = { scrollToBottomToken &+= 1 } }
+    }
+}
+
+/// An overlay that reads the lens's visibility in its own body, as the
+/// overlays above the rail do, and counts its evaluations.
+private struct LensVisibilityProbe: View {
+    let counter: BodyEvaluationCounter
+    let visibility: PromptLensVisibility
+
+    var body: some View {
+        let _ = counter.bump()
+        let shown = visibility.isShown
+        Color.clear
+            .allowsHitTesting(false)
+            .accessibilityHidden(!shown)
     }
 }
 

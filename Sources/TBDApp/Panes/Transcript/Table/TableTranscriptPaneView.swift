@@ -53,6 +53,10 @@ struct TableTranscriptPaneView: View {
 
     /// Within ~120pt of the bottom. Drives the floating jump-to-bottom button.
     @State private var atBottom: Bool = true
+    /// Whether the prompt rail's lens is on screen. The table's coordinator
+    /// writes it, and only the jump-to-bottom button reads it, so the lens
+    /// coming and going never re-renders this pane.
+    @State private var promptLensVisibility = PromptLensVisibility()
 
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row.
@@ -390,10 +394,11 @@ struct TableTranscriptPaneView: View {
                         registeredTable.view = table
                         appState.registerTranscriptView(table, for: terminalID)
                     },
-                    promptRail: .rail(earlier: nil),
+                    promptRail: .rail,
                     // The rest arrives as an update to the table now in the
                     // window, as the backfill after a tail-first fetch does.
-                    onOpenSettled: { [identity] in widenedPane = identity }
+                    onOpenSettled: { [identity] in widenedPane = identity },
+                    promptLensVisibility: promptLensVisibility
                 )
                 // Compose the terminal with its current Claude session so a session
                 // rollover within one terminal tears down and rebuilds the stateful
@@ -402,8 +407,16 @@ struct TableTranscriptPaneView: View {
                 // rail lives inside the table's view, so the rebuild takes it too.
                 .id(identity)
                 .overlay(alignment: .bottomLeading) {
-                    jumpToBottomButton
-                        .animation(.easeInOut(duration: 0.2), value: atBottom)
+                    // The overlay spans the prompt rail's leading gutter too;
+                    // the inset keeps the button clear of the rail.
+                    TranscriptJumpToLatestButton(
+                        atBottom: atBottom,
+                        lensVisibility: promptLensVisibility,
+                        leadingInset: PromptRailLayout.width
+                    ) {
+                        scrollToBottomToken &+= 1
+                    }
+                    .animation(.easeInOut(duration: 0.2), value: atBottom)
                 }
 
                 // OUTSIDE the `.id` above, deliberately: a `/clear` rebuilds the
@@ -429,8 +442,8 @@ struct TableTranscriptPaneView: View {
                         //
                         // This lifts the WHOLE composer subtree, so an open menu
                         // also paints over the transcript's own bottom-leading
-                        // `jumpToBottomButton` overlay when the transcript is
-                        // scrolled up. That is intended: the menu is a transient
+                        // jump-to-bottom button (`TranscriptJumpToLatestButton`)
+                        // when the transcript is scrolled up. That is intended: the menu is a transient
                         // popup and, while it is open, it owns the pane. Escape
                         // or a token change closes it and the button is back.
                         //
@@ -515,31 +528,6 @@ struct TableTranscriptPaneView: View {
     private func setActivityGroup(_ id: String, expanded: Bool) {
         activityGroupExpansion[id] = expanded
         activityToggleToken &+= 1
-    }
-
-    // MARK: - Jump-to-Bottom
-
-    @ViewBuilder
-    private var jumpToBottomButton: some View {
-        if !atBottom {
-            Button {
-                scrollToBottomToken &+= 1
-            } label: {
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.system(size: 28))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, Color.accentColor)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .shadow(radius: 4)
-            }
-            .buttonStyle(.plain)
-            .padding(16)
-            // The overlay spans the prompt rail's leading gutter too; keep the
-            // button clear of the rail.
-            .padding(.leading, PromptRailLayout.width)
-            .transition(.scale(scale: 0.5).combined(with: .opacity))
-            .help("Scroll to bottom")
-        }
     }
 
     // MARK: - Open-path node build (timed, one-shot)

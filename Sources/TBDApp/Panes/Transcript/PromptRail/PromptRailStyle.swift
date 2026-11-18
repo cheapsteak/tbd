@@ -1,11 +1,10 @@
 import AppKit
 
-// Presentation the rail and the card share: notch colours, the edge fade's
-// extent, the card's metrics and its rows' expansion, and the rail's
-// accessibility labels. Notch lengths are `PromptRailWorkScale`'s.
+// Presentation the rail and its lens share: notch colours, the edge fade's
+// extent, the lens's row and box metrics, and the rail's accessibility
+// labels. Notch lengths are `PromptRailWorkScale`'s.
 
-/// Notch and dash colours, shared by the rail and the card so a card's dashes
-/// match the notches they sit over.
+/// Notch colours, the same at rest and in the lens's rows.
 enum PromptRailNotchStyle {
     /// Alpha of an inactive peer notch: lavender at reduced opacity.
     static let inactivePeerAlpha: CGFloat = 0.5
@@ -21,7 +20,38 @@ enum PromptRailNotchStyle {
     }
 }
 
-/// The 24pt edge fade over a clipped edge of the rail and of the card's list.
+/// Every notch colour resolved for one appearance, so a draw pass resolves
+/// each dynamic colour once rather than once per notch. A `CGColor` is fixed
+/// the moment it is made, so a palette belongs to the draw that made it.
+struct PromptRailNotchPalette: Equatable {
+    let prompt: CGColor
+    let activePrompt: CGColor
+    let peer: CGColor
+    let activePeer: CGColor
+
+    /// Resolves each colour in the current drawing appearance: call it from
+    /// `draw(_:)` or inside `performAsCurrentDrawingAppearance`. A peer's
+    /// colour does not depend on its sender.
+    static func resolvedInCurrentAppearance() -> PromptRailNotchPalette {
+        let peer = PromptOutlineEntry.Kind.peer(sender: "")
+        return PromptRailNotchPalette(
+            prompt: PromptRailNotchStyle.color(for: .prompt, active: false).cgColor,
+            activePrompt: PromptRailNotchStyle.color(for: .prompt, active: true).cgColor,
+            peer: PromptRailNotchStyle.color(for: peer, active: false).cgColor,
+            activePeer: PromptRailNotchStyle.color(for: peer, active: true).cgColor)
+    }
+
+    func color(for kind: PromptOutlineEntry.Kind, active: Bool) -> CGColor {
+        switch kind {
+        case .prompt:
+            return active ? activePrompt : prompt
+        case .peer:
+            return active ? activePeer : peer
+        }
+    }
+}
+
+/// The 24pt edge fade over a clipped edge of the rail.
 /// `configure(_:height:fadesTop:fadesBottom:)` spells it as a layer mask.
 enum PromptRailFade {
     /// The fraction of a view `height` tall that each edge's fade covers:
@@ -31,142 +61,140 @@ enum PromptRailFade {
     }
 }
 
-/// The card's geometry, typography and timing.
-enum PromptRailCardMetrics {
+/// The lens's readable rows and the box behind them: geometry and
+/// typography (lens spec, "Drawing").
+enum PromptRailRowMetrics {
+    // MARK: Width
+
+    /// The widest the box grows.
     static let maxWidth: CGFloat = 320
-    /// The card leaves this much of the pane's width uncovered.
+    /// The box leaves this much of the pane's width uncovered.
     static let paneInset: CGFloat = 24
-    static let rowHeight: CGFloat = 22
-    static let fontSize: CGFloat = 13
-    /// Starts at the rail's notch leading edge, so the dashes sit over the notches.
+
+    /// The widest the box grows over a pane `paneWidth` wide: `maxWidth`
+    /// capped at the pane's width less `paneInset`, and never narrower than
+    /// the rail itself.
+    static func boxMaxWidth(paneWidth: CGFloat) -> CGFloat {
+        max(PromptRailLayout.width, min(maxWidth, paneWidth - paneInset))
+    }
+
+    /// The rail overlay's width while a lens exists, opening, open or
+    /// closing: the box's widest plus `boxShadowReach`, so the overlay's
+    /// layer, which clips to its bounds, keeps the box's shadow whole; capped
+    /// at the pane's width, and never narrower than the rail. With no lens
+    /// the overlay is the rail column alone.
+    static func openOverlayWidth(paneWidth: CGFloat) -> CGFloat {
+        max(PromptRailLayout.width, min(paneWidth, boxMaxWidth(paneWidth: paneWidth) + boxShadowReach))
+    }
+
+    // MARK: Row layout
+
+    /// Starts at the rail's notch leading edge, so a row's dash is its notch.
     static let dashColumnLeading: CGFloat = PromptRailLayout.notchLeading
     static let dashColumnWidth: CGFloat = 18
     static let dashGap: CGFloat = 8
-    static let verticalPadding: CGFloat = 6
     static let trailingPadding: CGFloat = 10
     static let timeGap: CGFloat = 8
-    static let hoverCornerRadius: CGFloat = 6
-    static let cornerRadius: CGFloat = 8
-    static let fadeDuration: TimeInterval = 0.15
-    static let earlierRowText = "Earlier prompts not loaded"
+    /// Added to each row's natural width, as the mock adds it, so a title
+    /// the box is sized to exactly does not truncate by a hair.
+    static let naturalWidthSlack: CGFloat = 2
     /// Characters of a first line that are laid out at all. Far more than a
     /// 320pt row can show, so a longer line still truncates at the tail,
     /// while the first line of a large paste costs no more to lay out than a
     /// short one.
     static let drawnPrefix = 400
 
-    /// The card stops this far above the bottom of the rail, which keeps the
-    /// pane's bottom-corner jump-to-bottom button clear of it.
-    static let bottomClearance: CGFloat = 60
-
     /// Where row text starts: after the dash column and its gap.
     static var textLeading: CGFloat { dashColumnLeading + dashColumnWidth + dashGap }
-    /// Where the dash column ends: the rail's own trailing edge, since the
-    /// card's dashes sit over its notches.
-    static var dashColumnTrailing: CGFloat { dashColumnLeading + dashColumnWidth }
 
-    /// Whether a point `x` along a row `rowWidth` wide, in list coordinates,
-    /// is over the row's text column: from the first line's leading edge
-    /// (`textLeading`) to the end of the time, short of the row's trailing
-    /// padding. The gap between the dash column and the first line belongs to
-    /// the dash. The space between the first line and the time does not
-    /// interrupt the column, so moving from text to time stays in one zone.
-    /// A row expands only for a pointer over its text column.
-    static func isOverRowText(x: CGFloat, rowWidth: CGFloat) -> Bool {
-        x >= textLeading && x < rowWidth - trailingPadding
+    // MARK: Text
+
+    /// The text size of a row at least `fullTextRowHeight` tall.
+    static let fontSize: CGFloat = 13
+    /// The text size of a row shorter than `fullTextRowHeight`.
+    static let smallFontSize: CGFloat = 10.5
+    /// The row height from which text is `fontSize` rather than `smallFontSize`.
+    static let fullTextRowHeight: CGFloat = 15
+    /// The row height at which a row's text starts to fade in. Its opacity is
+    /// `(h − textFadeStart) / textFadeLength`, clamped to 0…1, for a row `h`
+    /// tall.
+    static let textFadeStart: CGFloat = 10.5
+    static let textFadeLength: CGFloat = 2.5
+    /// A row's wanted width grows with its height on a smoothstep, from the
+    /// rail's width at `widthRevealStart` tall to its full width at
+    /// `widthRevealEnd`.
+    static let widthRevealStart: CGFloat = 8.5
+    static let widthRevealEnd: CGFloat = 14
+    /// A row's text shows only above this opacity, and the box spans only
+    /// the rows whose text shows.
+    static let textVisibleOpacity: CGFloat = 0.01
+    /// Row text that does not fit fades out as the room between
+    /// `textLeading` and the box's trailing padding shrinks from twice this
+    /// to this, and is gone below it: a box too narrow for any of a long
+    /// title shows no text rather than a bare time.
+    static let textRoomFadeLength: CGFloat = 48
+    /// Over the last this many points of box width before a row's text fits,
+    /// its room fade ramps up to full, so text that comes to fit never jumps
+    /// to full in one frame.
+    static let textFitRampLength: CGFloat = 12
+
+    /// A row `h` tall's text opacity, before the lens's open fraction:
+    /// `(h − textFadeStart) / textFadeLength`, clamped to 0…1.
+    static func textOpacity(rowHeight h: CGFloat) -> CGFloat {
+        min(1, max(0, (h - textFadeStart) / textFadeLength))
     }
 
-    /// The card's height over a list `contentHeight` tall and a rail
-    /// `railHeight` tall: the list's, up to the rail's less `bottomClearance`.
-    static func height(contentHeight: CGFloat, railHeight: CGFloat) -> CGFloat {
-        max(0, min(contentHeight, railHeight - bottomClearance))
+    /// How far a row `h` tall has grown from the rail's width toward its full
+    /// width: a smoothstep from `widthRevealStart` to `widthRevealEnd`.
+    static func widthReveal(rowHeight h: CGFloat) -> CGFloat {
+        let t = min(1, max(0, (h - widthRevealStart) / (widthRevealEnd - widthRevealStart)))
+        return t * t * (3 - 2 * t)
     }
 
-    /// Where the pointed row's centre goes when the card opens: the pointer's
-    /// y, in card coordinates (the rail's, since the card sits at its
-    /// top-left), held at least half a row inside the card's top and bottom.
-    /// The card stops `bottomClearance` short of the rail's bottom, so a
-    /// pointer over that stretch would otherwise put its row below the card.
-    static func pointedRowCentre(pointerY: CGFloat, cardHeight: CGFloat) -> CGFloat {
-        let half = rowHeight / 2
-        return max(half, min(pointerY, cardHeight - half))
+    /// How much of a row's text shows in a box `boxWidth` wide, for a row
+    /// whose natural width (`PromptRailLensPainter.naturalWidth(at:)`) is
+    /// `naturalWidth` (lens spec, "Room"). Text that fits, its first line and
+    /// its time and their gap within the room the box leaves it, shows in
+    /// full, however narrow the box. Text that does not fit shows by the
+    /// room left for it: none up to `textRoomFadeLength`, all from twice
+    /// that. Within `textFitRampLength` of fitting, it ramps from that up to
+    /// full, so the opacity follows the box's width without a jump and never
+    /// falls below the room's own.
+    static func textRoomOpacity(boxWidth: CGFloat, naturalWidth: CGFloat) -> CGFloat {
+        let fit = naturalWidth - naturalWidthSlack
+        if fit <= boxWidth { return 1 }
+        let room = boxWidth - textLeading - trailingPadding
+        let byRoom = min(1, max(0, (room - textRoomFadeLength) / textRoomFadeLength))
+        let ramp = max(0, 1 - (fit - boxWidth) / textFitRampLength)
+        return byRoom + (1 - byRoom) * ramp
     }
 
-    /// The list offset that opens the card with `row`'s centre at
-    /// `pointedRowCentre(pointerY:cardHeight:)`, clamped to the list's ends:
-    /// the row sits under the pointer, or as close as the card's height and
-    /// the list's ends allow. Either clamp keeps the row inside the card.
-    static func openOffset(row: Int, pointerY: CGFloat, contentHeight: CGFloat, cardHeight: CGFloat) -> CGFloat {
-        let target = pointedRowCentre(pointerY: pointerY, cardHeight: cardHeight)
-        let maxOffset = max(0, contentHeight - cardHeight)
-        return min(max(0, rowRect(row, width: 0).midY - target), maxOffset)
-    }
+    // MARK: Hovered row
 
-    /// A row's rectangle in list coordinates.
-    static func rowRect(_ row: Int, width: CGFloat) -> NSRect {
-        NSRect(
-            x: 0, y: verticalPadding + CGFloat(row) * rowHeight,
-            width: width, height: rowHeight)
-    }
-}
+    static let hoverCornerRadius: CGFloat = 6
+    /// The hovered row's fill shows only once the lens is more open than this.
+    static let hoverMinOpenFraction: CGFloat = 0.6
+    /// The hovered row's fill shows only on a row at least this tall.
+    static let hoverMinRowHeight: CGFloat = 11
 
-/// Where a card row's expansion goes: how many lines of its prompt it shows,
-/// and whether it grows up to the row rather than down from it.
-struct PromptRailExpansionPlacement: Equatable {
-    let lines: Int
-    let growsUpward: Bool
-}
+    // MARK: Box
 
-extension PromptRailCardMetrics {
-    /// How long the pointer rests on a row before the row expands.
-    static let expansionDelay = Duration.milliseconds(150)
-    /// Lines of its prompt an expansion shows at most.
-    static let expansionMaxLines = 6
-
-    /// The height of an expansion showing `lines` lines of its prompt, each
-    /// `lineHeight` tall: the row's own height, which holds one line centred
-    /// in it, plus a line for each of the rest. The line on the row keeps the
-    /// row's padding above and below it.
-    static func expansionHeight(lines: Int, lineHeight: CGFloat) -> CGFloat {
-        rowHeight + CGFloat(max(0, lines - 1)) * lineHeight
-    }
-
-    /// The part of the list's `clip` rect, in list coordinates, an expansion
-    /// may cover: the clip less each edge fade that is on, which covers
-    /// `PromptRailFade.edgeFraction(height:)` of the clip at that edge.
-    static func expansionRoom(clip: NSRect, fadesTop: Bool, fadesBottom: Bool) -> NSRect {
-        let fade = PromptRailFade.edgeFraction(height: clip.height) * clip.height
-        let top = clip.minY + (fadesTop ? fade : 0)
-        let bottom = clip.maxY - (fadesBottom ? fade : 0)
-        return NSRect(x: clip.minX, y: top, width: clip.width, height: max(0, bottom - top))
-    }
-
-    /// Where an expansion of `row` goes within the list's `visible` rect,
-    /// both in list coordinates, for a prompt that would fill `wantedLines`
-    /// lines `lineHeight` tall.
-    ///
-    /// It grows down from the row when all `wantedLines` fit below the row's
-    /// top, and otherwise up to the row's bottom when they fit above it. When
-    /// they fit neither way it shows as many as fit, growing whichever way has
-    /// more room. Nil when not even one line fits, which takes a whole row's
-    /// height, or there is nothing to show.
-    static func expansionPlacement(
-        row: NSRect, visible: NSRect, wantedLines: Int, lineHeight: CGFloat
-    ) -> PromptRailExpansionPlacement? {
-        guard wantedLines > 0, lineHeight > 0 else { return nil }
-        // Laid-out heights are fractional; a hair over the room still fits.
-        let slack: CGFloat = 0.01
-        let below = visible.maxY - row.minY
-        let above = row.maxY - visible.minY
-        let wanted = expansionHeight(lines: wantedLines, lineHeight: lineHeight)
-        if wanted <= below + slack { return PromptRailExpansionPlacement(lines: wantedLines, growsUpward: false) }
-        if wanted <= above + slack { return PromptRailExpansionPlacement(lines: wantedLines, growsUpward: true) }
-        let growsUpward = above > below
-        let room = growsUpward ? above : below
-        let fitting = Int(((room - rowHeight) / lineHeight + slack).rounded(.down)) + 1
-        let lines = min(wantedLines, fitting)
-        return lines > 0 ? PromptRailExpansionPlacement(lines: lines, growsUpward: growsUpward) : nil
-    }
+    /// The box reaches this far above its first readable row and below its last.
+    static let boxPadding: CGFloat = 3
+    /// The radius of the box's trailing corners.
+    static let boxCornerRadius: CGFloat = 8
+    /// The 45° taper that joins the box to the rail column above and below it.
+    static let boxTaper: CGFloat = 8
+    static let boxBorderWidth: CGFloat = 0.5
+    static let boxShadowRadius: CGFloat = 8
+    static let boxShadowOpacity: CGFloat = 0.2
+    /// How far the box's shadow can reach past its rect: its blur, taken at
+    /// twice its radius so the soft edge is covered in full, and its 2pt
+    /// offset.
+    static var boxShadowReach: CGFloat { 2 * boxShadowRadius + 2 }
+    /// How far the box's drawing can reach past its rect: the taper, and the
+    /// shadow's reach.
+    static var boxDrawingOutset: CGFloat { boxTaper + boxShadowReach }
 }
 
 /// The rail's accessibility.

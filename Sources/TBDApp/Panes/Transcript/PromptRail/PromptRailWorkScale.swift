@@ -1,8 +1,8 @@
 import CoreGraphics
 import Foundation
 
-/// How long each prompt rail notch is, and each card dash with it: its turn's
-/// work (`PromptOutline.workCounts`) on a log scale against the session's
+/// How long each prompt rail notch is, at rest and in the lens's rows: its
+/// turn's work (`PromptOutline.workCounts`) on a log scale against the session's
 /// busiest turn. A turn with no tool calls is `minLength` long and the busiest
 /// turn so far `maxLength`, so the rail always spans the whole range; a busier
 /// turn arriving raises `busiest`, which rescales every other notch.

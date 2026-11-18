@@ -62,8 +62,7 @@ struct TableTranscriptView: NSViewRepresentable {
     /// earlier history.
     var onNearTop: (@MainActor (Bool) -> Void)?
     /// The prompt rail to mount. `makeNSView` fixes the container's gutter
-    /// from it for the life of the view and installs the rail and its card;
-    /// each `updateNSView` hands the card the mount's earlier-history state.
+    /// from it for the life of the view and installs the rail's overlay.
     /// `.none` (the default) mounts no rail and no gutter.
     var promptRail: PromptRailMount = .none
     /// Called once, when the table's open has settled: two main-queue turns
@@ -77,8 +76,23 @@ struct TableTranscriptView: NSViewRepresentable {
     /// a table that is already in the window as an update rather than as a
     /// mount (`TranscriptTailFirstOpen`). Nil where nothing waits on the open.
     var onOpenSettled: (@MainActor () -> Void)?
+    /// The pane's record of whether the prompt rail's lens is drawn, from
+    /// when it starts to grow until it has shrunk away. The coordinator sets
+    /// it on each change, a main-queue turn later and outside any SwiftUI
+    /// update (`Coordinator.reportPromptLensDrawn(_:)`), and only the
+    /// overlays above the rail read it. Nil where nothing does.
+    var promptLensVisibility: PromptLensVisibility?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
+
+    /// Whether a pane's jump-to-bottom button shows: the transcript is
+    /// scrolled up from its newest message, and the prompt rail's lens is not
+    /// on screen. The live, History and Remote panes all show it through
+    /// `TranscriptJumpToLatestButton`, since it would cover the lens's rows
+    /// and take their clicks.
+    static func showsJumpToBottom(atBottom: Bool, promptLensShown: Bool) -> Bool {
+        !atBottom && !promptLensShown
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(context: context)
@@ -151,6 +165,7 @@ struct TableTranscriptView: NSViewRepresentable {
         // pane's already-bumped token as a prepend.
         coordinator.lastPrependToken = prependToken
         coordinator.onNearTop = onNearTop
+        coordinator.promptLensVisibility = promptLensVisibility
         // Seed the root the first composition below happens against, so the
         // first `updateNSView` does not read as a transition.
         coordinator.lastLinkRoot = linkRoot
@@ -222,30 +237,33 @@ struct TableTranscriptView: NSViewRepresentable {
     }
 
     /// Installs the mounted rail and connects it to the coordinator: a rail
-    /// view in the gutter and a card view above everything, sharing one hover
-    /// model, whose jumps go to this table. The rail becomes the presenter and
-    /// the container hands its outline on to the card. Attaching the presenter
-    /// pushes it the current outline and active prompt at once. With no rail
-    /// mounted, this does nothing.
+    /// overlay above the transcript with its own hover model, whose jumps go
+    /// to this table. The rail becomes the presenter; attaching it pushes it
+    /// the current outline and active prompt at once. With no rail mounted,
+    /// this does nothing.
     private func attachPromptRail(to coordinator: Coordinator, container: TranscriptContainerView) {
-        guard case .rail(let earlier) = promptRail else { return }
+        guard case .rail = promptRail else { return }
         let onJump: @MainActor (String) -> Void = { [weak coordinator] id in
             coordinator?.jump(toNodeID: id)
         }
         let hover = PromptRailHoverModel()
         let rail = PromptRailNSView(hover: hover, onJump: onJump)
-        let card = PromptRailCardNSView(hover: hover, onJump: onJump)
-        container.installPromptRail(rail: rail, card: card, hover: hover, earlier: earlier)
+        container.installPromptRail(rail: rail, hover: hover)
         coordinator.promptRailPresenter = rail
+        coordinator.observePromptLensDrawn(of: container)
     }
 
     func updateNSView(_ container: TranscriptContainerView, context ctx: Context) {
         let coordinator = ctx.coordinator
+        #if DEBUG
+        coordinator.updateCount += 1
+        #endif
         if scrollToBottomToken != coordinator.lastScrollToken {
             coordinator.lastScrollToken = scrollToBottomToken
             coordinator.scrollToEnd(animated: true)
         }
         coordinator.onNearTop = onNearTop
+        coordinator.usePromptLensVisibility(promptLensVisibility, lensDrawn: container.isPromptRailLensDrawn)
         let nodes = nodesProvider()
         coordinator.update(
             nodes: nodes,
@@ -257,11 +275,6 @@ struct TableTranscriptView: NSViewRepresentable {
         if let request = scrollToItem, request.token != coordinator.lastScrollItemToken {
             coordinator.lastScrollItemToken = request.token
             coordinator.scrollToRow(withNodeID: request.itemID)
-        }
-        // The Remote pane's earlier-history state changes as pages load; the
-        // card's Load row follows it.
-        if case .rail(let earlier) = promptRail {
-            container.promptRailEarlier = earlier
         }
     }
 
@@ -306,6 +319,15 @@ struct TableTranscriptView: NSViewRepresentable {
         /// The near-top answer last reported, so `onNearTop` fires on transitions
         /// only. Nil until the first report.
         private var lastNearTop: Bool?
+        /// See `TableTranscriptView.promptLensVisibility`. Refreshed every
+        /// `updateNSView`.
+        var promptLensVisibility: PromptLensVisibility?
+        #if DEBUG
+        /// How many times `updateNSView` has run against this coordinator.
+        /// Tests read it to show what does not re-render the table; debug
+        /// builds only, as the tests are.
+        var updateCount = 0
+        #endif
 
         /// How many rows the table held when `makeNSView` built it, which is
         /// what the first layout, inside the window insertion, realizes from.

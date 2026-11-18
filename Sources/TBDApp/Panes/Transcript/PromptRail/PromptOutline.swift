@@ -15,29 +15,12 @@ struct PromptOutlineEntry: Equatable, Identifiable {
     let rowIndex: Int
     let kind: Kind
     let firstLine: String
-    /// The prompt's opening, as the card's row expansion shows it:
-    /// `PromptOutline.excerpt(of:)`. It begins with `firstLine`, cut short
-    /// when that line alone passes `PromptOutline.excerptLimit` characters.
-    let excerpt: String
     let timestamp: Date?
-
-    /// Whether the prompt has more than its first line: another line with
-    /// content, or more of the first line than the excerpt holds. Either way
-    /// a row showing only the first line shows part of the prompt.
-    var runsPastFirstLine: Bool { excerpt != firstLine }
 }
 
 /// Pure projection of render nodes into rail entries. Reads node data only;
 /// nothing here builds or measures a cell.
 enum PromptOutline {
-    /// Characters an excerpt holds at most: far more than the six lines a
-    /// card row's expansion shows.
-    static let excerptLimit = 500
-    /// Characters of a prompt an excerpt reads at most, from its first with
-    /// content. Enough for `excerptLimit` collapsed characters of all but the
-    /// most whitespace-heavy text, and a bound on what a large paste costs.
-    static let excerptScanLimit = 4 * excerptLimit
-
     /// What one node contributes to the outline apart from where it sits:
     /// everything in its entry but the row index. A node's projection
     /// depends on its content alone, so `PromptOutlineCache` keeps it by
@@ -46,13 +29,10 @@ enum PromptOutline {
         let id: String
         let kind: PromptOutlineEntry.Kind
         let firstLine: String
-        let excerpt: String
         let timestamp: Date?
 
         func entry(rowIndex: Int) -> PromptOutlineEntry {
-            PromptOutlineEntry(
-                id: id, rowIndex: rowIndex, kind: kind,
-                firstLine: firstLine, excerpt: excerpt, timestamp: timestamp)
+            PromptOutlineEntry(id: id, rowIndex: rowIndex, kind: kind, firstLine: firstLine, timestamp: timestamp)
         }
     }
 
@@ -97,14 +77,7 @@ enum PromptOutline {
     private static func projection(
         id: String, kind: PromptOutlineEntry.Kind, text: String, timestamp: Date?
     ) -> Projection {
-        // Unwrapped once, for both the first line and the excerpt.
-        let unwrapped = TranscriptPastedContent.unwrap(text)
-        return Projection(
-            id: id,
-            kind: kind,
-            firstLine: firstLine(ofUnwrapped: unwrapped),
-            excerpt: excerpt(ofUnwrapped: unwrapped),
-            timestamp: timestamp)
+        Projection(id: id, kind: kind, firstLine: firstLine(of: text), timestamp: timestamp)
     }
 
     /// First line with non-whitespace content of the unwrapped text, whitespace
@@ -120,50 +93,6 @@ enum PromptOutline {
         guard let start = text.firstIndex(where: { !$0.isWhitespace }) else { return "" }
         let end = text[start...].firstIndex(where: \.isNewline) ?? text.endIndex
         return text[start..<end].split(whereSeparator: \.isWhitespace).joined(separator: " ")
-    }
-
-    /// The prompt's opening, for the card's row expansion: the unwrapped
-    /// text's lines with content, from the first, each collapsed as
-    /// `firstLine(of:)` collapses it and joined by newlines, so it begins with
-    /// the first line. At most `excerptLimit` characters, then "…" when the
-    /// text runs on past them — which cuts a first line longer than the limit.
-    /// Reads at most `excerptScanLimit` characters from the first with
-    /// content.
-    static func excerpt(of text: String) -> String {
-        excerpt(ofUnwrapped: TranscriptPastedContent.unwrap(text))
-    }
-
-    /// `excerpt(of:)` for text already unwrapped.
-    private static func excerpt(ofUnwrapped text: String) -> String {
-        guard let start = text.firstIndex(where: { !$0.isWhitespace }) else { return "" }
-        let window = text[start...].prefix(excerptScanLimit)
-        // Text past the window counts only if it has content.
-        var runsOn = text[window.endIndex...].contains(where: { !$0.isWhitespace })
-        var result = ""
-        var length = 0
-        var lineStart = window.startIndex
-        while lineStart < window.endIndex {
-            let lineEnd = window[lineStart...].firstIndex(where: \.isNewline) ?? window.endIndex
-            let line = window[lineStart..<lineEnd].split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            lineStart = lineEnd < window.endIndex ? window.index(after: lineEnd) : window.endIndex
-            guard !line.isEmpty else { continue }
-            let separator = result.isEmpty ? "" : "\n"
-            let room = excerptLimit - length - separator.count
-            let lineLength = line.count
-            if lineLength > room {
-                if room > 0 {
-                    result.append(separator)
-                    result.append(contentsOf: line.prefix(room))
-                }
-                runsOn = true
-                break
-            }
-            result.append(separator)
-            result.append(line)
-            length += separator.count + lineLength
-        }
-        if runsOn { result.append("…") }
-        return result
     }
 
     // MARK: Work
@@ -209,7 +138,7 @@ enum PromptOutline {
         count == 1 ? "1 tool call" : "\(count) tool calls"
     }
 
-    /// The card's time column for entries with `timestamps`, in order.
+    /// The lens rows' time column for entries with `timestamps`, in order.
     /// Today's entries each show their time (`timeLabel`). An earlier day's
     /// entries are listed in order, so only its first shows the date and the
     /// rest of that day show nothing. An entry without a timestamp shows

@@ -3,37 +3,68 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 
-/// The prompt rail: one notch per prompt in the transcript's 20pt
-/// gutter, each as long as its turn was busy, the active prompt's notch
-/// accented. It is the coordinator's `PromptRailPresenter`, so an
-/// active-prompt change goes straight from the coordinator to a layer update,
-/// and it hands every outline change on through `onOutlineChange` so the card
-/// stays in step.
+/// The prompt rail: one notch per prompt in the transcript's 20pt gutter,
+/// each as long as its turn was busy, the active prompt's notch accented.
+/// Hovering it grows the lens (`PromptRailNSView+Lens.swift`): the notches
+/// near the pointer become readable rows over a box. The view is an overlay
+/// as tall as the rail, laid over the transcript's leading edge: the rail
+/// column alone while no lens exists, and wide enough for the box while one
+/// does (`wantsOpenWidth`, which the container frames it by). It is the
+/// coordinator's `PromptRailPresenter`, so an active-prompt change goes
+/// straight from the coordinator to a redraw.
 ///
-/// - **Notches** – one reusable `CALayer` per entry, placed by
-///   `PromptRailLayout` and as long as `PromptRailWorkScale` says. The active
-///   notch keeps its length and is thicker and accented instead. Layer colours
-///   do not follow the appearance by themselves, so they are re-resolved in
-///   `viewDidChangeEffectiveAppearance()`.
+/// - **Drawing** – at rest the notches are drawn in `draw(_:)`, placed by
+///   `PromptRailLayout` and as long as `PromptRailWorkScale` says, the active
+///   one last so it sits on top. The active notch keeps its length and is
+///   thicker and accented instead. While a lens exists, `PromptRailLensPainter`
+///   draws the box, the notches and the rows' text instead. Colours resolve
+///   in each draw, so an appearance change only has to redraw.
 /// - **Overflow** – past the minimum pitch the notches are offset to keep the
-///   active one `PromptRailLayout.edgeMargin` from either end, and a gradient
-///   mask fades whichever edge clips a notch.
-/// - **Hover** – an `NSTrackingArea` over the rail column feeds
-///   `PromptRailHoverModel.railHoverChanged`, on entering and on every move,
-///   and `pointedIndex`. A tracking area follows geometry, not hit-testing,
-///   so the rail stays hovered while the open card covers it — which is what
-///   keeps Escape and click suppression in force while the pointer is still
-///   on the rail.
+///   active one `PromptRailLayout.edgeMargin` from either end. At rest a
+///   gradient mask on the view's own layer fades whichever edge clips a
+///   notch; while a lens exists the painter fades the notches alone, so the
+///   box and its text keep their full opacity at the rail's ends.
+/// - **Hit-testing** – the overlay answers over the rail column, and over the
+///   lens's box, inside its drawn shape, taper included, while the lens is
+///   open. Clicks and the wheel anywhere else fall through to the
+///   transcript, whatever the overlay's frame covers.
+/// - **Hover** – one `NSTrackingArea` covers the whole overlay, and code
+///   decides whether the pointer is over the rail column or the box. Entering
+///   the column and every move inside it report
+///   `PromptRailHoverModel.railHoverChanged` true, and leaving it reports
+///   false. The box reports `boxHoverChanged`. A tracking area follows
+///   geometry, not hit-testing, so the rail stays hovered under the lens's
+///   box — which is what keeps Escape and click suppression in force while
+///   the pointer is still on the rail.
+/// - **Lens** – the hover model's open state arrives through
+///   `lensOpenChanged(_:)`. The lens is shown while it is open and there is a
+///   prompt to show; `onLensShownChange` reports that, and the container runs
+///   the Escape monitor off it. A dismissed lens is still drawn while it
+///   shrinks (`isLensDrawn`), and `onOpenWidthChange` reports when it starts
+///   and stops being drawn.
+/// - **Clicks** – a click on a row, or on a notch of the bare rail, jumps to
+///   its prompt.
 /// - **Wheel** – the rail never scrolls under the wheel; it hands wheel
-///   events to the transcript's scroll view, so the gutter is not a dead zone.
-/// - **Accessibility** – a group labelled "Prompts" with one button per entry,
-///   labelled with its first line, time and tool-call count; pressing one
-///   jumps to it.
+///   events to the transcript's scroll view, so the gutter and the box are
+///   not dead zones.
+/// - **Accessibility** – a group labelled "Prompts", framed over the rail
+///   column, with one button per entry, labelled with its first line, time
+///   and tool-call count; pressing one jumps to it.
 ///
-/// Coordinates are flipped (y grows downward), matching `PromptRailLayout`.
+/// Hit-testing, clicks, hover and the wheel live in
+/// `PromptRailNSView+Pointer.swift`. Coordinates are flipped (y grows
+/// downward), matching `PromptRailLayout`.
 final class PromptRailNSView: NSView, PromptRailPresenter {
-    private let hover: PromptRailHoverModel
-    private let onJump: @MainActor (String) -> Void
+    let hover: PromptRailHoverModel
+    let onJump: @MainActor (String) -> Void
+    /// Whether the lens should open and close at once; read as each starts.
+    let reduceMotion: @MainActor () -> Bool
+    /// Whether frames come from a display link. Tests turn it off and drive
+    /// frames with `advanceFrame(to:)`, so no live link runs in their windows.
+    let usesDisplayLink: Bool
+    /// The current time, which the rows' time column and the accessibility
+    /// labels read "today" from. Tests pin it.
+    let now: @MainActor () -> Date
 
     /// The outline last delivered by the coordinator.
     private(set) var entries: [PromptOutlineEntry] = []
@@ -51,40 +82,72 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     /// Each entry's work, parallel to `entries`, as last delivered.
     var workCounts: [Int] { workScale.counts }
 
-    /// The notch nearest the pointer while it is over the rail; nil otherwise.
-    private(set) var pointedIndex: Int?
-    /// The pointer's last y over the rail, in rail coordinates. The card
-    /// scrolls its list on opening so the pointed row sits under it.
-    private(set) var pointerY: CGFloat = 0
+    /// Whether the pointer was last seen over the rail column. The pointer
+    /// handlers in `PromptRailNSView+Pointer.swift` keep it.
+    var isPointerOverRail = false
+    /// The pointer's last y over the rail column or the box, in rail
+    /// coordinates. The lens opens on the row under it and follows it. The
+    /// pointer handlers keep it.
+    var pointerY: CGFloat = 0
     /// How far the notches are shifted up to keep the active one in view.
     private(set) var offset: CGFloat = 0
 
-    /// Called after every change of `entries`, `workCounts` or
-    /// `activeIndex`. The container forwards all three to the card, whose
-    /// dashes follow the counts.
-    var onOutlineChange: (@MainActor () -> Void)?
+    /// Whether the hover model has the lens open. An open lens with no
+    /// prompts shows nothing; `isLensShown` says whether it shows.
+    private(set) var lensOpen = false
+    /// Whether the lens shows: open, with at least one prompt. A closed lens
+    /// is still drawn while it shrinks away (`isLensDrawn`).
+    private(set) var isLensShown = false
+    /// Called on every change of `isLensShown`, and only on a change — when
+    /// the lens opens or closes with prompts, and when an open lens gains its
+    /// first prompt or loses its last. The container runs the Escape monitor
+    /// off it, so Escape is taken only while there is a lens to dismiss.
+    var onLensShownChange: (@MainActor (Bool) -> Void)?
     /// The transcript's scroll view: wheel events over the rail go to it.
     weak var wheelTarget: NSView?
 
-    /// Holds the notch layers and carries the fade mask.
-    private let contentLayer = CALayer()
-    /// Moved by `-offset`, so an offset change is one property write.
-    private let notchesLayer = CALayer()
-    private(set) var notchLayers: [CALayer] = []
+    /// The widest the lens's box may grow, which the pane's width sets
+    /// (`PromptRailRowMetrics.boxMaxWidth(paneWidth:)`). The container keeps
+    /// it; a rail outside one keeps `maxWidth`.
+    var boxMaxWidth: CGFloat = PromptRailRowMetrics.maxWidth {
+        didSet {
+            if boxMaxWidth != oldValue { lensBoxMaxWidthChanged() }
+        }
+    }
+    /// Called on every change of `wantsOpenWidth`: when a lens starts to open
+    /// and when it has closed. The container reframes the overlay off it.
+    var onOpenWidthChange: (@MainActor () -> Void)?
+    /// The lens's state; `PromptRailNSView+Lens.swift` keeps it.
+    var lensState = PromptRailLensState()
+    let lensPainter = PromptRailLensPainter()
+
+    /// The notch colours the last draw resolved, in the appearance it drew in.
+    private(set) var lastDrawnPalette: PromptRailNotchPalette?
+
+    /// The overflow fade, installed as the view's own layer mask while the
+    /// notches overflow.
     private let fadeMask = CAGradientLayer()
-    private var hoverTrackingArea: NSTrackingArea?
+    /// The one tracking area, over the whole overlay.
+    private(set) var hoverTrackingArea: NSTrackingArea?
     /// Built on the first accessibility query and dropped on an outline change.
     private var accessibilityButtons: [PromptRailAccessibilityButton]?
 
-    init(hover: PromptRailHoverModel, onJump: @escaping @MainActor (String) -> Void) {
+    init(
+        hover: PromptRailHoverModel,
+        onJump: @escaping @MainActor (String) -> Void,
+        reduceMotion: @escaping @MainActor () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
+        usesDisplayLink: Bool = true,
+        now: @escaping @MainActor () -> Date = Date.init
+    ) {
         self.hover = hover
         self.onJump = onJump
+        self.reduceMotion = reduceMotion
+        self.usesDisplayLink = usesDisplayLink
+        self.now = now
         super.init(frame: .zero)
         wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
         layer?.masksToBounds = true
-        contentLayer.masksToBounds = true
-        contentLayer.addSublayer(notchesLayer)
-        layer?.addSublayer(contentLayer)
 
         let area = NSTrackingArea(
             rect: .zero,
@@ -106,60 +169,77 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
 
     // MARK: Test seams
 
-    /// Each notch layer's frame in rail coordinates, offset applied.
-    var notchLayerFrames: [CGRect] {
-        let origin = notchesLayer.frame.origin
-        return notchLayers.map { $0.frame.offsetBy(dx: origin.x, dy: origin.y) }
+    /// Each notch's rectangle as drawn, in rail coordinates, offset applied:
+    /// in the lens's displayed rows while a lens exists.
+    var displayedNotchRects: [CGRect] {
+        if lensState.lens != nil {
+            let rows = lensState.displayedRows
+            return rows.heights.indices.map { index in
+                PromptRailLensPainter.notchRect(
+                    row: index, in: rows, active: index == activeIndex, length: workScale.length(at: index))
+            }
+        }
+        let layout = currentLayout()
+        return entries.indices.map { displayedNotchRect($0, active: $0 == activeIndex, layout: layout) }
     }
 
-    /// Whether the clipped-edge fade is installed (only while overflowing).
-    var hasFadeMask: Bool { contentLayer.mask != nil }
+    /// Whether the layer mask that fades a clipped edge is installed: only at
+    /// rest, and only while overflowing. While a lens exists the painter
+    /// fades the notches itself.
+    var hasFadeMask: Bool { layer?.mask != nil }
+
+    // MARK: Lens
+
+    /// The hover model opened or closed the lens: it grows or shrinks.
+    func lensOpenChanged(_ open: Bool) {
+        lensOpen = open
+        updateLensShown()
+        lensOpenStateChanged()
+    }
+
+    private func updateLensShown() {
+        let shown = lensOpen && !entries.isEmpty
+        guard shown != isLensShown else { return }
+        isLensShown = shown
+        onLensShownChange?(shown)
+    }
 
     // MARK: PromptRailPresenter
 
     func promptRail(entriesDidChange entries: [PromptOutlineEntry]) {
         self.entries = entries
         accessibilityButtons = nil
-        relayoutNotches()
+        lensPainter.setEntries(entries, activeIndex: activeIndex)
+        applyOffset(currentLayout())
+        invalidateRail()
         // The accessibility children were just invalidated; tell assistive
         // clients to re-query them rather than keep a stale list. A no-op when
         // no assistive client is running.
         NSAccessibility.post(element: self, notification: .layoutChanged)
-        onOutlineChange?()
+        updateLensShown()
+        lensOutlineChanged()
     }
 
-    /// Restyles only the notches whose length moved: every one when the
-    /// busiest turn changed, which rescales them all, and otherwise those
-    /// whose own count changed. Relabels only the buttons whose count changed,
-    /// since a label carries the count and not the length.
+    /// Redraws when any notch's length moved: every one when the busiest turn
+    /// changed, which rescales them all, and otherwise those whose own count
+    /// changed. Relabels only the buttons whose count changed, since a label
+    /// carries the count and not the length.
     func promptRail(workCountsDidChange counts: [Int]) {
         let previous = workScale
         workScale = PromptRailWorkScale(counts: counts)
-        let rescaled = previous.busiest != workScale.busiest
-        withoutAnimation {
-            let layout = currentLayout()
-            for index in notchLayers.indices
-            where rescaled || previous.count(at: index) != workScale.count(at: index) {
-                styleNotch(index, layout: layout)
-            }
-        }
+        guard workScale != previous else { return }
+        invalidateRail()
         updateAccessibilityLabels { previous.count(at: $0) != workScale.count(at: $0) }
-        onOutlineChange?()
     }
 
     func promptRail(activeIndexDidChange index: Int?) {
         let previous = activeIndex
         deliveredActiveIndex = index
-        let current = activeIndex
-        guard previous != current else { return }
-        withoutAnimation {
-            let layout = currentLayout()
-            for changed in [previous, current].compactMap({ $0 }) {
-                styleNotch(changed, layout: layout)
-            }
-            applyOffset(layout)
-        }
-        onOutlineChange?()
+        guard previous != activeIndex else { return }
+        lensPainter.setActiveIndex(activeIndex)
+        applyOffset(currentLayout())
+        invalidateRail()
+        lensActiveChanged()
     }
 
     // MARK: Layout
@@ -168,85 +248,96 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
         let heightChanged = newSize.height != frame.height
         super.setFrameSize(newSize)
         if heightChanged {
-            relayoutNotches()
+            let layout = currentLayout()
+            applyOffset(layout)
             // The pitch follows the height, so the buttons' bands move even
             // when the overflow offset does not.
-            updateAccessibilityFrames(currentLayout())
+            updateAccessibilityFrames(layout)
+            lensGeometryChanged()
         } else {
-            withoutAnimation { layoutContentLayer() }
+            withoutAnimation { fadeMask.frame = bounds }
         }
+        needsDisplay = true
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        withoutAnimation {
-            let layout = currentLayout()
-            for index in notchLayers.indices { styleNotch(index, layout: layout) }
+        needsDisplay = true
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        // The display link follows its window's screen. Until the move is
+        // done no link may start: the container closes the lens as it leaves
+        // its window, which can ask for frames after this has run.
+        if newWindow !== window {
+            lensState.isLeavingWindow = true
+            invalidateFrameLink()
         }
     }
 
-    private func currentLayout() -> PromptRailLayout {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        lensState.isLeavingWindow = false
+        if window == nil {
+            finishLensAnimation()
+        } else if isRunningFrames {
+            lensState.lastFrameTimestamp = nil
+            startFrameLink()
+        }
+    }
+
+    func currentLayout() -> PromptRailLayout {
         PromptRailLayout(count: entries.count, railHeight: bounds.height)
     }
 
-    /// Rebuilds every notch: one layer per entry, each framed and coloured.
-    private func relayoutNotches() {
-        withoutAnimation {
-            layoutContentLayer()
-            let count = entries.count
-            while notchLayers.count < count {
-                let notch = CALayer()
-                notchesLayer.addSublayer(notch)
-                notchLayers.append(notch)
-            }
-            while notchLayers.count > count {
-                notchLayers.removeLast().removeFromSuperlayer()
-            }
-            let layout = currentLayout()
-            for index in notchLayers.indices { styleNotch(index, layout: layout) }
-            applyOffset(layout)
-        }
+    /// The rail column, in rail coordinates.
+    var railColumnRect: NSRect {
+        NSRect(x: 0, y: 0, width: min(PromptRailLayout.width, bounds.width), height: bounds.height)
     }
 
-    private func layoutContentLayer() {
-        contentLayer.frame = bounds
-        fadeMask.frame = contentLayer.bounds
+    /// What a change to the notches redraws: the rail column alone while no
+    /// lens exists, since the notches are all that is drawn then, and the
+    /// whole overlay while one does.
+    var notchRedrawRect: NSRect {
+        lensState.lens == nil ? railColumnRect : bounds
     }
 
-    /// Frames and colours one notch, resolving its colour in this view's
-    /// appearance: a `CGColor` is fixed the moment it is made.
-    private func styleNotch(_ index: Int, layout: PromptRailLayout) {
-        guard notchLayers.indices.contains(index), entries.indices.contains(index) else { return }
-        let active = index == activeIndex
-        let notch = notchLayers[index]
-        let rect = layout.notchRect(index, active: active, length: workScale.length(at: index))
-        notch.frame = rect
-        notch.cornerRadius = rect.height / 2
-        let color = PromptRailNotchStyle.color(for: entries[index].kind, active: active)
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            notch.backgroundColor = color.cgColor
-        }
+    /// Marks the notches for redraw, over `notchRedrawRect`.
+    private func invalidateRail() {
+        setNeedsDisplay(notchRedrawRect)
     }
 
-    /// Recomputes the overflow offset, moves the notches and refreshes the fade.
-    private func applyOffset(_ layout: PromptRailLayout) {
+    /// Recomputes the overflow offset and, at rest, refreshes the fade. While
+    /// a lens exists it sets the fade from the rows it shows.
+    func applyOffset(_ layout: PromptRailLayout) {
         let previous = offset
         // A rail not yet laid out has no height to keep anything in view of;
         // an offset derived from it would carry into the first real layout.
         offset = bounds.height > 0 ? layout.scrollOffset(keepingVisible: activeIndex, current: offset) : 0
-        notchesLayer.frame = CGRect(
-            x: 0, y: -offset, width: bounds.width, height: max(layout.contentHeight, bounds.height))
-        if layout.overflows, bounds.height > 0 {
-            PromptRailFade.configure(
-                fadeMask,
-                height: bounds.height,
-                fadesTop: offset > 0,
-                fadesBottom: offset < layout.contentHeight - bounds.height)
-            if contentLayer.mask !== fadeMask { contentLayer.mask = fadeMask }
-        } else if contentLayer.mask != nil {
-            contentLayer.mask = nil
+        if lensState.lens == nil {
+            setFade(
+                top: layout.overflows && offset > 0,
+                bottom: layout.overflows && offset < layout.contentHeight - bounds.height)
         }
-        if offset != previous { updateAccessibilityFrames(layout) }
+        if offset != previous {
+            invalidateRail()
+            updateAccessibilityFrames(layout)
+        }
+    }
+
+    /// Installs the fade over whichever ends clip a notch, or removes it when
+    /// neither does.
+    func setFade(top: Bool, bottom: Bool) {
+        withoutAnimation {
+            fadeMask.frame = bounds
+            if top || bottom, bounds.height > 0 {
+                PromptRailFade.configure(fadeMask, height: bounds.height, fadesTop: top, fadesBottom: bottom)
+                if layer?.mask !== fadeMask { layer?.mask = fadeMask }
+            } else if layer?.mask != nil {
+                layer?.mask = nil
+            }
+        }
     }
 
     private func withoutAnimation(_ body: () -> Void) {
@@ -256,53 +347,84 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
         CATransaction.commit()
     }
 
-    // MARK: Hover
+    // MARK: Drawing
 
-    override func mouseEntered(with event: NSEvent) {
-        guard event.trackingArea === hoverTrackingArea else {
-            super.mouseEntered(with: event)
+    override func draw(_ dirtyRect: NSRect) {
+        guard !entries.isEmpty, let context = NSGraphicsContext.current?.cgContext else { return }
+        // A `CGColor` is fixed the moment it is made, so each draw resolves
+        // the palette in this view's appearance.
+        let drawsLens = lensState.lens != nil
+        var resolved: PromptRailNotchPalette?
+        var lensColors: PromptRailLensPalette?
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            resolved = PromptRailNotchPalette.resolvedInCurrentAppearance()
+            if drawsLens { lensColors = PromptRailLensPalette.resolvedInCurrentAppearance() }
+        }
+        guard let palette = resolved else { return }
+        lastDrawnPalette = palette
+
+        if let lensColors {
+            lensPainter.draw(
+                rows: lensState.displayedRows,
+                shape: lensState.shape,
+                openFraction: lensState.openFraction,
+                hoveredRow: lensState.hoveredRow,
+                workScale: workScale,
+                notchColors: palette,
+                colors: lensColors,
+                railHeight: bounds.height,
+                fades: lensState.fade,
+                dirtyRect: dirtyRect,
+                in: context)
             return
         }
-        trackPointer(event)
-        hover.railHoverChanged(true)
-    }
 
-    override func mouseMoved(with event: NSEvent) {
-        trackPointer(event)
-        // Every move re-asserts rail hover. `closeNow()` — the window
-        // resigning key, the app deactivating — forgets it, and a pointer
-        // resting on the rail sends no new enter, so without this the card
-        // would not reopen until the pointer left the rail and came back.
-        hover.railHoverChanged(true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        guard event.trackingArea === hoverTrackingArea else {
-            super.mouseExited(with: event)
-            return
+        let layout = currentLayout()
+        let active = activeIndex
+        if let range = notchIndices(reaching: dirtyRect, layout: layout) {
+            for index in range where index != active {
+                fillNotch(index, active: false, layout: layout, palette: palette, in: context)
+            }
         }
-        pointedIndex = nil
-        hover.railHoverChanged(false)
-    }
-
-    private func trackPointer(_ event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        pointerY = point.y
-        pointedIndex = currentLayout().index(atRailY: point.y, offset: offset)
-    }
-
-    // MARK: Wheel
-
-    /// The rail never scrolls itself; the wheel scrolls the transcript.
-    override func scrollWheel(with event: NSEvent) {
-        if let wheelTarget {
-            wheelTarget.scrollWheel(with: event)
-        } else {
-            super.scrollWheel(with: event)
+        // The active notch is thicker; drawn last, it sits on top.
+        if let active {
+            fillNotch(active, active: true, layout: layout, palette: palette, in: context)
         }
+    }
+
+    /// The entries whose notches can reach into `rect`, in rail coordinates:
+    /// each notch lies inside its own band of the rail, so the bands `rect`
+    /// touches, widened by a notch's thickness.
+    private func notchIndices(reaching rect: NSRect, layout: PromptRailLayout) -> ClosedRange<Int>? {
+        let margin = PromptRailLayout.activeNotchHeight
+        guard let first = layout.index(atRailY: rect.minY - margin, offset: offset),
+              let last = layout.index(atRailY: rect.maxY + margin, offset: offset)
+        else { return nil }
+        return first...max(first, last)
+    }
+
+    private func displayedNotchRect(_ index: Int, active: Bool, layout: PromptRailLayout) -> CGRect {
+        layout.notchRect(index, active: active, length: workScale.length(at: index))
+            .offsetBy(dx: 0, dy: -offset)
+    }
+
+    private func fillNotch(
+        _ index: Int, active: Bool, layout: PromptRailLayout, palette: PromptRailNotchPalette, in context: CGContext
+    ) {
+        guard entries.indices.contains(index) else { return }
+        let rect = displayedNotchRect(index, active: active, layout: layout)
+        let radius = min(rect.width, rect.height) / 2
+        context.setFillColor(palette.color(for: entries[index].kind, active: active))
+        context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+        context.fillPath()
     }
 
     // MARK: Accessibility
+
+    /// The group covers the rail column, not the whole overlay.
+    override func accessibilityFrame() -> NSRect {
+        NSAccessibility.screenRect(fromView: self, rect: railColumnRect)
+    }
 
     override func accessibilityChildren() -> [Any]? {
         if let accessibilityButtons { return accessibilityButtons }
@@ -313,7 +435,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
 
     /// One button per entry, labelled "<first line>, <time>, <work>".
     private func makeAccessibilityButtons() -> [PromptRailAccessibilityButton] {
-        let now = Date()
+        let date = now()
         let layout = currentLayout()
         let buttons = entries.enumerated().map { index, entry in
             let id = entry.id
@@ -324,7 +446,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
             button.setAccessibilityElement(true)
             button.setAccessibilityRole(.button)
             button.setAccessibilityLabel(
-                PromptRailAccessibility.label(for: entry, workCount: workScale.count(at: index), now: now))
+                PromptRailAccessibility.label(for: entry, workCount: workScale.count(at: index), now: date))
             button.setAccessibilityParent(self)
             button.setAccessibilityFrameInParentSpace(accessibilityFrame(index, layout: layout))
             return button
@@ -337,11 +459,11 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     /// changes, so they match it one for one.
     private func updateAccessibilityLabels(where changed: (Int) -> Bool) {
         guard let accessibilityButtons else { return }
-        let now = Date()
+        let date = now()
         for (index, button) in accessibilityButtons.enumerated()
         where entries.indices.contains(index) && changed(index) {
             button.setAccessibilityLabel(
-                PromptRailAccessibility.label(for: entries[index], workCount: workScale.count(at: index), now: now))
+                PromptRailAccessibility.label(for: entries[index], workCount: workScale.count(at: index), now: date))
         }
     }
 
@@ -352,12 +474,13 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
         }
     }
 
-    /// The band of the rail a notch owns: the full rail width, one pitch tall.
+    /// The band of the rail a notch owns: the rail column's width, one pitch
+    /// tall.
     private func accessibilityFrame(_ index: Int, layout: PromptRailLayout) -> NSRect {
         NSRect(
             x: 0,
             y: layout.notchCenterY(index) - layout.pitch / 2 - offset,
-            width: bounds.width,
+            width: PromptRailLayout.width,
             height: layout.pitch)
     }
 }
@@ -386,9 +509,9 @@ final class PromptRailAccessibilityButton: NSAccessibilityElement {
 }
 
 extension PromptRailFade {
-    /// The Core Animation spelling of the fade both AppKit views use: fades
-    /// the top and/or bottom `PromptRailLayout.fadeHeight` of a layer `height`
-    /// tall. The mask lives in a flipped layer tree, so y 0 is the top edge.
+    /// The Core Animation spelling of the rail's fade: fades the top and/or
+    /// bottom `PromptRailLayout.fadeHeight` of a layer `height` tall. The mask
+    /// lives in a flipped view's layer, so y 0 is the top edge.
     static func configure(_ mask: CAGradientLayer, height: CGFloat, fadesTop: Bool, fadesBottom: Bool) {
         let fraction = edgeFraction(height: height)
         let opaque = CGColor(gray: 0, alpha: 1)

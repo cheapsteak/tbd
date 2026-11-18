@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 /// The transcript's peer-message colour, in its two appearances: the prompt
-/// rail's notches, the card's dashes and text, and a peer bubble's glyph and tint.
+/// rail's notches, a peer's sender in the lens's rows, and a peer bubble's
+/// glyph and tint.
 ///
 /// Each appearance matches the WCAG relative luminance of the sidebar's
 /// `AttentionAmber` (light 0.2388 vs 0.2384; dark 0.3668 vs 0.3660), so a peer

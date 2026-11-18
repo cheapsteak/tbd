@@ -7,7 +7,9 @@ import SwiftUI
 ///
 /// It is an overlay, not a table row, so showing or hiding it never shifts the
 /// rows and the table's row model is unchanged. `Content.resolve` decides what
-/// it shows; the pane mounts it only when that is not `.hidden`.
+/// it shows; the pane mounts it through `RemoteTranscriptEarlierHeaderOverlay`,
+/// only when that is not `.hidden` and the prompt rail's lens is not on
+/// screen.
 struct RemoteTranscriptEarlierHeader: View {
     let content: Content
     let onRetry: @MainActor () -> Void
@@ -75,5 +77,28 @@ struct RemoteTranscriptEarlierHeader: View {
         .padding(.vertical, 4)
         .background(.ultraThinMaterial, in: Capsule())
         .padding(.top, 6)
+    }
+}
+
+/// The earlier-history header as the remote pane overlays it. Centred at the
+/// top, its capsule would cover the prompt rail lens's first rows and take
+/// their clicks, so it hides while the lens is on screen (lens spec,
+/// "Overlays above the rail"). It reads the lens's visibility in its own body,
+/// so the lens opening and closing re-renders it alone, never the pane.
+struct RemoteTranscriptEarlierHeaderOverlay: View {
+    let content: RemoteTranscriptEarlierHeader.Content
+    let lensVisibility: PromptLensVisibility
+    let onRetry: @MainActor () -> Void
+
+    /// Whether the header shows: it has something to say, and the prompt
+    /// rail's lens is not on screen.
+    static func shows(content: RemoteTranscriptEarlierHeader.Content, promptLensShown: Bool) -> Bool {
+        content != .hidden && !promptLensShown
+    }
+
+    var body: some View {
+        if Self.shows(content: content, promptLensShown: lensVisibility.isShown) {
+            RemoteTranscriptEarlierHeader(content: content, onRetry: onRetry)
+        }
     }
 }
