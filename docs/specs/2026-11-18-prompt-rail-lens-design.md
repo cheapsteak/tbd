@@ -67,8 +67,8 @@ The lens holds still while the pointer moves near its centre and follows when pu
 - **Opening** – the lens opens on the centre whose own layout puts the pointed row under the pointer, found by bisection.
 - **Dead zone** – while the pointer is within `0.45 × R` rows (2.7 rows) of the centre, the lens does not move.
 - **Following** – past the dead zone, the centre eases toward the centre whose layout puts the pointer exactly on the dead zone's edge. The ease is time-based, with a time constant of about 130ms: 12% of the remaining distance per 60Hz frame, and the same per second of real time at 120Hz.
-- **Flick freeze** – while the pointer is moving fast, the lens holds still. The speed is smoothed as `v ← 0.6 × v + 0.4 × instantaneous`, and a smoothed speed above 0.45pt/ms counts as fast. This keeps the lens from smearing past the row the reader is aiming at.
-- **Settling** – the lens stops moving once a step would move the centre by less than 0.002 rows.
+- **Flick freeze** – while the pointer is moving fast, the lens holds still. The speed is measured from the pointer's own moves and their event times, not from frames, so a flick that starts while the frames are paused freezes the lens at once, and a pointer that comes back after a pause is not taken for a flick. It is smoothed as `v ← 0.6 × v + 0.4 × instantaneous` per 60Hz frame's worth of time, decays toward zero while the pointer is still, and a smoothed speed above 0.45pt/ms counts as fast. This keeps the lens from smearing past the row the reader is aiming at.
+- **Settling** – once the centre is within 0.002 rows of its target, it moves to the target and stops, so the settled position is the same at any frame rate.
 
 ### Drawing
 
@@ -98,7 +98,7 @@ Rows are drawn at their layout height, and each shows as much as its height allo
 - **Outside the column** – a pointer above the first row or below the last points at no row: it draws no hover fill, and a click there jumps nowhere. A short session's column ends well above the rail's bottom, so this is common.
 - **Wheel** – a wheel over the rail column or the box scrolls the transcript. Neither the rail nor the lens scrolls under the wheel.
 - **Elsewhere** – clicks and the wheel outside the rail column and the box reach the transcript, whatever the overlay's frame covers. Once the lens starts to close, its shrinking box takes no clicks: they reach the transcript.
-- **Jump-to-latest button** – each transcript pane's button that scrolls to the newest message (live, History and Remote) hides while the lens is open, so it never covers the lens's rows or takes their clicks.
+- **Overlays above the rail** – each transcript pane's jump-to-latest button (live, History and Remote) and the Remote pane's earlier-history header (its loading capsule and retry button) hide while the lens is open, so they never cover the lens's rows or take their clicks. Only those overlays observe the lens's state; the pane itself never does, because a pane re-render reruns the table's whole-transcript comparison (see the rail spec's "Views").
 - **Keyboard** – the Go menu's Previous Prompt and Next Prompt are unchanged.
 - **VoiceOver** – the "Prompts" group, with one button per entry, is unchanged.
 
@@ -119,7 +119,7 @@ Logic stays out of the views, under `Sources/TBDApp/Panes/Transcript/PromptRail/
 - **`PromptRailNSView`** (reworked) – the one view:
   - **Frame** – an overlay as tall as the rail and as wide as the box can grow. It draws the box, the notches and the rows in `draw(_:)`.
   - **Hit-testing** – it returns nil outside the rail column and the box, so the transcript keeps its clicks.
-  - **Display link** – a link from `NSView.displayLink(target:selector:)`, as `GhosttyTerminalView` uses, drives the frames. It runs only while the lens is opening, moving or closing, and pauses once the lens settles. It takes its frame times from the link, through a seam that lets tests step frames by hand.
+  - **Display link** – a link from `NSView.displayLink(target:selector:)`, as `GhosttyTerminalView` uses, drives the frames. It exists only while the lens is opening, moving or closing, and is released once the lens settles; the next movement makes a new one. So a settled or abandoned rail never leaves a link in the run loop. It takes its frame times from the link, through a seam that lets tests step frames by hand.
   - **Tracking** – one tracking area over the whole overlay feeds the hover model. Code, not separate areas, decides whether the pointer is over the rail column or the box. A tracking area follows geometry, not hit-testing, so the rail stays hovered under the box.
   - **Kept** – its accessibility buttons and its hand-off of wheel events to the transcript.
 - **`TranscriptContainerView`** – stacks the scroll view and then the overlay. It runs the Escape monitor while the lens is open, and closes the lens when the container leaves its window or the window resigns key.
@@ -174,7 +174,7 @@ An HTML mock ported the prototype's lens onto a fake transcript with the rail's 
   - a click on a row jumps and closes the lens, and a click on the bare rail jumps;
   - Escape and deactivation close the lens at once and suppress regrowth until the pointer leaves the rail;
   - clicks and the wheel outside the rail and the box reach the transcript, and the wheel over the box scrolls it;
-  - the display link pauses once the lens settles;
+  - the display link is released once the lens settles;
   - the accessibility buttons are unchanged;
   - nothing builds a table cell.
 - **Mounting, offscreen** – a pane-shaped mount keeps the gutter inside the table's view. A table with no mount has no rail.
