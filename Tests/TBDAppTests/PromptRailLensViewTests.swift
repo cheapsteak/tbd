@@ -505,7 +505,6 @@ struct PromptRailLensViewTests {
         try await Self.openLens(mount, at: NSPoint(x: Self.onRail.x, y: layout.notchCenterY(5)))
         mount.frames(Self.wholeAnimation)
         let opened = try #require(mount.rail.lens).centre
-        try #require(abs(opened - 5.5) < 1, "precondition: the lens opened on notch 5, at \(opened)")
 
         mount.rail.lensOpenChanged(false)
         mount.frames(8)
@@ -518,6 +517,8 @@ struct PromptRailLensViewTests {
         mount.rail.lensOpenChanged(true)
         let lens = try #require(mount.rail.lens, "the reopen left no lens")
         let fresh = PromptRailSteadyLens(geometry: mount.rail.currentLensGeometry(), pointerY: notch30.y)
+        try #require(abs(fresh.centre - opened) > 10,
+                     "precondition: notch 30's opening centre \(fresh.centre) lies far from notch 5's lens, at \(opened)")
         #expect(abs(lens.centre - fresh.centre) < 1e-9,
                 "the reopened lens is centred on \(lens.centre), not on notch 30's opening centre \(fresh.centre)")
         #expect(mount.rail.openFraction == partWay,
