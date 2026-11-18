@@ -47,7 +47,7 @@ struct PromptRailLensViewTests {
         #expect(mount.rail.frame.width == PromptRailLayout.width, "the overlay widened with no lens")
 
         await mount.clock.advance(by: .milliseconds(1))
-        await mount.hover._drainForTesting()
+        try await Self.joinFired(mount)
         #expect(mount.hover.isOpen, "the lens did not open once the 80ms had passed")
         #expect(mount.rail.lens != nil, "the open at 80ms grew no lens")
     }
@@ -100,7 +100,7 @@ struct PromptRailLensViewTests {
 
         try mount.move(to: Self.offLens)
         try await mount.clock.requireAdvanceWhenArmed(by: Self.closeGrace, timeout: Self.mainActorHop)
-        await mount.hover._drainForTesting()
+        try await Self.joinFired(mount)
         #expect(!mount.hover.isOpen)
         #expect(mount.rail.lens == nil, "with Reduce Motion the lens did not close at once")
         #expect(mount.rail.openFraction == 0)
@@ -155,7 +155,7 @@ struct PromptRailLensViewTests {
 
         try mount.move(to: Self.offLens)
         try await mount.clock.requireAdvanceWhenArmed(by: Self.closeGrace, timeout: Self.mainActorHop)
-        await mount.hover._drainForTesting()
+        try await Self.joinFired(mount)
         #expect(!mount.hover.isOpen, "the lens stayed open with the pointer off both the rail and the box")
         #expect(mount.rail.lens != nil, "the lens vanished rather than shrinking")
         #expect(mount.rail.isRunningFrames, "a shrinking lens wants no frames")
@@ -356,7 +356,7 @@ struct PromptRailLensViewTests {
         #expect(mount.rail.hoveredRow == nil, "the hovered row's fill outlived the pointer")
         #expect(!mount.rail.isPointerOverRail)
         try await mount.clock.requireAdvanceWhenArmed(by: Self.closeGrace, timeout: Self.mainActorHop)
-        await mount.hover._drainForTesting()
+        try await Self.joinFired(mount)
         #expect(!mount.hover.isOpen, "the lens stayed open after the pointer left the overlay")
     }
 
@@ -546,7 +546,7 @@ struct PromptRailLensViewTests {
 
         try mount.move(to: Self.onRail)
         try await mount.clock.requireAdvanceWhenArmed(by: Self.openDelay, timeout: Self.mainActorHop)
-        await mount.hover._drainForTesting()
+        try await Self.joinFired(mount)
         #expect(mount.hover.isOpen)
         #expect(mount.rail.lens == nil, "an empty rail grew a lens")
         #expect(mount.rail.boxRect == nil)
@@ -1311,9 +1311,17 @@ struct PromptRailLensViewTests {
     private static func openLens(_ mount: LensMount, at point: NSPoint = PromptRailLensViewTests.onRail) async throws {
         try mount.move(to: point)
         try await mount.clock.requireAdvanceWhenArmed(by: openDelay, timeout: mainActorHop)
-        await mount.hover._drainForTesting()
+        try await joinFired(mount)
         try #require(mount.hover.isOpen, "the hover model did not open")
         try #require(mount.rail.lens != nil, "the open grew no lens")
+    }
+
+    /// Joins the hover model's task that the last advance woke. The
+    /// `#require` turns a timer longer than the advance into a failure here,
+    /// instead of a join that waits on a sleeper nobody will advance.
+    private static func joinFired(_ mount: LensMount) async throws {
+        try #require(!mount.clock.hasSleeper, "the timer outlasted the advance")
+        await mount.hover._drainForTesting()
     }
 
     /// Runs `draw(_:)` once, into a bitmap: the offscreen host's own display

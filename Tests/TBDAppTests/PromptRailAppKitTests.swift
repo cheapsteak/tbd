@@ -278,7 +278,7 @@ struct PromptRailAppKitTests {
         let move = try Self.mouseMoved(to: NSPoint(x: 8, y: 300))
         rail.mouseMoved(with: move)
         try await clock.requireAdvanceWhenArmed(by: Self.openDelay, timeout: Self.mainActorHop)
-        await hover._drainForTesting()
+        try await Self.joinFired(clock, hover)
         #expect(hover.isOpen, "a move over the rail did not reopen the lens")
     }
 
@@ -298,13 +298,13 @@ struct PromptRailAppKitTests {
         rail.mouseMoved(with: onRail)
         #expect(rail.isPointerOverRail)
         try await clock.requireAdvanceWhenArmed(by: Self.openDelay, timeout: Self.mainActorHop)
-        await hover._drainForTesting()
+        try await Self.joinFired(clock, hover)
         try #require(hover.isOpen, "a move over the rail column did not open the lens")
 
         rail.mouseMoved(with: offRail)
         #expect(!rail.isPointerOverRail)
         try await clock.requireAdvanceWhenArmed(by: Self.closeGrace, timeout: Self.mainActorHop)
-        await hover._drainForTesting()
+        try await Self.joinFired(clock, hover)
         #expect(!hover.isOpen, "a pointer off the rail column kept the rail hovered")
     }
 
@@ -501,11 +501,19 @@ struct PromptRailAppKitTests {
             windowNumber: 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0))
     }
 
+    /// Joins the hover model's task that the last advance woke. The
+    /// `#require` turns a timer longer than the advance into a failure here,
+    /// instead of a join that waits on a sleeper nobody will advance.
+    private static func joinFired(_ clock: EventDrivenTestClock, _ hover: PromptRailHoverModel) async throws {
+        try #require(!clock.hasSleeper, "the timer outlasted the advance")
+        await hover._drainForTesting()
+    }
+
     /// Hovers the rail and fires the open timer.
     private static func openLens(_ hover: PromptRailHoverModel, _ clock: EventDrivenTestClock) async throws {
         hover.railHoverChanged(true)
         try await clock.requireAdvanceWhenArmed(by: openDelay, timeout: mainActorHop)
-        await hover._drainForTesting()
+        try await joinFired(clock, hover)
         try #require(hover.isOpen, "the hover model did not open")
     }
 
