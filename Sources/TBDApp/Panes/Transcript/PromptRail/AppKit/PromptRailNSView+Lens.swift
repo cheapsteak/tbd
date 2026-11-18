@@ -106,7 +106,7 @@ final class PromptRailDisplayLinkProxy: NSObject {
 ///   moves, and pauses once it settles. `advanceFrame(to:)` is the link's
 ///   callback and the tests' seam.
 /// - **Hover** – the pointer over the box reports box hover, so the lens
-///   stays open over its own rows.
+///   stays open over its own rows, and the box never narrows under it.
 /// - **Clicks** – a click on a row jumps to its prompt and closes the lens.
 extension PromptRailNSView {
     // MARK: State
@@ -375,7 +375,16 @@ extension PromptRailNSView {
         let fraction = lensState.openFraction
         let rows = PromptRailLensRows.resting(currentLensGeometry()).blended(toward: lens.rows, fraction: fraction)
         lensState.displayedRows = rows
-        lensState.shape = lensPainter.shape(for: rows, openFraction: fraction, maxWidth: boxMaxWidth)
+        var shape = lensPainter.shape(for: rows, openFraction: fraction, maxWidth: boxMaxWidth)
+        // While the pointer is over the box, the box never narrows: moving
+        // through rows with shorter titles must not leave the pointer outside
+        // it, which would close the lens. Over the rail column, which sits in
+        // front of the box's leading end, no narrowing can leave the pointer
+        // outside, so there, as anywhere off the box, the box fits its rows.
+        if lensState.isPointerOverBox, !isPointerOverRail {
+            shape = shape.widened(toAtLeast: min(lensState.shape.width, boxMaxWidth))
+        }
+        lensState.shape = shape
         // The box moves and grows under a still pointer, which sends no
         // event, so its hover follows the box here.
         if let point = lensState.lastPointer {
@@ -440,9 +449,9 @@ extension PromptRailNSView {
     // MARK: Clicks
 
     /// The row a click at `point`, in rail coordinates, lands on: over the
-    /// rail column or the box of a lens that has started to grow, the
-    /// displayed row there; over the bare rail, the resting notch there. nil
-    /// anywhere else.
+    /// rail column of a lens that has started to grow, or over an open
+    /// lens's box, the displayed row there; over the bare rail, the resting
+    /// notch there. nil anywhere else, the box of a closing lens among it.
     func clickRow(at point: NSPoint) -> Int? {
         guard !entries.isEmpty, isOverRailOrBox(point) else { return nil }
         if lensState.lens != nil, lensState.openFraction > 0 {

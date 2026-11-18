@@ -16,6 +16,16 @@ struct PromptRailLensShape: Equatable {
     let box: CGRect?
 
     static let closed = PromptRailLensShape(width: PromptRailLayout.width, textRows: nil, box: nil)
+
+    /// This shape with its box at least `width` wide: the same rows, the box
+    /// widened to `width` when it is narrower. A shape with no box is
+    /// returned as it is.
+    func widened(toAtLeast width: CGFloat) -> PromptRailLensShape {
+        guard let box, width > self.width else { return self }
+        return PromptRailLensShape(
+            width: width, textRows: textRows,
+            box: CGRect(x: box.minX, y: box.minY, width: width - box.minX, height: box.height))
+    }
 }
 
 /// Which ends of the rail fade the lens's notches, because a displayed row

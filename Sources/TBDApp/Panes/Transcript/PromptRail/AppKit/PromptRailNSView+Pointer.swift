@@ -3,20 +3,23 @@ import AppKit
 /// The rail's pointer handling: hit-testing, clicks, hover and the wheel.
 ///
 /// - **Hit-testing** – the overlay answers over the rail column, and over the
-///   lens's box while it shows. Clicks and the wheel anywhere else fall
-///   through to the transcript, whatever the overlay's frame covers.
-/// - **Clicks** – a mouse-up over the rail column or the box jumps to the row
-///   its mouse-down landed on.
+///   lens's box while the lens is open. Clicks and the wheel anywhere else,
+///   the box of a closing lens among them, fall through to the transcript,
+///   whatever the overlay's frame covers.
+/// - **Clicks** – a mouse-up over the rail column or the open lens's box
+///   jumps to the row its mouse-down landed on.
 /// - **Hover** – the one tracking area covers the whole overlay, and
 ///   `trackPointer` decides whether the pointer is over the rail column or
-///   the box, and reports each to the hover model.
+///   the box, and reports each to the hover model. Only a move over either,
+///   or one that changes which the pointer is over, asks the lens for a
+///   frame.
 /// - **Wheel** – the rail never scrolls itself; it hands wheel events to the
 ///   transcript's scroll view.
 extension PromptRailNSView {
     // MARK: Hit-testing
 
-    /// The overlay answers only over the rail column and the lens's box, so
-    /// the transcript keeps its clicks and its wheel everywhere else.
+    /// The overlay answers only over the rail column and the open lens's
+    /// box, so the transcript keeps its clicks and its wheel everywhere else.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard !isHidden else { return nil }
         return isOverRailOrBox(convert(point, from: superview)) ? self : nil
@@ -28,9 +31,11 @@ extension PromptRailNSView {
     }
 
     /// Whether `point`, in this view's coordinates, lies inside the overlay
-    /// and over the rail column or the lens's box.
+    /// and over the rail column or the open lens's box. Once the lens starts
+    /// to close, its shrinking box takes no clicks: they reach the
+    /// transcript.
     func isOverRailOrBox(_ point: NSPoint) -> Bool {
-        bounds.contains(point) && (isInRailColumn(point) || isOverBox(point))
+        bounds.contains(point) && (isInRailColumn(point) || (lensOpen && isOverBox(point)))
     }
 
     // MARK: Clicks
@@ -41,8 +46,8 @@ extension PromptRailNSView {
         lensState.mouseDownRow = clickRow(at: convert(event.locationInWindow, from: nil))
     }
 
-    /// A mouse-up over the rail column or the box jumps to the row its
-    /// mouse-down landed on. The rows can move between the two, under a
+    /// A mouse-up over the rail column or the open lens's box jumps to the
+    /// row its mouse-down landed on. The rows can move between the two, under a
     /// still pointer, as the lens grows, eases or follows, so the mouse-up
     /// does not look for its own row: on a moving row it would not find the
     /// pressed one, and the click would be lost.
@@ -93,12 +98,17 @@ extension PromptRailNSView {
     /// reports rail hover, over the box it reports box hover, and leaving
     /// either reports that. Gains are reported before losses, so a move
     /// between the rail and the box never passes through hovering neither,
-    /// which would start the close grace.
+    /// which would start the close grace. A frame is asked for only for a
+    /// move over the rail column or the box, where the lens may follow and
+    /// the hovered row may change, or one that changes the hover; a move
+    /// across the rest of a widened overlay needs none.
     private func trackPointer(_ event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let inside = bounds.contains(point)
         let overRail = inside && isInRailColumn(point)
         let overBox = inside && isOverBox(point)
+        let wasOverRail = isPointerOverRail
+        let wasOverBox = lensState.isPointerOverBox
         lensState.lastPointer = point
         if overRail || overBox { pointerY = point.y }
 
@@ -117,7 +127,8 @@ extension PromptRailNSView {
             isPointerOverRail = false
             hover.railHoverChanged(false)
         }
-        lensPointerMoved()
+        let hoverChanged = isPointerOverRail != wasOverRail || lensState.isPointerOverBox != wasOverBox
+        if overRail || overBox || hoverChanged { lensPointerMoved() }
     }
 
     // MARK: Wheel

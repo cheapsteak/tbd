@@ -235,6 +235,94 @@ struct PromptRailLensViewTests {
         #expect(!mount.hover.isOpen, "the lens stayed open after the pointer left the overlay")
     }
 
+    /// The box is as wide as the widest row it shows. While the pointer is
+    /// over it, though, it never narrows: moving through rows with shorter
+    /// titles must not leave the pointer outside it, which would close the
+    /// lens. One long title, on the row the lens opens on, makes the box 320pt
+    /// wide; every other title is a few letters.
+    @Test("the box never narrows under the pointer, and fits its rows again once the pointer leaves it")
+    func boxHoldsWidthUnderPointer() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        let long = PromptRailLayout(count: 40, railHeight: 601).index(atRailY: Self.onRail.y, offset: 0) ?? 0
+        let entries = (0..<40).map { index in
+            PromptOutlineEntry(
+                id: "p-\(index)", rowIndex: index * 2, kind: .prompt,
+                firstLine: index == long ? String(repeating: "A long prompt title ", count: 6) : "P\(index)",
+                timestamp: nil)
+        }
+        mount.rail.promptRail(entriesDidChange: entries)
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        let opened = try #require(mount.rail.boxRect, "the open lens has no box")
+        try #require(opened.width > 300, "precondition: the long title widens the box, to \(opened.width)")
+
+        var narrowest = opened.width
+        func settle() {
+            var frames = 0
+            while mount.rail.isRunningFrames, frames < 1200 {
+                mount.frame()
+                narrowest = min(narrowest, mount.rail.boxRect?.width ?? 0)
+                frames += 1
+            }
+        }
+        // Into the box, past where any short title reaches, then down it in
+        // 10pt steps: the lens follows, and the long title's row shrinks.
+        var pointer = NSPoint(x: 250, y: Self.onRail.y)
+        try mount.move(to: pointer)
+        settle()
+        try #require(mount.rail.lensState.isPointerOverBox, "precondition: \(pointer) is over the box")
+        var moves = 0
+        while mount.rail.lensState.shape.textRows?.contains(long) == true, moves < 20 {
+            pointer.y += 10
+            try mount.move(to: pointer)
+            settle()
+            moves += 1
+        }
+        let longShows = mount.rail.lensState.shape.textRows?.contains(long) == true
+        try #require(!longShows, "precondition: the long title still shows after \(moves) moves")
+        #expect(narrowest >= opened.width - 0.01,
+                "the box narrowed from \(opened.width) to \(narrowest) under the pointer")
+        #expect(mount.rail.lensState.isPointerOverBox, "the pointer at \(pointer) fell outside the box")
+        let armedClose = await watchForSleeper(on: mount.clock)
+        #expect(!armedClose, "the lens started to close under a pointer on its box")
+        #expect(mount.hover.isOpen)
+
+        // Back onto the rail column: the box fits its short rows again.
+        try mount.move(to: NSPoint(x: Self.onRail.x, y: pointer.y))
+        settle()
+        let fitted = mount.rail.boxRect?.width ?? PromptRailLayout.width
+        #expect(fitted < 200, "the box stayed \(fitted) wide after the pointer left it")
+    }
+
+    /// Only a move over the rail column or the box, or one that changes
+    /// which the pointer is over, can move the lens or its hovered row.
+    @Test("a move across the overlay off the rail column and the box asks for no frame")
+    func moveOffRailAndBoxAsksNoFrame() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        let box = try #require(mount.rail.boxRect, "the open lens has no box")
+        let past = NSPoint(x: box.maxX + 4, y: box.midY)
+        try #require(past.x + 8 < mount.rail.frame.width, "precondition: \(past) lies inside the overlay")
+
+        // Leaving the rail column changes the hover: a frame clears the
+        // hovered row.
+        try mount.move(to: past)
+        #expect(mount.rail.isRunningFrames, "leaving the rail column asked for no frame")
+        var frames = 0
+        while mount.rail.isRunningFrames, frames < 1200 {
+            mount.frame()
+            frames += 1
+        }
+        #expect(mount.rail.hoveredRow == nil)
+        try #require(!mount.rail.isRunningFrames, "precondition: the frames stopped, after \(frames)")
+
+        try mount.move(to: NSPoint(x: past.x + 4, y: past.y + 20))
+        #expect(!mount.rail.isRunningFrames, "a move off the rail column and the box asked for a frame")
+    }
+
     /// The live pane hides its jump-to-latest button while the lens shows.
     /// The container reports the lens coming and going, and the table's
     /// coordinator passes each report up to the pane a main-queue turn later,
@@ -396,6 +484,26 @@ struct PromptRailLensViewTests {
         #expect(mount.rail.hitTest(past) == nil, "the overlay took a point past the box")
         #expect(mount.rail.hitTest(NSPoint(x: inside.x, y: box.maxY + 20)) == nil,
                 "the overlay took a point below the box")
+    }
+
+    @Test("once the lens starts to close, its shrinking box takes no clicks, and the rail column still does")
+    func closingBoxTakesNoClicks() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        let box = try #require(mount.rail.boxRect, "the open lens has no box")
+        let inside = NSPoint(x: (PromptRailLayout.width + box.maxX) / 2, y: box.midY)
+        try #require(mount.rail.hitTest(inside) === mount.rail, "precondition: the open box takes clicks")
+
+        mount.hover.dismiss(.escape)
+        mount.frame()
+        let shrinking = try #require(mount.rail.boxRect, "the box went with the close's first frame")
+        try #require(mount.rail.openFraction > 0 && shrinking.contains(inside),
+                     "precondition: \(inside) is over the shrinking box \(shrinking)")
+        #expect(mount.rail.hitTest(inside) == nil, "the shrinking box took a click")
+        #expect(mount.rail.clickRow(at: inside) == nil, "a click on the shrinking box found a row")
+        #expect(mount.rail.hitTest(Self.onRail) === mount.rail, "the rail column stopped taking clicks")
     }
 
     @Test("the wheel over the box scrolls the transcript")
