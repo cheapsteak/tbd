@@ -8,11 +8,11 @@ Document and chat viewers solve this with an outline rail. Claude desktop's mark
 
 ## Decision
 
-Every transcript pane gets a **prompt rail**: a 20pt column at its leading edge with one notch per prompt, each notch as long as its turn was busy, the current prompt's notch accented. Hovering the rail opens a card listing the prompts by first line and time; clicking one jumps the transcript to it. ⌥⌘↑ and ⌥⌘↓ jump to the previous and next prompt.
+Every transcript pane gets a **prompt rail**: a 20pt column at its leading edge with one notch per prompt, each notch as long as its turn was busy, the current prompt's notch accented. Hovering the rail magnifies the notches near the pointer into readable rows of first line and time ([`2026-11-18-prompt-rail-lens-design.md`](2026-11-18-prompt-rail-lens-design.md)); clicking one jumps the transcript to it. ⌥⌘↑ and ⌥⌘↓ jump to the previous and next prompt.
 
 - **It appears in all three transcript surfaces**: the live pane, Session History and the Remote pane. All three render through `TableTranscriptView`, so the rail is built once.
 - **It is always on, with no setting.** It acts on nothing by itself, so the default-off flag rule does not apply.
-- **It is built in AppKit, inside the table's own view.** The transcript is an AppKit table, and the rail and its card sit beside its scroll view in the view `TableTranscriptView` hands SwiftUI.
+- **It is built in AppKit, inside the table's own view.** The transcript is an AppKit table, and the rail sits beside its scroll view in the view `TableTranscriptView` hands SwiftUI.
 - **It lives entirely in TBDApp.** There is no daemon, RPC, schema or durable-resource change.
 
 ## Prior art: Claude desktop's rail
@@ -46,7 +46,7 @@ The rail describes whatever rows the table holds. In a drilled-in subagent threa
 
 **Time.** Today's prompts each show their short local time (`14:02`). An earlier day's prompts are listed in order, so only the first of each day shows its abbreviated date (`Oct 24`) and the rest of that day's rows leave the column blank — the date would only repeat. Both use the user's locale. A node without a timestamp shows nothing and does not start a new day; the next prompt with a timestamp is compared with the last one that had one. VoiceOver labels keep each prompt's own date or time, since a listener hears one row at a time.
 
-**Peers.** A peer notch is drawn in `PeerLavender`, the tint the peer bubble already uses. Its card row reads "*sender*: first line" with the sender in lavender.
+**Peers.** A peer notch is drawn in `PeerLavender`, the tint the peer bubble already uses. Its readable row reads "*sender*: first line" with the sender in lavender.
 
 ## The rail
 
@@ -69,12 +69,12 @@ The count reads node data only, like the rest of the outline.
 ### Geometry
 
 - **Gutter** – a fixed 20pt column on the leading edge of the transcript area, running from the top of the table to the top of the composer. It exists from the moment the table is created, with zero prompts as with two hundred, so the table's width never changes on its account.
-- **Notches** – stacked from 12pt below the top of the rail, leaving 12pt free at the bottom. The pitch is the free height divided by the prompt count, clamped between 4pt and 8pt.
+- **Notches** – stacked from 12pt below the top of the rail, leaving 12pt free at the bottom. The pitch is the free height divided by the prompt count, clamped between 4pt and 8pt. A short session spreads its notches wider than 8pt, so the column is tall enough for the lens to open without moving either end (see "The resting rail" in the lens spec).
   - Every notch starts 2pt from the rail's leading edge and is as long as its turn's work (4–16pt).
   - An inactive notch is 2pt tall in the tertiary label color.
   - The active notch keeps its length and is marked by thickness and color instead: 3pt tall in the accent color.
   - A peer notch is lavender at reduced opacity, and full lavender at 3pt tall when active.
-- **Overflow** – at the 4pt floor a 600pt rail holds 144 notches. Past that, the rail offsets its notches to keep the active one at least 40pt from either end, and fades the clipped edges over 24pt. The rail never scrolls under the wheel: a wheel over it scrolls the transcript, so the gutter is no dead zone, and the card is where the whole list is browsed.
+- **Overflow** – at the 4pt floor a 600pt rail holds 144 notches. Past that, the rail offsets its notches to keep the active one at least 40pt from either end, and fades the clipped edges over 24pt. The rail never scrolls under the wheel: a wheel over it scrolls the transcript, so the gutter is no dead zone, and the lens is where the whole list is browsed.
 
 ### The active prompt
 
@@ -88,30 +88,13 @@ A reader scroll, here and under Jumping, is any move of the clip view's origin t
 
 The coordinator recomputes the active entry on the clip view's bounds notification, which it already observes. A binary search over the entries' row rectangles finds it, and `rect(ofRow:)` builds no cells. The rail is told only when the active entry changes. Content streaming in at the bottom grows the document before the coordinator's tail-follow catches up with it on the next main-queue turn; the active entry is not recomputed in between, so the bottom rule does not lapse for that turn and hand the last prompt's notch to the one before it.
 
-## The card
+## Hovering
 
-- **Opening** – 80ms after the pointer enters the rail, the card fades in over 150ms, easing out.
-- **Closing** – 100ms after the pointer leaves both rail and card, so a jittery pointer does not snap it shut. Escape, a click on a row and app deactivation close it at once; hover alone cannot be the only dismissal, because a backgrounded app receives no pointer-exit event. After Escape or a click, hovering does not reopen it until the pointer has left the rail.
-- **Placement** – anchored at the rail's top-left, its dash column lined up over the rail's notches. It is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height less 60pt, which keeps the pane's bottom-corner jump-to-bottom button clear of it. A longer list scrolls inside the card behind 24pt edge fades. On opening, the list is scrolled so the row for the notch under the pointer sits under the pointer, or as close as the card's height and the list's ends allow.
-- **Rows** – 22pt tall, 13pt system text: an 18pt dash column, an 8pt gap, the first line truncated at the tail, and the time right-aligned in the secondary label color with monospaced digits — today's time, or an earlier day's date on its first row only (see **Time** above). A row whose time cell is blank gives that width to its first line.
-  - Each row's dash is as long as its notch, so the card's dash column repeats the rail's profile.
-  - The active row is medium weight, with its accent or lavender dash.
-  - The row under the pointer gets a quaternary-fill background with a 6pt corner radius.
-- **Expansion** – a row whose prompt is longer than the row shows (its first line is cut off, or the prompt runs past it) appears to expand in place when the pointer rests on it, so the reader can read more of a prompt without leaving the card.
-  - It responds to the row's text, not its dash: the pointer has to be within the row's text column, from the first line's leading edge to the end of the time, short of the row's trailing padding. The gap between the dash column and the first line belongs to the dash; the space between the first line and the time does not interrupt the text column, so moving from one to the other never hides and re-arms the overlay. A pointer arriving from the rail rests over the dash column, which the card lays over the rail's notches, so opening the card never expands a row by itself. Over the dash column the row still highlights and a click still jumps, but nothing expands.
-  - After the pointer has rested 150ms over such a row's text, an overlay as wide as the row is drawn over it with the hovered row's fill on the card's background. It repeats the row's dash and time and shows the prompt's first six lines wrapped to the row's text width, the last ending in "…" when more remains. The rows beneath stay where they are: the overlay covers them, so nothing moves under the pointer.
-  - It grows downward from the row, the dash and time beside its first prompt line on the row's band. When that would pass the bottom of the card's visible list, it grows upward instead: its bottom edge sits on the row's, and the dash and time stay on the row's band beside its last line. Either way nothing under the pointer moves. When the card is too short for six lines, it shows as many as fit, and none when not one fits.
-  - It takes no mouse and no scroll events. Hover, clicks and the wheel all reach the list beneath, so a click on the row jumps exactly as it does without the overlay.
-  - It disappears the moment the pointer leaves the row's 22pt band or moves onto its dash column, or the list scrolls, and the next row's overlay waits its own 150ms. The text under the pointer therefore always belongs to the row a click would jump to.
-  - A row that already shows its whole prompt never expands.
-  - A turn's tool-call count is shown by its notch's length and read by VoiceOver; the card's rows and expansions do not print it.
-  - Rows carry no tooltips; the expansion is how a row shows more.
-- **Click** – jumps to the prompt and closes the card.
-- **Remote, older history not loaded** – the card's first row reads "Earlier prompts not loaded" in the secondary color, with a Load button that calls the pane's existing load-earlier action, the one the "Load earlier messages" header button calls. The rail never loads history by itself.
+Hovering the rail magnifies it: the notch under the pointer grows into a readable row of its first line and time, rows near it grow part way, and far notches stay notches. A rounded box behind the readable rows keeps them legible over the transcript, which the gutter never widens to make room for. A click on a row jumps to its prompt. The lens, its layout, its motion and its dismissal rules are specified in [`2026-11-18-prompt-rail-lens-design.md`](2026-11-18-prompt-rail-lens-design.md).
 
 ## Jumping
 
-`TableTranscriptView.Coordinator.jump(toNodeID:)` serves the card, the keyboard commands and VoiceOver.
+`TableTranscriptView.Coordinator.jump(toNodeID:)` serves the lens, the keyboard commands and VoiceOver.
 
 - **Placement** – it scrolls the clip at once, unanimated, so the target row's top sits 16pt below the top of the viewport, clamped to the scrollable range.
 - **Pinning** – a row far from the bottom has only an estimated height until it is laid out. When rows near the target realize and correct their heights, the target would drift: a correction moves every row below it, and the table's layout keeps its own choice of visible row in place, not the target. The jump therefore holds the target as an anchor and re-pins it whenever a row above it changes height and at the end of each table layout pass. This is the mechanism the prepend path already uses for its anchor, generalised to hold a jump target as well.
@@ -133,10 +116,10 @@ The Go menu gains **Previous Prompt** (⌥⌘↑) and **Next Prompt** (⌥⌘↓
 
 The transcript stays fast because it is lazy in three ways: the table builds cells only for visible rows, only the bottom 40 rows are measured up front while the rest carry estimates until they are laid out, and the Remote pane loads history in pages. The rail must preserve all three. These rules are requirements:
 
-1. **The rail and the card read node data only.** Nothing measures or builds a cell to draw them.
+1. **The rail reads node data only.** Nothing measures or builds a cell to draw it.
 2. **The gutter is fixed and present from creation.** Any change to the table's column width discards every cached height, re-measures the bottom window and reloads the table.
 3. **Jumps pin; nothing pre-measures.** No pass measures the rows above a jump target. On a long transcript, measuring every row exactly took about 4 seconds where measuring the bottom window takes about 40ms.
-4. **The rail never loads pages.** Only the card's Load row does.
+4. **The rail never loads pages.**
 
 ## Structure
 
@@ -154,15 +137,13 @@ Everything with logic in it is kept out of the views. It lives under `Sources/TB
 
 ### Views
 
-`TableTranscriptView`'s view is a container `NSView`, `TranscriptContainerView`, holding the scroll view right of the 20pt gutter, the rail in the gutter and the card stacked above both. The rail and card views live under `PromptRail/AppKit/`.
+`TableTranscriptView`'s view is a container `NSView`, `TranscriptContainerView`, holding the scroll view right of the 20pt gutter and the rail stacked above it. The rail view lives under `PromptRail/AppKit/`.
 
-- **Rail** – `PromptRailNSView` draws its notches as layers. It is the presenter, so an active-entry change goes straight from the coordinator to a layer update. It hands wheel events to the scroll view.
-- **Card** – `PromptRailCardNSView` scrolls a list view that draws its rows from node data, building no view per row.
-- **Hover** – an `NSTrackingArea` on the rail and another on the card feed the hover model, in the key window only. A tracking area follows geometry, not hit-testing, so the rail stays hovered while the open card covers it, which keeps Escape and click suppression in force while the pointer is still on the rail.
-- **Wiring** – the container hands the rail's outline on to the card, shows and hides the card as the hover model says, runs the Escape monitor only while the card is on screen, and closes the card when the container leaves its window or the window resigns key. The monitor is app-wide, so a card left open in a background window would take Escape from every view in the key one.
-- **Stacking** – settled by AppKit subview order: the scroll view, then the rail, then the card.
+- **Rail** – `PromptRailNSView` is the presenter, so an active-entry change goes straight from the coordinator to the rail. It hands wheel events to the scroll view. Its drawing, hover tracking and lens are specified in the lens spec.
+- **Wiring** – the container runs the Escape monitor only while the lens is open, and closes the lens when the container leaves its window or the window resigns key. The monitor is app-wide, so a lens left open in a background window would take Escape from every view in the key one.
+- **Stacking** – settled by AppKit subview order: the scroll view, then the rail.
 
-**Mounting.** The table's `promptRail` parameter says whether to build the views. The three call sites mount the rail on the table directly, the Remote pane passing its earlier-history state and load action and the other two passing none. A harness that drives the table alone mounts nothing and gets no gutter. Because the views live inside the table's view, a pane's `.id` that rebuilds the table, as on session rollover, rebuilds the rail with it. A pane's overlays span the gutter too, so the live pane insets its bottom-leading jump-to-bottom button by the gutter's width to keep it clear of the rail.
+**Mounting.** The table's `promptRail` parameter says whether to build the views. The three call sites mount the rail on the table directly. A harness that drives the table alone mounts nothing and gets no gutter. Because the views live inside the table's view, a pane's `.id` that rebuilds the table, as on session rollover, rebuilds the rail with it. A pane's overlays span the gutter too, so the live pane insets its bottom-leading jump-to-bottom button by the gutter's width to keep it clear of the rail.
 
 ## Accessibility
 
@@ -186,9 +167,8 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - building the outline realizes no cells, which checks the first lazy-rendering rule;
   - a turn's count grows as tool calls arrive, whether appended or as a tail re-render, and the rail hears only actual changes.
 - **Keyboard** – previous and next from the middle, from inside an exchange, from the first prompt and from the last.
-- **Views, offscreen** – notch geometry and colours, the overflow offset and fade, the wheel handed to the transcript, the accessibility buttons, and the card's rows, size caps, in-place updates, Escape monitor and key-window close.
-- **Row expansion** – against an injected clock: no overlay before 150ms, the overlay after it; none for a row that shows its whole prompt; six lines with the trailing "…" and no tool-call line; growing upward near the card's bottom and clamping in a short card; hit-testing through the overlay to the list for clicks and the wheel; hiding at once when the pointer changes rows, moves onto the dash column, or the list scrolls; no expansion while the pointer is over the dash column, including a card that opens under a pointer resting there.
-- **Mounting, offscreen** – a pane-shaped mount keeps the gutter inside the table's view and makes the rail the presenter, with and without earlier history; a new pane identity rebuilds the rail; a table with no mount has no rail, card or gutter.
+- **Views, offscreen** – notch geometry and colours, the overflow offset and fade, the wheel handed to the transcript and the accessibility buttons. The lens's own tests are listed in the lens spec.
+- **Mounting, offscreen** – a pane-shaped mount keeps the gutter inside the table's view and makes the rail the presenter; a new pane identity rebuilds the rail; a table with no mount has no rail or gutter.
 
 ## Out of scope
 
@@ -201,19 +181,14 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
 ## Rejected alternatives
 
 - **A prompt list in the Session index** – `SessionWorkbenchView` already shows a trailing index on panes 980pt wide or more. A Prompts section there costs little but gives no rail, nothing on narrower panes, and entries that open overlay cards instead of scrolling.
-- **Notches placed by scroll position** – scrollbar-marker placement shows where long turns are, but neighbouring prompts merge into one mark and the notches stop lining up with the card's rows.
+- **Notches placed by scroll position** – scrollbar-marker placement shows where long turns are, but neighbouring prompts merge into one mark.
 - **A windowed rail** – showing only the prompts around the current one keeps a comfortable pitch, but the rail then stops showing how far into the session the reader is.
 - **Measuring rows above a jump target** – it would make jumps exact on the first try, at the cost of the estimated heights that make long transcripts open instantly.
-- **A SwiftUI rail beside the table** – a SwiftUI rail in an `HStack` beside `TableTranscriptView`, with the card as a SwiftUI overlay, works against the framework at each point the rail depends on.
-  - SwiftUI hover follows hit-testing, so once the open card covers the rail, the rail hears the pointer leave and Escape and click suppression lapse with the pointer still on it. Hover has to be recomputed from the rail column's geometry by a handler on the whole pane.
-  - The pane must not observe the rail's state: a pane that re-renders on every active-prompt change reruns `updateNSView`, and with it a whole-transcript comparison, in the middle of a scroll. Keeping it out takes a state object only the rail and card read, with writes deferred to the next main-queue turn because the coordinator reports from inside `updateNSView`, and a separate pointer object so that a pointer moving over the rail re-renders nothing.
+- **A SwiftUI rail beside the table** – a SwiftUI rail in an `HStack` beside `TableTranscriptView`, with the lens as a SwiftUI overlay, works against the framework at each point the rail depends on.
+  - SwiftUI hover follows hit-testing, so once the open lens's box covers the rail, the rail hears the pointer leave and Escape and click suppression lapse with the pointer still on it. Hover has to be recomputed from the rail column's geometry by a handler on the whole pane.
+  - The pane must not observe the rail's state: a pane that re-renders on every active-prompt change reruns `updateNSView`, and with it a whole-transcript comparison, in the middle of a scroll. Keeping it out takes a state object only the rail reads, with writes deferred to the next main-queue turn because the coordinator reports from inside `updateNSView`, and a separate pointer object so that a pointer moving over the rail re-renders nothing.
   - SwiftUI has no public way to forward a wheel event to the table's scroll view, so the gutter becomes a dead zone for scrolling.
   - The transcript is already AppKit. Views inside its hierarchy share its layout, stacking and event routing with no bridge between frameworks.
 - **A show/hide preference** – the rail acts on nothing by itself, and each preference is another layout to test.
-- **Other ways to show a whole prompt on hover** –
-  - *Growing the row for real* shifts every row below it, so the row under the pointer changes as it grows and the card's rows stop lining up with the rail's notches.
-  - *A peek panel beside the card* needs horizontal room a narrow pane lacks, and a scrollable one needs a submenu-style aim rule so that crossing rows on the way to it does not switch prompts.
-  - *System tooltips* wait one to two seconds before showing, vanish when the pointer moves, and turn a long paste into one unformatted box.
-  - *Previewing in the transcript*, scrolling it to the hovered prompt and back, shows the prompt in context but churns the transcript and lays out far rows as the pointer sweeps the card.
 - **Other meanings for notch length** – time taken, context-window fill and reply size each fit the length channel. Time counts waits on the reader's answers and permission prompts as work. Context fill is cumulative, so it says more about the session than the turn, and needs the model's window size. Reply size ignores the tool activity that makes up most of a coding turn. Tool calls track what the reader means by "a big turn" most directly.
 - **A fixed scale for notch length** – fixed thresholds or a fixed ceiling keep a notch's length comparable across sessions and stable after its turn ends, but a quiet session then uses only the short end and a busy one saturates at the ceiling. Scaling to the session's busiest turn always uses the whole range.
