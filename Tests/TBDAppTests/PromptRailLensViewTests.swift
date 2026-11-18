@@ -323,29 +323,29 @@ struct PromptRailLensViewTests {
         #expect(!mount.rail.isRunningFrames, "a move off the rail column and the box asked for a frame")
     }
 
-    /// Each transcript pane hides its jump-to-latest button while the lens shows.
-    /// The container reports the lens coming and going, and the table's
-    /// coordinator passes each report up to the pane a main-queue turn later,
-    /// outside any SwiftUI update.
-    @Test("the lens coming and going reaches the pane through the container and the table's coordinator")
+    /// The overlays above the rail hide while the lens shows. The container
+    /// reports the lens coming and going, and the table's coordinator writes
+    /// each report to the pane's `PromptLensVisibility` a main-queue turn
+    /// later, outside any SwiftUI update.
+    @Test("the lens coming and going reaches the pane's visibility object through the container and the coordinator")
     func lensShownReachesPane() async throws {
         let mount = LensMount()
         defer { mount.host.tearDown() }
         let coordinator = TableTranscriptView.Coordinator(context: TranscriptCardContext(
             terminalID: nil, openTranscriptOverlay: nil, appState: nil, linkResolver: nil, onLinkClicked: nil))
         defer { withExtendedLifetime(coordinator) {} }
-        let reports = LensShownRecorder()
-        coordinator.onPromptLensShownChange = { shown in reports.values.append(shown) }
+        let visibility = PromptLensVisibility()
+        coordinator.promptLensVisibility = visibility
         coordinator.observePromptLensShown(of: mount.container)
 
         try await Self.openLens(mount)
         await drainMainQueue()
-        #expect(reports.values == [true], "the open reached the pane as \(reports.values)")
+        #expect(visibility.isShown, "the open never reached the pane")
 
         mount.hover.dismiss(.escape)
-        #expect(reports.values == [true], "the close reached the pane inside the change rather than a turn later")
+        #expect(visibility.isShown, "the close reached the pane inside the change rather than a turn later")
         await drainMainQueue()
-        #expect(reports.values == [true, false], "the close reached the pane as \(reports.values)")
+        #expect(!visibility.isShown, "the close never reached the pane")
     }
 
     @Test("an empty rail grows no lens, and an open lens appears with the first prompt and goes with the last")
@@ -1029,12 +1029,6 @@ private final class LensMount {
             windowNumber: host.window.windowNumber, context: nil, eventNumber: 0,
             clickCount: pressed ? 1 : 0, pressure: pressed ? 1 : 0))
     }
-}
-
-/// The lens-shown reports a coordinator passes up, in order.
-@MainActor
-private final class LensShownRecorder {
-    var values: [Bool] = []
 }
 
 @MainActor

@@ -64,7 +64,8 @@ final class TranscriptContainerView: NSView {
     private weak var observedKeyWindow: NSWindow?
     /// Called with whether the rail's lens is on screen, on each change: the
     /// report that also runs the Escape monitor. `TableTranscriptView` passes
-    /// it up to the pane, which hides its jump-to-latest button meanwhile.
+    /// it to the pane's `PromptLensVisibility`, which the overlays above the
+    /// rail read to hide meanwhile.
     var onPromptRailLensShownChange: (@MainActor (Bool) -> Void)?
 
     private var promptRailNSView: PromptRailNSView? { railView as? PromptRailNSView }

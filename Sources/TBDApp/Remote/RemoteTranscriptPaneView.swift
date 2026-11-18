@@ -61,9 +61,10 @@ struct RemoteTranscriptPaneView: View {
     @State private var tail = RemoteTranscriptTail()
     @State private var presentationMemo = TranscriptPresentationMemo()
     @State private var atBottom = true
-    /// The prompt rail's lens is on screen, which hides the jump-to-bottom
-    /// button (`TableTranscriptView.showsJumpToBottom`).
-    @State private var promptLensShown = false
+    /// Whether the prompt rail's lens is on screen. The table's coordinator
+    /// writes it, and only the overlays above the rail read it, so the lens
+    /// coming and going never re-renders this pane.
+    @State private var promptLensVisibility = PromptLensVisibility()
     @State private var scrollToBottomToken = 0
     @State private var promptScroll: TranscriptScrollRequest?
     @State private var activityGroupExpansion: [String: Bool] = [:]
@@ -292,30 +293,18 @@ struct RemoteTranscriptPaneView: View {
                     onNearTop(near)
                 },
                 promptRail: .rail,
-                onPromptLensShownChange: { shown in promptLensShown = shown }
+                promptLensVisibility: promptLensVisibility
             )
             .overlay(alignment: .top) {
-                let content = RemoteTranscriptEarlierHeader.Content.resolve(
-                    state: earlier, hasEarlier: hasEarlier, nearTop: isNearTop)
-                if content != .hidden {
-                    RemoteTranscriptEarlierHeader(content: content, onRetry: onLoadEarlier)
-                }
+                RemoteTranscriptEarlierHeaderOverlay(
+                    content: RemoteTranscriptEarlierHeader.Content.resolve(
+                        state: earlier, hasEarlier: hasEarlier, nearTop: isNearTop),
+                    lensVisibility: promptLensVisibility,
+                    onRetry: onLoadEarlier)
             }
             .overlay(alignment: .bottomTrailing) {
-                if TableTranscriptView.showsJumpToBottom(atBottom: atBottom, promptLensShown: promptLensShown) {
-                    Button {
-                        scrollToBottomToken &+= 1
-                    } label: {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.system(size: 28))
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, Color.accentColor)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .shadow(radius: 4)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(16)
-                    .help("Scroll to bottom")
+                TranscriptJumpToLatestButton(atBottom: atBottom, lensVisibility: promptLensVisibility) {
+                    scrollToBottomToken &+= 1
                 }
             }
             // A new session or a new conversation rebuilds the table's

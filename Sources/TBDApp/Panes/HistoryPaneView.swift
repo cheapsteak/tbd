@@ -370,9 +370,10 @@ struct SessionTranscriptView: View {
     /// the transcript content. Drives the floating jump-to-bottom button:
     /// shown only when the user has consciously scrolled up.
     @State private var atBottom: Bool = true
-    /// The prompt rail's lens is on screen, which hides the jump-to-bottom
-    /// button (`TableTranscriptView.showsJumpToBottom`).
-    @State private var promptLensShown = false
+    /// Whether the prompt rail's lens is on screen. The table's coordinator
+    /// writes it, and only the jump-to-bottom button reads it, so the lens
+    /// coming and going never re-renders this pane.
+    @State private var promptLensVisibility = PromptLensVisibility()
 
     /// Incremented by the jump-to-bottom button to ask the table to scroll to
     /// the last row (NSTableView renderer path).
@@ -546,25 +547,11 @@ struct SessionTranscriptView: View {
                         // The rest arrives as an update to the table now in
                         // the window, as the live pane's backfill does.
                         onOpenSettled: { [sessionId] in widenedSessionID = sessionId },
-                        onPromptLensShownChange: { shown in promptLensShown = shown }
+                        promptLensVisibility: promptLensVisibility
                     )
                     .overlay(alignment: .bottomTrailing) {
-                        if TableTranscriptView.showsJumpToBottom(
-                            atBottom: atBottom, promptLensShown: promptLensShown) {
-                            Button {
-                                scrollToBottomToken &+= 1
-                            } label: {
-                                Image(systemName: "arrow.down.circle.fill")
-                                    .font(.system(size: 28))
-                                    .symbolRenderingMode(.palette)
-                                    .foregroundStyle(.white, Color.accentColor)
-                                    .background(.ultraThinMaterial, in: Circle())
-                                    .shadow(radius: 4)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(16)
-                            .transition(.scale(scale: 0.5).combined(with: .opacity))
-                            .help("Scroll to bottom")
+                        TranscriptJumpToLatestButton(atBottom: atBottom, lensVisibility: promptLensVisibility) {
+                            scrollToBottomToken &+= 1
                         }
                     }
                 }

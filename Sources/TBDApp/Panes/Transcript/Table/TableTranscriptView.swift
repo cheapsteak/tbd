@@ -76,19 +76,19 @@ struct TableTranscriptView: NSViewRepresentable {
     /// a table that is already in the window as an update rather than as a
     /// mount (`TranscriptTailFirstOpen`). Nil where nothing waits on the open.
     var onOpenSettled: (@MainActor () -> Void)?
-    /// Called with whether the prompt rail's lens is on screen, on each
-    /// change, a main-queue turn later and outside any SwiftUI update
-    /// (`Coordinator.reportPromptLensShown(_:)`). Each pane that mounts the
-    /// rail hides its jump-to-latest button while the lens shows
-    /// (`showsJumpToBottom`). Nil where nothing waits on the lens.
-    var onPromptLensShownChange: (@MainActor (Bool) -> Void)?
+    /// The pane's record of whether the prompt rail's lens is on screen. The
+    /// coordinator sets it on each change, a main-queue turn later and
+    /// outside any SwiftUI update (`Coordinator.reportPromptLensShown(_:)`),
+    /// and only the overlays above the rail read it. Nil where nothing does.
+    var promptLensVisibility: PromptLensVisibility?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
     /// Whether a pane's jump-to-bottom button shows: the transcript is
     /// scrolled up from its newest message, and the prompt rail's lens is not
-    /// on screen. The live, History and Remote panes all ask this, since the
-    /// button would cover the lens's rows and take their clicks.
+    /// on screen. The live, History and Remote panes all show it through
+    /// `TranscriptJumpToLatestButton`, since it would cover the lens's rows
+    /// and take their clicks.
     static func showsJumpToBottom(atBottom: Bool, promptLensShown: Bool) -> Bool {
         !atBottom && !promptLensShown
     }
@@ -164,7 +164,7 @@ struct TableTranscriptView: NSViewRepresentable {
         // pane's already-bumped token as a prepend.
         coordinator.lastPrependToken = prependToken
         coordinator.onNearTop = onNearTop
-        coordinator.onPromptLensShownChange = onPromptLensShownChange
+        coordinator.promptLensVisibility = promptLensVisibility
         // Seed the root the first composition below happens against, so the
         // first `updateNSView` does not read as a transition.
         coordinator.lastLinkRoot = linkRoot
@@ -254,12 +254,13 @@ struct TableTranscriptView: NSViewRepresentable {
 
     func updateNSView(_ container: TranscriptContainerView, context ctx: Context) {
         let coordinator = ctx.coordinator
+        coordinator.updateCount += 1
         if scrollToBottomToken != coordinator.lastScrollToken {
             coordinator.lastScrollToken = scrollToBottomToken
             coordinator.scrollToEnd(animated: true)
         }
         coordinator.onNearTop = onNearTop
-        coordinator.onPromptLensShownChange = onPromptLensShownChange
+        coordinator.promptLensVisibility = promptLensVisibility
         let nodes = nodesProvider()
         coordinator.update(
             nodes: nodes,
@@ -315,9 +316,12 @@ struct TableTranscriptView: NSViewRepresentable {
         /// The near-top answer last reported, so `onNearTop` fires on transitions
         /// only. Nil until the first report.
         private var lastNearTop: Bool?
-        /// See `TableTranscriptView.onPromptLensShownChange`. Refreshed every
+        /// See `TableTranscriptView.promptLensVisibility`. Refreshed every
         /// `updateNSView`.
-        var onPromptLensShownChange: (@MainActor (Bool) -> Void)?
+        var promptLensVisibility: PromptLensVisibility?
+        /// How many times `updateNSView` has run against this coordinator.
+        /// Tests read it to show what does not re-render the table.
+        var updateCount = 0
 
         /// How many rows the table held when `makeNSView` built it, which is
         /// what the first layout, inside the window insertion, realizes from.

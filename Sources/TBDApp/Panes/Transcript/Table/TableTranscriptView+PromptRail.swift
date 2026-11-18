@@ -252,22 +252,27 @@ extension TableTranscriptView.Coordinator {
     }
 
     /// Passes `container`'s reports of whether the rail's lens is on screen
-    /// up to the pane, through `reportPromptLensShown(_:)`. The container
-    /// holds the coordinator, so the close of a lens whose table is being
-    /// torn down still reaches the pane; the coordinator holds the container
-    /// only weakly, so no cycle forms.
+    /// to the pane's `promptLensVisibility`, through
+    /// `reportPromptLensShown(_:)`. The container holds the coordinator, so
+    /// the close of a lens whose table is being torn down still reaches the
+    /// pane; the coordinator holds the container only weakly, so no cycle
+    /// forms.
     func observePromptLensShown(of container: TranscriptContainerView) {
         container.onPromptRailLensShownChange = { shown in self.reportPromptLensShown(shown) }
     }
 
-    /// Reports whether the rail's lens is on screen to
-    /// `onPromptLensShownChange` on the next main-queue turn, never in place:
-    /// an outline change inside SwiftUI's update can give an open lens its
-    /// first prompt or take its last, and SwiftUI drops a state write made
-    /// there. Each report carries its own value, so reports arrive in order
-    /// and the last one stands.
+    /// Writes whether the rail's lens is on screen to `promptLensVisibility`
+    /// on the next main-queue turn, never in place: an outline change inside
+    /// SwiftUI's update can give an open lens its first prompt or take its
+    /// last, and a state write made there is dropped or warned about. Each
+    /// report carries its own value, so reports arrive in order and the last
+    /// one stands. Only a change is written, so the overlays that read it
+    /// re-render only when it changes.
     func reportPromptLensShown(_ shown: Bool) {
-        DispatchQueue.main.async { self.onPromptLensShownChange?(shown) }
+        DispatchQueue.main.async {
+            guard let visibility = self.promptLensVisibility, visibility.isShown != shown else { return }
+            visibility.isShown = shown
+        }
     }
 
     /// Stops holding the last jump's target, as a pin and as the active
