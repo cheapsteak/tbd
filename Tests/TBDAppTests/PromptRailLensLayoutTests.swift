@@ -111,8 +111,8 @@ struct PromptRailLensLayoutTests {
         #expect(misses.isEmpty, "\(count) prompts: \(misses.prefix(5))")
     }
 
-    /// Seven or fewer prompts rest at the peak or taller, so the lens keeps
-    /// the resting rows; eight do not.
+    /// In a tall rail, seven or fewer prompts rest at the peak or taller, so
+    /// the lens keeps the resting rows; eight do not.
     @Test(arguments: [1, 3, 7])
     func fewPromptsKeepRest(count: Int) {
         let geometry = Self.geometry(count)
@@ -128,11 +128,93 @@ struct PromptRailLensLayoutTests {
         #expect(!Self.geometry(8).keepsRestingRows)
     }
 
+    /// A short rail lowers the peak a mid-column bump draws, so few prompts
+    /// there keep their resting rows too (spec step 0).
+    @Test(arguments: [(1, 40), (2, 74), (3, 60), (4, 100), (5, 150)] as [(Int, CGFloat)])
+    func fewPromptsInShortRailKeepRest(count: Int, railHeight: CGFloat) {
+        let geometry = PromptRailLensGeometry(
+            layout: PromptRailLayout(count: count, railHeight: railHeight), restOffset: 0)
+        #expect(geometry.keepsRestingRows, "\(count) prompts in \(railHeight)pt rest at \(geometry.restPitch)pt")
+        let resting = PromptRailLensRows.resting(geometry)
+        for share in [0, 0.5, 1] as [CGFloat] {
+            let anchor = Self.anchor(geometry, at: share)
+            for centre in Self.centres(count) {
+                let rows = geometry.rows(centre: centre, anchor: anchor)
+                #expect(rows == resting, "\(count) prompts in \(railHeight)pt, opened at \(share), centre \(centre)")
+            }
+        }
+    }
+
+    /// 2 prompts in a 74pt rail rest at 25pt, above the 21.6pt peak a
+    /// mid-column bump would draw there, so the pointed row is never the
+    /// shorter one.
+    @Test func twoPromptsInShortRailKeep25pt() {
+        let geometry = PromptRailLensGeometry(layout: PromptRailLayout(count: 2, railHeight: 74), restOffset: 0)
+        let anchor = geometry.anchor(pointerY: Self.top + 12.5)
+        let heights = geometry.rows(centre: 0.5, anchor: anchor).heights
+        #expect(Self.isClose(heights, [25, 25]), "\(heights)")
+    }
+
+    /// On short rails that do not keep their resting rows, no row is taller
+    /// than the one the lens is centred on.
+    @Test func pointedRowIsTallestOnShortRails() {
+        var misses: [String] = []
+        for railHeight in [60, 74, 100, 150, 200] as [CGFloat] {
+            for count in 1...12 {
+                let geometry = PromptRailLensGeometry(
+                    layout: PromptRailLayout(count: count, railHeight: railHeight), restOffset: 0)
+                for share in [0, 0.5, 1] as [CGFloat] {
+                    let anchor = Self.anchor(geometry, at: share)
+                    for centre in Self.centres(count) {
+                        let heights = geometry.rows(centre: centre, anchor: anchor).heights
+                        let pointed = PromptRailLensMath.row(containing: centre, count: count)
+                        guard heights.count == count else {
+                            misses.append("\(count) in \(railHeight)pt: \(heights.count) heights")
+                            continue
+                        }
+                        let tallest = heights.max() ?? .nan
+                        if !(tallest <= heights[pointed] + 0.5) {
+                            misses.append(
+                                "\(count) in \(railHeight)pt, opened at \(share), centre \(centre): "
+                                    + "row \(pointed) is \(heights[pointed])pt, the tallest \(tallest)pt")
+                        }
+                    }
+                }
+            }
+        }
+        #expect(misses.isEmpty, "\(misses.prefix(5))")
+    }
+
+    /// A short rail that squeezes rather than slides holds both ends, even
+    /// where half a bump near an end would draw a peak the slivers cannot pay
+    /// for at full height.
+    @Test(arguments: [(11, 60), (12, 74), (17, 100)] as [(Int, CGFloat)])
+    func shortRailEndsHold(count: Int, railHeight: CGFloat) {
+        let geometry = PromptRailLensGeometry(
+            layout: PromptRailLayout(count: count, railHeight: railHeight), restOffset: 0)
+        #expect(!geometry.slidesPastFloor && !geometry.keepsRestingRows)
+        let end = Self.top + geometry.columnHeight
+        var misses: [String] = []
+        for share in [0, 0.5, 1] as [CGFloat] {
+            let anchor = Self.anchor(geometry, at: share)
+            for centre in Self.centres(count) {
+                let rows = geometry.rows(centre: centre, anchor: anchor)
+                let first = rows.tops.first ?? .nan
+                let bottom = (rows.tops.last ?? .nan) + (rows.heights.last ?? .nan)
+                if !(abs(first - Self.top) <= 0.5 && abs(bottom - end) <= 0.5) {
+                    misses.append("opened at \(share), centre \(centre): \(first)…\(bottom)")
+                }
+            }
+        }
+        #expect(misses.isEmpty, "\(count) prompts in \(railHeight)pt: the column is \(Self.top)…\(end), but \(misses.prefix(5))")
+    }
+
     /// Past the floor, 600 prompts in 577pt, the column slides: the centre
-    /// row stays on the rail, and it moves down the rail as the centre does.
+    /// row stays on the rail, it moves down the rail as the centre does, and
+    /// no row grows past the peak.
     @Test func pastFloorSlides() {
         let geometry = Self.geometry(600)
-        #expect(geometry.restOverflows)
+        #expect(geometry.restOverflows && geometry.slidesPastFloor)
         let anchor = Self.anchor(geometry)
         let railEnd = Self.railHeight - PromptRailLayout.bottomInset
         var previousY = -CGFloat.infinity
@@ -144,6 +226,8 @@ struct PromptRailLensLayoutTests {
                 continue
             }
             if !rows.overflows { misses.append("centre \(centre) does not overflow") }
+            let tallest = rows.heights.max() ?? .nan
+            if !(tallest <= 26.5) { misses.append("centre \(centre): a row is \(tallest)pt") }
             let row = min(Int(centre), 599)
             let bandTop = rows.tops[row]
             let bandBottom = bandTop + rows.heights[row]
@@ -155,6 +239,51 @@ struct PromptRailLensLayoutTests {
             previousY = y
         }
         #expect(misses.isEmpty, "\(misses.prefix(5))")
+    }
+
+    /// Whether a rail slides is decided once for the rail (spec step 6). 450
+    /// prompts overfill 577pt with a whole bump but not with the half bump at
+    /// an end, and deciding per centre made the column jump about 50pt there.
+    /// From one sampled centre to the next, neither the column's top nor the
+    /// centre's height moves more than 3pt, the centre never moves up, no row
+    /// passes the peak, and the column covers the rail to within 1pt. The
+    /// centres are 0.05 rows apart within 12 rows of either end, where the
+    /// bump is cut off, and 0.25 rows apart between.
+    @Test(arguments: [true, false])
+    func slideIsContinuous(openedAtTop: Bool) {
+        let geometry = Self.geometry(450)
+        #expect(geometry.slidesPastFloor && !Self.geometry(300).slidesPastFloor)
+        let end = Self.top + geometry.columnHeight
+        let anchor = geometry.anchor(pointerY: openedAtTop ? Self.restingCentre(of: 0, in: geometry) : end)
+        let nearTop = (0...240).map { CGFloat($0) / 20 }
+        let between = (49...1751).map { CGFloat($0) / 4 }
+        let nearEnd = (8760...9000).map { CGFloat($0) / 20 }
+        let centres = nearTop + between + nearEnd
+        var previousTop = CGFloat.nan
+        var previousY = CGFloat.nan
+        var misses: [String] = []
+        for (step, centre) in centres.enumerated() {
+            let rows = geometry.rows(centre: centre, anchor: anchor)
+            let first = rows.tops.first ?? .nan
+            let bottom = (rows.tops.last ?? .nan) + (rows.heights.last ?? .nan)
+            let y = rows.y(ofFraction: centre)
+            if step > 0 {
+                if !(abs(first - previousTop) <= 3) {
+                    misses.append("centre \(centre): the top moved \(first - previousTop)pt")
+                }
+                if !(y - previousY >= -1e-9 && y - previousY <= 3) {
+                    misses.append("centre \(centre): the centre moved \(y - previousY)pt")
+                }
+            }
+            let tallest = rows.heights.max() ?? .nan
+            if !(tallest <= 26.5) { misses.append("centre \(centre): a row is \(tallest)pt") }
+            if !(first <= Self.top + 1 && bottom >= end - 1) {
+                misses.append("centre \(centre): the column \(first)…\(bottom) leaves the rail uncovered")
+            }
+            previousTop = first
+            previousY = y
+        }
+        #expect(misses.isEmpty, "opened at the \(openedAtTop ? "top" : "end"): \(misses.prefix(5))")
     }
 
     @Test func blendRoundTrips() throws {

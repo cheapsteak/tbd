@@ -136,6 +136,31 @@ struct PromptRailSteadyLensTests {
         #expect(lens.centre == settled)
     }
 
+    /// A rail that keeps its resting rows never moves (spec step 0), so `step`
+    /// reports no movement and the caller can stop stepping: 5 prompts, with
+    /// the pointer drawn steadily from notch 0 to notch 4, then held.
+    @Test func restingRailNeverSteps() {
+        let five = PromptRailLensGeometry(layout: PromptRailLayout(count: 5, railHeight: 601), restOffset: 0)
+        #expect(five.keepsRestingRows)
+        let top = PromptRailLayout.topInset
+        var pointer = top + 0.5 * five.restPitch
+        var lens = PromptRailSteadyLens(geometry: five, pointerY: pointer)
+        let start = lens.centre
+        let target = top + 4.5 * five.restPitch
+        var moves = 0
+        while pointer < target {
+            pointer = min(target, pointer + 2)
+            if lens.step(pointerY: pointer, dt: Self.frame) { moves += 1 }
+        }
+        #expect(lens.speed > 0.05, "the lens stopped tracking the pointer's speed: \(lens.speed)")
+        for _ in 0..<60 {
+            if lens.step(pointerY: pointer, dt: Self.frame) { moves += 1 }
+        }
+        #expect(moves == 0)
+        #expect(lens.centre == start, "the centre moved from \(start) to \(lens.centre)")
+        #expect(lens.rows == PromptRailLensRows.resting(five))
+    }
+
     /// A shorter outline holds the centre to its count; a longer one keeps it.
     @Test func rebasedClampsCentre() throws {
         let lens = PromptRailSteadyLens(geometry: Self.geometry, pointerY: Self.restingCentre(of: 28))

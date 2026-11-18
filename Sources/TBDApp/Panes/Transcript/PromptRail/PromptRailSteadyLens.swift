@@ -50,17 +50,19 @@ struct PromptRailSteadyLens: Equatable, Sendable {
     /// Advances the lens by `dt` seconds with the pointer at `pointerY`.
     /// Returns true when the centre moved.
     ///
-    /// The lens holds still during a flick, and while the pointer is within
-    /// the dead zone of its centre. Past the dead zone, the centre eases
-    /// toward the centre whose layout puts the pointer exactly on the dead
-    /// zone's edge, by `1 − exp(−dt / easeTimeConstant)` of the way.
+    /// A rail that keeps its resting rows (spec step 0) never moves, so its
+    /// lens only tracks the pointer's speed. Otherwise the lens holds still
+    /// during a flick, and while the pointer is within the dead zone of its
+    /// centre. Past the dead zone, the centre eases toward the centre whose
+    /// layout puts the pointer exactly on the dead zone's edge, by
+    /// `1 − exp(−dt / easeTimeConstant)` of the way.
     mutating func step(pointerY: CGFloat, dt: TimeInterval) -> Bool {
         guard dt > 0, !pointerY.isNaN else { return false }
         let elapsed = CGFloat(dt)
         let instant = abs(pointerY - lastPointerY) / (elapsed * 1000)
         speed += (instant - speed) * (1 - pow(Self.speedKeptPerFrame, elapsed * 60))
         lastPointerY = pointerY
-        guard speed <= Self.flickSpeed else { return false }
+        guard !geometry.keepsRestingRows, speed <= Self.flickSpeed else { return false }
 
         let pointed = rows.fraction(atY: pointerY)
         let deadZone = Self.deadZoneShare * PromptRailLayout.lensRadius
