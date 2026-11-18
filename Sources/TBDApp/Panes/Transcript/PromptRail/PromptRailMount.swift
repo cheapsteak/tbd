@@ -12,9 +12,9 @@ enum PromptRailMount {
     /// The gutter `TranscriptContainerView` keeps on its leading edge. It is
     /// fixed for the life of the view and present with zero prompts as with
     /// two hundred, so the table's column width never changes on the rail's
-    /// account: a width change discards every cached row height. The rail's
-    /// overlay is wider than the gutter, but it draws over the transcript and
-    /// never narrows the table.
+    /// account: a width change discards every cached row height. While the
+    /// lens is open, the rail's overlay is wider than the gutter, but it
+    /// draws over the transcript and never narrows the table.
     var containerGutter: CGFloat {
         switch self {
         case .rail:

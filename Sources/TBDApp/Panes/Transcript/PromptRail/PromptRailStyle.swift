@@ -97,6 +97,9 @@ enum PromptRailRowMetrics {
     static let dashGap: CGFloat = 8
     static let trailingPadding: CGFloat = 10
     static let timeGap: CGFloat = 8
+    /// Added to each row's natural width, as the mock adds it, so a title
+    /// the box is sized to exactly does not truncate by a hair.
+    static let naturalWidthSlack: CGFloat = 2
     /// Characters of a first line that are laid out at all. Far more than a
     /// 320pt row can show, so a longer line still truncates at the tail,
     /// while the first line of a large paste costs no more to lay out than a

@@ -51,7 +51,14 @@ struct PromptRailLensState {
     /// The last frame moved the lens, or held it still only for a flick, so
     /// the next may move it.
     var keepsStepping = false
+    /// The last frame stepped the lens, so its pointer tracking is current.
+    /// A frame that steps it after one that did not, or as frames start
+    /// again after a pause, first resumes its tracking where the pointer is.
+    var tracksPointer = false
     var frameLink: CADisplayLink?
+    /// The rail is moving to another window, or out of one: no display link
+    /// may start until it has arrived.
+    var isLeavingWindow = false
 
     /// Whether the pointer was last seen over the box, as reported to the
     /// hover model.
@@ -59,10 +66,11 @@ struct PromptRailLensState {
     /// The pointer's last position over the overlay, in rail coordinates;
     /// nil once it has left.
     var lastPointer: NSPoint?
-    /// The row a mouse-down landed on, for the mouse-up to match.
+    /// The row a mouse-down landed on, which the mouse-up jumps to.
     var mouseDownRow: Int?
-    /// The edge fades the lens last set, and the height it set them for.
-    var fade: (top: Bool, bottom: Bool, height: CGFloat)?
+    /// The ends whose notches the painter fades, because a displayed row
+    /// runs past them.
+    var fade = PromptRailEndFades.neither
 }
 
 /// The display link's target. A link retains its target, so it targets this
@@ -127,12 +135,6 @@ extension PromptRailNSView {
     /// `onOpenWidthChange` reports each change.
     var wantsOpenWidth: Bool { lensState.lens != nil }
 
-    /// A row `h` tall's text opacity before the open fraction:
-    /// `(h − 10.5) / 2.5`, clamped to 0…1.
-    func textOpacity(forRowHeight h: CGFloat) -> CGFloat {
-        PromptRailRowMetrics.textOpacity(rowHeight: h)
-    }
-
     func currentLensGeometry() -> PromptRailLensGeometry {
         PromptRailLensGeometry(layout: currentLayout(), restOffset: offset)
     }
@@ -194,7 +196,8 @@ extension PromptRailNSView {
         lensState.hoveredRow = nil
         lensState.stepRequested = false
         lensState.keepsStepping = false
-        lensState.fade = nil
+        lensState.tracksPointer = false
+        lensState.fade = .neither
         setLens(nil)
         // The resting rail sets its own fades, from its overflow offset.
         applyOffset(currentLayout())
@@ -283,7 +286,10 @@ extension PromptRailNSView {
     /// link's callback, and the tests' seam. The time since the last frame
     /// (`firstFrameInterval` on the first since frames started) advances the
     /// open fraction and, while the pointer is over the rail column or the
-    /// box of an open lens, the lens's steady motion.
+    /// box of an open lens, the lens's steady motion. The first frame that
+    /// steps the lens after frames paused, or after the pointer was off both,
+    /// resumes its tracking where the pointer is, so where the pointer went
+    /// meanwhile does not read as a flick.
     func advanceFrame(to timestamp: TimeInterval) {
         let dt = lensState.lastFrameTimestamp.map { max(0, timestamp - $0) }
             ?? PromptRailLensAnimation.firstFrameInterval
@@ -305,9 +311,11 @@ extension PromptRailNSView {
         var moved = false
         let driving = lensOpen && isPointerOverLens
         if driving {
+            if !lensState.tracksPointer { lens.resumeTracking(pointerY: pointerY) }
             moved = lens.step(pointerY: pointerY, dt: dt)
             lensState.lens = lens
         }
+        lensState.tracksPointer = driving
         // A flick holds the lens still without settling it: once the pointer
         // slows, the lens may still have to follow.
         lensState.keepsStepping = moved || (driving && lens.speed > PromptRailSteadyLens.flickSpeed)
@@ -322,8 +330,9 @@ extension PromptRailNSView {
         guard wants != lensState.isRunningFrames else { return }
         lensState.isRunningFrames = wants
         // A run of frames starts afresh: its first frame measures from no
-        // earlier one.
+        // earlier one, and resumes the lens's pointer tracking.
         lensState.lastFrameTimestamp = nil
+        lensState.tracksPointer = false
         if wants {
             resumeFrameLink()
         } else {
@@ -332,9 +341,10 @@ extension PromptRailNSView {
     }
 
     /// Unpauses the display link, making one first if need be. Only in a
-    /// window, since the link follows the window's screen.
+    /// window the rail is not leaving, since the link follows the window's
+    /// screen: a link made on the way out would outlive the move.
     func resumeFrameLink() {
-        guard usesDisplayLink, window != nil else { return }
+        guard usesDisplayLink, window != nil, !lensState.isLeavingWindow else { return }
         if lensState.frameLink == nil {
             let link = displayLink(
                 target: PromptRailDisplayLinkProxy(self),
@@ -346,7 +356,7 @@ extension PromptRailNSView {
     }
 
     /// Drops the display link: the rail is leaving its window, and a new
-    /// window means a new link.
+    /// window means a new link, or the rail is going away.
     func invalidateFrameLink() {
         lensState.frameLink?.invalidate()
         lensState.frameLink = nil
@@ -384,17 +394,17 @@ extension PromptRailNSView {
         return row
     }
 
-    /// Fades whichever end clips a row: a sliding column past the floor, or a
-    /// windowed rail part way open.
+    /// Fades the notches at whichever end clips a row: a sliding column past
+    /// the floor, or a windowed rail part way open. The painter fades them,
+    /// not the layer mask the resting rail uses, which would fade the box
+    /// and its text at that end too, so the mask comes off.
     private func updateLensFade(_ rows: PromptRailLensRows) {
         guard let first = rows.tops.first, let lastTop = rows.tops.last, let lastHeight = rows.heights.last
         else { return }
-        let height = bounds.height
-        let top = first < PromptRailLayout.topInset - 0.5
-        let bottom = lastTop + lastHeight > height - PromptRailLayout.bottomInset + 0.5
-        if let fade = lensState.fade, fade.top == top, fade.bottom == bottom, fade.height == height { return }
-        lensState.fade = (top, bottom, height)
-        setFade(top: top, bottom: bottom)
+        if hasFadeMask { setFade(top: false, bottom: false) }
+        lensState.fade = PromptRailEndFades(
+            top: first < PromptRailLayout.topInset - 0.5,
+            bottom: lastTop + lastHeight > bounds.height - PromptRailLayout.bottomInset + 0.5)
     }
 
     // MARK: Hover
@@ -434,13 +444,11 @@ extension PromptRailNSView {
     /// displayed row there; over the bare rail, the resting notch there. nil
     /// anywhere else.
     func clickRow(at point: NSPoint) -> Int? {
-        guard bounds.contains(point), !entries.isEmpty else { return nil }
-        let overRail = isInRailColumn(point)
-        guard overRail || isOverBox(point) else { return nil }
+        guard !entries.isEmpty, isOverRailOrBox(point) else { return nil }
         if lensState.lens != nil, lensState.openFraction > 0 {
             return lensState.displayedRows.index(atY: point.y)
         }
-        guard overRail else { return nil }
+        guard isInRailColumn(point) else { return nil }
         return currentLayout().index(atRailY: point.y, offset: offset)
     }
 

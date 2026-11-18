@@ -284,16 +284,22 @@ struct PromptRailAppKitTests {
 
         let onRail = try Self.mouseMoved(to: NSPoint(x: 8, y: 300))
         let offRail = try Self.mouseMoved(to: NSPoint(x: 340, y: 300))
+        // The notch the pointer points at, while it is over the rail column.
+        func pointedIndex() -> Int? {
+            rail.isPointerOverRail ? rail.currentLayout().index(atRailY: rail.pointerY, offset: rail.offset) : nil
+        }
         rail.mouseMoved(with: onRail)
         #expect(rail.isPointerOverRail)
-        #expect(rail.pointedIndex != nil, "a move over the rail column pointed at no notch")
+        let pointedOnRail = pointedIndex()
+        #expect(pointedOnRail == 4, "a move over the rail column pointed at \(String(describing: pointedOnRail))")
         try await clock.requireAdvanceWhenArmed(by: Self.openDelay, timeout: Self.mainActorHop)
         await hover._drainForTesting()
         try #require(hover.isOpen, "a move over the rail column did not open the lens")
 
         rail.mouseMoved(with: offRail)
         #expect(!rail.isPointerOverRail)
-        #expect(rail.pointedIndex == nil, "a pointer off the rail column still points at a notch")
+        let pointedOffRail = pointedIndex()
+        #expect(pointedOffRail == nil, "a pointer off the rail column still points at a notch")
         try await clock.requireAdvanceWhenArmed(by: Self.closeGrace, timeout: Self.mainActorHop)
         await hover._drainForTesting()
         #expect(!hover.isOpen, "a pointer off the rail column kept the rail hovered")

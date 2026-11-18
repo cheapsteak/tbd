@@ -197,6 +197,44 @@ struct PromptRailLensViewTests {
         #expect(followed > opened + 1, "the lens stayed at \(followed) after a push from \(opened)")
     }
 
+    /// The frames pause once the lens settles, and the lens's last pointer
+    /// height is where it settled. A move made then must not read, on the
+    /// first frame after, as a flick from there.
+    @Test("a pointer that moved while the frames were paused is no flick: the first frame follows it")
+    func pausedFramesResumeWithoutFlick() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        try #require(!mount.rail.isRunningFrames, "precondition: the open lens settled")
+        let opened = try #require(mount.rail.lens).centre
+
+        try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 150))
+        try #require(mount.rail.isRunningFrames, "precondition: a move over the open lens asked for a frame")
+        mount.frame()
+        let lens = try #require(mount.rail.lens)
+        #expect(lens.speed <= PromptRailSteadyLens.flickSpeed,
+                "the move made while the frames were paused read as a flick, at \(lens.speed)pt/ms")
+        #expect(lens.centre > opened + 1, "the first frame left the lens at \(lens.centre), from \(opened)")
+    }
+
+    @Test("the pointer leaving the overlay takes the hovered row's fill away at once")
+    func exitClearsHoveredRow() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        try #require(mount.rail.hoveredRow != nil, "precondition: the open lens hovers the row under the pointer")
+
+        // What `mouseExited(with:)` does for the overlay's own tracking area.
+        mount.rail.pointerExitedOverlay()
+        #expect(mount.rail.hoveredRow == nil, "the hovered row's fill outlived the pointer")
+        #expect(!mount.rail.isPointerOverRail)
+        try await mount.clock.requireAdvanceWhenArmed(by: Self.closeGrace, timeout: Self.mainActorHop)
+        await mount.hover._drainForTesting()
+        #expect(!mount.hover.isOpen, "the lens stayed open after the pointer left the overlay")
+    }
+
     @Test("an empty rail grows no lens, and an open lens appears with the first prompt and goes with the last")
     func emptyOutlineNoLens() async throws {
         let mount = LensMount(entryCount: 0)
@@ -294,6 +332,28 @@ struct PromptRailLensViewTests {
         #expect(mount.rail.lens == nil)
     }
 
+    /// The rows move under a still pointer while the lens grows, so the row
+    /// under a mouse-up can differ from the row its mouse-down pressed.
+    @Test("a click whose row moves away under it while the lens grows still jumps to the row it pressed")
+    func clickDuringGrowJumpsToPressedRow() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(2)
+        let grown = mount.rail.openFraction
+        try #require(grown > 0 && grown < 1, "precondition: the lens is part way open, at \(grown)")
+        let point = NSPoint(x: Self.onRail.x, y: 230)
+        let pressed = try #require(mount.rail.displayedRows.index(atY: point.y))
+
+        try mount.press(at: point)
+        mount.frames(Self.wholeAnimation)
+        let under = try #require(mount.rail.displayedRows.index(atY: point.y))
+        try #require(under != pressed, "precondition: the grow moved row \(pressed) from under the pointer")
+        try mount.release(at: point)
+        #expect(mount.jumps.ids == ["p-\(pressed)"], "the click jumped to \(mount.jumps.ids), not row \(pressed)")
+        #expect(!mount.hover.isOpen)
+    }
+
     @Test("the overlay answers over the rail column and the open box, and nowhere else")
     func hitTestFollowsBox() async throws {
         let mount = LensMount()
@@ -331,6 +391,97 @@ struct PromptRailLensViewTests {
         let target = try #require(mount.rail.hitTest(inside), "the box let the wheel through")
         target.scrollWheel(with: event)
         #expect(recorder.events == 1)
+    }
+
+    // MARK: Drawing
+
+    /// A few-prompts rail rests its rows far taller than the peak. Each row
+    /// draws its text, its hover fill and its share of the box in a band the
+    /// peak's height, centred on it, so the box hugs the text.
+    @Test("on a rail of one or two prompts the box hugs each row's 26pt text band, not the whole row")
+    func fewPromptsBoxHugsText() async throws {
+        let peak = PromptRailLayout.lensPeak
+        let padding = PromptRailRowMetrics.boxPadding
+
+        let one = LensMount(entryCount: 1)
+        defer { one.host.tearDown() }
+        try await Self.openLens(one)
+        one.frames(Self.wholeAnimation)
+        let single = one.rail.displayedRows
+        try #require(single.heights.count == 1 && single.heights[0] > peak,
+                     "precondition: one prompt rests taller than the peak, at \(single.heights)")
+        let oneBox = try #require(one.rail.boxRect, "the open lens has no box")
+        #expect(oneBox.height <= peak + 2 * padding + 0.5, "one prompt's box is \(oneBox.height)pt tall")
+        let middle = single.tops[0] + single.heights[0] / 2
+        #expect(abs(oneBox.midY - middle) <= 0.01, "the box's middle is at \(oneBox.midY), the row's at \(middle)")
+        #expect(one.rail.hoveredRow == 0)
+        try Self.drawOnce(one.rail)
+
+        let two = LensMount(entryCount: 2)
+        defer { two.host.tearDown() }
+        try await Self.openLens(two)
+        two.frames(Self.wholeAnimation)
+        let rows = two.rail.displayedRows
+        let tall = rows.heights.allSatisfy { $0 > peak }
+        try #require(rows.heights.count == 2 && tall, "precondition: two prompts rest taller than the peak")
+        let box = try #require(two.rail.boxRect, "the open lens has no box")
+        let firstBandTop = rows.tops[0] + (rows.heights[0] - peak) / 2
+        let lastBandBottom = rows.tops[1] + (rows.heights[1] + peak) / 2
+        #expect(abs(box.minY - (firstBandTop - padding)) <= 0.01,
+                "the box starts at \(box.minY), not 3pt above the first band at \(firstBandTop)")
+        #expect(abs(box.maxY - (lastBandBottom + padding)) <= 0.01,
+                "the box ends at \(box.maxY), not 3pt below the last band at \(lastBandBottom)")
+        try Self.drawOnce(two.rail)
+    }
+
+    /// The resting rail fades a clipped end with a mask on its own layer.
+    /// While a lens exists that mask would fade the box and its text too, so
+    /// it comes off and the painter fades the notches alone.
+    @Test("a lens on a sliding rail fades its notches without the layer mask, which returns once the lens closes")
+    func lensFadesWithoutLayerMask() async throws {
+        let mount = LensMount(entryCount: 450)
+        defer { mount.host.tearDown() }
+        #expect(mount.rail.hasFadeMask, "the windowed resting rail has no fade")
+
+        try await Self.openLens(mount)
+        let lens = try #require(mount.rail.lens)
+        try #require(lens.geometry.slidesPastFloor, "precondition: 450 prompts slide in a 601pt rail")
+        mount.frames(Self.wholeAnimation)
+        #expect(mount.rail.openFraction == 1)
+        #expect(!mount.rail.hasFadeMask, "the open lens kept the layer mask, which fades its box")
+        let fade = mount.rail.lensState.fade
+        #expect(fade.top || fade.bottom, "the open lens's rows run past an end, but no notch fades")
+        try Self.drawOnce(mount.rail)
+
+        mount.hover.dismiss(.escape)
+        mount.frames(Self.wholeAnimation)
+        #expect(mount.rail.lens == nil, "the lens had not closed")
+        #expect(mount.rail.hasFadeMask, "the resting rail's fade did not come back")
+    }
+
+    /// With no lens, the notches are all the rail draws, so a change to them
+    /// redraws the rail column alone, however wide the overlay is; while a
+    /// lens exists, the whole overlay.
+    @Test("a change to the notches redraws the rail column alone while no lens exists, and the whole overlay while one does")
+    func notchRedrawStaysInColumn() async throws {
+        let wide = PromptRailNSView(
+            hover: PromptRailHoverModel(notificationCenter: NotificationCenter(), clock: EventDrivenTestClock()),
+            onJump: { _ in }, usesDisplayLink: false)
+        wide.frame = NSRect(x: 0, y: 0, width: 344, height: 601)
+        let column = NSRect(x: 0, y: 0, width: PromptRailLayout.width, height: 601)
+        #expect(wide.railColumnRect == column)
+        wide.promptRail(entriesDidChange: Self.entries(40))
+        #expect(wide.notchRedrawRect == column, "an outline change redraws \(wide.notchRedrawRect)")
+        wide.promptRail(activeIndexDidChange: 3)
+        #expect(wide.notchRedrawRect == column, "an active change redraws \(wide.notchRedrawRect)")
+        wide.promptRail(workCountsDidChange: Array(repeating: 2, count: 40))
+        #expect(wide.notchRedrawRect == column, "a work change redraws \(wide.notchRedrawRect)")
+
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        #expect(mount.rail.bounds.width > PromptRailLayout.width)
+        #expect(mount.rail.notchRedrawRect == mount.rail.bounds, "with a lens, a change redraws \(mount.rail.notchRedrawRect)")
     }
 
     // MARK: Live changes
@@ -465,7 +616,9 @@ struct PromptRailLensViewTests {
         #expect(lens.geometry.railHeight == 401, "the lens kept the old rail's height")
         #expect(abs(lens.centre - centre) < 0.01)
         let rows = mount.rail.displayedRows
+        let first = try #require(rows.tops.first)
         let end = try #require(rows.tops.last) + (rows.heights.last ?? 0)
+        #expect(abs(first - PromptRailLayout.topInset) <= 0.5, "the column starts at \(first), not the top inset")
         #expect(end <= 401 - PromptRailLayout.bottomInset + 0.5, "the column runs past the shorter rail, to \(end)")
     }
 
@@ -514,14 +667,12 @@ struct PromptRailLensViewTests {
 
     @Test("a row's text fades in from 10.5pt tall to 13pt")
     func textOpacityRule() {
-        let rail = PromptRailNSView(
-            hover: PromptRailHoverModel(notificationCenter: NotificationCenter(), clock: EventDrivenTestClock()),
-            onJump: { _ in }, usesDisplayLink: false)
-        #expect(rail.textOpacity(forRowHeight: 8) == 0)
-        #expect(rail.textOpacity(forRowHeight: 10.5) == 0)
-        #expect(abs(rail.textOpacity(forRowHeight: 11.5) - 0.4) < 0.0001)
-        #expect(rail.textOpacity(forRowHeight: 13) == 1)
-        #expect(rail.textOpacity(forRowHeight: 26) == 1)
+        typealias Metrics = PromptRailRowMetrics
+        #expect(Metrics.textOpacity(rowHeight: 8) == 0)
+        #expect(Metrics.textOpacity(rowHeight: 10.5) == 0)
+        #expect(abs(Metrics.textOpacity(rowHeight: 11.5) - 0.4) < 0.0001)
+        #expect(Metrics.textOpacity(rowHeight: 13) == 1)
+        #expect(Metrics.textOpacity(rowHeight: 26) == 1)
     }
 
     // MARK: Helpers
@@ -610,7 +761,17 @@ private final class LensMount {
 
     /// A press and release at `point`, in rail coordinates.
     func click(at point: NSPoint) throws {
+        try press(at: point)
+        try release(at: point)
+    }
+
+    /// A mouse-down at `point`, in rail coordinates.
+    func press(at point: NSPoint) throws {
         rail.mouseDown(with: try event(.leftMouseDown, at: point))
+    }
+
+    /// A mouse-up at `point`, in rail coordinates.
+    func release(at point: NSPoint) throws {
         rail.mouseUp(with: try event(.leftMouseUp, at: point))
     }
 

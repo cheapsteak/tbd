@@ -8,13 +8,23 @@ struct PromptRailLensShape: Equatable {
     /// The rows whose text shows at all; nil when none does.
     let textRows: ClosedRange<Int>?
     /// The box, in rail coordinates: from the pane's leading edge to `width`,
-    /// and from `boxPadding` above the first of `textRows` to `boxPadding`
-    /// below the last. nil when no row shows text, or when the box would be
-    /// no more than 2pt wider than the rail. Its taper reaches past it above
-    /// and below, over the rail column only.
+    /// and from `boxPadding` above the text band of the first of `textRows`
+    /// to `boxPadding` below the last's
+    /// (`PromptRailLensPainter.textBand(row:in:)`). nil when no row shows
+    /// text, or when the box would be no more than 2pt wider than the rail.
+    /// Its taper reaches past it above and below, over the rail column only.
     let box: CGRect?
 
     static let closed = PromptRailLensShape(width: PromptRailLayout.width, textRows: nil, box: nil)
+}
+
+/// Which ends of the rail fade the lens's notches, because a displayed row
+/// runs past them.
+struct PromptRailEndFades: Equatable {
+    var top: Bool
+    var bottom: Bool
+
+    static let neither = PromptRailEndFades(top: false, bottom: false)
 }
 
 /// The lens's colours other than the notches', resolved for one appearance.
@@ -135,8 +145,9 @@ final class PromptRailLensPainter {
     }
 
     /// Entry `index`'s natural width: `textLeading`, its first line, the gap
-    /// and its time when it has one, and `trailingPadding`, at 13pt in the
-    /// row's weight. Measured on first use and cached.
+    /// and its time when it has one, `trailingPadding` and
+    /// `naturalWidthSlack`, at 13pt in the row's weight. Measured on first
+    /// use and cached.
     func naturalWidth(at index: Int) -> CGFloat {
         guard entries.indices.contains(index) else { return Metrics.textLeading + Metrics.trailingPadding }
         if naturalWidths.count != entries.count { clearWidths() }
@@ -146,7 +157,8 @@ final class PromptRailLensPainter {
         let titleWidth = ceil(title(index, font: font, small: false).size().width)
         let label = timeText(at: index)
         let timeWidth = label.isEmpty ? 0 : ceil(timeString(label, font: fonts.time).size().width) + Metrics.timeGap
-        let width = Metrics.textLeading + titleWidth + timeWidth + Metrics.trailingPadding
+        let width = Metrics.textLeading + titleWidth + timeWidth
+            + Metrics.trailingPadding + Metrics.naturalWidthSlack
         naturalWidths[index] = width
         measuredWidths += 1
         return width
@@ -158,7 +170,7 @@ final class PromptRailLensPainter {
     /// box can grow to `maxWidth`. A row's wanted width is `20 + (min(natural,
     /// maxWidth) − 20) × widthReveal(h)`, and the box is as wide as the
     /// widest. A row's text shows when `textOpacity(h) × openFraction` passes
-    /// `textVisibleOpacity`; the box spans those rows.
+    /// `textVisibleOpacity`; the box spans those rows' text bands.
     func shape(for rows: PromptRailLensRows, openFraction: CGFloat, maxWidth: CGFloat) -> PromptRailLensShape {
         guard openFraction > 0 else { return .closed }
         let rail = PromptRailLayout.width
@@ -179,20 +191,35 @@ final class PromptRailLensPainter {
         }
         guard let first, let last else { return PromptRailLensShape(width: width, textRows: nil, box: nil) }
         guard width - rail > 2 else { return PromptRailLensShape(width: width, textRows: first...last, box: nil) }
-        let top = rows.tops[first] - Metrics.boxPadding
-        let bottom = rows.tops[last] + rows.heights[last] + Metrics.boxPadding
+        let firstBand = Self.textBand(row: first, in: rows)
+        let lastBand = Self.textBand(row: last, in: rows)
+        let top = firstBand.minY - Metrics.boxPadding
+        let bottom = lastBand.maxY + Metrics.boxPadding
         return PromptRailLensShape(
             width: width, textRows: first...last,
             box: CGRect(x: 0, y: top, width: width, height: bottom - top))
     }
 
+    /// Row `index`'s text band in `rows`, in rail coordinates, as a
+    /// zero-width rect at x 0: the row itself, or, for a row taller than the
+    /// lens's peak (a few-prompts rail), a band the peak's height centred on
+    /// it (lens spec, "Drawing"). The row's text, its hover fill and its
+    /// share of the box lie in it, so the box hugs the text rather than a row
+    /// up to 184pt tall.
+    static func textBand(row index: Int, in rows: PromptRailLensRows) -> CGRect {
+        let height = rows.heights[index]
+        let bandHeight = min(height, PromptRailLayout.lensPeak)
+        return CGRect(x: 0, y: rows.tops[index] + (height - bandHeight) / 2, width: 0, height: bandHeight)
+    }
+
     // MARK: Drawing
 
     /// Draws the lens: the box, the hovered row's fill, every notch `dirtyRect`
-    /// reaches (the active one last, on top), and the text of the rows that
-    /// show any, faded by `openFraction` and by the box's room. Call it from
-    /// `draw(_:)`, where row text resolves its colours in the view's
-    /// appearance; `notchColors` and `colors` are resolved in it already.
+    /// reaches (the active one last, on top) faded at the ends `fades` names,
+    /// and the text of the rows that show any, faded by `openFraction` and by
+    /// the box's room. Call it from `draw(_:)`, where row text resolves its
+    /// colours in the view's appearance; `notchColors` and `colors` are
+    /// resolved in it already.
     func draw(
         rows: PromptRailLensRows,
         shape: PromptRailLensShape,
@@ -202,6 +229,7 @@ final class PromptRailLensPainter {
         notchColors: PromptRailNotchPalette,
         colors: PromptRailLensPalette,
         railHeight: CGFloat,
+        fades: PromptRailEndFades,
         dirtyRect: CGRect,
         in context: CGContext
     ) {
@@ -210,30 +238,21 @@ final class PromptRailLensPainter {
         if let hoveredRow, rows.heights.indices.contains(hoveredRow) {
             drawHoverFill(row: hoveredRow, rows: rows, width: shape.width, color: colors.hoverFill, in: context)
         }
-
-        let margin = PromptRailLayout.activeNotchHeight
-        if let first = rows.index(atY: dirtyRect.minY - margin),
-           let last = rows.index(atY: dirtyRect.maxY + margin), first <= last {
-            for index in first...last where index != activeIndex {
-                fillNotch(index, rows: rows, workScale: workScale, colors: notchColors, in: context)
-            }
-        }
-        if let activeIndex {
-            fillNotch(activeIndex, rows: rows, workScale: workScale, colors: notchColors, in: context)
-        }
+        drawNotches(
+            rows: rows, workScale: workScale, colors: notchColors, railHeight: railHeight, fades: fades,
+            dirtyRect: dirtyRect, in: context)
 
         guard let textRows = shape.textRows else { return }
         let roomOpacity = Metrics.textRoomOpacity(boxWidth: shape.width)
         guard roomOpacity > 0 else { return }
         for index in textRows {
-            let top = rows.tops[index]
-            let height = rows.heights[index]
-            // Text in the rail's insets would sit behind its edge fades.
-            guard top + height > PromptRailLayout.topInset,
-                  top < railHeight - PromptRailLayout.bottomInset,
-                  top <= dirtyRect.maxY, top + height >= dirtyRect.minY
+            let band = Self.textBand(row: index, in: rows)
+            // Text in the rail's insets would sit past its notches' fades.
+            guard band.maxY > PromptRailLayout.topInset,
+                  band.minY < railHeight - PromptRailLayout.bottomInset,
+                  band.minY <= dirtyRect.maxY, band.maxY >= dirtyRect.minY
             else { continue }
-            let alpha = Metrics.textOpacity(rowHeight: height) * openFraction * roomOpacity
+            let alpha = Metrics.textOpacity(rowHeight: rows.heights[index]) * openFraction * roomOpacity
             guard alpha > Metrics.textVisibleOpacity else { continue }
             drawText(row: index, rows: rows, width: shape.width, alpha: alpha, in: context)
         }
@@ -280,10 +299,11 @@ final class PromptRailLensPainter {
     private func drawBox(_ box: CGRect, in context: CGContext, colors: PromptRailLensPalette) {
         let path = Self.boxPath(box)
         context.saveGState()
-        // Offset sideways only, as the mock's 2pt: a shadow's offset is in
-        // the context's base space, whose vertical sense a flipped view does
-        // not set.
-        context.setShadow(offset: CGSize(width: 2, height: 0), blur: Metrics.boxShadowRadius, color: colors.shadow)
+        // The mock's shadow falls 2pt right and 1pt down. A shadow's offset
+        // is in the context's base space, where y points up even in a flipped
+        // view, so down is −1.
+        context.setShadow(
+            offset: CGSize(width: 2, height: -1), blur: Metrics.boxShadowRadius, color: colors.shadow)
         context.addPath(path)
         context.setFillColor(colors.background)
         context.fillPath()
@@ -294,15 +314,69 @@ final class PromptRailLensPainter {
         context.strokePath()
     }
 
+    /// The hovered row's fill, over its text band.
     private func drawHoverFill(
         row index: Int, rows: PromptRailLensRows, width: CGFloat, color: CGColor, in context: CGContext
     ) {
-        let rect = CGRect(x: 1, y: rows.tops[index], width: max(0, width - 2), height: rows.heights[index])
+        let band = Self.textBand(row: index, in: rows)
+        let rect = CGRect(x: 1, y: band.minY, width: max(0, width - 2), height: band.height)
         guard rect.width > 0, rect.height > 0 else { return }
         let radius = min(Metrics.hoverCornerRadius, rect.width / 2, rect.height / 2)
         context.setFillColor(color)
         context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
         context.fillPath()
+    }
+
+    /// Every notch `dirtyRect` reaches, the active one last, on top. While a
+    /// row runs past an end, the notches fade toward it over the rail's
+    /// 24pt fade band, as the resting rail's layer mask fades them. They are
+    /// drawn into a transparency layer and faded there, so the fade touches
+    /// the notches alone, not the box or its text.
+    private func drawNotches(
+        rows: PromptRailLensRows, workScale: PromptRailWorkScale, colors: PromptRailNotchPalette,
+        railHeight: CGFloat, fades: PromptRailEndFades, dirtyRect: CGRect, in context: CGContext
+    ) {
+        let fading = fades.top || fades.bottom
+        if fading { context.beginTransparencyLayer(auxiliaryInfo: nil) }
+        let margin = PromptRailLayout.activeNotchHeight
+        if let first = rows.index(atY: dirtyRect.minY - margin),
+           let last = rows.index(atY: dirtyRect.maxY + margin), first <= last {
+            for index in first...last where index != activeIndex {
+                fillNotch(index, rows: rows, workScale: workScale, colors: colors, in: context)
+            }
+        }
+        if let activeIndex {
+            fillNotch(activeIndex, rows: rows, workScale: workScale, colors: colors, in: context)
+        }
+        guard fading else { return }
+        Self.fadeEnds(fades, railHeight: railHeight, in: context)
+        context.endTransparencyLayer()
+    }
+
+    /// Erases what is drawn toward the ends `fades` names: all of it at the
+    /// rail's edge, none of it `PromptRailLayout.fadeHeight` in (at most half
+    /// the rail), on a straight ramp, the resting rail's mask's ramp.
+    private static func fadeEnds(_ fades: PromptRailEndFades, railHeight: CGFloat, in context: CGContext) {
+        let band = PromptRailFade.edgeFraction(height: railHeight) * railHeight
+        // Gray and alpha: opaque at the start, clear at the end.
+        let components: [CGFloat] = [0, 1, 0, 0]
+        let locations: [CGFloat] = [0, 1]
+        guard band > 0,
+              let gradient = CGGradient(
+                colorSpace: CGColorSpaceCreateDeviceGray(), colorComponents: components,
+                locations: locations, count: 2)
+        else { return }
+        context.saveGState()
+        context.setBlendMode(.destinationOut)
+        if fades.top {
+            context.drawLinearGradient(
+                gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: 0, y: band), options: [])
+        }
+        if fades.bottom {
+            context.drawLinearGradient(
+                gradient, start: CGPoint(x: 0, y: railHeight), end: CGPoint(x: 0, y: railHeight - band), options: [])
+        }
+        context.restoreGState()
     }
 
     private func fillNotch(

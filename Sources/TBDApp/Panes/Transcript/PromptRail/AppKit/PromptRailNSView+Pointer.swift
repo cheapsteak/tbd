@@ -1,0 +1,133 @@
+import AppKit
+
+/// The rail's pointer handling: hit-testing, clicks, hover and the wheel.
+///
+/// - **Hit-testing** – the overlay answers over the rail column, and over the
+///   lens's box while it shows. Clicks and the wheel anywhere else fall
+///   through to the transcript, whatever the overlay's frame covers.
+/// - **Clicks** – a mouse-up over the rail column or the box jumps to the row
+///   its mouse-down landed on.
+/// - **Hover** – the one tracking area covers the whole overlay, and
+///   `trackPointer` decides whether the pointer is over the rail column or
+///   the box, and reports each to the hover model.
+/// - **Wheel** – the rail never scrolls itself; it hands wheel events to the
+///   transcript's scroll view.
+extension PromptRailNSView {
+    // MARK: Hit-testing
+
+    /// The overlay answers only over the rail column and the lens's box, so
+    /// the transcript keeps its clicks and its wheel everywhere else.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden else { return nil }
+        return isOverRailOrBox(convert(point, from: superview)) ? self : nil
+    }
+
+    /// Whether `point`, in this view's coordinates, is over the rail column.
+    func isInRailColumn(_ point: NSPoint) -> Bool {
+        point.x >= 0 && point.x < PromptRailLayout.width
+    }
+
+    /// Whether `point`, in this view's coordinates, lies inside the overlay
+    /// and over the rail column or the lens's box.
+    func isOverRailOrBox(_ point: NSPoint) -> Bool {
+        bounds.contains(point) && (isInRailColumn(point) || isOverBox(point))
+    }
+
+    // MARK: Clicks
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        lensState.mouseDownRow = clickRow(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// A mouse-up over the rail column or the box jumps to the row its
+    /// mouse-down landed on. The rows can move between the two, under a
+    /// still pointer, as the lens grows, eases or follows, so the mouse-up
+    /// does not look for its own row: on a moving row it would not find the
+    /// pressed one, and the click would be lost.
+    override func mouseUp(with event: NSEvent) {
+        let pressed = lensState.mouseDownRow
+        lensState.mouseDownRow = nil
+        guard let pressed, isOverRailOrBox(convert(event.locationInWindow, from: nil)) else { return }
+        jump(toRow: pressed)
+    }
+
+    // MARK: Hover
+
+    override func mouseEntered(with event: NSEvent) {
+        guard event.trackingArea === hoverTrackingArea else {
+            super.mouseEntered(with: event)
+            return
+        }
+        trackPointer(event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        trackPointer(event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard event.trackingArea === hoverTrackingArea else {
+            super.mouseExited(with: event)
+            return
+        }
+        pointerExitedOverlay()
+    }
+
+    /// The pointer left the overlay: it is over neither the rail column nor
+    /// the box, and no row is hovered. The hovered row's fill goes at once,
+    /// since no frame may come to clear it.
+    func pointerExitedOverlay() {
+        isPointerOverRail = false
+        lensState.lastPointer = nil
+        setPointerOverBox(false)
+        hover.railHoverChanged(false)
+        if lensState.hoveredRow != nil {
+            lensState.hoveredRow = nil
+            needsDisplay = true
+        }
+    }
+
+    /// Follows the pointer across the overlay: over the rail column it
+    /// reports rail hover, over the box it reports box hover, and leaving
+    /// either reports that. Gains are reported before losses, so a move
+    /// between the rail and the box never passes through hovering neither,
+    /// which would start the close grace.
+    private func trackPointer(_ event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let inside = bounds.contains(point)
+        let overRail = inside && isInRailColumn(point)
+        let overBox = inside && isOverBox(point)
+        lensState.lastPointer = point
+        if overRail || overBox { pointerY = point.y }
+
+        if overBox { setPointerOverBox(true) }
+        if overRail {
+            isPointerOverRail = true
+            // Every move over the rail re-asserts rail hover. `closeNow()` —
+            // the window resigning key, the app deactivating — forgets it, and
+            // a pointer resting on the rail sends no new enter, so without
+            // this the lens would not reopen until the pointer left the rail
+            // and came back.
+            hover.railHoverChanged(true)
+        }
+        if !overBox { setPointerOverBox(false) }
+        if !overRail, isPointerOverRail {
+            isPointerOverRail = false
+            hover.railHoverChanged(false)
+        }
+        lensPointerMoved()
+    }
+
+    // MARK: Wheel
+
+    /// The rail never scrolls itself; the wheel scrolls the transcript.
+    override func scrollWheel(with event: NSEvent) {
+        if let wheelTarget {
+            wheelTarget.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+}
