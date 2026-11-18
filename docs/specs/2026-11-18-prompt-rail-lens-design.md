@@ -52,6 +52,7 @@ The open lens fills exactly the resting column, from the rail's top inset to whe
 
 For a lens centred on fractional row `c`:
 
+0. **Few prompts.** When the column gives every row the peak height or more (7 or fewer prompts at the shipped strength), every row keeps its resting height and shows its text. Nothing moves; the steps below apply only to longer lists. Without this, the squeeze would make far rows taller than the pointed one.
 1. **The bump.** Row `i`'s weight is `f = ½ × (1 + cos(π × d / R))` for `|d| < R`, where `d = i + ½ − c`, and 0 otherwise. `F` is the sum of the weights. The peak is `T`, lowered to `0.85 × H / F` when `T × F` would leave less than 15% of the column's height `H` for the other rows.
 2. **Row heights.** Row `i` is `base + (peak − base) × f` tall. Rows whose centre lies above `c` use one base and the rest use another. Each base is at least 1pt, the **sliver floor**.
 3. **Two-sided squeeze.** The lens centre sits where the resting rail draws row `c`. The upper base is solved so that the rows above the centre fill exactly the space above it. The lower base is solved so that the whole column fills exactly `H`. So the notch under the pointer stays under it as the lens opens.
