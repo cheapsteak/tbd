@@ -124,14 +124,17 @@ struct PromptRailLensRows: Equatable, Sendable {
 /// fractional row. On a rail that is not windowed, the open lens fills exactly
 /// the resting column, so neither end moves. A windowed rail's lens fits every
 /// prompt between the insets, and the notches beyond the window slide in from
-/// behind the fades; a rail past the floor slides its column with the lens.
-/// Far rows squeeze to pay for the rows that grow.
+/// behind the fades; a windowed rail past the floor slides its column with the
+/// lens. Far rows squeeze to pay for the rows that grow.
 ///
 /// A port of the approved HTML mock's `computeLens` and its helpers, with
 /// rules from the spec that the mock does not follow:
 /// - **The column slides only past the floor, decided once per rail.** A
 ///   windowed rail squeezes every prompt into the column while 1pt slivers
-///   fit (spec step 5), and slides only when they do not (step 6). Sliding
+///   fit (spec step 5), and slides only when they do not (step 6). A rail
+///   that is not windowed never slides: where its slivers and a whole bump
+///   overfill the column, as 46 prompts do in a 208pt rail, the peak is
+///   lowered until they fit (`peak(column:bump:count:slides:)`). Sliding
 ///   whenever the resting rail overflows, as the mock does, moves a
 ///   300-prompt column's bottom end by up to 127pt and stretches its end rows
 ///   past 100pt. Deciding it for each centre instead makes the column jump by
@@ -141,8 +144,9 @@ struct PromptRailLensRows: Equatable, Sendable {
 ///   the centre for the room the slide leaves it, with rows no taller than
 ///   the peak, rather than stretching its last rows to fill all of it. Within
 ///   `lensRadius` rows of either end it sits where the end rows meet the
-///   rail's end, so no gap opens there. A rail short of the floor mid-rail
-///   lowers the peak near an end until slivers fit, so its ends still hold.
+///   rail's end, so no gap opens there. A rail that does not slide lowers
+///   the peak wherever slivers would not fit beside it, near an end or along
+///   a full column, so its ends still hold.
 struct PromptRailLensGeometry: Equatable, Sendable {
     /// No row of the open lens is thinner than this.
     static let sliverFloor: CGFloat = 1
@@ -177,14 +181,15 @@ struct PromptRailLensGeometry: Equatable, Sendable {
     /// A windowed rail never keeps them, however short: its lens squeezes
     /// every prompt into the column (step 5), so the pointer can reach each.
     let keepsRestingRows: Bool
-    /// Past the floor (spec step 6): even 1pt slivers around a whole bump in
-    /// mid-column overfill the column, so the open column slides. Decided
+    /// Past the floor (spec step 6): the rail is windowed, and even 1pt
+    /// slivers around a whole bump in mid-column, at the peak a sliding
+    /// column draws, overfill the column, so the open column slides. Decided
     /// once for the rail, never per lens position, so the column cannot
     /// switch between squeezing and sliding as the lens nears an end.
     let slidesPastFloor: Bool
     /// The total weight of a bump in mid-column.
     private let middleBump: CGFloat
-    /// The peak a bump in mid-column draws (spec step 1), at least a sliver.
+    /// The peak a bump in mid-column draws (`peak(column:bump:count:slides:)`).
     private let middlePeak: CGFloat
 
     init(layout: PromptRailLayout, restOffset: CGFloat) {
@@ -197,7 +202,9 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         let column = min(layout.freeHeight, rows * pitch)
         let overflows = layout.overflows
         let bump = Self.bumpSum(around: rows / 2, count: count)
-        let peak = max(Self.peak(column: column, bump: bump), sliver)
+        let slidingPeak = Self.peak(column: column, bump: bump, count: count, slides: true)
+        let slides = count > 0 && overflows && rows * sliver + (slidingPeak - sliver) * bump > column + 1e-6
+        let peak = Self.peak(column: column, bump: bump, count: count, slides: slides)
 
         self.count = count
         railHeight = layout.railHeight
@@ -208,7 +215,7 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         middleBump = bump
         middlePeak = peak
         keepsRestingRows = count > 0 && !overflows && pitch >= peak
-        slidesPastFloor = count > 0 && CGFloat(count) * sliver + (peak - sliver) * bump > column + 1e-6
+        slidesPastFloor = slides
     }
 
     /// The anchor for a lens opened with the pointer at `pointerY`, in rail
@@ -248,8 +255,7 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         let top = PromptRailLayout.topInset
         let slides = slidesPastFloor
 
-        // Step 1: the bump, and the peak, lowered when it would leave the
-        // other rows less than 15% of the column.
+        // Step 1: the bump, and its peak.
         var weights = [CGFloat](repeating: 0, count: count)
         var bump: CGFloat = 0
         for index in bumpRows(around: c) {
@@ -257,13 +263,7 @@ struct PromptRailLensGeometry: Equatable, Sendable {
             weights[index] = weight
             bump += weight
         }
-        var peak = max(Self.peak(column: column, bump: bump), sliver)
-        // A rail short of the floor mid-rail can still overfill near an end,
-        // where half a bump draws a higher peak. Lower that peak until
-        // slivers fit, so the column's ends hold.
-        if !slides && bump > 1e-6 && sliver * (rowCount - bump) + peak * bump > column {
-            peak = max(sliver, (column - sliver * (rowCount - bump)) / bump)
-        }
+        let peak = Self.peak(column: column, bump: bump, count: count, slides: slides)
 
         // Step 2: row i is `base + (peak − base) × f`, with `upper` as the base
         // for rows whose centre lies above c and `lower` for the rest. The
@@ -293,14 +293,13 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         // Where the centre sits (steps 3 to 6).
         let centreY: CGFloat
         if slides {
-            // Past the floor, the column slides (step 6). A windowed rail maps
-            // the centre through `slideY`.
-            centreY = restOverflows ? slideY(c, anchor) : anchorY(c, anchor)
+            // Past the floor, the column slides (step 6).
+            centreY = slideY(c, anchor)
         } else {
             // Near an end, hold the centre inward so the rows on the cramped
             // side keep at least half the squeeze they get mid-rail.
             let middleBump = self.middleBump
-            let middleFill = Self.peak(column: column, bump: middleBump) * middleBump
+            let middleFill = middlePeak * middleBump
             let soft = rowCount - middleBump > 1e-6
                 ? max(sliver, 0.5 * (column - middleFill) / (rowCount - middleBump))
                 : sliver
@@ -438,13 +437,22 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         bumpRows(around: c, count: count).reduce(0) { $0 + bumpWeight(row: $1, centre: c) }
     }
 
-    /// The peak for a bump of total weight `bump`: `lensPeak`, lowered to
+    /// The peak for a bump of total weight `bump` in a column `column` tall,
+    /// over `count` rows (spec steps 1 and 6): `lensPeak`, lowered to
     /// `0.85 × column / bump` when it would leave the other rows less than
-    /// 15% of the column.
-    private static func peak(column: CGFloat, bump: CGFloat) -> CGFloat {
+    /// 15% of the column. On a rail that does not slide it is lowered
+    /// further, until 1pt slivers for the rows outside the bump fit beside
+    /// it, so the column's ends hold: near an end, where half a bump draws a
+    /// higher peak, and along a full rail that is not windowed. Such a rail
+    /// always has room for that, as its prompts rest at least 4pt apart.
+    /// Never below a sliver.
+    private static func peak(column: CGFloat, bump: CGFloat, count: Int, slides: Bool) -> CGFloat {
         let full = PromptRailLayout.lensPeak
-        if bump > 1e-6 && column - full * bump < 0.15 * column { return 0.85 * column / bump }
-        return full
+        var peak = bump > 1e-6 && column - full * bump < 0.15 * column ? 0.85 * column / bump : full
+        if !slides && bump > 1e-6 {
+            peak = min(peak, (column - sliverFloor * (CGFloat(count) - bump)) / bump)
+        }
+        return max(peak, sliverFloor)
     }
 
     // MARK: Where the centre sits
@@ -482,7 +490,7 @@ struct PromptRailLensGeometry: Equatable, Sendable {
             if index < centreRow { fa += weight } else if index == centreRow { fa += weight * within }
         }
         let column = columnHeight
-        let peak = Self.peak(column: column, bump: bump)
+        let peak = Self.peak(column: column, bump: bump, count: count, slides: true)
         let inset = PromptRailLayout.topInset
         let sliver = Self.sliverFloor
         if top { return inset + peak * fa + sliver * (min(c, radius) - fa) }

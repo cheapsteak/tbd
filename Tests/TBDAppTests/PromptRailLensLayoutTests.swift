@@ -246,6 +246,45 @@ struct PromptRailLensLayoutTests {
         #expect(misses.isEmpty, "\(count) prompts in \(railHeight)pt: the column is \(Self.top)…\(end), but \(misses.prefix(5))")
     }
 
+    /// Only a windowed rail slides (spec step 6). 46 prompts in a 208pt rail
+    /// rest 4pt apart and fill the 184pt column exactly, so the rail is not
+    /// windowed, though 1pt slivers and a whole bump at the full peak would
+    /// overfill it. The peak is lowered until they fit instead, so wherever
+    /// the lens is centred and wherever it opened, the rows run from 12pt
+    /// to 196pt without a gap or an overlap, none under 1pt.
+    @Test func fullUnwindowedRailHoldsEnds() {
+        let geometry = PromptRailLensGeometry(layout: PromptRailLayout(count: 46, railHeight: 208), restOffset: 0)
+        #expect(!geometry.restOverflows && geometry.columnHeight == 184,
+                "precondition: 46 prompts fill a 208pt rail's 184pt column without windowing it")
+        #expect(!geometry.slidesPastFloor, "a rail that is not windowed slides")
+        #expect(!geometry.keepsRestingRows)
+        let end = Self.top + geometry.columnHeight
+        var misses: [String] = []
+        for share in [0, 0.5, 1] as [CGFloat] {
+            let anchor = Self.anchor(geometry, at: share)
+            for centre in Self.centres(46) {
+                let rows = geometry.rows(centre: centre, anchor: anchor)
+                guard rows.tops.count == 46, rows.heights.count == 46 else {
+                    misses.append("centre \(centre): \(rows.tops.count) tops, \(rows.heights.count) heights")
+                    continue
+                }
+                let first = rows.tops[0]
+                let bottom = rows.tops[45] + rows.heights[45]
+                if !(abs(first - Self.top) <= 0.5 && abs(bottom - end) <= 0.5) {
+                    misses.append("opened at \(share), centre \(centre): the rows span \(first)…\(bottom)")
+                }
+                for index in 0..<45 where !(abs(rows.tops[index + 1] - rows.tops[index] - rows.heights[index]) <= 1e-6) {
+                    misses.append("opened at \(share), centre \(centre): rows \(index) and \(index + 1) leave a gap or overlap")
+                }
+                let thinnest = rows.heights.min() ?? .nan
+                if !(thinnest >= PromptRailLensGeometry.sliverFloor - 1e-9) {
+                    misses.append("opened at \(share), centre \(centre): a row is \(thinnest)pt")
+                }
+            }
+        }
+        #expect(misses.isEmpty, "the column is \(Self.top)…\(end), but \(misses.prefix(5))")
+    }
+
     /// Past the floor, 600 prompts in 577pt, the column slides: the centre
     /// row stays on the rail, it moves down the rail as the centre does, and
     /// no row grows past the peak.
