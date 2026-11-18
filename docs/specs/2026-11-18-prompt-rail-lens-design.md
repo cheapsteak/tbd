@@ -87,7 +87,7 @@ Rows are drawn at their layout height, and each shows as much as its height allo
 - **Time column** – the time column follows the rail spec's rule: today's rows show their time, and an earlier day's first row shows its date.
 - **The box:**
   - **Rows** – it spans the rows whose text shows at all, from 3pt above the first to 3pt below the last.
-  - **Width** – it is as wide as the widest of those rows wants, capped at 320pt and at the pane's width less 24pt. A row's wanted width grows with its height, from the rail's 20pt at 8.5pt tall to its full width at 14pt tall, on a smoothstep.
+  - **Width** – it is as wide as the widest of those rows wants, capped at 320pt and at the pane's width less 24pt. A row's wanted width grows with its height, from the rail's 20pt at 8.5pt tall to its full width at 14pt tall, on a smoothstep. While the pointer is over the box, the box never narrows, so moving through rows with shorter titles cannot leave the pointer outside it and close the lens; it fits its rows again once the pointer leaves it.
   - **Shape** – it starts at the pane's leading edge, behind the rail column, and has 8pt corners on its trailing side. An 8pt 45° taper joins it to the rail column above and below.
   - **Look** – it is filled with the window background colour, has a 0.5pt border in the separator colour, and casts an 8pt shadow in the shadow colour at 20% opacity, resolved for the current appearance.
 
@@ -96,7 +96,8 @@ Rows are drawn at their layout height, and each shows as much as its height allo
 - **Click on a row** – jumps to its prompt, as the card's rows did, and closes the lens.
 - **Click on the bare rail** – a click on the rail before the lens has grown jumps to the pointed notch's prompt.
 - **Wheel** – a wheel over the rail column or the box scrolls the transcript. Neither the rail nor the lens scrolls under the wheel.
-- **Elsewhere** – clicks and the wheel outside the rail column and the box reach the transcript, whatever the overlay's frame covers.
+- **Elsewhere** – clicks and the wheel outside the rail column and the box reach the transcript, whatever the overlay's frame covers. Once the lens starts to close, its shrinking box takes no clicks: they reach the transcript.
+- **Jump-to-latest button** – the live pane's button that scrolls to the newest message hides while the lens is open, so it never covers the lens's bottom rows or takes their clicks.
 - **Keyboard** – the Go menu's Previous Prompt and Next Prompt are unchanged.
 - **VoiceOver** – the "Prompts" group, with one button per entry, is unchanged.
 
