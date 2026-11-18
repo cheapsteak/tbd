@@ -403,6 +403,32 @@ struct PromptRailLensLayoutTests {
         #expect((36...39).contains(nearBottom), "notch 36 opened on row \(nearBottom)")
     }
 
+    /// The slide's minimum slope needs 0.25pt for every prompt (spec step
+    /// 6). 3,000 prompts in a 600pt rail have too little room for it, and the
+    /// lens still opens on the notch under the pointer: with prompt 1564
+    /// active, a pointer at 340pt over notch 1509 opens on it, within 0.5pt.
+    /// 1,000 prompts have room for the slope, and open on the pointed notch
+    /// as they always have.
+    @Test func denseRailOpensOnPointedNotch() {
+        let cases: [(count: Int, active: Int, notch: Int)] = [(3000, 1564, 1509), (1000, 500, 435)]
+        for (count, active, notch) in cases {
+            let layout = PromptRailLayout(count: count, railHeight: 600)
+            let offset = layout.scrollOffset(keepingVisible: active, current: 0)
+            let geometry = PromptRailLensGeometry(layout: layout, restOffset: offset)
+            #expect(geometry.slidesPastFloor, "\(count) prompts do not slide")
+            let pointerY = Self.restingCentre(of: notch, in: geometry)
+            let anchor = geometry.anchor(pointerY: pointerY)
+            let centre = geometry.openingCentre(pointerY: pointerY, anchor: anchor)
+            let rows = geometry.rows(centre: centre, anchor: anchor)
+            let opened = rows.index(atY: pointerY)
+            #expect(opened == notch,
+                    "\(count) prompts: the pointer at \(pointerY) over notch \(notch) opened on row \(String(describing: opened))")
+            let drawnAt = rows.y(ofFraction: CGFloat(notch) + 0.5)
+            #expect(abs(drawnAt - pointerY) <= 0.5,
+                    "\(count) prompts: notch \(notch)'s middle opened at \(drawnAt), not under the pointer at \(pointerY)")
+        }
+    }
+
     @Test func emptyIsEmpty() {
         let geometry = Self.geometry(0)
         let anchor = geometry.anchor(pointerY: 100)

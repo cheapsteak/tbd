@@ -492,6 +492,10 @@ struct PromptRailLensGeometry: Equatable, Sendable {
     /// fully into view, and never flatter than `slideMinPerRow`. Within the
     /// last `lensRadius` rows of a run, the centre follows `slideBound`, so
     /// the end rows meet the rail's end rather than leave a gap before it.
+    ///
+    /// The minimum slope needs `slideMinPerRow` for every prompt. A rail too
+    /// short for that keeps the opened-on notch under the pointer, held only
+    /// to `slideBound`, and each run takes the slope its own room allows.
     private func slideY(_ c: CGFloat, _ anchor: PromptRailLensAnchor) -> CGFloat {
         let rowCount = CGFloat(count)
         let radius = PromptRailLayout.lensRadius
@@ -501,9 +505,13 @@ struct PromptRailLensGeometry: Equatable, Sendable {
         let tailRows = min(radius, rowCount - opened)
         let headY = slideBound(headRows, top: true)
         let tailY = slideBound(rowCount - tailRows, top: false)
-        let low = max(slideBound(opened, top: true), headY + slope * (opened - headRows))
-        let high = min(slideBound(opened, top: false), tailY - slope * (rowCount - tailRows - opened))
-        let openedY = low <= high ? PromptRailLensMath.clamp(anchor.y, low, high) : (low + high) / 2
+        let highest = slideBound(opened, top: true)
+        let lowest = slideBound(opened, top: false)
+        let low = max(highest, headY + slope * (opened - headRows))
+        let high = min(lowest, tailY - slope * (rowCount - tailRows - opened))
+        let openedY = low <= high
+            ? PromptRailLensMath.clamp(anchor.y, low, high)
+            : PromptRailLensMath.clamp(anchor.y, highest, lowest)
         if c <= opened {
             if opened - headRows > 1e-9 && c < headRows { return slideBound(c, top: true) }
             let run: CGFloat
