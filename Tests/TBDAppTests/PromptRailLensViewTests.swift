@@ -493,6 +493,39 @@ struct PromptRailLensViewTests {
         #expect(mount.rail.frame.width == PromptRailLayout.width)
     }
 
+    /// Reopening while the lens shrinks builds it afresh, as an open does:
+    /// at the pointer where it is now, not where the shrinking lens was. The
+    /// grow goes on from the open fraction the shrink reached, so the box
+    /// does not pop.
+    @Test("reopening while the lens shrinks builds it afresh at the pointer, growing on from where the shrink was")
+    func reopenWhileShrinkingRebuilds() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        let layout = PromptRailLayout(count: 40, railHeight: 601)
+        try await Self.openLens(mount, at: NSPoint(x: Self.onRail.x, y: layout.notchCenterY(5)))
+        mount.frames(Self.wholeAnimation)
+        let opened = try #require(mount.rail.lens).centre
+        try #require(abs(opened - 5.5) < 1, "precondition: the lens opened on notch 5, at \(opened)")
+
+        mount.rail.lensOpenChanged(false)
+        mount.frames(8)
+        let partWay = mount.rail.openFraction
+        try #require(mount.rail.lens != nil, "precondition: the lens is still shrinking")
+        try #require(partWay > 0 && partWay < 1, "precondition: the lens is \(partWay) open part way through shrinking")
+
+        let notch30 = NSPoint(x: Self.onRail.x, y: layout.notchCenterY(30))
+        try mount.move(to: notch30)
+        mount.rail.lensOpenChanged(true)
+        let lens = try #require(mount.rail.lens, "the reopen left no lens")
+        let fresh = PromptRailSteadyLens(geometry: mount.rail.currentLensGeometry(), pointerY: notch30.y)
+        #expect(abs(lens.centre - fresh.centre) < 1e-9,
+                "the reopened lens is centred on \(lens.centre), not on notch 30's opening centre \(fresh.centre)")
+        #expect(mount.rail.openFraction == partWay,
+                "the reopen moved the open fraction from \(partWay) to \(mount.rail.openFraction)")
+        mount.frame()
+        #expect(mount.rail.openFraction > partWay, "the reopened lens did not grow on from \(partWay)")
+    }
+
     @Test("the window resigning key shrinks the lens away and stops the frames")
     func resignKeyStopsFrames() async throws {
         let mount = LensMount()
@@ -671,6 +704,45 @@ struct PromptRailLensViewTests {
         #expect(mount.jumps.ids == ["p-1"], "a click on the last notch's band jumped to \(mount.jumps.ids)")
     }
 
+    /// A few-prompts rail draws each row's text, its hover fill and its
+    /// share of the box in a band the peak's height, centred on a row far
+    /// taller (lens spec, "Drawing"). Only that band points at the row:
+    /// between two bands the pointer hovers no row and a click jumps nowhere.
+    @Test("on a few-prompts rail a row is pointed at only within its text band")
+    func fewPromptsPointWithinBand() async throws {
+        let mount = LensMount(entryCount: 3)
+        defer { mount.host.tearDown() }
+        let layout = PromptRailLayout(count: 3, railHeight: 601)
+        try await Self.openLens(mount, at: NSPoint(x: Self.onRail.x, y: layout.notchCenterY(1)))
+        mount.frames(Self.wholeAnimation)
+        let rows = mount.rail.displayedRows
+        try #require(rows.heights.count == 3, "precondition: three rows, not \(rows.heights.count)")
+        try #require(rows.heights[1] > PromptRailLayout.lensPeak + 20,
+                     "precondition: three prompts rest far taller than the peak, at \(rows.heights)")
+        #expect(mount.rail.hoveredRow == 1,
+                "the pointer opened on row 1's band hovers row \(String(describing: mount.rail.hoveredRow))")
+
+        // Where rows 0 and 1 meet, above row 1's band and below row 0's.
+        let band = PromptRailLensPainter.textBand(row: 1, in: rows)
+        let gap = NSPoint(x: Self.onRail.x, y: rows.tops[1])
+        try #require(gap.y < band.minY - 10, "precondition: y \(gap.y) lies well above row 1's band, at \(band.minY)")
+        try mount.move(to: gap)
+        mount.frame()
+        #expect(mount.hover.isOpen, "a pointer between the bands closed the lens")
+        #expect(mount.rail.hoveredRow == nil,
+                "a pointer between the bands hovers row \(String(describing: mount.rail.hoveredRow))")
+        #expect(mount.rail.clickRow(at: gap) == nil, "a click between the bands found a row")
+        try mount.click(at: gap)
+        #expect(mount.jumps.ids.isEmpty, "a click between the bands jumped to \(mount.jumps.ids)")
+
+        let centre = NSPoint(x: Self.onRail.x, y: band.midY)
+        try mount.move(to: centre)
+        mount.frame()
+        #expect(mount.rail.hoveredRow == 1,
+                "the pointer on row 1's band hovers row \(String(describing: mount.rail.hoveredRow))")
+        #expect(mount.rail.clickRow(at: centre) == 1, "a click on row 1's band found no row 1")
+    }
+
     /// The press keeps the pressed prompt's id, so prompts arriving above it
     /// before the release, which hand its row to another prompt, still let
     /// the click jump to the prompt pressed.
@@ -754,9 +826,11 @@ struct PromptRailLensViewTests {
         let peak = PromptRailLayout.lensPeak
         let padding = PromptRailRowMetrics.boxPadding
 
+        // The pointer on the row's middle, inside its band, so it hovers it.
         let one = LensMount(entryCount: 1)
         defer { one.host.tearDown() }
-        try await Self.openLens(one)
+        let oneLayout = PromptRailLayout(count: 1, railHeight: 601)
+        try await Self.openLens(one, at: NSPoint(x: Self.onRail.x, y: oneLayout.notchCenterY(0)))
         one.frames(Self.wholeAnimation)
         let single = one.rail.displayedRows
         try #require(single.heights.count == 1 && single.heights[0] > peak,
@@ -950,6 +1024,23 @@ struct PromptRailLensViewTests {
         #expect(shrunk.centre <= 5, "the centre \(shrunk.centre) lies past the last of 5 rows")
         #expect(mount.rail.displayedRows.heights.count == 5)
         try Self.drawOnce(mount.rail)
+    }
+
+    /// A rebase can leave the lens off its target for a still pointer, so an
+    /// open lens asks for a frame, which steps it there.
+    @Test("a new prompt under a settled open lens asks for a frame, with no pointer move")
+    func rebaseAsksForFrame() async throws {
+        let mount = LensMount()
+        defer { mount.host.tearDown() }
+        try await Self.openLens(mount)
+        mount.frames(Self.wholeAnimation)
+        try mount.move(to: NSPoint(x: Self.onRail.x, y: Self.onRail.y + 2))
+        mount.frame()
+        try #require(!mount.rail.isRunningFrames, "precondition: the open lens settled")
+
+        mount.rail.promptRail(entriesDidChange: Self.entries(41))
+        #expect(mount.rail.lens?.geometry.count == 41, "the lens did not move onto the new column")
+        #expect(mount.rail.isRunningFrames, "a rebase under a still pointer asked for no frame")
     }
 
     @Test("a rail height change under an open lens moves it onto the new column")

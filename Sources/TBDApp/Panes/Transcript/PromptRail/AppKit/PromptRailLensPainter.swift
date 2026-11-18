@@ -211,15 +211,11 @@ final class PromptRailLensPainter {
     }
 
     /// Row `index`'s text band in `rows`, in rail coordinates, as a
-    /// zero-width rect at x 0: the row itself, or, for a row taller than the
-    /// lens's peak (a few-prompts rail), a band the peak's height centred on
-    /// it (lens spec, "Drawing"). The row's text, its hover fill and its
-    /// share of the box lie in it, so the box hugs the text rather than a row
-    /// up to 184pt tall.
+    /// zero-width rect at x 0 (`PromptRailLensRows.textBand(row:)`). The box
+    /// hugs the text in it rather than a row up to 184pt tall.
     static func textBand(row index: Int, in rows: PromptRailLensRows) -> CGRect {
-        let height = rows.heights[index]
-        let bandHeight = min(height, PromptRailLayout.lensPeak)
-        return CGRect(x: 0, y: rows.tops[index] + (height - bandHeight) / 2, width: 0, height: bandHeight)
+        let band = rows.textBand(row: index)
+        return CGRect(x: 0, y: band.top, width: 0, height: band.height)
     }
 
     // MARK: Drawing

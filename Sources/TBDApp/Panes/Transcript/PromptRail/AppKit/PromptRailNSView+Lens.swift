@@ -163,13 +163,17 @@ extension PromptRailNSView {
         }
     }
 
-    /// Builds a lens on the row under the pointer, unless one is still
-    /// shrinking, and grows it.
+    /// Builds a lens on the row under the pointer, with the time column
+    /// worked out afresh, and grows it. A lens still shrinking is built
+    /// afresh too, at the pointer where it is now, and grows on from the
+    /// open fraction the shrink reached, so the box does not pop (lens spec,
+    /// "Opening").
     private func openLens() {
         guard !entries.isEmpty else { return }
-        if lensState.lens == nil {
+        let shrinking = lensState.animation?.target == 0
+        if lensState.lens == nil || shrinking {
+            if lensState.lens == nil { lensState.openFraction = 0 }
             lensPainter.refreshTimeColumn(now: now())
-            lensState.openFraction = 0
             setLens(PromptRailSteadyLens(geometry: currentLensGeometry(), pointerY: pointerY))
         }
         animateOpenFraction(to: 1)
@@ -279,10 +283,16 @@ extension PromptRailNSView {
     /// whenever the active prompt does, as on a row click or Previous and
     /// Next Prompt; re-anchoring on it would move the open rows at some later,
     /// unrelated outline change.
+    ///
+    /// A rebased lens may no longer sit on its target for a still pointer, so
+    /// an open one asks for a frame, which steps it there.
     private func rebaseLens() {
         guard let lens = lensState.lens else { return }
         let geometry = currentLensGeometry()
-        if !Self.sameColumn(geometry, lens.geometry) { lensState.lens = lens.rebased(to: geometry) }
+        if !Self.sameColumn(geometry, lens.geometry) {
+            lensState.lens = lens.rebased(to: geometry)
+            if lensOpen { lensState.stepRequested = true }
+        }
         refreshLensDisplay()
         updateFrameDemand()
     }
@@ -459,7 +469,7 @@ extension PromptRailNSView {
 
     private func rowUnderPointer(in rows: PromptRailLensRows) -> Int? {
         guard lensOpen, lensState.openFraction > PromptRailRowMetrics.hoverMinOpenFraction, isPointerOverLens,
-              let row = rows.indexInColumn(atY: pointerY),
+              let row = rows.pointedRow(atY: pointerY),
               rows.heights[row] >= PromptRailRowMetrics.hoverMinRowHeight
         else { return nil }
         return row
@@ -512,13 +522,15 @@ extension PromptRailNSView {
 
     /// The row a click at `point`, in rail coordinates, lands on: over the
     /// rail column of a lens that has started to grow, or over an open
-    /// lens's box, the displayed row there; over the bare rail, the resting
-    /// notch there. nil anywhere else: the box of a closing lens, and above
-    /// the first row or below the last, where the column has ended.
+    /// lens's box, the displayed row whose text band holds it; over the bare
+    /// rail, the resting notch whose band holds it, since the bare rail draws
+    /// its notches alike at any pitch. nil anywhere else: the box of a
+    /// closing lens, above the first row or below the last, where the column
+    /// has ended, and between a few-prompts lens's text bands.
     func clickRow(at point: NSPoint) -> Int? {
         guard !entries.isEmpty, isOverRailOrBox(point) else { return nil }
         if lensState.lens != nil, lensState.openFraction > 0 {
-            return lensState.displayedRows.indexInColumn(atY: point.y)
+            return lensState.displayedRows.pointedRow(atY: point.y)
         }
         guard isInRailColumn(point) else { return nil }
         return currentLayout().indexInColumn(atRailY: point.y, offset: offset)

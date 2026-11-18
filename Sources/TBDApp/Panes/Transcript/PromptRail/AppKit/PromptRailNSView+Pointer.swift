@@ -8,7 +8,8 @@ import AppKit
 ///   whatever the overlay's frame covers.
 /// - **Clicks** – a mouse-up over the rail column or the open lens's box
 ///   jumps to the prompt its mouse-down landed on. Above the first row and
-///   below the last, the column has ended, and a click there lands on none.
+///   below the last, the column has ended, and a click there lands on none;
+///   so does one between a few-prompts lens's text bands.
 /// - **Hover** – the one tracking area covers the whole overlay, and
 ///   `trackPointer` decides whether the pointer is over the rail column or
 ///   the box, and reports each to the hover model. Only a move over either,

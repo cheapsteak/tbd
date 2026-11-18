@@ -67,6 +67,27 @@ struct PromptRailLensRows: Equatable, Sendable {
         return lastRow(atOrAbove: y)
     }
 
+    /// Row `index`'s text band, as its top and height: the row itself, or,
+    /// for a row taller than the lens's peak (a few-prompts rail), a band the
+    /// peak's height centred on it (lens spec, "Drawing"). The row's text,
+    /// its hover fill and its share of the box lie in it.
+    func textBand(row index: Int) -> (top: CGFloat, height: CGFloat) {
+        let height = heights[index]
+        let bandHeight = min(height, PromptRailLayout.lensPeak)
+        return (tops[index] + (height - bandHeight) / 2, bandHeight)
+    }
+
+    /// The row `y` points at: the row whose band holds it, as
+    /// `indexInColumn(atY:)` finds it, except that a row taller than the
+    /// lens's peak is pointed at only within its text band. Between a
+    /// few-prompts rail's bands, as outside the column, `y` points at no row.
+    func pointedRow(atY y: CGFloat) -> Int? {
+        guard let row = indexInColumn(atY: y) else { return nil }
+        guard heights[row] > PromptRailLayout.lensPeak else { return row }
+        let band = textBand(row: row)
+        return y >= band.top && y < band.top + band.height ? row : nil
+    }
+
     /// The fractional row under `y`: the row's index plus how far down its
     /// band `y` lies. 0 above the first row and `count` below the last.
     func fraction(atY y: CGFloat) -> CGFloat {
