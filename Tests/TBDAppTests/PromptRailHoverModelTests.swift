@@ -158,7 +158,9 @@ struct PromptRailHoverModelTests {
         #expect(model.isOpen, "leaving the rail and coming back reopens the lens")
     }
 
-    @Test("a row click off the rail does not hold the lens shut")
+    /// The click also clears the box's hover: the box it was on is gone, so
+    /// once the reopened lens loses the rail, the grace runs and closes it.
+    @Test("a row click off the rail does not hold the lens shut, and leaves no box hover behind")
     func clickOffRailDoesNotSuppress() async throws {
         let clock = EventDrivenTestClock()
         let model = Self.makeModel(clock)
@@ -172,6 +174,11 @@ struct PromptRailHoverModelTests {
         model.railHoverChanged(true)
         try await Self.fire(clock, by: Self.openDelay, model)
         #expect(model.isOpen)
+
+        // No box exit follows: the click's box hover must already be gone.
+        model.railHoverChanged(false)
+        try await Self.fire(clock, by: Self.closeGrace, model)
+        #expect(!model.isOpen, "the reopened lens stayed open off the rail, held by the clicked box's hover")
     }
 
     @Test("the app resigning active closes the lens with the pointer still on the rail")

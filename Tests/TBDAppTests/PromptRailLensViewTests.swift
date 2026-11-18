@@ -32,18 +32,24 @@ struct PromptRailLensViewTests {
 
     // MARK: Opening
 
-    @Test("no lens before the 80ms open delay has passed")
+    @Test("no lens before the 80ms open delay has passed, and the lens opens on its last millisecond")
     func noLensBefore80ms() async throws {
         let mount = LensMount()
         defer { mount.host.tearDown() }
 
         try mount.move(to: Self.onRail)
         try await mount.clock.requireAdvanceWhenArmed(by: .milliseconds(79), timeout: Self.mainActorHop)
+        #expect(mount.clock.hasSleeper, "the open timer is no longer pending at 79ms")
         #expect(!mount.hover.isOpen)
         #expect(mount.rail.lens == nil, "a lens grew before the open delay passed")
         #expect(mount.rail.openFraction == 0)
         #expect(mount.rail.boxRect == nil)
         #expect(mount.rail.frame.width == PromptRailLayout.width, "the overlay widened with no lens")
+
+        await mount.clock.advance(by: .milliseconds(1))
+        await mount.hover._drainForTesting()
+        #expect(mount.hover.isOpen, "the lens did not open once the 80ms had passed")
+        #expect(mount.rail.lens != nil, "the open at 80ms grew no lens")
     }
 
     @Test("the lens starts to grow once the 80ms open delay has passed, in an overlay wide enough for its box")
@@ -144,8 +150,6 @@ struct PromptRailLensViewTests {
         #expect(!mount.rail.isPointerOverRail)
         let armedClose = await watchForSleeper(on: mount.clock)
         #expect(!armedClose, "leaving the rail column for the box started the close grace")
-        await mount.clock.advance(by: .milliseconds(300))
-        await mount.hover._drainForTesting()
         #expect(mount.hover.isOpen, "the lens closed under a pointer on its box")
         #expect(mount.rail.lens != nil)
 

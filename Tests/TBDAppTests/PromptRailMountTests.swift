@@ -122,7 +122,10 @@ struct PromptRailMountTests {
         #expect(rail.boxMaxWidth == PromptRailRowMetrics.boxMaxWidth(paneWidth: 680))
         #expect(container.subviews == [container.scrollView, rail])
         let delivered = await host.settle { rail.entries.count == 3 }
-        #expect(delivered, "the rail never received the outline (entries: \(rail.entries.count))")
+        guard delivered else {
+            Issue.record(OutlineNotDelivered(expected: 3, observed: rail.entries.count))
+            return
+        }
         #expect(rail.entries == coordinator.promptEntries)
     }
 
@@ -216,6 +219,17 @@ struct PromptRailMountTests {
         try #require(laidOut, "the table never mounted and laid out")
         await host.pump(times: 5)
         return try #require(host.firstDescendant(TranscriptContainerView.self))
+    }
+}
+
+/// The mounted rail never received the table's outline within the settle's
+/// run-loop turns: names the entry count it held when the wait ended.
+private struct OutlineNotDelivered: Error, CustomStringConvertible {
+    let expected: Int
+    let observed: Int
+
+    var description: String {
+        "the rail never received the outline: it held \(observed) entries, not \(expected)"
     }
 }
 

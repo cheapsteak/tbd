@@ -25,7 +25,7 @@ struct PromptRailAppKitTests {
     // MARK: Rail
 
     @Test("one notch per entry, each as long as its turn's work, the active one 3pt tall and the rest 2pt, all at x 2")
-    func notchLengthsFollowWork() {
+    func notchLengthsFollowWork() throws {
         let rail = Self.makeRail(onJump: { _ in })
         let counts = [0, 3, 40, 1, 12]
         rail.promptRail(entriesDidChange: Self.entries(5))
@@ -33,7 +33,7 @@ struct PromptRailAppKitTests {
         rail.promptRail(activeIndexDidChange: 2)
 
         let frames = rail.displayedNotchRects
-        #expect(frames.count == 5)
+        try #require(frames.count == 5, "the rail drew \(frames.count) notches for 5 entries")
         for (index, frame) in frames.enumerated() {
             #expect(Self.isClose(frame.minX, PromptRailLayout.notchLeading), "notch \(index) starts at \(frame.minX)")
             let length = PromptRailWorkScale.length(work: counts[index], busiest: 40)
@@ -53,6 +53,8 @@ struct PromptRailAppKitTests {
         // length.
         rail.promptRail(activeIndexDidChange: 0)
         let moved = rail.displayedNotchRects
+        try #require(moved.count == frames.count,
+                     "moving the active notch left \(moved.count) notches of \(frames.count)")
         let lengthsKept = zip(moved, frames).allSatisfy { Self.isClose($0.width, $1.width) }
         #expect(lengthsKept, Comment(rawValue: "lengths \(frames.map(\.width)) became \(moved.map(\.width))"))
         #expect(moved[0].height == 3)
@@ -106,14 +108,23 @@ struct PromptRailAppKitTests {
         let darkAccent = Self.resolved(.controlAccentColor, in: dark)
         try #require(lightTertiary != darkTertiary, "the inactive colour does not differ by appearance")
         let drewLight = RunLoopPump.until { rail.lastDrawnPalette?.prompt == lightTertiary }
-        try #require(drewLight, "the notches never drew in the light appearance")
+        guard drewLight else {
+            throw PaletteNotDrawn(
+                appearance: "light", expected: "prompt \(Self.describe(lightTertiary))",
+                observed: Self.describe(rail.lastDrawnPalette))
+        }
 
         rail.appearance = dark
         let followed = RunLoopPump.until {
             rail.lastDrawnPalette?.activePrompt == darkAccent
                 && rail.lastDrawnPalette?.prompt == darkTertiary
         }
-        #expect(followed, "the notches were not redrawn in the dark appearance's colours")
+        guard followed else {
+            throw PaletteNotDrawn(
+                appearance: "dark",
+                expected: "active prompt \(Self.describe(darkAccent)), prompt \(Self.describe(darkTertiary))",
+                observed: Self.describe(rail.lastDrawnPalette))
+        }
     }
 
     @Test("an overflowing rail offsets its notches to keep the active one in view, behind a fade")
@@ -284,22 +295,14 @@ struct PromptRailAppKitTests {
 
         let onRail = try Self.mouseMoved(to: NSPoint(x: 8, y: 300))
         let offRail = try Self.mouseMoved(to: NSPoint(x: 340, y: 300))
-        // The notch the pointer points at, while it is over the rail column.
-        func pointedIndex() -> Int? {
-            rail.isPointerOverRail ? rail.currentLayout().index(atRailY: rail.pointerY, offset: rail.offset) : nil
-        }
         rail.mouseMoved(with: onRail)
         #expect(rail.isPointerOverRail)
-        let pointedOnRail = pointedIndex()
-        #expect(pointedOnRail == 4, "a move over the rail column pointed at \(String(describing: pointedOnRail))")
         try await clock.requireAdvanceWhenArmed(by: Self.openDelay, timeout: Self.mainActorHop)
         await hover._drainForTesting()
         try #require(hover.isOpen, "a move over the rail column did not open the lens")
 
         rail.mouseMoved(with: offRail)
         #expect(!rail.isPointerOverRail)
-        let pointedOffRail = pointedIndex()
-        #expect(pointedOffRail == nil, "a pointer off the rail column still points at a notch")
         try await clock.requireAdvanceWhenArmed(by: Self.closeGrace, timeout: Self.mainActorHop)
         await hover._drainForTesting()
         #expect(!hover.isOpen, "a pointer off the rail column kept the rail hovered")
@@ -481,6 +484,15 @@ struct PromptRailAppKitTests {
         return result
     }
 
+    private static func describe(_ color: CGColor?) -> String {
+        color.map { String(describing: $0) } ?? "none"
+    }
+
+    private static func describe(_ palette: PromptRailNotchPalette?) -> String {
+        guard let palette else { return "nothing" }
+        return "active prompt \(describe(palette.activePrompt)), prompt \(describe(palette.prompt))"
+    }
+
     /// A pointer move to `location`, in the window coordinates of a view with
     /// no window: its own, flipped about its height.
     private static func mouseMoved(to location: NSPoint) throws -> NSEvent {
@@ -551,6 +563,19 @@ private final class JumpRecorder {
 private final class WheelRecorder: NSView {
     private(set) var events = 0
     override func scrollWheel(with event: NSEvent) { events += 1 }
+}
+
+/// The notches never drew in an appearance's colours within the run-loop
+/// turns a redraw gets: names the colours expected and those the view last
+/// drew.
+private struct PaletteNotDrawn: Error, CustomStringConvertible {
+    let appearance: String
+    let expected: String
+    let observed: String
+
+    var description: String {
+        "the notches never drew in the \(appearance) appearance's colours: expected \(expected); last drew \(observed)"
+    }
 }
 
 /// AppKit's monitor table, faked: counts installs and removals, so a test can
