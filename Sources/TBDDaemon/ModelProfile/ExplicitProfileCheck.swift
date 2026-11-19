@@ -10,6 +10,16 @@ import TBDShared
 /// The reads are closures so this folder stays below `Claude`, which owns the
 /// profile config directories the login test reads.
 struct ExplicitProfileCheck: Sendable {
+    /// What a profile that exists lacks to start a session.
+    enum MissingCredential: Equatable, Sendable {
+        /// An OAuth profile with no account in its config directory.
+        case login
+        /// A token profile with no stored token.
+        case token
+        /// An API-key profile with no stored key.
+        case apiKey
+    }
+
     /// The profile's row, or nil when it does not exist.
     let profile: @Sendable (UUID) async throws -> ModelProfile?
     /// The profile's stored secret, for a token or API-key profile.
@@ -26,19 +36,32 @@ struct ExplicitProfileCheck: Sendable {
         guard let row = try await profile(id) else {
             return "Model profile \(id.uuidString) does not exist. Run tbd profile list to see the profiles."
         }
-        guard requireCredentials else { return nil }
-        switch row.kind {
-        case .oauth:
-            guard Self.isBlank(loginIdentity(id)) else { return nil }
+        guard requireCredentials, let missing = try missingCredential(of: row) else { return nil }
+        switch missing {
+        case .login:
             return "Model profile '\(row.name)' is not logged in. Run tbd profile login \(row.name), then try again."
-        case .oauthToken:
-            guard try Self.isBlank(secret(id)) else { return nil }
+        case .token:
             return "Model profile '\(row.name)' has no stored token. Add one in TBD Settings → Model Profiles, then try again."
         case .apiKey:
-            guard try Self.isBlank(secret(id)) else { return nil }
             return "Model profile '\(row.name)' has no stored API key. Add one in TBD Settings → Model Profiles, then try again."
+        }
+    }
+
+    /// What `row` lacks to start a session, or nil when it lacks nothing.
+    /// These are exactly the credential refusals of
+    /// `refusal(for:requireCredentials:)`, read through the same closures, so
+    /// a caller that shows a profile as usable agrees with the create that
+    /// checks it. A Bedrock profile lacks nothing here, because AWS owns its
+    /// credentials. Throws when the stored secret cannot be read.
+    func missingCredential(of row: ModelProfile) throws -> MissingCredential? {
+        switch row.kind {
+        case .oauth:
+            return Self.isBlank(loginIdentity(row.id)) ? .login : nil
+        case .oauthToken:
+            return try Self.isBlank(secret(row.id)) ? .token : nil
+        case .apiKey:
+            return try Self.isBlank(secret(row.id)) ? .apiKey : nil
         case .bedrock:
-            // AWS owns a Bedrock profile's credentials.
             return nil
         }
     }

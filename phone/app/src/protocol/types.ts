@@ -305,7 +305,23 @@ export type PromptAnswerOutcome = 'delivered' | 'already_resolved' | 'unknown';
 
 export type PromptAnswerResult = { outcome: PromptAnswerOutcome };
 
-export type ProfilesListResult = { profiles: PhoneProfile[] };
+export type ProfilesListParams = {
+  /**
+   * The repo a new worktree would be made in, for the New sheet. With it, the reply names the
+   * repo's profile and marks each profile usable or not; without it, the reply has neither.
+   */
+  repoID?: string;
+};
+
+export type ProfilesListResult = {
+  profiles: PhoneProfile[];
+  /**
+   * The profile a new worktree in the request's `repoID` would use, with balancing left out: the
+   * repo's own setting, else the global default, each skipped when it no longer exists or is an
+   * API-key profile with no key. Absent when the request had no `repoID`, or neither is left.
+   */
+  repoProfileID?: string;
+};
 
 /** A model profile, never with a token or other secret. */
 export type PhoneProfile = {
@@ -314,6 +330,13 @@ export type PhoneProfile = {
   /** The credential kind's raw value, such as `oauth` or `apiKey`. A `String` in Swift. */
   kind: string;
   isDefault: boolean;
+  /**
+   * False when the profile cannot start a session, as the laptop's check before a create finds
+   * it; absent when it can, and on every profile of a reply to a request with no `repoID`.
+   */
+  usable?: boolean;
+  /** Why it cannot, in a short phrase such as "Not logged in". Only beside `usable: false`. */
+  unusableReason?: string;
 };
 
 export type SessionSwitchProfileParams = { session: PhoneSessionRef; profileID: string };
@@ -336,7 +359,12 @@ export type SessionSwitchProfileResult = { session: PhoneSessionRef; parked: boo
 
 export type SessionSetModelParams = { session: PhoneSessionRef; model: string };
 
-export type PhoneWorktreeCreateParams = { repoID: string; message: string };
+export type PhoneWorktreeCreateParams = {
+  repoID: string;
+  message: string;
+  /** The profile the user picked on the New sheet. Absent leaves the choice to the laptop, as before. */
+  profileID?: string;
+};
 
 export type PhoneWorktreeCreateResult = {
   worktreeID: string;
@@ -384,7 +412,7 @@ export interface MethodShapes {
   'transcript.close': { params: PhoneEmpty; result: PhoneEmpty };
   'message.send': { params: MessageSendParams; result: ActionOutcomeResult };
   'prompt.answer': { params: PhonePromptAnswerParams; result: PromptAnswerResult };
-  'profiles.list': { params: PhoneEmpty; result: ProfilesListResult };
+  'profiles.list': { params: ProfilesListParams; result: ProfilesListResult };
   'session.switchProfile': { params: SessionSwitchProfileParams; result: SessionSwitchProfileResult };
   'session.fork': { params: SessionForkParams; result: SessionRefResult };
   'session.setModel': { params: SessionSetModelParams; result: ActionOutcomeResult };

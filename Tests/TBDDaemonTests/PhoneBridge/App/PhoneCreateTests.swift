@@ -222,7 +222,8 @@ struct PhoneCreateTests {
     }
 
     /// The create carries the repo and the message, and nothing else the
-    /// params could hold, under the verified pairing's device.
+    /// params could hold, under the verified pairing's device. With no
+    /// profile picked it names none, so the laptop chooses as it always has.
     @Test func createWorktreePassesOnlyRepoAndPrompt() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h)
@@ -239,9 +240,110 @@ struct PhoneCreateTests {
         try #require(creates.count == 1)
         #expect(creates[0].repoID == repo.id)
         #expect(creates[0].prompt == "Add a search box.")
+        #expect(creates[0].profileID == nil)
         let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(creates[0]))
         let keys = try #require(encoded as? [String: Any]).keys.sorted()
         #expect(keys == ["prompt", "repoID"])
+    }
+
+    /// A worktree create's body as a phone sends it, with `params` as given,
+    /// so a test can send fields the typed params do not have.
+    private static func createBody(_ params: [String: Any]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "kind": "request", "method": "worktree.create", "requestID": "create", "params": params,
+        ] as [String: Any])
+    }
+
+    /// The profile picked on the New sheet rides the create as its explicit
+    /// profile, beside the repo and the message. The record still names only
+    /// the repo.
+    @Test func createWorktreePassesThePickedProfile() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        let worktree = try await Self.seedCreatedWorktree(h, in: repo)
+        _ = try await Self.seedTab(h, in: worktree, kind: .claude)
+        let outbox = await h.connect()
+        let profileID = UUID()
+
+        let (reply, _) = try await h.request(
+            .worktreeCreate,
+            params: PhoneWorktreeCreateParams(repoID: repo.id, message: "Add a search box.", profileID: profileID),
+            on: outbox)
+
+        #expect(reply.error == nil)
+        let creates = h.actions.worktreeCreates
+        try #require(creates.count == 1)
+        #expect(creates[0].profileID == profileID)
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(creates[0]))
+        let keys = try #require(encoded as? [String: Any]).keys.sorted()
+        #expect(keys == ["profileID", "prompt", "repoID"])
+        #expect(h.recorder.records == [PhoneActionRecord(
+            deviceName: "Acme Phone", action: "worktree.create", target: "repo:\(repo.id.uuidString)")])
+    }
+
+    /// A phone cannot set the model, or any other field of the laptop's
+    /// create: one in the params is ignored, and the create carries only the
+    /// repo, the message and the profile.
+    @Test func createWorktreeDropsAModelThePhoneSends() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        let worktree = try await Self.seedCreatedWorktree(h, in: repo)
+        _ = try await Self.seedTab(h, in: worktree, kind: .claude)
+        let outbox = await h.connect()
+        let profileID = UUID()
+
+        let (reply, _) = try await h.send(try Self.createBody([
+            "repoID": repo.id.uuidString, "message": "Add a search box.", "profileID": profileID.uuidString,
+            "model": "opus", "folder": "acme-folder", "primaryAgentPreference": "codex",
+        ]), on: outbox)
+
+        #expect(reply.error == nil)
+        let creates = h.actions.worktreeCreates
+        try #require(creates.count == 1)
+        #expect(creates[0].model == nil)
+        #expect(creates[0].folder == nil)
+        #expect(creates[0].primaryAgentPreference == nil)
+        #expect(creates[0].profileID == profileID)
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(creates[0]))
+        let keys = try #require(encoded as? [String: Any]).keys.sorted()
+        #expect(keys == ["profileID", "prompt", "repoID"])
+    }
+
+    /// A `profileID` that is not a UUID does not decode, so the request is
+    /// `bad_request`: nothing is created and nothing recorded.
+    @Test func createWorktreeWithAProfileIDThatIsNotAUUIDIsABadRequest() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        _ = try await Self.seedCreatedWorktree(h, in: repo)
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.send(try Self.createBody([
+            "repoID": repo.id.uuidString, "message": "Add a search box.", "profileID": "acme-not-a-uuid",
+        ]), on: outbox)
+
+        #expect(reply.error?.code == .badRequest)
+        #expect(h.actions.worktreeCreates.isEmpty)
+        #expect(h.recorder.records.isEmpty)
+    }
+
+    /// A picked profile the laptop refuses at create, because it changed
+    /// after the list, is `refused` with the laptop's words, and the wait for
+    /// a session never starts.
+    @Test func aCreateWhoseProfileIsRefusedReturnsTheDaemonsReason() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        let refusal = "Model profile 'acme-work' is not logged in. Run tbd profile login acme-work, then try again."
+        h.actions.respond(to: .createWorktree, with: RPCResponse(error: refusal))
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.request(
+            .worktreeCreate,
+            params: PhoneWorktreeCreateParams(repoID: repo.id, message: "Add a search box.", profileID: UUID()),
+            on: outbox)
+
+        #expect(reply.error == PhoneAppError(code: .refused, message: refusal))
+        #expect(h.actions.worktreeCreates.count == 1)
+        #expect(h.subscriptions.subscriberCount == 0)
     }
 
     /// A message of only whitespace and invisible characters creates the

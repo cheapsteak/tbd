@@ -15,7 +15,8 @@
 // - `switch-ask`: the same with Personal picked, so the sheet asks about restarting under it.
 // - `fork`: the same tab with the Fork sheet open.
 // - `model`: the same tab with the Model sheet open, nothing picked yet, so Set waits.
-// - `new-local`: the sessions list with acme-web's New sheet open, its first message the mock's.
+// - `new-local`: the sessions list with acme-web's New sheet open, its first message the mock's,
+//   and its Account row naming the repo's profile.
 // - `new-remote`: acme-api's New sheet on Remote session, acme-cloud picked, with the mock's
 //   message (mock 1356-1357).
 //
@@ -149,6 +150,7 @@ test('new-local', async ({ page, appHost }) => {
   await message.blur();
   const create = sheet.getByRole('button', { name: 'Create', exact: true });
   await expect(create).toBeEnabled();
+  await expect(sheet.getByRole('button', { name: /^Account/ })).toBeEnabled();
   await capture(page, 'new-local', create);
 });
 

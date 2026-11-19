@@ -14,8 +14,9 @@
 // once the session runs under that profile already, disabled with the reason, and the Fork
 // sheet's rows waiting when an event reorders them. Then New, from a repo's "+": the repo it
 // sends, the new session opening once its row appears, a create the user moved away from or
-// closed, the providers and their forms, what remote.create carries, refusals, one create per
-// gesture, the tap guard, what closing the sheet uncovers, and the keyboard.
+// closed, the providers and their forms, what remote.create carries, the account a local
+// worktree starts on, refusals, one create per gesture, the tap guard, what closing the sheet
+// uncovers, and the keyboard.
 //
 // Every test that acts checks the exact params the fake laptop got. Checkout v2's Review tab is
 // the mock's `s-co-rev`: acme-work, opus, idle. Its Claude tab is working, on Personal and
@@ -1771,6 +1772,201 @@ test('a providers load that lands after Local is chosen again holds nothing', as
   }), TAP_GUARD_MS + 300);
   await hostCall(page, 'release', 'remote.providers');
   expect(await disabledOnce).toBe(false);
+});
+
+// MARK: - New: the account
+
+/** acme-work as the laptop marks it when it is not logged in. */
+const NOT_LOGGED_IN = 'Not logged in';
+/** The laptop's refusal of a create under a profile that is not logged in. */
+const PROFILE_REFUSED = "Model profile 'acme-work' is not logged in. Run tbd profile login acme-work, then try again.";
+
+/**
+ * The local form's Account row.
+ * @param {Page} page
+ */
+function accountRow(page) {
+  return sheet(page).getByRole('button', { name: /^Account/ });
+}
+
+/**
+ * The Account list's row for the profile named `name`.
+ * @param {Page} page
+ * @param {string} name
+ */
+function accountOption(page, name) {
+  return sheet(page).locator('button.mi[aria-pressed]', { hasText: name });
+}
+
+/**
+ * Every `profiles.list` that reached the fake laptop, by its params.
+ * @param {Page} page
+ */
+async function profileLoads(page) {
+  return (await hostRequests(page)).filter((r) => r.method === 'profiles.list').map((r) => r.params);
+}
+
+/** mock.json with acme-work not logged in, and acme-api starting its worktrees on acme-bedrock. */
+function withAccounts() {
+  const scenario = structuredClone(MOCK);
+  const work = scenario.profiles.find((/** @type {any} */ p) => p.id === WORK);
+  work.usable = false;
+  work.unusableReason = NOT_LOGGED_IN;
+  scenario.repoProfiles = { [API_REPO]: BEDROCK };
+  return scenario;
+}
+
+test("the Account row reads Default until the profiles load, then the repo's profile; left alone, Create sends no profileID", async ({ page, appHost }) => {
+  await openApp(page, appHost, { scenario: withAccounts() });
+  await hostCall(page, 'hold', 'profiles.list');
+  await openNew(page, 'acme-api');
+  const row = accountRow(page);
+  await expect(row).toContainText('Default');
+  await expect(row).toBeDisabled();
+  await page.waitForTimeout(TAP_GUARD_MS + 100);
+  await expect(row).toBeDisabled();
+  await hostCall(page, 'release', 'profiles.list');
+  // The row names acme-api's own profile, and waits a moment as it lands under the finger.
+  await expect(row).toContainText('acme-bedrock');
+  await expect(row).toBeDisabled();
+  await expect(row).toBeEnabled();
+  expect(await profileLoads(page)).toEqual([{ repoID: API_REPO }]);
+  // Opening the list and closing it with the row picks nothing.
+  await row.click();
+  await expect(accountOption(page, 'acme-bedrock')).toHaveAttribute('aria-pressed', 'true');
+  await row.click();
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect.poll(() => creates(page)).toEqual([{ method: 'worktree.create', params: { repoID: API_REPO, message: LOCAL_MESSAGE } }]);
+});
+
+test("a tap on the profile the row already shows pins it, and Create sends its profileID", async ({ page, appHost }) => {
+  await openApp(page, appHost, { scenario: withAccounts() });
+  await openNew(page, 'acme-api');
+  const row = accountRow(page);
+  await expect(row).toContainText('acme-bedrock');
+  await expect(row).toBeEnabled();
+  await row.click();
+  await expect(accountOption(page, 'acme-bedrock')).toHaveAttribute('aria-pressed', 'true');
+  await accountOption(page, 'acme-bedrock').click();
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
+  await expect(row).toContainText('acme-bedrock');
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect.poll(() => creates(page)).toEqual([
+    { method: 'worktree.create', params: { repoID: API_REPO, message: LOCAL_MESSAGE, profileID: BEDROCK } },
+  ]);
+});
+
+test('the Account list ticks the current profile and disables one that cannot start a session; a pick goes out as profileID', async ({ page, appHost }) => {
+  await openApp(page, appHost, { scenario: withAccounts() });
+  await openNew(page, 'acme-web');
+  const row = accountRow(page);
+  await expect(row).toContainText('Personal');
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
+  await expect(accountOption(page, 'Personal')).toHaveCount(0);
+  await row.click();
+  await expect(row).toHaveAttribute('aria-expanded', 'true');
+  await expect(accountOption(page, 'Personal')).toHaveAttribute('aria-pressed', 'true');
+  await expect(accountOption(page, 'Personal').locator('small')).toHaveText('Claude subscription · default');
+  await expect(accountOption(page, 'acme-work')).toBeDisabled();
+  await expect(accountOption(page, 'acme-work').locator('small')).toHaveText(NOT_LOGGED_IN);
+  await expect(accountOption(page, 'acme-bedrock')).toHaveAttribute('aria-pressed', 'false');
+  await expect(accountOption(page, 'acme-bedrock').locator('small')).toHaveText('Amazon Bedrock');
+  await accountOption(page, 'acme-bedrock').click();
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
+  await expect(accountOption(page, 'acme-bedrock')).toHaveCount(0);
+  await expect(row).toContainText('acme-bedrock');
+  // A pick does not enable Create: the message does.
+  await page.waitForTimeout(TAP_GUARD_MS + 100);
+  await expect(createButton(page)).toBeDisabled();
+  // The remote form has no Account row.
+  await sheet(page).getByRole('button', { name: 'Remote session' }).click();
+  await expect(provider(page, 'acme-cloud')).toBeVisible();
+  await expect(accountRow(page)).toHaveCount(0);
+  await sheet(page).getByRole('button', { name: 'Local worktree' }).click();
+  await expect(row).toBeEnabled();
+  await expect(row).toContainText('acme-bedrock');
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect.poll(() => creates(page)).toEqual([
+    { method: 'worktree.create', params: { repoID: WEB_REPO, message: LOCAL_MESSAGE, profileID: BEDROCK } },
+  ]);
+  await expect(screenName(page)).toHaveAttribute('data-screen', 'session');
+  await expect(accountButton(page, 'acme-bedrock')).toBeVisible();
+});
+
+test("a list that loads again keeps a pick it still offers, and goes back to the repo's profile once it does not", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openNew(page, 'acme-web');
+  const row = accountRow(page);
+  await row.click();
+  await accountOption(page, 'acme-work').click();
+  await expect(row).toContainText('acme-work');
+  // Each time the local form shows, it loads the profiles again.
+  await sheet(page).getByRole('button', { name: 'Remote session' }).click();
+  await sheet(page).getByRole('button', { name: 'Local worktree' }).click();
+  await expect.poll(() => profileLoads(page)).toEqual([{ repoID: WEB_REPO }, { repoID: WEB_REPO }]);
+  await expect(row).toBeEnabled();
+  await expect(row).toContainText('acme-work');
+  // Now the laptop says acme-work cannot start a session.
+  const profiles = MOCK.profiles.map((/** @type {any} */ p) => (p.id === WORK ? { ...p, usable: false, unusableReason: NOT_LOGGED_IN } : p));
+  await hostCall(page, 'setReply', 'profiles.list', { result: { profiles, repoProfileID: PERSONAL } });
+  await sheet(page).getByRole('button', { name: 'Remote session' }).click();
+  await sheet(page).getByRole('button', { name: 'Local worktree' }).click();
+  await expect(row).toContainText('Personal');
+  await expect(row).toBeEnabled();
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect.poll(() => creates(page)).toEqual([{ method: 'worktree.create', params: { repoID: WEB_REPO, message: LOCAL_MESSAGE } }]);
+});
+
+test('a failed profiles load leaves the row at Default with no words, and Create goes out with no profileID', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await hostCall(page, 'setReply', 'profiles.list', { error: { code: 'internal', message: 'TBD could not read its profiles.' } });
+  await openNew(page, 'acme-web');
+  await expect.poll(() => count(page, 'profiles.list')).toBe(1);
+  await page.waitForTimeout(TAP_GUARD_MS + 100);
+  await expect(accountRow(page)).toContainText('Default');
+  await expect(accountRow(page)).toBeDisabled();
+  await expect(sheet(page).getByRole('alert')).toHaveCount(0);
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect.poll(() => creates(page)).toEqual([{ method: 'worktree.create', params: { repoID: WEB_REPO, message: LOCAL_MESSAGE } }]);
+});
+
+test("a refused create keeps the message and the pick, and the next sheet starts again at the repo's profile", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await hostCall(page, 'setReply', 'worktree.create', { error: { code: 'refused', message: PROFILE_REFUSED } });
+  await openNew(page, 'acme-web');
+  await accountRow(page).click();
+  await accountOption(page, 'acme-work').click();
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect(sheet(page).getByRole('alert')).toHaveText(PROFILE_REFUSED);
+  await expect(firstMessage(page)).toHaveValue(LOCAL_MESSAGE);
+  await expect(accountRow(page)).toContainText('acme-work');
+  expect(await creates(page)).toEqual([{ method: 'worktree.create', params: { repoID: WEB_REPO, message: LOCAL_MESSAGE, profileID: WORK } }]);
+  await page.keyboard.press('Escape');
+  await expect(sheet(page)).toHaveCount(0);
+  await page.waitForTimeout(TAP_GUARD_MS + 100);
+  await openNew(page, 'acme-web');
+  await expect(accountRow(page)).toBeEnabled();
+  await expect(accountRow(page)).toContainText('Personal');
+});
+
+test('a double tap on the Account row opens the list and leaves it open', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openNew(page, 'acme-web');
+  const row = accountRow(page);
+  await expect(row).toBeEnabled();
+  await doubleTap(page, row);
+  await expect(row).toHaveAttribute('aria-expanded', 'true');
+  await page.waitForTimeout(TAP_GUARD_MS + 100);
+  await expect(row).toHaveAttribute('aria-expanded', 'true');
+  await expect(row).toContainText('Personal');
+  await expect(accountOption(page, 'Personal')).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('Cancel closes the sheet and sends nothing, and a double tap on it opens no session', async ({ page, appHost }) => {

@@ -92,6 +92,24 @@ struct ExplicitProfileCheckTests {
         let profile = ModelProfile(name: "acme-work", kind: kind)
         #expect(try await check(profile).refusal(for: profile.id, requireCredentials: false) == nil)
     }
+
+    /// `missingCredential(of:)` names what each credential refusal above is
+    /// for, and nothing for a profile that has its credential or, like a
+    /// Bedrock profile, needs none of TBD's.
+    @Test func missingCredentialNamesWhatEachRefusalIsFor() throws {
+        let oauth = ModelProfile(name: "acme-work", kind: .oauth)
+        let token = ModelProfile(name: "acme-work", kind: .oauthToken)
+        let apiKey = ModelProfile(name: "acme-work", kind: .apiKey)
+        let bedrock = ModelProfile(name: "acme-bedrock", kind: .bedrock)
+
+        #expect(try check(oauth).missingCredential(of: oauth) == .login)
+        #expect(try check(oauth, identity: "person@acme.example").missingCredential(of: oauth) == nil)
+        #expect(try check(token).missingCredential(of: token) == .token)
+        #expect(try check(token, secret: "sk-ant-oat01-TEST").missingCredential(of: token) == nil)
+        #expect(try check(apiKey).missingCredential(of: apiKey) == .apiKey)
+        #expect(try check(apiKey, secret: "sk-ant-api-TEST").missingCredential(of: apiKey) == nil)
+        #expect(try check(bedrock).missingCredential(of: bedrock) == nil)
+    }
 }
 
 // Nested under TBDHomeSerialized: every test points the process-global

@@ -398,3 +398,50 @@ test("a remote session's refKey is its row ID in the session list", () => {
   assert.ok(remoteRow !== undefined && remoteRow.sessions[0] !== undefined);
   assert.equal(refKey(remoteRow.sessions[0].ref), remoteRow.id);
 });
+
+// The New sheet's account choice: `profiles.list` with a repo, and `worktree.create` with a profile.
+
+const PROFILE = { id: '6C2471BC-B073-5CE4-B694-F648094C061D', name: 'Personal', kind: 'oauth', isDefault: true };
+
+test("a profile's, the profiles reply's and a phone create's fields are PhoneAppMessages.swift's", () => {
+  const file = 'TBDDaemon/PhoneBridge/App/PhoneAppMessages.swift';
+  assert.deepEqual(swiftStructFields(file, 'PhoneProfile'), ['id', 'name', 'kind', 'isDefault', 'usable', 'unusableReason']);
+  assert.deepEqual(swiftStructFields(file, 'ProfilesListResult'), ['profiles', 'repoProfileID']);
+  assert.deepEqual(swiftStructFields(file, 'ProfilesListParams'), ['repoID']);
+  assert.deepEqual(swiftStructFields(file, 'PhoneWorktreeCreateParams'), ['repoID', 'message', 'profileID']);
+});
+
+test('a profiles reply for a repo keeps its marks and the repo profile; one with none of them, as an older laptop sends, decodes without them', () => {
+  const unusable = { ...PROFILE, id: '8DFEE22E-09D8-5BE1-B331-221F570DC1C6', name: 'acme-work', isDefault: false, usable: false, unusableReason: 'Not logged in' };
+  const forRepo = { profiles: [PROFILE, unusable], repoProfileID: PROFILE.id };
+  assert.deepEqual(decodeResult('profiles.list', forRepo), forRepo);
+  const older = decodeResult('profiles.list', { profiles: [PROFILE] });
+  assert.deepEqual(older, { profiles: [PROFILE] });
+  assert.equal('repoProfileID' in older, false);
+  for (const key of ['usable', 'unusableReason']) assert.equal(key in (older.profiles[0] ?? {}), false, key);
+});
+
+test('the profile marks and the repo profile are checked like the rest', () => {
+  assert.throws(() => decodeResult('profiles.list', { profiles: [{ ...PROFILE, usable: 'no' }] }), at('profiles[0].usable'));
+  assert.throws(() => decodeResult('profiles.list', { profiles: [{ ...PROFILE, usable: null }] }), at('profiles[0].usable'));
+  assert.throws(() => decodeResult('profiles.list', { profiles: [{ ...PROFILE, usable: false, unusableReason: 3 }] }), at('profiles[0].unusableReason'));
+  assert.throws(() => decodeResult('profiles.list', { profiles: [], repoProfileID: 7 }), at('repoProfileID'));
+  assert.throws(() => decodeResult('profiles.list', { profiles: [], repoProfileID: null }), at('repoProfileID'));
+});
+
+test('profiles.list takes an optional repoID, and worktree.create an optional profileID, each sent only when set', () => {
+  const repoID = '16E7737E-5C20-548E-81FC-5DD3F9A51D36';
+  assert.deepEqual(requestBody('r1', 'profiles.list', { repoID }).params, { repoID });
+  assert.deepEqual(requestBody('r2', 'profiles.list', {}).params, {});
+  assert.deepEqual(requestBody('r3', 'profiles.list', { repoID: undefined }).params, {});
+  assert.throws(() => decodeParams('profiles.list', { repoID: 7 }), at('repoID'));
+  const create = { repoID, message: 'Add a search box to the orders page.' };
+  assert.deepEqual(requestBody('r4', 'worktree.create', { ...create, profileID: PROFILE.id }).params, { ...create, profileID: PROFILE.id });
+  const none = requestBody('r5', 'worktree.create', { ...create, profileID: undefined }).params as object;
+  assert.deepEqual(none, create);
+  assert.equal('profileID' in none, false);
+  // A field a phone may not set, such as a model, never goes out.
+  const withModel = { ...create, model: 'opus' } as unknown as ParamsOf<'worktree.create'>;
+  assert.deepEqual(requestBody('r6', 'worktree.create', withModel).params, create);
+  assert.throws(() => decodeParams('worktree.create', { ...create, profileID: 7 }), at('profileID'));
+});

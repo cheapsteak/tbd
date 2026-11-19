@@ -307,3 +307,5 @@ button.tool:active{background:var(--box)}
 .tool code.path{display:flex}
 .tool code.path .dir{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.65}
 .tool code.path .base{flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the New sheet's Account row: the account a new worktree starts on sits at the row's right, as a value, and a long name is cut with an ellipsis */
+.mi .val{flex:0 1 auto;display:block;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}

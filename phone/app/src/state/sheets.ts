@@ -21,6 +21,12 @@
  * - **Providers** (`providers`): the last `remote.providers`, for the New sheet's repo, loaded
  *   afresh each time the sheet shows its remote form. A load that a later one replaced changes
  *   nothing when it ends (`id`), and a list loaded for one repo never shows for another.
+ * - **The New sheet's profiles** (`newProfiles`): the last `profiles.list` with the New sheet's
+ *   repo, loaded afresh each time the sheet shows its local form, for its Account row: the
+ *   profiles marked usable or not, and the one a new worktree in the repo would use. A load of its
+ *   own, apart from `profiles`, so the Account row and the session's account menu and sheets never
+ *   read or replace each other's list. A load that a later one replaced changes nothing when it
+ *   ends (`id`), and a list loaded for one repo never shows for another.
  * - **Creating** (`creating`): the create on its way from this phone, a worktree or a remote
  *   session, its repo, and the navigation mark its session opens by (`navMark`); null for none.
  *   `beginCreate` marks it, and nothing else does, so one gesture sends one create; `endCreate`
@@ -48,7 +54,8 @@
  * Below the slice are the menus' and the sheets' shared rules: the model names, which profile is
  * the current one, the profiles in the Fork sheet's order, what stops an acting request (the one
  * check the buttons and the actions both make), and the words they show. Then the New sheet's:
- * a provider's form, the `remote.create` params it makes, and when Create may send.
+ * the account a new worktree starts on, a provider's form, the `remote.create` params it makes,
+ * and when Create may send.
  */
 
 import type {
@@ -85,6 +92,22 @@ export type ProvidersLoad =
   | { phase: 'loaded'; repoID: string; providers: readonly PhoneProvider[] }
   | { phase: 'failed'; repoID: string; message: string };
 
+/**
+ * Where the New sheet's `profiles.list` stands (`newProfiles`): never asked (`idle`), on its way
+ * for `repoID` (`loading`, with the load's `id`), answered (`loaded`, the laptop's profiles in its
+ * order, each marked usable or not for `repoID`, and `repoProfileID`, the profile a new worktree
+ * there would use, or null when the laptop named none), or failed (`failed`). The sheet shows a
+ * failed load as it shows one on its way, with no words: a create goes out all the same.
+ */
+export type NewProfilesLoad =
+  | { phase: 'idle' }
+  | { phase: 'loading'; id: number; repoID: string }
+  | { phase: 'loaded'; repoID: string; profiles: readonly PhoneProfile[]; repoProfileID: string | null }
+  | { phase: 'failed'; repoID: string };
+
+/** The New sheet's profiles once loaded for its repo (`loadedNewProfiles`). */
+export type LoadedNewProfiles = Extract<NewProfilesLoad, { phase: 'loaded' }>;
+
 /** Which of a session's acting requests is on its way. */
 export type ActingKind = 'switch' | 'fork' | 'model';
 
@@ -112,6 +135,7 @@ export interface SheetsState {
   /** The last action's failure, shown in `on` while `ui.sheet` or `ui.menu` is that very object; null for none. */
   failed: { on: SheetState | MenuState; text: string } | null;
   providers: ProvidersLoad;
+  newProfiles: NewProfilesLoad;
   /** The create on its way, or null. */
   creating: CreateOnItsWay | null;
   /** The last open a create that settled handed to `openPending`, by identity, or null. It may have opened since. */
@@ -122,8 +146,8 @@ export interface SheetsState {
 
 export function emptySheets(): SheetsState {
   return {
-    profiles: { phase: 'idle' }, acting: emptyRecord(), failed: null, providers: { phase: 'idle' }, creating: null,
-    awaitingOpen: null, lostCreates: emptyRecord(),
+    profiles: { phase: 'idle' }, acting: emptyRecord(), failed: null, providers: { phase: 'idle' }, newProfiles: { phase: 'idle' },
+    creating: null, awaitingOpen: null, lostCreates: emptyRecord(),
   };
 }
 
@@ -198,6 +222,21 @@ export function providersEnded(s: SheetsState, id: number, next: ProvidersLoad):
 /** The providers the last load gave for `repoID`, or null while none is loaded for it. */
 export function loadedProviders(s: SheetsState, repoID: string): readonly PhoneProvider[] | null {
   return s.providers.phase === 'loaded' && s.providers.repoID === repoID ? s.providers.providers : null;
+}
+
+/** `s` with a new `profiles.list` for the New sheet's `repoID` on its way, numbered `id`. */
+export function newProfilesLoading(s: SheetsState, id: number, repoID: string): SheetsState {
+  return { ...s, newProfiles: { phase: 'loading', id, repoID } };
+}
+
+/** `s` with the New sheet's profiles load `id` ended in `next`, or `s` itself when a later load replaced it. */
+export function newProfilesEnded(s: SheetsState, id: number, next: NewProfilesLoad): SheetsState {
+  return s.newProfiles.phase === 'loading' && s.newProfiles.id === id ? { ...s, newProfiles: next } : s;
+}
+
+/** The New sheet's profiles as the last load gave them for `repoID`, or null while none is loaded for it. */
+export function loadedNewProfiles(s: SheetsState, repoID: string): LoadedNewProfiles | null {
+  return s.newProfiles.phase === 'loaded' && s.newProfiles.repoID === repoID ? s.newProfiles : null;
 }
 
 /**
@@ -391,6 +430,59 @@ export function restartNote(session: PhoneSession): string {
 }
 
 // MARK: - The New sheet's rules
+
+/** What the Account row reads while it knows no profile to name (`accountChoice`). */
+export const NO_ACCOUNT_TEXT = 'Default';
+
+/**
+ * Whether `p` can start a session in the repo it was listed for. The laptop marks a profile that
+ * cannot `usable: false` and leaves a usable one unmarked, so a profile listed with no repo, which
+ * carries no mark, counts as usable.
+ */
+export function isUsable(p: PhoneProfile): boolean {
+  return p.usable !== false;
+}
+
+/**
+ * Whether the profile with ID `id`, which the user picked, still stands in `profiles`, a list
+ * loaded since the pick: the list holds it, and it is usable. A pick that no longer stands goes,
+ * and the Account row shows the repo's profile again (`accountChoice`).
+ */
+export function pickStands(profiles: readonly PhoneProfile[], id: string): boolean {
+  const p = profileByID(profiles, id);
+  return p !== null && isUsable(p);
+}
+
+/**
+ * The profile the New sheet's Account row shows, from `loaded`, the profiles loaded for the
+ * sheet's repo (null while none are), and `picked`, the profile the user picked (null for none):
+ * - the pick, while it stands (`pickStands`), as the list now has it; while no list is loaded, as
+ *   it was picked;
+ * - else the repo's profile (`repoProfileID`), when the list holds it;
+ * - else null, while the row knows no profile to name, which it reads as `NO_ACCOUNT_TEXT`.
+ *
+ * Only a pick goes out with a create, the repo's own profile included when the user taps it. A
+ * row left alone sends no `profileID`, and the laptop chooses as it always has: with balancing
+ * on, it may start the session on another profile than the one the row names.
+ */
+export function accountChoice(loaded: LoadedNewProfiles | null, picked: PhoneProfile | null): PhoneProfile | null {
+  if (picked !== null) {
+    if (loaded === null) return picked;
+    if (pickStands(loaded.profiles, picked.id)) return profileByID(loaded.profiles, picked.id);
+  }
+  if (loaded === null || loaded.repoProfileID === null) return null;
+  return profileByID(loaded.profiles, loaded.repoProfileID);
+}
+
+/**
+ * The line under a profile in the Account row's list: for one that cannot start a session, the
+ * laptop's short reason; else, and for one the laptop gave no reason for, its kind and the
+ * default's mark, as the account menu and the Switch account sheet word them (`profileDetail`).
+ */
+export function accountDetail(p: PhoneProfile): string {
+  if (!isUsable(p) && p.unusableReason !== undefined && p.unusableReason !== '') return p.unusableReason;
+  return profileDetail(p);
+}
 
 /**
  * What the user changed in a provider's form, by field name: the text typed or the choice picked

@@ -215,6 +215,57 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
     }
 }
 
+// MARK: - FakeProfileCredentials
+
+/// The credentials the service's `ExplicitProfileCheck` reads for a profile:
+/// a stored secret and a login account per profile, none until a test sets
+/// one, and a secret read that throws for a profile a test makes unreadable.
+/// The check reads profile rows from the harness's database.
+final class FakeProfileCredentials: @unchecked Sendable {
+    struct Unreadable: Error {}
+
+    private let lock = NSLock()
+    private var secrets: [UUID: String] = [:]
+    private var logins: [UUID: String] = [:]
+    private var unreadable: Set<UUID> = []
+
+    init() {}
+
+    /// Stores `secret` as `id`'s token or API key.
+    func store(_ secret: String, for id: UUID) {
+        lock.withLock { secrets[id] = secret }
+    }
+
+    /// Gives `id` a login account, as `/login` in its config directory does.
+    func logIn(_ id: UUID) {
+        lock.withLock { logins[id] = "person@acme.example" }
+    }
+
+    /// Every later read of `id`'s secret throws, as a key file that fails the
+    /// store's checks does.
+    func makeSecretUnreadable(_ id: UUID) {
+        lock.withLock { _ = unreadable.insert(id) }
+    }
+
+    func secret(_ id: UUID) throws -> String? {
+        let (value, fails) = lock.withLock { () -> (String?, Bool) in (secrets[id], unreadable.contains(id)) }
+        if fails { throw Unreadable() }
+        return value
+    }
+
+    func loginIdentity(_ id: UUID) -> String? {
+        lock.withLock { logins[id] }
+    }
+
+    /// The check over `db`'s profile rows and these credentials.
+    func check(db: TBDDatabase) -> ExplicitProfileCheck {
+        ExplicitProfileCheck(
+            profile: { id in try await db.modelProfiles.get(id: id) },
+            secret: { id in try self.secret(id) },
+            loginIdentity: { id in self.loginIdentity(id) })
+    }
+}
+
 // MARK: - CapturingOutbox
 
 /// A `PhoneAppOutbox` that keeps every app body sent through it, in order.
@@ -449,10 +500,12 @@ enum PhoneProviderSecret {
 /// one paired phone named "Acme Phone", with fakes for everything it calls
 /// and an `EventDrivenTestClock` for its timers. `subscriptions` and
 /// `pendingPrompts` are the service's own, so a test can open prompts and
-/// broadcast state deltas to it.
+/// broadcast state deltas to it. `credentials` holds what the service's
+/// profile check reads for each profile: nothing until a test sets it.
 struct PhoneServiceHarness: Sendable {
     let db: TBDDatabase
     let actions: FakeSessionActions
+    let credentials: FakeProfileCredentials
     let recorder: CapturingRecorder
     let clock: EventDrivenTestClock
     let subscriptions: StateSubscriptionManager
@@ -481,6 +534,7 @@ struct PhoneServiceHarness: Sendable {
             id: peer.deviceID, name: peer.deviceName, publicKey: Data(repeating: 7, count: 32),
             roomID: UUID().uuidString, pairedAt: Date(timeIntervalSince1970: 1_800_000_000)))
         let actions = FakeSessionActions()
+        let credentials = FakeProfileCredentials()
         let recorder = CapturingRecorder()
         let clock = EventDrivenTestClock()
         let subscriptions = StateSubscriptionManager()
@@ -502,10 +556,11 @@ struct PhoneServiceHarness: Sendable {
         let service = PhoneAppService(
             db: db, actions: actions, subscriptions: subscriptions,
             pendingPrompts: pendingPrompts, locateTranscript: Self.locateTranscript,
+            profileCheck: credentials.check(db: db),
             recorder: recorder, readPhoneControl: readPhoneControl, readPairing: readPairing, now: now, clock: clock)
         return PhoneServiceHarness(
-            db: db, actions: actions, recorder: recorder, clock: clock, subscriptions: subscriptions,
-            pendingPrompts: pendingPrompts, service: service, peer: peer)
+            db: db, actions: actions, credentials: credentials, recorder: recorder, clock: clock,
+            subscriptions: subscriptions, pendingPrompts: pendingPrompts, service: service, peer: peer)
     }
 
     /// The production locator over a `projects/` root that does not exist,
