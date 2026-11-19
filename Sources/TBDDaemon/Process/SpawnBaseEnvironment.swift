@@ -214,6 +214,34 @@ enum SpawnBaseEnvironment {
         return environment
     }
 
+    /// `USER` and `LOGNAME` named for the account this process runs as.
+    ///
+    /// A daemon started by launchd, or by a script a launchd job runs, can have
+    /// no `USER` at all and a `LOGNAME` of `root`. Every session it spawns
+    /// inherits that, and Claude Code names the macOS keychain account it stores
+    /// a login under from the environment: a session with no `USER` stores its
+    /// refreshed token under a second item (account `unknown`) beside the one
+    /// `/login` wrote. One login then lives in two items that rotate the same
+    /// refresh token, and one of them loses it.
+    ///
+    /// A value that is missing, empty, or names a different account than the
+    /// process uid is replaced; a value that already agrees is left alone, and
+    /// no other name is touched. With no resolvable account the base is
+    /// returned unchanged. `account` is injectable for tests. The daemon applies
+    /// it once to its own environment at startup (`Daemon.scrubInheritedTBDEnv`),
+    /// so every spawn that inherits plainly gets it.
+    static func withLoginIdentity(
+        _ base: [String: String],
+        account: String? = ClaudeCredentialAccount.current()
+    ) -> [String: String] {
+        guard let account else { return base }
+        var environment = base
+        for name in ["USER", "LOGNAME"] where environment[name] != account {
+            environment[name] = account
+        }
+        return environment
+    }
+
     /// Whether `value` names a directory TBD minted for one profile — that is,
     /// one under the profiles root of the installation `base` itself names, so
     /// a daemon fenced onto a scratch `TBD_HOME` judges against that fence

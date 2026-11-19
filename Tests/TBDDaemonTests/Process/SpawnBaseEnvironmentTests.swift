@@ -312,4 +312,26 @@ struct SpawnBaseEnvironmentTests {
             request.environment["CLAUDE_CONFIG_DIR"]
                 == "/tmp/example-tbd-home/profiles/this-spawn/claude")
     }
+    // MARK: - Login identity
+
+    @Test func aMissingUserAndLogNameAreNamedForTheAccount() {
+        let result = SpawnBaseEnvironment.withLoginIdentity(["PATH": "/usr/bin"], account: "alice")
+        #expect(result == ["PATH": "/usr/bin", "USER": "alice", "LOGNAME": "alice"])
+    }
+
+    @Test func anEmptyOrDisagreeingValueIsReplaced() {
+        let result = SpawnBaseEnvironment.withLoginIdentity(
+            ["USER": "", "LOGNAME": "root"], account: "alice")
+        #expect(result == ["USER": "alice", "LOGNAME": "alice"])
+    }
+
+    @Test func anAgreeingValueAndEveryOtherNameAreLeftAlone() {
+        let base = ["USER": "alice", "LOGNAME": "alice", "HOME": "/Users/alice", "user": "x"]
+        #expect(SpawnBaseEnvironment.withLoginIdentity(base, account: "alice") == base)
+    }
+
+    @Test func noResolvableAccountChangesNothing() {
+        let base = ["LOGNAME": "root"]
+        #expect(SpawnBaseEnvironment.withLoginIdentity(base, account: nil) == base)
+    }
 }
