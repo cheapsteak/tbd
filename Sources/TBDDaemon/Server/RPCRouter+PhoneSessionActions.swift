@@ -90,8 +90,9 @@ extension RPCRouter: PhoneSessionActions {
     /// A worktree create from a phone. Its first message rides the spawn
     /// command of the worktree's first agent, so it is held to the phone
     /// message rule first (`phoneWorktreeCreateVetted`), and a refused one
-    /// creates nothing. A create with no first message goes to the handler as
-    /// it came.
+    /// creates nothing. A create with no first message meets no message rule
+    /// and goes to the handler. Either way the handler gets only the repo, the
+    /// message and the profile.
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
         switch Self.phoneWorktreeCreateVetted(p) {
         case .refused(let refusal):
@@ -157,20 +158,24 @@ extension RPCRouter: PhoneSessionActions {
 
     // MARK: - The fields a phone may set
 
-    /// A worktree a phone creates: the repo and the first message. The folder,
-    /// branch, name, parent, profile, model, agent, settings, plugin folders,
-    /// pull request and window size all take TBD's defaults, as spec section 5
-    /// says.
+    /// A worktree a phone creates: the repo, the first message and the
+    /// profile the user picked, if any. The folder, branch, name, parent,
+    /// model, agent, settings, plugin folders, pull request and window size
+    /// all take TBD's defaults, as spec section 5 says. The handler checks the
+    /// profile as it checks any explicit profile, and refuses the create
+    /// before anything exists when the profile is missing or has no
+    /// credentials; no profile leaves the choice to the laptop.
     static func phoneWorktreeCreateParams(_ p: WorktreeCreateParams) -> WorktreeCreateParams {
-        WorktreeCreateParams(repoID: p.repoID, prompt: p.prompt)
+        WorktreeCreateParams(repoID: p.repoID, prompt: p.prompt, profileID: p.profileID)
     }
 
-    /// A worktree a phone creates, as the handler gets it: the repo and the
-    /// first message (`phoneWorktreeCreateParams`), with the first message
-    /// held to the phone message rule (`PhoneMessageText.vettedFirstMessage`).
-    /// A nil or empty first message is no message and is kept as it came.
-    /// Either the params with the message's CRLFs made bare LFs, or the
-    /// refusal that answers in place of the create.
+    /// A worktree a phone creates, as the handler gets it: the repo, the
+    /// first message and the profile (`phoneWorktreeCreateParams`), with the
+    /// first message held to the phone message rule
+    /// (`PhoneMessageText.vettedFirstMessage`). A nil or empty first message
+    /// is no message and is kept as it came. Either the params with the
+    /// message's CRLFs made bare LFs, or the refusal that answers in place of
+    /// the create.
     static func phoneWorktreeCreateVetted(
         _ p: WorktreeCreateParams
     ) -> PhoneMessageText.Vetted<WorktreeCreateParams> {
@@ -179,7 +184,8 @@ extension RPCRouter: PhoneSessionActions {
         case .refused(let refusal):
             return .refused(refusal)
         case .deliver(let prompt):
-            return .deliver(WorktreeCreateParams(repoID: narrowed.repoID, prompt: prompt))
+            return .deliver(WorktreeCreateParams(
+                repoID: narrowed.repoID, prompt: prompt, profileID: narrowed.profileID))
         }
     }
 

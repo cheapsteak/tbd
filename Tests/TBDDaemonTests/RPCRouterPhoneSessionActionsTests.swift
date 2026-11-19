@@ -325,10 +325,11 @@ struct RPCRouterPhoneSessionActionsTests {
         return Set(try #require(object as? [String: Any]).keys)
     }
 
-    /// A phone's create keeps the repo and the first message, and nothing
-    /// else, whatever the bridge passed. Every field is set, so the rebuild has
-    /// something to drop from each.
-    @Test func phoneWorktreeCreateParamsKeepOnlyTheRepoAndTheFirstMessage() throws {
+    /// A phone's create keeps the repo, the first message and the profile,
+    /// and nothing else, whatever the bridge passed: the model goes with the
+    /// rest. Every field is set, so the rebuild has something to drop from
+    /// each.
+    @Test func phoneWorktreeCreateParamsKeepOnlyTheRepoTheFirstMessageAndTheProfile() throws {
         let full = WorktreeCreateParams(
             repoID: UUID(), folder: "acme-folder", branch: "acme-branch", displayName: "Acme",
             prompt: "first message", cols: 80, rows: 24, parentWorktreeID: UUID(),
@@ -339,9 +340,61 @@ struct RPCRouterPhoneSessionActionsTests {
             pluginDirs: ["/nonexistent"])
         let narrowed = RPCRouter.phoneWorktreeCreateParams(full)
 
-        #expect(try encodedKeys(narrowed) == ["repoID", "prompt"])
+        #expect(try encodedKeys(narrowed) == ["repoID", "prompt", "profileID"])
         #expect(narrowed.repoID == full.repoID)
         #expect(narrowed.prompt == "first message")
+        #expect(narrowed.profileID == full.profileID)
+        #expect(narrowed.model == nil)
+    }
+
+    /// The message rule keeps the profile: the handler gets the message with
+    /// the send rail's line endings and the profile the phone picked, and
+    /// still no model.
+    @Test func phoneWorktreeCreateVettedKeepsTheProfile() throws {
+        let repoID = UUID()
+        let profileID = UUID()
+        let vetted = RPCRouter.phoneWorktreeCreateVetted(WorktreeCreateParams(
+            repoID: repoID, prompt: "first\r\nsecond", profileID: profileID, model: "opus"))
+
+        guard case .deliver(let params) = vetted else {
+            Issue.record("a message with CRLF line endings was refused: \(vetted)")
+            return
+        }
+        #expect(params.prompt == "first\nsecond")
+        #expect(params.profileID == profileID)
+        #expect(try encodedKeys(params) == ["repoID", "prompt", "profileID"])
+    }
+
+    /// A phone's create naming a profile the laptop cannot use is refused by
+    /// the create handler's own check, before anything of the create exists:
+    /// a profile that is gone, and an OAuth profile that never logged in. The
+    /// repo does not exist either, and the same create with no profile gets
+    /// past the check to the repo lookup and throws, so each refusal is the
+    /// profile's.
+    @Test func phoneCreateWorktreeRefusesAnUnusableProfileAndCreatesNothing() async throws {
+        let f = try makeFixture()
+        let missing = UUID()
+        let loggedOut = try await f.db.modelProfiles.create(name: "acme-oauth", kind: .oauth)
+        let unusable: [(id: UUID, refusal: String)] = [
+            (missing, "Model profile \(missing.uuidString) does not exist. Run tbd profile list to see the profiles."),
+            (loggedOut.id, "Model profile 'acme-oauth' is not logged in. Run tbd profile login acme-oauth, then try again."),
+        ]
+
+        for profile in unusable {
+            let response = try await f.actions.phoneCreateWorktree(
+                WorktreeCreateParams(repoID: UUID(), prompt: "hi", profileID: profile.id), deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == profile.refusal)
+        }
+        let worktrees = try await f.db.worktrees.list()
+        #expect(worktrees.isEmpty, "a refused profile creates no worktree row")
+        let createRows = f.actuationRows().filter { $0.method == RPCMethod.worktreeCreate }
+        #expect(createRows.isEmpty, "a refused profile records no create")
+
+        await #expect(throws: WorktreeLifecycleError.self) {
+            _ = try await f.actions.phoneCreateWorktree(
+                WorktreeCreateParams(repoID: UUID(), prompt: "hi"), deviceID: UUID())
+        }
     }
 
     /// The socket's create refuses a missing plugin folder before it looks for

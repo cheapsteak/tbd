@@ -1681,6 +1681,7 @@ struct PhonePromptAnswerRouterTests {
         let service = PhoneAppService(
             db: db, actions: actions, subscriptions: subs, pendingPrompts: router.pendingQuestions,
             locateTranscript: PhoneServiceHarness.locateTranscript,
+            profileCheck: router.explicitProfileCheck,
             recorder: CapturingRecorder(), clock: EventDrivenTestClock())
         return Fixture(db: db, service: service, peer: peer)
     }

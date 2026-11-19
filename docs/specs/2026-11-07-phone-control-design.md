@@ -29,7 +29,7 @@ phone, so that a session waiting on me does not sit idle until I am back at my d
 - Answer an open question or permission prompt, with the same choices the laptop offers.
 - Switch a local Claude session to another model profile, fork it under a profile, and change its
   model with `/model`.
-- Create a local worktree with a first message, or a remote-provider session.
+- Create a local worktree with a first message on a chosen account, or a remote-provider session.
 - Work across NAT on both ends with no port forwarding and no VPN app.
 - Need no server that the TBD maintainer hosts. Each user's setup is their own.
 - Keep the relay, the network and Cloudflare unable to read or inject anything.
@@ -299,7 +299,20 @@ Requests:
 - **`message.send`** – sends text to a session, waking it first if it is parked.
 - **`prompt.answer`** – answers an open prompt by its ID.
 - **`profiles.list`** – the user's model profiles: ID, name, kind, and which is the default. Never
-  a token or other secret.
+  a token or other secret. The New sheet names its repo (`repoID`), and the reply then adds two
+  things:
+  - **`repoProfileID`** – the profile a new worktree in that repo would start on: the repo's own
+    profile setting when that profile loads, otherwise the global default when it loads. Loading
+    follows the laptop's resolver with balancing left out, so a profile that is gone, or an API-key
+    profile with no key, is passed over. Absent when neither applies.
+  - **`usable: false` and `unusableReason`** – on each profile that cannot start a session, by the
+    same check `worktree.create` runs on a profile it is given. The reason is a short phrase of TBD's
+    own, such as "Not logged in", "No token stored" or "No API key stored", never the laptop's
+    refusal text, which names commands a phone user cannot run. A usable profile carries neither
+    field.
+
+  Without a repo the reply carries none of these, which is what the Switch account and Fork
+  sheets read.
 - **`session.switchProfile`** – restarts a local Claude session under another profile in the same
   tab, or, for a parked session, moves it to that profile and leaves it parked. The reply carries
   the session's reference and `parked`, read from the laptop's row after the switch: true when it
@@ -308,8 +321,8 @@ Requests:
 - **`session.fork`** – copies a local Claude session's conversation into a new tab, optionally
   under another profile. The reply carries the new session's reference.
 - **`session.setModel`** – sends `/model <name>` to the session through the send path.
-- **`worktree.create`** – a repo and a first message. The reply carries the new session's
-  reference.
+- **`worktree.create`** – a repo, a first message and, when the user picked one, a profile
+  (`profileID`). The reply carries the new session's reference.
 - **`remote.providers`** – registered providers, with their `create_params`.
 - **`remote.create`** – a provider and the filled form.
 
@@ -405,8 +418,11 @@ handler's logic.
   `sessions.changed`.
 - **Switch profile and fork** – `terminal.swapProfile` in `inPlace` and `fork` modes.
 - **Model** – `/model <name>` through the send path.
-- **New worktree** – the core of `worktree.create`, with the first message and TBD's defaults for
-  everything else.
+- **New worktree** – the core of `worktree.create`, with the first message, the profile the user
+  picked if any, and TBD's defaults for everything else, the model among them. A picked profile is
+  the create's explicit profile: the core checks it as it checks one from the laptop, and refuses
+  the create before anything of it exists when the profile is gone or has no credentials. A create
+  with no profile resolves one as any create without one does, balancing included.
 - **Remote sessions** – the core functions behind `remote.sessions`, `remote.transcriptSync`,
   `remote.transcriptLoadEarlier`, `remote.sendMessage`, `remote.answer` and `remote.create`.
 
@@ -712,8 +728,13 @@ These come from the laptop's bundle.
   constant in the app bundle, so it updates with TBD releases.
 - **New sheet** – opened from a repo's "+", so the repo is already chosen and the sheet names it.
   Two choices:
-  - **Local worktree** – type the first message, then Create. TBD uses its defaults for
-    everything else. The new session opens when it is ready.
+  - **Local worktree** – type the first message, optionally choose the account, then Create. TBD
+    uses its defaults for everything else. The new session opens when it is ready.
+    - **Account** – one collapsed row showing the profile the repo would use, or "Default" until
+      the list says. A tap lists the profiles, with a check on the current choice; a profile that
+      cannot start a session is disabled and says why. A pick is sent as the create's profile, and
+      an untouched row sends none. Each new sheet starts again at the repo's profile. The design:
+      [phone New sheet account picker](2026-11-19-phone-new-sheet-profile-picker-design.md).
   - **Remote session** – pick a provider, type the first message, and fill any extra required
     fields. Field types are text, multi-line text, on/off, number, and a choice list. The repo
     from the "+" is the `repo` that TBD fills (section 6).

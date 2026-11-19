@@ -13,14 +13,16 @@ import TBDShared
 ///
 /// **Each create goes through one action** under the device of the verified
 /// pairing, `context.peer.deviceID`: `phoneCreateWorktree`, which keeps only
-/// the repo and the first message, and `phoneRemoteCreate`, which keeps only
-/// the provider and the form values. A refusal is `refused`: a worktree
-/// create's with the daemon's reason, and a remote create's in its own words
-/// only when it carries a code (`remoteRefusal(_:method:)`), since a
-/// provider's own words can quote a secret. A success whose result does not decode is `internal`,
-/// never a success. Both creates are in the request memory (`remembersReplies(of:)`),
-/// so a resend creates once and gets the first reply. Their records name the
-/// repo or the provider, never the message or a form value.
+/// the repo, the first message and the profile, and `phoneRemoteCreate`,
+/// which keeps only the provider and the form values. A refusal is
+/// `refused`: a worktree create's with the daemon's reason, and a remote
+/// create's in its own words only when it carries a code
+/// (`remoteRefusal(_:method:)`), since a provider's own words can quote a
+/// secret. A success whose result does not decode is `internal`, never a
+/// success. Both creates are in the request memory
+/// (`remembersReplies(of:)`), so a resend creates once and gets the first
+/// reply. Their records name the repo or the provider, never the message, a
+/// form value or a profile.
 ///
 /// **A provider's form reaches the phone field by field.** `remote.providers`
 /// sends each provider's name, whether it is ready and why not, whether it
@@ -66,8 +68,17 @@ extension PhoneAppService {
     // MARK: - worktree.create
 
     /// Creates a worktree in the tapped repo with the phone's message as its
-    /// first message, and every other choice TBD's default, then waits up to
+    /// first message, on the profile the phone picked when it names one, and
+    /// every other choice TBD's default, then waits up to
     /// `PhoneAppConstants.worktreeSessionWait` for its first agent session.
+    ///
+    /// **A named profile is the create's explicit profile.** The create
+    /// checks it again before anything exists, as it checks one from the
+    /// laptop, since it can change between `profiles.list` and the tap; a
+    /// profile it refuses is `refused` with the daemon's reason, and nothing
+    /// is created. With none named, the laptop picks the profile as it does
+    /// for any create with none, balancing included. A `profileID` that is not
+    /// a UUID does not decode, so the request is `bad_request`.
     ///
     /// A message over `PhoneAppConstants.messageMaxBytes` is `bad_request`.
     /// The new session opens on the pty holder, whose spawn takes the first
@@ -94,7 +105,8 @@ extension PhoneAppService {
         let prompt = PhoneMessageText.isBlank(params.message) ? nil : params.message
         try Task.checkCancellation()
         let response = try await actions.phoneCreateWorktree(
-            WorktreeCreateParams(repoID: params.repoID, prompt: prompt), deviceID: context.peer.deviceID)
+            WorktreeCreateParams(repoID: params.repoID, prompt: prompt, profileID: params.profileID),
+            deviceID: context.peer.deviceID)
         let worktree = try Self.succeeded(Worktree.self, from: response, method: "worktree.create")
         let terminalID = try await firstAgentSession(inWorktree: worktree.id)
         return PhoneWorktreeCreateResult(
@@ -539,8 +551,9 @@ extension PhoneAppService {
     }
 
     /// The repo `repoID` names, when the phone can see it: it exists and is
-    /// not hidden. Otherwise `not_found`.
-    private nonisolated func visibleRepo(_ repoID: UUID) async throws -> Repo {
+    /// not hidden. Otherwise `not_found`. `profiles.list` reads a repo the
+    /// same way.
+    nonisolated func visibleRepo(_ repoID: UUID) async throws -> Repo {
         guard let repo = try await db.repos.get(id: repoID), !repo.hidden else {
             throw PhoneAppError(code: .notFound, message: Self.noSuchRepoReason)
         }

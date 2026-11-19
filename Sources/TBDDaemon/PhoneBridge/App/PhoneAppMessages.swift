@@ -13,7 +13,7 @@ import TBDShared
 // - `transcript.close` – PhoneEmpty, PhoneEmpty
 // - `message.send` – MessageSendParams, ActionOutcomeResult
 // - `prompt.answer` – PhonePromptAnswerParams, PromptAnswerResult
-// - `profiles.list` – PhoneEmpty, ProfilesListResult
+// - `profiles.list` – ProfilesListParams, ProfilesListResult
 // - `session.switchProfile` – SessionSwitchProfileParams, SessionSwitchProfileResult
 // - `session.fork` – SessionForkParams, SessionRefResult
 // - `session.setModel` – SessionSetModelParams, ActionOutcomeResult
@@ -441,8 +441,27 @@ struct PhonePromptAnswerParams: Codable, Equatable, Sendable {
     let answer: PromptAnswer
 }
 
+/// `profiles.list`'s params. A phone that names no repo, as `{}` does, gets
+/// the list with none of the fields a repo adds, which is what the Switch
+/// account and Fork sheets read.
+struct ProfilesListParams: Codable, Equatable, Sendable {
+    /// The repo of the New sheet. With it, the reply names the profile a new
+    /// worktree there would start on, and says which profiles cannot start a
+    /// session.
+    let repoID: UUID?
+}
+
 struct ProfilesListResult: Codable, Equatable, Sendable {
     let profiles: [PhoneProfile]
+    /// The profile a new worktree in the request's repo would start on, with
+    /// balancing left out. Absent when the request named no repo, and when no
+    /// profile applies.
+    let repoProfileID: UUID?
+
+    init(profiles: [PhoneProfile], repoProfileID: UUID? = nil) {
+        self.profiles = profiles
+        self.repoProfileID = repoProfileID
+    }
 }
 
 /// A model profile, never with a token or other secret.
@@ -451,6 +470,24 @@ struct PhoneProfile: Codable, Equatable, Sendable {
     let name: String
     let kind: String
     let isDefault: Bool
+    /// `false` when the profile cannot start a session. Absent when it can,
+    /// and always absent when the request named no repo.
+    let usable: Bool?
+    /// Why the profile cannot start a session, in a few words of TBD's own,
+    /// such as "Not logged in". Present only with `usable: false`.
+    let unusableReason: String?
+
+    init(
+        id: UUID, name: String, kind: String, isDefault: Bool,
+        usable: Bool? = nil, unusableReason: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.isDefault = isDefault
+        self.usable = usable
+        self.unusableReason = unusableReason
+    }
 }
 
 struct SessionSwitchProfileParams: Codable, Equatable, Sendable {
@@ -488,6 +525,15 @@ struct SessionSetModelParams: Codable, Equatable, Sendable {
 struct PhoneWorktreeCreateParams: Codable, Equatable, Sendable {
     let repoID: UUID
     let message: String
+    /// The profile the user picked on the New sheet. Absent leaves the
+    /// choice to the laptop, as a create from the laptop with no profile does.
+    let profileID: UUID?
+
+    init(repoID: UUID, message: String, profileID: UUID? = nil) {
+        self.repoID = repoID
+        self.message = message
+        self.profileID = profileID
+    }
 }
 
 struct PhoneWorktreeCreateResult: Codable, Equatable, Sendable {

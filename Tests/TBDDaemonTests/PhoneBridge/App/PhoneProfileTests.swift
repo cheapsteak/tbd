@@ -138,6 +138,238 @@ struct PhoneProfileTests {
         #expect(fitted.profiles == [short, after])
     }
 
+    // MARK: - profiles.list for the New sheet
+
+    private static func listResult(_ bytes: Data) throws -> ProfilesListResult {
+        try JSONDecoder().decode(PhoneReplyEnvelope<ProfilesListResult>.self, from: bytes).result
+    }
+
+    /// The keys `value` encodes on the wire. A nil optional encodes no key.
+    private static func wireKeys(_ value: some Encodable) throws -> Set<String> {
+        let object = try JSONSerialization.jsonObject(with: PhoneAppCoding.makeEncoder().encode(value))
+        return Set(try #require(object as? [String: Any]).keys)
+    }
+
+    private static let baseProfileKeys: Set<String> = ["id", "name", "kind", "isDefault"]
+
+    private static func seedRepo(_ h: PhoneServiceHarness, hidden: Bool = false) async throws -> Repo {
+        let repo = try await h.db.repos.create(
+            path: "/acme/widgets-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        if hidden {
+            try await h.db.repos.setHidden(id: repo.id, hidden: true)
+        }
+        return repo
+    }
+
+    /// With a repo, the reply names the profile a new worktree there would
+    /// start on: the repo's own profile when it has one, and the global
+    /// default when it has none.
+    @Test func theRepoProfileIsTheReposOwnThenTheDefault() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let work = try await h.db.modelProfiles.create(name: "Acme Work", kind: .bedrock, awsRegion: "us-west-2")
+        let home = try await h.db.modelProfiles.create(name: "Acme Home", kind: .bedrock, awsRegion: "us-west-2")
+        try await h.db.config.setDefaultProfileID(home.id)
+        let pinned = try await Self.seedRepo(h)
+        try await h.db.repos.setProfileOverride(id: pinned.id, profileID: work.id)
+        let unpinned = try await Self.seedRepo(h)
+        let outbox = await h.connect()
+
+        let (pinnedReply, pinnedBytes) = try await h.request(
+            .profilesList, params: ProfilesListParams(repoID: pinned.id), on: outbox)
+        let (unpinnedReply, unpinnedBytes) = try await h.request(
+            .profilesList, params: ProfilesListParams(repoID: unpinned.id), on: outbox)
+
+        #expect(pinnedReply.error == nil)
+        #expect(unpinnedReply.error == nil)
+        #expect(try Self.listResult(pinnedBytes).repoProfileID == work.id)
+        #expect(try Self.listResult(unpinnedBytes).repoProfileID == home.id)
+        // A pure read: it calls nothing and records nothing.
+        #expect(h.actions.calls.isEmpty)
+        #expect(h.recorder.records.isEmpty)
+    }
+
+    /// The repo's own profile is passed over as the resolver passes it over:
+    /// when it is gone, and when it is an API-key profile with no key. The
+    /// default applies then, and with no default the reply names no profile
+    /// and encodes no key for one. A profile that lacks another credential
+    /// still applies, as it does for the resolver, though it is unusable.
+    @Test func aRepoProfileThatDoesNotLoadFallsToTheDefault() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let keyless = try await h.db.modelProfiles.create(name: "Acme Key", kind: .apiKey)
+        let loggedOut = try await h.db.modelProfiles.create(name: "Acme Login", kind: .oauth)
+        let fallback = try await h.db.modelProfiles.create(
+            name: "Acme Default", kind: .bedrock, awsRegion: "us-west-2")
+        let repo = try await Self.seedRepo(h)
+        let params = ProfilesListParams(repoID: repo.id)
+        let outbox = await h.connect()
+
+        try await h.db.config.setDefaultProfileID(fallback.id)
+        try await h.db.repos.setProfileOverride(id: repo.id, profileID: UUID())
+        let (_, goneBytes) = try await h.request(.profilesList, params: params, on: outbox)
+        try await h.db.repos.setProfileOverride(id: repo.id, profileID: keyless.id)
+        let (_, keylessBytes) = try await h.request(.profilesList, params: params, on: outbox)
+        try await h.db.config.setDefaultProfileID(nil)
+        let (_, noneBytes) = try await h.request(.profilesList, params: params, on: outbox)
+        try await h.db.repos.setProfileOverride(id: repo.id, profileID: loggedOut.id)
+        let (_, loggedOutBytes) = try await h.request(.profilesList, params: params, on: outbox)
+
+        #expect(try Self.listResult(goneBytes).repoProfileID == fallback.id)
+        #expect(try Self.listResult(keylessBytes).repoProfileID == fallback.id)
+        let none = try Self.listResult(noneBytes)
+        #expect(none.repoProfileID == nil)
+        #expect(try Self.wireKeys(none) == ["profiles"])
+        let loggedOutResult = try Self.listResult(loggedOutBytes)
+        #expect(loggedOutResult.repoProfileID == loggedOut.id)
+        let shown = loggedOutResult.profiles.first { profile in profile.id == loggedOut.id }
+        #expect(shown?.usable == false)
+    }
+
+    /// With a repo, each profile says whether it can start a session, by the
+    /// check a create runs on an explicit profile: a logged-out OAuth
+    /// profile, a token profile with no token and an API-key profile with no
+    /// key cannot, each with its own few words; their counterparts with the
+    /// credential can, and so can a Bedrock profile, whose credentials AWS
+    /// owns. A usable profile carries neither new field. No reason holds the
+    /// create's refusal text or a secret.
+    @Test func eachProfileSaysWhetherItCanStartASession() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let loggedOut = try await h.db.modelProfiles.create(name: "Acme OAuth Out", kind: .oauth)
+        let loggedIn = try await h.db.modelProfiles.create(name: "Acme OAuth In", kind: .oauth)
+        h.credentials.logIn(loggedIn.id)
+        let tokenless = try await h.db.modelProfiles.create(name: "Acme Token Out", kind: .oauthToken)
+        let token = try await h.db.modelProfiles.create(name: "Acme Token In", kind: .oauthToken)
+        h.credentials.store("sk-ant-oat01-TEST", for: token.id)
+        let keyless = try await h.db.modelProfiles.create(name: "Acme Key Out", kind: .apiKey)
+        let key = try await h.db.modelProfiles.create(name: "Acme Key In", kind: .apiKey)
+        h.credentials.store("sk-ant-api-TEST", for: key.id)
+        let bedrock = try await h.db.modelProfiles.create(
+            name: "Acme Bedrock", kind: .bedrock, awsRegion: "us-west-2")
+        try await h.db.config.setDefaultProfileID(bedrock.id)
+        let repo = try await Self.seedRepo(h)
+        let outbox = await h.connect()
+
+        let (reply, bytes) = try await h.request(
+            .profilesList, params: ProfilesListParams(repoID: repo.id), on: outbox)
+
+        #expect(reply.error == nil)
+        let result = try Self.listResult(bytes)
+        #expect(result.profiles == [
+            PhoneProfile(
+                id: loggedOut.id, name: "Acme OAuth Out", kind: "oauth", isDefault: false,
+                usable: false, unusableReason: "Not logged in"),
+            PhoneProfile(id: loggedIn.id, name: "Acme OAuth In", kind: "oauth", isDefault: false),
+            PhoneProfile(
+                id: tokenless.id, name: "Acme Token Out", kind: "oauthToken", isDefault: false,
+                usable: false, unusableReason: "No token stored"),
+            PhoneProfile(id: token.id, name: "Acme Token In", kind: "oauthToken", isDefault: false),
+            PhoneProfile(
+                id: keyless.id, name: "Acme Key Out", kind: "apiKey", isDefault: false,
+                usable: false, unusableReason: "No API key stored"),
+            PhoneProfile(id: key.id, name: "Acme Key In", kind: "apiKey", isDefault: false),
+            PhoneProfile(id: bedrock.id, name: "Acme Bedrock", kind: "bedrock", isDefault: true),
+        ])
+        #expect(result.repoProfileID == bedrock.id)
+        let unusable = try #require(result.profiles.first)
+        #expect(try Self.wireKeys(unusable) == Self.baseProfileKeys.union(["usable", "unusableReason"]))
+        let usable = try #require(result.profiles.last)
+        #expect(try Self.wireKeys(usable) == Self.baseProfileKeys)
+        let text = String(decoding: bytes, as: UTF8.self)
+        for leak in ["tbd profile", "Settings", "sk-ant", "person@acme.example", "us-west-2"] {
+            #expect(!text.contains(leak), "the reply carries \(leak)")
+        }
+    }
+
+    /// A profile whose stored secret cannot be read is unusable, since the
+    /// create's check would fail on it, and the list still arrives.
+    @Test func aProfileWhoseSecretCannotBeReadIsUnusable() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let key = try await h.db.modelProfiles.create(name: "Acme Key", kind: .apiKey)
+        h.credentials.store("sk-ant-api-TEST", for: key.id)
+        h.credentials.makeSecretUnreadable(key.id)
+        let repo = try await Self.seedRepo(h)
+        let outbox = await h.connect()
+
+        let (reply, bytes) = try await h.request(
+            .profilesList, params: ProfilesListParams(repoID: repo.id), on: outbox)
+
+        #expect(reply.error == nil)
+        #expect(try Self.listResult(bytes).profiles == [PhoneProfile(
+            id: key.id, name: "Acme Key", kind: "apiKey", isDefault: false,
+            usable: false, unusableReason: PhoneAppService.credentialsUnreadableReason)])
+    }
+
+    /// Without a repo, as an older phone and the Switch account and Fork
+    /// sheets ask, the reply carries none of the fields a repo adds, unusable
+    /// profiles and a repo default included.
+    @Test func withoutARepoTheReplyCarriesNoneOfTheNewFields() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let loggedOut = try await h.db.modelProfiles.create(name: "Acme OAuth", kind: .oauth)
+        _ = try await h.db.modelProfiles.create(name: "Acme Key", kind: .apiKey)
+        try await h.db.config.setDefaultProfileID(loggedOut.id)
+        let outbox = await h.connect()
+
+        let (reply, bytes) = try await h.request(.profilesList, params: PhoneEmpty(), on: outbox)
+
+        #expect(reply.error == nil)
+        let result = try Self.listResult(bytes)
+        #expect(result.profiles.count == 2)
+        #expect(try Self.wireKeys(result) == ["profiles"])
+        for profile in result.profiles {
+            #expect(try Self.wireKeys(profile) == Self.baseProfileKeys)
+        }
+    }
+
+    /// A repo the phone cannot see, because it is gone or hidden, is
+    /// `not_found`, as it is for a create there.
+    @Test func profilesForAHiddenOrMissingRepoAreNotFound() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let hidden = try await Self.seedRepo(h, hidden: true)
+        let outbox = await h.connect()
+
+        for repoID in [hidden.id, UUID()] {
+            let (reply, _) = try await h.request(
+                .profilesList, params: ProfilesListParams(repoID: repoID), on: outbox)
+            #expect(reply.error == PhoneAppError(code: .notFound, message: PhoneAppService.noSuchRepoReason))
+        }
+    }
+
+    /// The reply names the repo's profile only when it lists that profile,
+    /// so a profile left out to fit the frame is never the one the row shows.
+    @Test func theRepoProfileIsNamedOnlyWhenItIsListed() throws {
+        let short = PhoneProfile(id: UUID(), name: "Acme Work", kind: "oauth", isDefault: true)
+        let long = PhoneProfile(
+            id: UUID(), name: String(repeating: "a", count: PhoneText.fieldLimit), kind: "oauth", isDefault: false)
+        let budget = try PhoneAppCoding.makeEncoder().encode(
+            ProfilesListResult(profiles: [short], repoProfileID: long.id)).count
+
+        let dropped = PhoneAppService.fittedProfiles([short, long], repoProfileID: long.id, budget: budget)
+        let kept = PhoneAppService.fittedProfiles([short, long], repoProfileID: short.id, budget: budget)
+
+        #expect(dropped == ProfilesListResult(profiles: [short], repoProfileID: nil))
+        #expect(kept == ProfilesListResult(profiles: [short], repoProfileID: short.id))
+    }
+
+    /// Profiles carrying a reason, with the repo's profile named, still fit
+    /// one frame with the longest request ID.
+    @Test func profilesWithReasonsFitOneFrame() throws {
+        let profiles = (0..<500).map { _ in
+            PhoneProfile(
+                id: UUID(), name: String(repeating: "a", count: PhoneText.fieldLimit), kind: "apiKey",
+                isDefault: false, usable: false, unusableReason: PhoneAppService.credentialsUnreadableReason)
+        }
+
+        let fitted = PhoneAppService.fittedProfiles(profiles, repoProfileID: profiles[0].id)
+
+        #expect(!fitted.profiles.isEmpty)
+        #expect(fitted.profiles.count < profiles.count)
+        #expect(fitted.repoProfileID == profiles[0].id)
+        let encoded = try PhoneAppCoding.makeEncoder().encode(fitted)
+        #expect(encoded.count <= PhoneAppService.profilesResultBytes)
+        let reply = try PhoneAppCoding.reply(
+            requestID: String(repeating: "r", count: PhoneAppConstants.requestIDMaxBytes), result: fitted)
+        #expect(PhoneAppCoding.framedSize(reply) <= PhoneFrameBudget.maxPlaintext)
+    }
+
     // MARK: - session.switchProfile
 
     @Test func switchProfileSwapsInPlace() async throws {

@@ -92,8 +92,10 @@ protocol PhoneSessionActions: Sendable {
     /// mode `p` names. The window size takes its default.
     func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// `worktree.create` with only the repo and the first message. The
-    /// pending `Worktree`.
+    /// `worktree.create` with only the repo, the first message and the
+    /// profile. The pending `Worktree`. A profile is checked as
+    /// `worktree.create` checks any explicit profile, so a missing one, or one
+    /// with no credentials, is refused before anything of the create exists.
     ///
     /// A first message that is not empty is held to the phone message rule
     /// (`PhoneMessageText.vetted`) first, because it rides the first agent's

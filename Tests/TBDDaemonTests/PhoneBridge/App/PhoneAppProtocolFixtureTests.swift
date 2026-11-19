@@ -306,7 +306,7 @@ private struct MethodCodecs {
         case .transcriptClose: self.init(PhoneEmpty.self, PhoneEmpty.self)
         case .messageSend: self.init(MessageSendParams.self, ActionOutcomeResult.self)
         case .promptAnswer: self.init(PhonePromptAnswerParams.self, PromptAnswerResult.self)
-        case .profilesList: self.init(PhoneEmpty.self, ProfilesListResult.self)
+        case .profilesList: self.init(ProfilesListParams.self, ProfilesListResult.self)
         case .sessionSwitchProfile: self.init(SessionSwitchProfileParams.self, SessionSwitchProfileResult.self)
         case .sessionFork: self.init(SessionForkParams.self, SessionRefResult.self)
         case .sessionSetModel: self.init(SessionSetModelParams.self, ActionOutcomeResult.self)

@@ -265,6 +265,10 @@ actor PhoneAppService: PhoneAppHandling {
     /// as the terminal row names it (`ClaudeTranscriptLocator.filePath` under
     /// the daemon's `projects/` roots), or nil.
     let locateTranscript: @Sendable (TBDShared.Terminal, _ worktreePath: String) -> String?
+    /// The check `worktree.create` runs on an explicit profile, the router's
+    /// own (`RPCRouter.explicitProfileCheck`), so `profiles.list` marks
+    /// unusable exactly the profiles a create would refuse.
+    let profileCheck: ExplicitProfileCheck
     let now: @Sendable () -> Date
     let clock: any Clock<Duration>
     /// Request IDs and their replies, per device.
@@ -307,6 +311,7 @@ actor PhoneAppService: PhoneAppHandling {
     init(db: TBDDatabase, actions: any PhoneSessionActions, subscriptions: StateSubscriptionManager,
          pendingPrompts: PendingPromptStore,
          locateTranscript: @escaping @Sendable (TBDShared.Terminal, _ worktreePath: String) -> String?,
+         profileCheck: ExplicitProfileCheck,
          recorder: any PhoneActionRecording = LoggerPhoneActionRecorder(),
          readPhoneControl: (@Sendable () async throws -> Bool)? = nil,
          readPairing: (@Sendable (UUID) async throws -> Bool)? = nil,
@@ -317,6 +322,7 @@ actor PhoneAppService: PhoneAppHandling {
         self.subscriptions = subscriptions
         self.pendingPrompts = pendingPrompts
         self.locateTranscript = locateTranscript
+        self.profileCheck = profileCheck
         self.recorder = recorder
         if let readPhoneControl {
             self.readPhoneControl = readPhoneControl
@@ -763,7 +769,7 @@ actor PhoneAppService: PhoneAppHandling {
                 try await self.promptAnswer(params, context)
             }
         case .profilesList:
-            return Self.typed(PhoneEmpty.self) { [self] params, context in
+            return Self.typed(ProfilesListParams.self) { [self] params, context in
                 try await self.profilesList(params, context)
             }
         case .sessionSwitchProfile:
