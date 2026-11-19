@@ -5,7 +5,11 @@
 //
 // **A scenario** is the laptop's data in wire form, with relative times:
 // - `layout` (PhoneGroupLayout[]), `rows` (PhoneRow[]), `profiles` (PhoneProfile[]) and
-//   `providers` (PhoneProvider[]), as the wire carries them;
+//   `providers` (PhoneProvider[]), as the wire carries them. A profile's `usable` and
+//   `unusableReason` are as a `profiles.list` with a `repoID` carries them, for every repo: a
+//   `profiles.list` with no `repoID` leaves them out, as the laptop does;
+// - `repoProfiles`: by repo ID, the profile a new worktree there uses, as the repo's own profile
+//   setting. A repo with none, or one naming no profile the scenario holds, uses the default;
 // - `transcripts`: each session's items (PhoneItem[]) by its ref key, as `refKey` writes it
 //   (`local:<terminalID>`, `remote:<provider>/<sessionID>`);
 // - `details`: by item ID, the text of each part (`input`, `result`, `text`) and the items of
@@ -74,7 +78,7 @@ const ACTING = new Set([
   'message.send', 'prompt.answer', 'session.switchProfile', 'session.fork', 'session.setModel',
   'worktree.create', 'remote.create',
 ]);
-const SCENARIO_KEYS = new Set(['layout', 'rows', 'transcripts', 'details', 'prompts', 'profiles', 'providers']);
+const SCENARIO_KEYS = new Set(['layout', 'rows', 'transcripts', 'details', 'prompts', 'profiles', 'repoProfiles', 'providers']);
 /** Item kinds a transcript leaves out unless `showDetails` is set. */
 const DETAIL_KINDS = new Set(['thinking', 'systemNote']);
 
@@ -133,6 +137,7 @@ const utf8 = new TextEncoder();
  * @property {Record<string, Record<string, any>>} details
  * @property {Record<string, any[]>} prompts
  * @property {any[]} profiles
+ * @property {Record<string, string>} repoProfiles
  * @property {any[]} providers
  * @property {{ session: any, showDetails: boolean } | null} open The open transcript.
  * @property {{ live: boolean, replayed: boolean } | null} connection Null while the phone is away.
@@ -158,6 +163,7 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
     details: {},
     prompts: {},
     profiles: [],
+    repoProfiles: {},
     providers: [],
     open: null,
     connection: null,
@@ -204,6 +210,7 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       parts.subagent === undefined ? parts : { ...parts, subagent: parts.subagent.map(resolveItem) }));
     state.prompts = s.prompts ?? {};
     state.profiles = s.profiles ?? [];
+    state.repoProfiles = s.repoProfiles ?? {};
     state.providers = s.providers ?? [];
     state.open = null;
   }
@@ -651,8 +658,17 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       announceRow(found.row);
     },
 
+    // With a `repoID`, the profiles as the scenario marks them and the repo's profile; without
+    // one, neither, as the Switch account and Fork sheets get them.
     'profiles.list': (request) => {
-      reply(request, { result: { profiles: state.profiles } });
+      const { repoID } = request.params;
+      if (typeof repoID !== 'string') {
+        reply(request, { result: { profiles: state.profiles.map(unmarked) } });
+        return;
+      }
+      const repoProfile = profileForRepo(repoID);
+      const result = { profiles: state.profiles };
+      reply(request, { result: repoProfile === undefined ? result : { ...result, repoProfileID: repoProfile.id } });
     },
 
     'remote.providers': (request) => {
@@ -722,16 +738,21 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       });
     },
 
+    // The new session runs under the `profileID` sent, or the repo's profile when none was.
     'worktree.create': (request) => {
-      const { repoID, message } = request.params;
+      const { repoID, message, profileID } = request.params;
       const group = repoGroup(repoID);
       if (group === null) {
         reply(request, failure('not_found', TEXT.noSuchRepo));
         return;
       }
+      const profile = profileID === undefined ? profileForRepo(repoID) : state.profiles.find((p) => p.id === profileID);
+      if (profileID !== undefined && profile === undefined) {
+        reply(request, failure('not_found', TEXT.noSuchProfile));
+        return;
+      }
       const worktreeID = mintID();
       const ref = { kind: 'local', terminalID: mintID() };
-      const profile = state.profiles.find((p) => p.isDefault === true);
       /** @type {any} */
       const session = {
         ref, agent: 'claude', tabName: 'Claude', status: { chip: 'working', changedAt: now() }, capabilities: CLAUDE_CAPABILITIES,
@@ -812,6 +833,16 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
    */
   function announceRow(row) {
     sendEvent('sessions.changed', { rows: [row], removedRowIDs: [] });
+  }
+
+  /**
+   * The profile a new worktree in `repoID` uses: the one `repoProfiles` names for it when the
+   * scenario holds that profile, else the default, else none.
+   * @param {string} repoID
+   */
+  function profileForRepo(repoID) {
+    const own = Object.hasOwn(state.repoProfiles, repoID) ? state.profiles.find((p) => p.id === state.repoProfiles[repoID]) : undefined;
+    return own ?? state.profiles.find((p) => p.isDefault === true);
   }
 
   /** @param {any} session @param {any} profile */
@@ -1017,6 +1048,15 @@ function mapValues(record, fn) {
   const out = {};
   for (const [key, value] of Object.entries(record)) out[key] = fn(value);
   return out;
+}
+
+/**
+ * `profile` as a `profiles.list` with no `repoID` carries it: without the marks a repo adds.
+ * @param {any} profile
+ */
+function unmarked(profile) {
+  const { usable, unusableReason, ...rest } = profile;
+  return rest;
 }
 
 /** @param {unknown} value @returns {value is Record<string, any>} */

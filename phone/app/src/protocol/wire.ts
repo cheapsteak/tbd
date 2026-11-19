@@ -19,7 +19,7 @@ import type {
   PhonePromptAnswerParams, PhonePromptResolution, PhoneProvider, PhoneQuestion, PhoneRemoteCreateParams,
   PhoneRemoteProvidersParams, PhoneRemoteProvidersResult, PhoneRow, PhoneRowKind, PhoneRowPlacement, PhoneSession,
   PhoneSessionRef, PhoneStatus, PhoneStatusChip, PhoneWorktreeCreateParams, PhoneWorktreeCreateResult,
-  ProfilesListResult, PromptAnswer, PromptAnswerOutcome, PromptAnswerResult, PromptChangedData, MessageSendParams,
+  ProfilesListParams, ProfilesListResult, PromptAnswer, PromptAnswerOutcome, PromptAnswerResult, PromptChangedData, MessageSendParams,
   ResultOf, SessionForkParams, SessionRefResult, SessionSetModelParams, SessionSwitchProfileParams,
   SessionSwitchProfileResult,
   SessionsChangedData, SessionsSubscribeParams, SessionsSubscribeResult, TranscriptDetailParams, TranscriptDetailPart,
@@ -336,9 +336,12 @@ export const decodePromptAnswerOutcome: Decoder<PromptAnswerOutcome> = (raw, pat
 
 export const decodePromptAnswerResult = obj<PromptAnswerResult>({ outcome: decodePromptAnswerOutcome }, {});
 
-export const decodePhoneProfile = obj<PhoneProfile>({ id: str, name: str, kind: str, isDefault: bool }, {});
+export const decodeProfilesListParams = obj<ProfilesListParams>({}, { repoID: str });
 
-export const decodeProfilesListResult = obj<ProfilesListResult>({ profiles: arr(decodePhoneProfile) }, {});
+export const decodePhoneProfile = obj<PhoneProfile>(
+  { id: str, name: str, kind: str, isDefault: bool }, { usable: bool, unusableReason: str });
+
+export const decodeProfilesListResult = obj<ProfilesListResult>({ profiles: arr(decodePhoneProfile) }, { repoProfileID: str });
 
 export const decodeSessionSwitchProfileParams = obj<SessionSwitchProfileParams>(
   { session: decodePhoneSessionRef, profileID: str }, {});
@@ -352,7 +355,7 @@ export const decodeSessionSwitchProfileResult = obj<SessionSwitchProfileResult>(
 
 export const decodeSessionSetModelParams = obj<SessionSetModelParams>({ session: decodePhoneSessionRef, model: str }, {});
 
-export const decodePhoneWorktreeCreateParams = obj<PhoneWorktreeCreateParams>({ repoID: str, message: str }, {});
+export const decodePhoneWorktreeCreateParams = obj<PhoneWorktreeCreateParams>({ repoID: str, message: str }, { profileID: str });
 
 export const decodePhoneWorktreeCreateResult = obj<PhoneWorktreeCreateResult>(
   { worktreeID: str }, { session: decodePhoneSessionRef });
@@ -386,7 +389,7 @@ const PARAMS: { readonly [M in Method]: Decoder<ParamsOf<M>> } = {
   'transcript.close': decodePhoneEmpty,
   'message.send': decodeMessageSendParams,
   'prompt.answer': decodePhonePromptAnswerParams,
-  'profiles.list': decodePhoneEmpty,
+  'profiles.list': decodeProfilesListParams,
   'session.switchProfile': decodeSessionSwitchProfileParams,
   'session.fork': decodeSessionForkParams,
   'session.setModel': decodeSessionSetModelParams,

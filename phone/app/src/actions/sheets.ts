@@ -33,9 +33,21 @@
 //   laptop's providers, or `failed` with the error's message, as `loadProfiles` does, a load
 //   that a later one replaced changes nothing when it ends, and a `superseded` one settles as
 //   `idle`. The remote form, while it shows, then loads again.
-// - `createWorktree(repoID, message): Promise<void>` – `worktree.create` in `repoID` with
-//   `message` as the new session's first message, sent as typed. It takes a mark (`navMark`) as it
-//   sends; on success it closes the New sheet of that repo, if one still shows, and opens the new
+// - `loadNewSheetProfiles(repoID): Promise<void>` – `profiles.list` with `repoID`, for the New
+//   sheet's Account row, which loads afresh each time the local form shows. The laptop's reply
+//   then names the profile a new worktree in `repoID` would use and marks each profile usable or
+//   not. It goes in a slice of its own (`newProfiles`), never in `profiles`, so the Account row
+//   and the session's account menu and sheets never replace each other's list. The slice shows it
+//   `loading` at once, then `loaded`, or `failed`, which the sheet shows with no words; a load
+//   that a later one replaced changes nothing when it ends, and a `superseded` one settles as
+//   `idle`, as `loadProviders`'s do. The local form, while it shows, then loads again.
+// - `createWorktree(repoID, message, profileID?): Promise<void>` – `worktree.create` in `repoID`
+//   with `message` as the new session's first message, sent as typed, and `profileID` when it is
+//   given: the profile the user picked on the Account row. With none, the create carries no
+//   `profileID` at all, and the laptop chooses as it always has. The laptop checks a profile again
+//   as it creates, since one can stop being usable after the list loaded, and a profile it refuses
+//   fails the create as any refusal does (below). It takes a mark (`navMark`) as it sends; on
+//   success it closes the New sheet of that repo, if one still shows, and opens the new
 //   worktree's first session once the list shows it, toasting "Created <row name>" then
 //   (`openPending({ worktreeID, toast: 'Created {name}' }, mark)`), unless the user has
 //   navigated since the mark or moved on from the create (below).
@@ -65,7 +77,8 @@
 //
 // **A create's error** shows as it comes, `not_confirmed` included (the worktree or the session
 // may exist all the same); `superseded` is silent. It shows in the New sheet of the create's repo
-// that shows when it settles, which shows its form again, its values kept while it stayed open.
+// that shows when it settles, which shows its form again, its values and the account picked kept
+// while it stayed open.
 // When none shows, because the user closed it while the create was on its way, nothing toasts:
 // the words are kept for the next New sheet that shows for that repo (`lostCreates`, by repo),
 // which shows them.
@@ -123,16 +136,18 @@
 // the error, and leave the choice to the user. Like every action, none rejects (`actions/index.ts`).
 
 import { AppError, BAD_PARAMS_TEXT } from '../client/client.ts';
-import type { PhoneRemoteCreateParams, PhoneSession, PhoneSessionRef, SessionForkParams } from '../protocol/types.ts';
+import type {
+  PhoneRemoteCreateParams, PhoneSession, PhoneSessionRef, PhoneWorktreeCreateParams, SessionForkParams,
+} from '../protocol/types.ts';
 import { refKey, sameRef } from '../protocol/wire.ts';
 import { isBlankMessage, trimLikeLaptop, withText } from '../state/prompts.ts';
 import { findSession } from '../state/route.ts';
 import {
   awaitOpen, beginAct, beginCreate, endAct, endCreate, failIn, isActing, keepLostCreate, loadedProfiles, loadedProviders,
-  newSheetShown, profileByID, profilesEnded, profilesLoading, providersEnded, providersLoading, remoteParamsReady, sameAccountName,
-  switchBlock, switchedToast, unavailableReason,
+  newProfilesEnded, newProfilesLoading, newSheetShown, profileByID, profilesEnded, profilesLoading, providersEnded, providersLoading,
+  remoteParamsReady, sameAccountName, switchBlock, switchedToast, unavailableReason,
 } from '../state/sheets.ts';
-import type { ActingKind, CreateInFlight, ProfilesLoad, ProvidersLoad, SheetsState } from '../state/sheets.ts';
+import type { ActingKind, CreateInFlight, NewProfilesLoad, ProfilesLoad, ProvidersLoad, SheetsState } from '../state/sheets.ts';
 import { nextToast } from '../state/store.ts';
 import type { AppState, MenuState, PendingOpen, SheetState, UIState } from '../state/store.ts';
 import type { ActionContext, Actions } from './index.ts';
@@ -298,6 +313,8 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
   let loads = 0;
   /** The number of the last `remote.providers` sent, so only the newest lands. */
   let providerLoads = 0;
+  /** The number of the last `profiles.list` sent for the New sheet, so only the newest lands. */
+  let newProfileLoads = 0;
 
   /**
    * Settles create `c` as `how` (`settleCreate`), and gives back the mark its session opens by,
@@ -443,7 +460,21 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
       store.update((s) => withSheets(s, providersEnded(s.sheets, id, next)));
     },
 
-    async createWorktree(repoID: string, message: string): Promise<void> {
+    async loadNewSheetProfiles(repoID: string): Promise<void> {
+      const id = ++newProfileLoads;
+      store.update((s) => ({ ...s, sheets: newProfilesLoading(s.sheets, id, repoID) }));
+      let next: NewProfilesLoad;
+      try {
+        const result = await client.request('profiles.list', { repoID });
+        next = { phase: 'loaded', repoID, profiles: result.profiles, repoProfileID: result.repoProfileID ?? null };
+      } catch (error) {
+        // Superseded: silent, and no longer on its way. Any other failure shows no words either.
+        next = errorText(error) === null ? { phase: 'idle' } : { phase: 'failed', repoID };
+      }
+      store.update((s) => withSheets(s, newProfilesEnded(s.sheets, id, next)));
+    },
+
+    async createWorktree(repoID: string, message: string, profileID?: string): Promise<void> {
       const c: CreateInFlight = { repoID, mode: 'local' };
       const ready = typeof message === 'string' && !isBlankMessage(message);
       const sent = { yes: false };
@@ -456,8 +487,9 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
       // Its mark was taken with it (`beginCreate`): a navigation from here on means the user chose where to go.
       let worktreeID: string | null = null;
       let text: string | null = null;
+      const params: PhoneWorktreeCreateParams = profileID === undefined ? { repoID, message } : { repoID, message, profileID };
       try {
-        worktreeID = (await client.request('worktree.create', { repoID, message })).worktreeID;
+        worktreeID = (await client.request('worktree.create', params)).worktreeID;
       } catch (error) {
         text = errorText(error);
       }

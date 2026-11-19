@@ -1,6 +1,6 @@
 // Tests sheets.ts: loading the profiles, switching a session's account, forking it, and changing
-// its model; then New: loading the providers, creating a worktree or a remote session, and the
-// New sheet's form rules. A fake client records each request and hands back a promise the test settles; the
+// its model; then New: loading the providers and the account choice's profiles, creating a
+// worktree or a remote session, and the New sheet's rules for its account and its form. A fake client records each request and hands back a promise the test settles; the
 // store and every action are real, so the route moves through `openSession` and `back`, the list
 // changes through `onEvent`, and a fork's new tab opens through `openPending` as in the app.
 
@@ -14,10 +14,12 @@ import type {
 import { refKey } from '../protocol/wire.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
 import {
-  beginCreate, currentProfileID, emptySheets, enumChoices, fieldOn, fieldProblem, fieldText, forkOrder, isActing, isWholeNumber,
-  kindWords, NO_EDITS, profileDetail, providerDetail, remoteCreateParams, remoteParamsReady, restartNote, sheetShows, switchedToast,
-  switchWords, WHOLE_NUMBER_TEXT, withFieldBadInput, withFieldOn, withFieldText,
+  accountChoice, accountDetail, beginCreate, currentProfileID, emptySheets, enumChoices, fieldOn, fieldProblem, fieldText, forkOrder,
+  isActing, isUsable, isWholeNumber, kindWords, loadedNewProfiles, NO_EDITS, pickStands, profileDetail, providerDetail,
+  remoteCreateParams, remoteParamsReady, restartNote, sheetShows, switchedToast, switchWords, WHOLE_NUMBER_TEXT, withFieldBadInput,
+  withFieldOn, withFieldText,
 } from '../state/sheets.ts';
+import type { LoadedNewProfiles } from '../state/sheets.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState, SheetState } from '../state/store.ts';
 import { createActions } from './index.ts';
@@ -826,6 +828,135 @@ test('createWorktree sends the repo of the New sheet, as the daemon wrote it, an
   h.last('worktree.create').resolve({ worktreeID: 'W-new' });
   await pending;
   assert.equal(h.state().sheets.creating, null);
+});
+
+test('createWorktree sends the picked profile as profileID, and with no pick carries no profileID at all', async () => {
+  const h = await newHarness();
+  let pending = h.actions.createWorktree(REPO, MESSAGE, BEDROCK.id);
+  assert.deepEqual(h.last('worktree.create').params, { repoID: REPO, message: MESSAGE, profileID: BEDROCK.id });
+  h.last('worktree.create').reject(new AppError('refused', "Model profile 'acme-bedrock' is not logged in."));
+  await pending;
+  pending = h.actions.createWorktree(REPO, MESSAGE);
+  const params = h.last('worktree.create').params as object;
+  assert.deepEqual(params, { repoID: REPO, message: MESSAGE });
+  assert.equal('profileID' in params, false);
+  h.last('worktree.create').resolve({ worktreeID: 'W-new' });
+  await pending;
+});
+
+test("a create refused for its profile shows the laptop's words in the sheet, which stays open", async () => {
+  const h = await newHarness();
+  const sheet = h.sheet();
+  const words = "Model profile 'acme-work' is not logged in. Run tbd profile login acme-work, then try again.";
+  const pending = h.actions.createWorktree(REPO, MESSAGE, WORK.id);
+  h.last('worktree.create').reject(new AppError('refused', words));
+  await pending;
+  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: words });
+  assert.equal(h.sheet(), sheet);
+});
+
+// MARK: - New: the account
+
+const UNUSABLE_WORK: PhoneProfile = { ...WORK, usable: false, unusableReason: 'Not logged in' };
+
+/** The New sheet's profiles as loaded for `REPO`, with `repoProfileID`. */
+function loadedFor(profiles: PhoneProfile[], repoProfileID: string | null): LoadedNewProfiles {
+  return { phase: 'loaded', repoID: REPO, profiles, repoProfileID };
+}
+
+test('loadNewSheetProfiles asks with the repo, then holds the profiles and the repo\'s profile for that repo only', async () => {
+  const h = await newHarness();
+  const pending = h.actions.loadNewSheetProfiles(REPO);
+  assert.deepEqual(h.last('profiles.list').params, { repoID: REPO });
+  assert.deepEqual(h.state().sheets.newProfiles, { phase: 'loading', id: 1, repoID: REPO });
+  h.last('profiles.list').resolve({ profiles: [PERSONAL, UNUSABLE_WORK, BEDROCK], repoProfileID: BEDROCK.id });
+  await pending;
+  assert.deepEqual(loadedNewProfiles(h.state().sheets, REPO), loadedFor([PERSONAL, UNUSABLE_WORK, BEDROCK], BEDROCK.id));
+  assert.equal(loadedNewProfiles(h.state().sheets, OTHER_REPO), null);
+  // A reply that names no profile for the repo reads as null.
+  const again = h.actions.loadNewSheetProfiles(REPO);
+  h.last('profiles.list').resolve({ profiles: PROFILES });
+  await again;
+  assert.deepEqual(loadedNewProfiles(h.state().sheets, REPO), loadedFor(PROFILES, null));
+});
+
+test("the New sheet's profiles and the account menu's are two loads, and neither replaces the other", async () => {
+  const h = await newHarness();
+  const before = h.state().sheets.profiles;
+  assert.deepEqual(before, { phase: 'loaded', profiles: PROFILES });
+  const forNew = h.actions.loadNewSheetProfiles(REPO);
+  const forMenu = h.actions.loadProfiles();
+  const [newLoad, menuLoad] = h.of('profiles.list').slice(-2);
+  assert.deepEqual(newLoad!.params, { repoID: REPO });
+  assert.deepEqual(menuLoad!.params, {});
+  // The menu's load lands first, then the sheet's: each in its own place.
+  menuLoad!.resolve({ profiles: [PERSONAL, WORK] });
+  await forMenu;
+  assert.equal(h.state().sheets.newProfiles.phase, 'loading');
+  newLoad!.resolve({ profiles: [PERSONAL, UNUSABLE_WORK], repoProfileID: PERSONAL.id });
+  await forNew;
+  assert.deepEqual(h.state().sheets.profiles, { phase: 'loaded', profiles: [PERSONAL, WORK] });
+  assert.deepEqual(h.state().sheets.newProfiles, loadedFor([PERSONAL, UNUSABLE_WORK], PERSONAL.id));
+});
+
+test("a New sheet profiles load: only the newest lands, a failure shows no words, and a superseded one settles as idle", async () => {
+  const h = await newHarness();
+  const first = h.actions.loadNewSheetProfiles(REPO);
+  const second = h.actions.loadNewSheetProfiles(REPO);
+  const [a, b] = h.of('profiles.list').slice(-2);
+  b!.reject(new AppError('internal', 'TBD could not read its profiles.'));
+  await second;
+  assert.deepEqual(h.state().sheets.newProfiles, { phase: 'failed', repoID: REPO });
+  assert.equal(h.state().sheets.failed, null);
+  a!.resolve({ profiles: PROFILES, repoProfileID: PERSONAL.id });
+  await first;
+  assert.deepEqual(h.state().sheets.newProfiles, { phase: 'failed', repoID: REPO });
+  const third = h.actions.loadNewSheetProfiles(REPO);
+  h.last('profiles.list').reject(new AppError('superseded', SUPERSEDED_TEXT));
+  await third;
+  assert.deepEqual(h.state().sheets.newProfiles, { phase: 'idle' });
+  assert.equal(h.state().ui.toast, null);
+});
+
+test('a profile is usable unless the laptop marks it not, and one listed with no repo carries no mark', () => {
+  assert.equal(isUsable(PERSONAL), true);
+  assert.equal(isUsable({ ...PERSONAL, usable: true }), true);
+  assert.equal(isUsable(UNUSABLE_WORK), false);
+  assert.equal(isUsable({ ...WORK, usable: false }), false);
+});
+
+test("the Account row names the repo's profile until a pick, and Default while it knows none", () => {
+  const loaded = loadedFor(PROFILES, WORK.id);
+  // Before the list loads, and after a failed load: Default.
+  assert.equal(accountChoice(null, null), null);
+  // Loaded: the repo's profile, as the laptop names it.
+  assert.equal(accountChoice(loaded, null), WORK);
+  // The laptop named none, or one the list does not hold: Default.
+  assert.equal(accountChoice(loadedFor(PROFILES, null), null), null);
+  assert.equal(accountChoice(loadedFor([PERSONAL, BEDROCK], WORK.id), null), null);
+  // A pick wins, as the list now has it.
+  const renamed = { ...BEDROCK, name: 'acme-bedrock-2' };
+  assert.equal(accountChoice(loadedFor([PERSONAL, WORK, renamed], WORK.id), BEDROCK), renamed);
+  // While no list is loaded, as a reload leaves it, the pick shows as it was picked.
+  assert.equal(accountChoice(null, BEDROCK), BEDROCK);
+});
+
+test("a pick that a reloaded list no longer offers, or offers unusable, goes back to the repo's profile", () => {
+  assert.equal(pickStands(PROFILES, BEDROCK.id), true);
+  assert.equal(pickStands([PERSONAL, WORK], BEDROCK.id), false);
+  assert.equal(pickStands([PERSONAL, UNUSABLE_WORK], WORK.id), false);
+  assert.equal(accountChoice(loadedFor([PERSONAL, WORK], PERSONAL.id), BEDROCK), PERSONAL);
+  assert.equal(accountChoice(loadedFor([PERSONAL, UNUSABLE_WORK], PERSONAL.id), WORK), PERSONAL);
+  assert.equal(accountChoice(loadedFor([UNUSABLE_WORK], null), WORK), null);
+});
+
+test("a profile's line in the Account list: the laptop's reason for one that cannot start a session, else its kind as the Switch account sheet words it", () => {
+  assert.equal(accountDetail(PERSONAL), 'Claude subscription · default');
+  assert.equal(accountDetail(BEDROCK), 'Amazon Bedrock');
+  assert.equal(accountDetail(UNUSABLE_WORK), 'Not logged in');
+  // Unusable with no reason, or a blank one: the kind, never an empty line.
+  assert.equal(accountDetail({ ...WORK, usable: false }), 'Claude subscription');
+  assert.equal(accountDetail({ ...WORK, usable: false, unusableReason: '' }), 'Claude subscription');
 });
 
 test('a create begins only while none is on its way', () => {

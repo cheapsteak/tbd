@@ -1,7 +1,8 @@
 // The fake laptop the end-to-end tests run against (fake-laptop-app.js), checked in Node: its
-// times, its transcript pages, its replay, its holds and its size check. Every body it sends
-// must decode with the app's own decoders and keep every field it carries, so a fake reply the
-// real app would refuse fails here in seconds rather than as an app error in Playwright.
+// times, its transcript pages, its replay, its holds, the profiles it lists for a repo and the
+// profile a new worktree starts on, and its size check. Every body it sends must decode with the
+// app's own decoders and keep every field it carries, so a fake reply the real app would refuse
+// fails here in seconds rather than as an app error in Playwright.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -310,6 +311,37 @@ test('a switch moves the session to the profile: a running one restarts idle, a 
     assert.equal(session.status.chip, after, chip);
     assert.equal(session.profileName, 'acme-work', chip);
   }
+});
+
+test("profiles.list with a repoID marks the profiles and names the repo's profile; without one it carries neither", () => {
+  const marked = [PROFILES[0], { ...PROFILES[1], usable: false, unusableReason: 'Not logged in' }];
+  const t = makeLaptop(scenarioWith([], { profiles: marked }));
+  t.subscribe();
+  assert.deepEqual(t.replyTo(t.ask('profiles.list')).result, { profiles: PROFILES });
+  assert.deepEqual(t.replyTo(t.ask('profiles.list', { repoID: REPO_ID })).result, { profiles: marked, repoProfileID: PROFILES[0].id });
+  // A repo's own profile comes before the default; one naming no profile the laptop holds falls back to it.
+  t.laptop.load(scenarioWith([], { profiles: marked, repoProfiles: { [REPO_ID]: PROFILES[1].id, 'repo-gone': 'no-such-profile' } }));
+  assert.equal(t.replyTo(t.ask('profiles.list', { repoID: REPO_ID })).result.repoProfileID, PROFILES[1].id);
+  assert.equal(t.replyTo(t.ask('profiles.list', { repoID: 'repo-gone' })).result.repoProfileID, PROFILES[0].id);
+  // No repo profile and no default: none is named.
+  t.laptop.load(scenarioWith([], { profiles: [PROFILES[1]] }));
+  assert.equal('repoProfileID' in t.replyTo(t.ask('profiles.list', { repoID: REPO_ID })).result, false);
+  assertDecodes(t.sent, t.methods);
+});
+
+test("worktree.create starts the session under the profileID sent, else the repo's profile, and refuses one it does not hold", () => {
+  const t = makeLaptop(scenarioWith([], { repoProfiles: { [REPO_ID]: PROFILES[1].id } }));
+  t.subscribe();
+  const profileOf = (/** @type {string} */ requestID) => {
+    const { worktreeID } = t.replyTo(requestID).result;
+    return t.laptop.state.rows.find((/** @type {any} */ r) => r.id === worktreeID).sessions[0].profileID;
+  };
+  assert.equal(profileOf(t.ask('worktree.create', { repoID: REPO_ID, message: 'Add a search box.', profileID: PROFILES[0].id })), PROFILES[0].id);
+  assert.equal(profileOf(t.ask('worktree.create', { repoID: REPO_ID, message: 'Add a search box.' })), PROFILES[1].id);
+  const refused = t.ask('worktree.create', { repoID: REPO_ID, message: 'Add a search box.', profileID: 'no-such-profile' });
+  assert.deepEqual(t.replyTo(refused).error, { code: 'not_found', message: TEXT.noSuchProfile });
+  assert.equal(t.laptop.state.rows.length, 3);
+  assertDecodes(t.sent, t.methods);
 });
 
 test('setReply replaces a handler, and null brings it back', () => {

@@ -5,7 +5,8 @@
 // The actions take one all the same, and these tests bring it:
 // - a sheet or menu that needs the profiles, and the New sheet's remote form, whose load ends
 //   superseded loads again while it shows, so its spinner always means a load on its way, and
-//   only once for each load that ends so;
+//   only once for each load that ends so; and the New sheet's local form, whose Account row's
+//   profiles load again the same way;
 // - choices that come back as an answer ends superseded wait, as they do after any change.
 //
 // esbuild bundles the real components, store and actions for the browser, with a client in the
@@ -275,6 +276,37 @@ test("the New sheet's remote form loads the providers again when its load ends s
   await supersede(page, 'remote.providers');
   await page.waitForTimeout(200);
   expect(await count(page, 'remote.providers')).toBe(3);
+  expect(problems).toEqual([]);
+});
+
+test("the New sheet's local form loads the Account row's profiles again when its load ends superseded, once for each", async ({ page }) => {
+  const problems = await started(page);
+  await act(page, 'openSheet', { name: 'new', repoID: 'R1', repoName: 'acme' });
+  const account = page.getByRole('button', { name: /^Account/ });
+  await expect(account).toContainText('Default');
+  await expect.poll(() => count(page, 'profiles.list')).toBe(1);
+  await supersede(page, 'profiles.list');
+  // The row still reads Default, and one more load is on its way, no more.
+  await expect.poll(() => count(page, 'profiles.list')).toBe(2);
+  await expect(account).toContainText('Default');
+  await page.waitForTimeout(200);
+  expect(await count(page, 'profiles.list')).toBe(2);
+  await resolve(page, 'profiles.list', { profiles: PROFILES, repoProfileID: WORK.id });
+  await expect(account).toContainText('acme-work');
+  await page.waitForTimeout(200);
+  expect(await count(page, 'profiles.list')).toBe(2);
+  // The remote form loads none, and the local one loads afresh when it shows again.
+  await page.getByRole('button', { name: 'Remote session' }).click();
+  await expect(account).toHaveCount(0);
+  await page.waitForTimeout(200);
+  expect(await count(page, 'profiles.list')).toBe(2);
+  await page.getByRole('button', { name: 'Local worktree' }).click();
+  await expect.poll(() => count(page, 'profiles.list')).toBe(3);
+  // A superseded load while the remote form shows starts nothing.
+  await page.getByRole('button', { name: 'Remote session' }).click();
+  await supersede(page, 'profiles.list');
+  await page.waitForTimeout(200);
+  expect(await count(page, 'profiles.list')).toBe(3);
   expect(problems).toEqual([]);
 });
 

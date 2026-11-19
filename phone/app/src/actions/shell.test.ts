@@ -1133,7 +1133,7 @@ test('createActions holds every action the plan names', () => {
     'closeSheet', 'openMenu', 'closeMenu', 'toast', 'clearToast', 'setShowDetails', 'setLastRow', 'toggleRepo', 'openLink',
     'openTranscript', 'closeTranscript', 'resumeTranscriptOnUp', 'onShowDetailsChanged', 'loadOlder', 'toggleDetail',
     'answerPrompt', 'dismissPrompt', 'setDraft', 'sendMessage',
-    'loadProfiles', 'switchProfile', 'fork', 'setModel', 'loadProviders', 'createWorktree', 'createRemote',
+    'loadProfiles', 'switchProfile', 'fork', 'setModel', 'loadProviders', 'loadNewSheetProfiles', 'createWorktree', 'createRemote',
   ];
   for (const name of names) assert.equal(typeof (actions as unknown as Record<string, unknown>)[name], 'function', name);
 });
@@ -1143,7 +1143,8 @@ test('every action that returns a Promise resolves, even when the laptop refuses
   const pending = [
     actions.loadOlder(), actions.toggleDetail(0, 'input'), actions.answerPrompt('p1', { kind: 'permission', decision: 'allow' }, 'Allow'),
     actions.sendMessage(), actions.loadProfiles(), actions.switchProfile('P1'), actions.fork(null), actions.setModel('opus'),
-    actions.loadProviders('R1'), actions.createWorktree('R1', 'hi'), actions.createRemote({ provider: 'acme-cloud', repoID: 'R1', message: 'hi', strings: {}, bools: {} }),
+    actions.loadProviders('R1'), actions.loadNewSheetProfiles('R1'), actions.createWorktree('R1', 'hi'), actions.createWorktree('R1', 'hi', 'P1'),
+    actions.createRemote({ provider: 'acme-cloud', repoID: 'R1', message: 'hi', strings: {}, bools: {} }),
   ];
   await Promise.all(pending);
 });
