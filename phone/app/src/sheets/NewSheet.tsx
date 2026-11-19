@@ -26,15 +26,17 @@
  * - **Account**, in the local form only, between the first message and the line under it: one
  *   row, "Account", with the profile the new session starts on at its right. The local form loads
  *   the profiles afresh each time it shows (`loadNewSheetProfiles`, for the repo), and the row
- *   names the repo's profile as the laptop reports it, until the user picks another
+ *   names the repo's profile as the laptop reports it, until the user picks one
  *   (`accountChoice`). It reads "Default" while it knows no profile to name: while the profiles
  *   load, when the load fails, which shows no words, and when the laptop names none. It opens only
  *   once the profiles are loaded: a tap opens the list under it, one row per profile with its kind
  *   and the default's mark as the Switch account sheet words them, or the laptop's reason for one
  *   that cannot start a session (`accountDetail`), which is disabled; the profile the row shows is
- *   ticked. A tap on another profile picks it and closes the list; a tap on the ticked one closes
- *   it. Each sheet starts again at the repo's profile, and a list that loads again without the
- *   picked profile, or with it unusable, unpicks it (`pickStands`). Only a pick goes out with
+ *   ticked. A tap on any profile that is not disabled picks it and closes the list, the ticked
+ *   one included: that tap pins the profile the row already shows, which a row left alone does
+ *   not, since with balancing on the laptop may start an unpicked create on another account.
+ *   Each sheet starts again at the repo's profile, unpicked, and a list that loads again without
+ *   the picked profile, or with it unusable, unpicks it (`pickStands`). Only a pick goes out with
  *   Create, as `profileID`; a row left alone sends none, so the laptop chooses as it always has.
  *   Picking never enables Create, and a failed load never holds it.
  * - **Local** ends with "TBD picks the branch, the worktree name and everything else from its
@@ -190,9 +192,10 @@ export function NewSheet({ sheet, titleID }: { sheet: NewSheetState; titleID: st
     setMode(m);
     setAccountsOpen(false);
   };
+  // Every tap is a pick, the ticked profile's too: `account` holds it, so Create sends it.
   const pickAccount = (p: PhoneProfile): void => {
     setAccountsOpen(false);
-    if (p.id !== choice?.id) setAccount(p);
+    setAccount(p);
   };
   const pickProvider = (p: PhoneProvider): void => {
     if (p.name === picked?.name) return;

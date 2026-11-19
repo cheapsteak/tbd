@@ -1831,14 +1831,32 @@ test("the Account row reads Default until the profiles load, then the repo's pro
   await expect(row).toBeDisabled();
   await expect(row).toBeEnabled();
   expect(await profileLoads(page)).toEqual([{ repoID: API_REPO }]);
-  // A tap on the ticked profile picks nothing: it only closes the list.
+  // Opening the list and closing it with the row picks nothing.
   await row.click();
   await expect(accountOption(page, 'acme-bedrock')).toHaveAttribute('aria-pressed', 'true');
-  await accountOption(page, 'acme-bedrock').click();
+  await row.click();
   await expect(row).toHaveAttribute('aria-expanded', 'false');
   await firstMessage(page).fill(LOCAL_MESSAGE);
   await createButton(page).click();
   await expect.poll(() => creates(page)).toEqual([{ method: 'worktree.create', params: { repoID: API_REPO, message: LOCAL_MESSAGE } }]);
+});
+
+test("a tap on the profile the row already shows pins it, and Create sends its profileID", async ({ page, appHost }) => {
+  await openApp(page, appHost, { scenario: withAccounts() });
+  await openNew(page, 'acme-api');
+  const row = accountRow(page);
+  await expect(row).toContainText('acme-bedrock');
+  await expect(row).toBeEnabled();
+  await row.click();
+  await expect(accountOption(page, 'acme-bedrock')).toHaveAttribute('aria-pressed', 'true');
+  await accountOption(page, 'acme-bedrock').click();
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
+  await expect(row).toContainText('acme-bedrock');
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect.poll(() => creates(page)).toEqual([
+    { method: 'worktree.create', params: { repoID: API_REPO, message: LOCAL_MESSAGE, profileID: BEDROCK } },
+  ]);
 });
 
 test('the Account list ticks the current profile and disables one that cannot start a session; a pick goes out as profileID', async ({ page, appHost }) => {

@@ -316,9 +316,9 @@ export type ProfilesListParams = {
 export type ProfilesListResult = {
   profiles: PhoneProfile[];
   /**
-   * The profile a new worktree in the request's `repoID` would use: the repo's own setting when
-   * that profile exists, else the default. Absent when the request had no `repoID`, or the laptop
-   * names none.
+   * The profile a new worktree in the request's `repoID` would use, with balancing left out: the
+   * repo's own setting, else the global default, each skipped when it no longer exists or is an
+   * API-key profile with no key. Absent when the request had no `repoID`, or neither is left.
    */
   repoProfileID?: string;
 };

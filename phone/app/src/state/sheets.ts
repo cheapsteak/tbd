@@ -461,8 +461,9 @@ export function pickStands(profiles: readonly PhoneProfile[], id: string): boole
  * - else the repo's profile (`repoProfileID`), when the list holds it;
  * - else null, while the row knows no profile to name, which it reads as `NO_ACCOUNT_TEXT`.
  *
- * Only a pick goes out with a create. The repo's profile is what the laptop would use anyway, so
- * a row left alone sends no `profileID` and the laptop chooses as it always has.
+ * Only a pick goes out with a create, the repo's own profile included when the user taps it. A
+ * row left alone sends no `profileID`, and the laptop chooses as it always has: with balancing
+ * on, it may start the session on another profile than the one the row names.
  */
 export function accountChoice(loaded: LoadedNewProfiles | null, picked: PhoneProfile | null): PhoneProfile | null {
   if (picked !== null) {

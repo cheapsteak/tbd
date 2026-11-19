@@ -39,7 +39,10 @@ Between the "First message" box and the hint line, the local form shows one coll
   known, it reads "Default".
 - **Expanded.** A tap opens a list, one row per profile, with a check on the current choice. The
   profile kind and a "default" mark follow the wording the Switch account sheet already uses.
-- **Picking.** A tap on a row makes it the choice and collapses the list.
+- **Picking.** A tap on a row makes it the choice and collapses the list. Tapping the ticked row
+  pins it: the new session starts on that profile. An untouched row leaves the choice to the
+  laptop, which with profile balancing on may start the session on another account than the one
+  the row names.
 - **Unusable profiles.** A profile that cannot start a session is disabled, and its row says why in
   short words, for example "Not logged in". It cannot be picked.
 - **No memory.** Each time the sheet opens, the choice starts again at the repo's profile.
@@ -53,9 +56,10 @@ Between the "First message" box and the hint line, the local form shows one coll
 
 **`profiles.list`** takes an optional `repoID`. With it, the reply adds:
 
-- `repoProfileID` – the ID of the profile a new worktree in that repo would use. It is the repo's own
-  profile setting when the repo has one that exists, otherwise the global default. It is absent when
-  the laptop cannot name one.
+- `repoProfileID` – the ID of the profile a new worktree in that repo would use, with balancing left
+  out. It is the repo's own profile setting, otherwise the global default. Either one is skipped when
+  it no longer exists or is an API-key profile with no key, as the laptop's resolver skips it. It is
+  absent when neither is left.
 - on each profile, `usable` (absent means usable) and, when it is false, `unusableReason` – a short
   phrase.
 
@@ -82,12 +86,14 @@ everything else a phone may not set, including `model`. The rest of the create i
 - **The list loads with no `repoProfileID`.** The row reads "Default" until the user picks one.
 - **The user picks a profile and the list reloads.** The pick stays if that profile is still in the
   list and usable. Otherwise the choice goes back to the repo's profile.
-- **The sheet sends `profileID` only when the user picked one.** Leaving the row alone sends none, so
-  the laptop's own choice, including balancing between accounts, applies exactly as before.
+- **The sheet sends `profileID` whenever the user tapped a profile row**, the ticked one included.
+  Leaving the row alone sends none, so the laptop's own choice, including balancing between
+  accounts, applies exactly as before.
 
 ## Components
 
-- **Laptop wire types** (`PhoneRPC.swift` and the phone app protocol files) – the optional request
+- **Laptop wire types** (`Sources/TBDDaemon/PhoneBridge/App/PhoneAppMessages.swift` and the phone
+  app protocol files) – the optional request
   field and the optional reply fields.
 - **`PhoneAppService+Profiles.swift`** – fills the new fields. It stays an allowlist, built field by
   field, and never carries a token or other secret.
@@ -116,7 +122,8 @@ Phone:
 - The row shows the repo's profile once the list loads, and "Default" before.
 - Expanding lists the profiles, with a check on the current one.
 - An unusable row is disabled and cannot be picked.
-- A pick is sent as `profileID` on Create. An untouched row sends none.
+- A pick is sent as `profileID` on Create, and so is a tap on the profile the row already shows. An
+  untouched row sends none.
 - A failed list leaves Create working with no `profileID`.
 - A reload that drops the picked profile resets the choice.
 - The remote form shows no Account row.

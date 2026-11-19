@@ -934,6 +934,8 @@ test("the Account row names the repo's profile until a pick, and Default while i
   // The laptop named none, or one the list does not hold: Default.
   assert.equal(accountChoice(loadedFor(PROFILES, null), null), null);
   assert.equal(accountChoice(loadedFor([PERSONAL, BEDROCK], WORK.id), null), null);
+  // A pick of the repo's own profile stands as a pick.
+  assert.equal(accountChoice(loaded, WORK), WORK);
   // A pick wins, as the list now has it.
   const renamed = { ...BEDROCK, name: 'acme-bedrock-2' };
   assert.equal(accountChoice(loadedFor([PERSONAL, WORK, renamed], WORK.id), BEDROCK), renamed);
