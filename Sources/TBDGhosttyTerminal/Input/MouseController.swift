@@ -983,10 +983,24 @@ final class MouseController: NSObject {
     /// One row of the hover underline: its layer and the viewport cells it is drawn under.
     private struct LinkOverlay {
         var span: GhosttyTextLink.Span
-        let layer: CALayer
+        let layer: CAShapeLayer
     }
 
     /// Draws (or moves) the hover underline under `spans`, viewport cells, one layer per row.
+    ///
+    /// The underline is the dotted underline the renderer draws for a program's SGR 4:4, drawn
+    /// where the renderer draws it, in the link colour:
+    ///
+    /// - **Weight** – the font's underline thickness, `t`.
+    /// - **Position** – along the middle of a box `3t` tall, centred on the font's underline
+    ///   position and kept inside the cell, as `DecorationRuns` places it; a font whose underline
+    ///   sits near the cell's bottom has its line lifted.
+    /// - **Dots** – flat-ended (butt) dots `t` long with gaps `t` long, the first dot at the
+    ///   link's first cell on each row.
+    /// - **Pixels** – edges on whole device pixels, which keeps the dots crisp. Where the
+    ///   renderer's line has edges between pixels, as an odd `t` centred on the font's position
+    ///   does, this one sits half a pixel lower rather than higher, so it never rises into the
+    ///   glyphs: Monaco 12 at a backing scale of 1 centres its underline on the baseline itself.
     ///
     /// `CALayer` sublayers rather than a renderer feature: the underline is transient hover
     /// decoration, not terminal content, and this keeps the frame path untouched.
@@ -996,27 +1010,45 @@ final class MouseController: NSObject {
         let scale = max(1, Double(view.backingScale))
         let grid = view.gridGeometry
         let cellW = Double(grid.cellSizePx.x), cellH = Double(grid.cellSizePx.y)
-        let thickness = max(1.0, (cellH / 14).rounded())
+        let metrics = view.renderContext.metrics
+        let thickness = Double(metrics.underlineThickness)
+        // In device pixels down from the top of the cell: the renderer's box for the underline
+        // (`DecorationRuns`), then the line's top edge, a thickness into it, on a whole pixel.
+        let centre = Double(metrics.baseline + metrics.underlineOffset)
+        let boxTop = min(max(centre - 1.5 * thickness, 0), max(cellH - 3 * thickness, 0))
+        let top = (boxTop + thickness).rounded(.up)
+        let lineWidth = CGFloat(thickness / scale)
 
         while linkOverlays.count > spans.count {
             linkOverlays.removeLast().layer.removeFromSuperlayer()
         }
         for (index, span) in spans.enumerated() {
             if index == linkOverlays.count {
-                let created = CALayer()
-                created.actions = ["position": NSNull(), "bounds": NSNull(), "hidden": NSNull()]
+                let created = CAShapeLayer()
+                created.actions = [
+                    "position": NSNull(), "bounds": NSNull(), "hidden": NSNull(), "path": NSNull(),
+                    "lineWidth": NSNull(), "lineDashPattern": NSNull(), "strokeColor": NSNull(),
+                ]
                 created.zPosition = 1
+                created.fillColor = nil
+                created.lineCap = .butt
                 host.addSublayer(created)
                 linkOverlays.append(LinkOverlay(span: span, layer: created))
             }
             linkOverlays[index].span = span
             let x = (Double(grid.originPx.x) + Double(span.columns.lowerBound) * cellW) / scale
             let width = Double(span.columns.count) * cellW / scale
-            let y = (Double(grid.originPx.y) + Double(span.row + 1) * cellH - thickness) / scale
+            let y = (Double(grid.originPx.y) + Double(span.row) * cellH + top) / scale
+            let line = CGMutablePath()
+            line.move(to: CGPoint(x: 0, y: lineWidth / 2))
+            line.addLine(to: CGPoint(x: CGFloat(width), y: lineWidth / 2))
             let layer = linkOverlays[index].layer
             layer.contentsScale = view.backingScale
-            layer.backgroundColor = NSColor.linkColor.cgColor
-            layer.frame = CGRect(x: x, y: y, width: width, height: thickness / scale)
+            layer.frame = CGRect(x: x, y: y, width: width, height: Double(lineWidth))
+            layer.path = line
+            layer.lineWidth = lineWidth
+            layer.lineDashPattern = [NSNumber(value: Double(lineWidth)), NSNumber(value: Double(lineWidth))]
+            layer.strokeColor = NSColor.linkColor.cgColor
             layer.isHidden = false
         }
     }
@@ -1033,7 +1065,16 @@ final class MouseController: NSObject {
     /// The viewport cells the hover underline is drawn under, one span per row, top row first:
     /// those of its layers that are in the view's layer and showing. Tests only.
     var underlinedSpans: [GhosttyTextLink.Span] {
-        linkOverlays.filter { $0.layer.superlayer != nil && !$0.layer.isHidden }.map(\.span)
+        showingLinkOverlays.map(\.span)
+    }
+
+    /// The layers the hover underline is drawn with, in step with `underlinedSpans`. Tests only.
+    var underlineLayers: [CAShapeLayer] {
+        showingLinkOverlays.map(\.layer)
+    }
+
+    private var showingLinkOverlays: [LinkOverlay] {
+        linkOverlays.filter { $0.layer.superlayer != nil && !$0.layer.isHidden }
     }
 
     // MARK: - Plumbing

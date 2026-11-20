@@ -238,7 +238,7 @@ extension GhosttyTerminalView {
         textLayer.fontSize = font.pointSize
         textLayer.foregroundColor = foreground
         textLayer.string = text
-        // The link underline's weight: a fourteenth of the cell height, at least a device pixel.
+        // A fourteenth of the cell height thick, at least a device pixel, along the cell's bottom.
         let thickness = max(1, (overlayFrame.height * scale / 14).rounded()) / scale
         underline.frame = CGRect(x: 0, y: overlayFrame.height - thickness, width: overlayFrame.width, height: thickness)
         underline.backgroundColor = foreground

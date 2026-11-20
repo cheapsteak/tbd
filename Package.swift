@@ -525,6 +525,9 @@ let package = Package(
                 // check what the engine does with its callbacks.
                 "TBDGhosttyCore",
                 "TBDGhosttyTerminal",
+                // The ⌘-hover suite holds the link underline to the rect the
+                // renderer draws a dotted underline with.
+                "TBDGhosttyShaderTypes",
                 .product(name: "Clocks", package: "swift-clocks"),
             ],
             resources: [
