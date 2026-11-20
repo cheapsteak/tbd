@@ -182,6 +182,92 @@ struct TerminalEngineCommandHoverTests {
         #expect(afterMove.isEmpty, "a move over the new text underlined \(afterMove)")
     }
 
+    /// The underline goes where the font puts one, as the renderer draws a program's underline: as
+    /// thick as the font's underline, centred on its position, on every row the link covers. An
+    /// odd thickness centred there would have its edges between device pixels, so the line sits
+    /// half a pixel lower, edges whole. libghostty-only: the SwiftTerm view draws its own.
+    @Test("a ⌘-hover underline sits at the font's underline position, as thick as the font's underline",
+          .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice))
+    func underlineSitsAtTheFontsUnderline() async throws {
+        let fixture = try HoverFixture(kind: .ghostty, width: 400)
+        defer { fixture.tearDown() }
+        let columns = fixture.engine.gridSize.cols
+        var upper = "see \(HoverFixture.linkURL)/"
+        while upper.count < columns { upper += "a" }
+        try #require(upper.count == columns, "\(upper) does not fill a row of \(columns)")
+        await fixture.show("\(upper)\r\n  more/acme now")
+        let view = try #require(fixture.engine.view as? GhosttyTerminalView)
+
+        try fixture.command(down: true)
+        try fixture.move(column: 14, row: 0, flags: .command)
+
+        let spans = view.mouseController.underlinedSpans
+        let layers = view.mouseController.underlineLayers
+        try #require(spans.count == 2 && layers.count == 2, "\(spans.count) spans on \(layers.count) layers")
+        let scale = max(1, Double(view.backingScale))
+        let grid = view.gridGeometry
+        let metrics = view.renderContext.metrics
+        let cellHeight = Double(grid.cellSizePx.y)
+        let thickness = Double(metrics.underlineThickness)
+        let fontCentre = Double(metrics.baseline + metrics.underlineOffset)
+        try #require(fontCentre - thickness / 2 >= 0 && fontCentre + thickness / 2 + 0.5 <= cellHeight,
+                     "the font's underline, \(thickness) px at \(fontCentre), leaves a \(cellHeight) px cell")
+        let drop = metrics.underlineThickness.isMultiple(of: 2) ? 0 : 0.5
+
+        for (span, layer) in zip(spans, layers) {
+            // Device pixels down from the top of the span's row.
+            let top = Double(layer.frame.minY) * scale - Double(grid.originPx.y) - Double(span.row) * cellHeight
+            let height = Double(layer.frame.height) * scale
+            #expect(isNear(height, thickness),
+                    "row \(span.row): the line is \(height) px thick, the font's underline \(thickness) px")
+            #expect(isNear(top, top.rounded()), "row \(span.row): its top edge, \(top) px, is between device pixels")
+            #expect(isNear(top + height / 2, fontCentre + drop),
+                    "row \(span.row): centred \(top + height / 2) px down its row, the font's underline at \(fontCentre) px")
+        }
+    }
+
+    /// Dotted as the renderer draws a program's SGR 4:4 underline: square-ended dots as long as the
+    /// line is thick, with gaps as long, the first dot at the link's first cell. libghostty-only:
+    /// the SwiftTerm view draws its own.
+    @Test("a ⌘-hover underline is dotted, its dots and gaps as long as it is thick",
+          .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice))
+    func underlineIsDotted() async throws {
+        let fixture = try HoverFixture(kind: .ghostty)
+        defer { fixture.tearDown() }
+        await fixture.show("see \(HoverFixture.linkURL) now")
+        let view = try #require(fixture.engine.view as? GhosttyTerminalView)
+
+        try fixture.command(down: true)
+        try fixture.move(column: 14, row: 0, flags: .command)
+
+        let layers = view.mouseController.underlineLayers
+        try #require(layers.count == 1, "\(layers.count) underline layers for a one-row URL")
+        let layer = layers[0]
+        let scale = max(1, Double(view.backingScale))
+        let grid = view.gridGeometry
+        let thickness = Double(view.renderContext.metrics.underlineThickness) / scale
+
+        let dashes = (layer.lineDashPattern ?? []).map(\.doubleValue)
+        #expect(dashes.count == 2 && dashes.allSatisfy { isNear($0, thickness) },
+                "dash pattern \(dashes) pt, for a line \(thickness) pt thick")
+        #expect(isNear(Double(layer.lineWidth), thickness), "stroked \(layer.lineWidth) pt wide, not \(thickness) pt")
+        #expect(layer.lineCap == .butt, "dot ends \(layer.lineCap.rawValue)")
+        #expect(layer.lineDashPhase == 0, "the pattern starts \(layer.lineDashPhase) pt in")
+        #expect(layer.fillColor == nil, "the line is filled as well as stroked")
+
+        // The stroke runs the layer's whole width along its middle, from its left edge, and the
+        // layer starts at the link's first cell: so does the first dot.
+        let line = try #require(layer.path?.boundingBox, "the layer strokes no path")
+        #expect(isNear(Double(line.minX), 0) && isNear(Double(line.width), Double(layer.bounds.width))
+                    && isNear(Double(line.minY), Double(layer.bounds.midY)) && line.height == 0,
+                "the stroke runs \(line) in a layer of \(layer.bounds)")
+        let cellWidth = Double(grid.cellSizePx.x)
+        #expect(isNear(Double(layer.frame.minX) * scale, Double(grid.originPx.x) + 4 * cellWidth),
+                "the line starts \(layer.frame.minX) pt in, not at column 4")
+        #expect(isNear(Double(layer.frame.width) * scale, 24 * cellWidth),
+                "the line is \(layer.frame.width) pt long, not 24 columns")
+    }
+
     @Test("a hover without Command underlines nothing", arguments: TerminalEngineFactory.availableKinds)
     func noCommand(kind: TerminalEngineKind) async throws {
         let fixture = try HoverFixture(kind: kind)
@@ -233,6 +319,11 @@ struct TerminalEngineCommandHoverTests {
 }
 
 // MARK: - Fixture and recorder
+
+/// Whether two lengths are the same, to well under a device pixel.
+private func isNear(_ a: Double, _ b: Double) -> Bool {
+    abs(a - b) < 1e-6
+}
 
 /// The cells an engine underlines on one row of the screen.
 private struct Underline: Equatable, CustomStringConvertible {
