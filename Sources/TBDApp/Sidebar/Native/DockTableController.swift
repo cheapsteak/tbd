@@ -100,6 +100,10 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// Runs after an apply changed the number of rows; the container resizes
     /// the dock.
     var onRowCountChange: (() -> Void)?
+    /// Runs after the user changed the selection in the dock. The container
+    /// tells the outline, which then mirrors the selection without scrolling
+    /// to it: the user is looking at the dock, not at the list above.
+    var onUserSelection: (() -> Void)?
 
     /// Answers whether an unpromoted scratch row's directory exists. The
     /// container hands in the outline's cache of answers probed off the main
@@ -153,17 +157,12 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     private var isApplyingModelSelection = false
     /// The selection the last apply mirrored; a new one scrolls its first row
     /// into view.
-    private var lastSelection: SelectionKey?
+    private var lastSelection: SidebarSelectionKey?
     /// The pins a drag carries, read from its pasteboard once per drag:
     /// `validateDrop` runs on every pointer move.
     private var dropPayloadCache: (sequence: Int, ids: [UUID])?
     private var renameEditor: SidebarRenameEditor?
     private weak var renamingCell: NSView?
-
-    private struct SelectionKey: Equatable {
-        let worktrees: Set<UUID>
-        let remote: RemoteSessionSelection?
-    }
 
     var isHoldingStructure: Bool { !holds.isEmpty }
 
@@ -541,7 +540,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// A selection that changed since the last apply scrolls its first dock
     /// row into view: opening a subtree can push the dock past its cap.
     private func scrollNewSelectionIntoView() {
-        let key = SelectionKey(worktrees: appState.selectedWorktreeIDs, remote: appState.selectedRemoteSession)
+        let key = SidebarSelectionKey(appState)
         defer { lastSelection = key }
         guard let previous = lastSelection, previous != key, let first = table.selectedRowIndexes.first else { return }
         table.scrollRowToVisible(first)
@@ -565,6 +564,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             extending: SidebarSelectionBridge.extendsSelection(selectionModifiers()),
             isShown: { shown.contains($0) })
         writeSelection(ids)
+        onUserSelection?()
         isApplyingModelSelection = true
         applyModelSelection()
         isApplyingModelSelection = false

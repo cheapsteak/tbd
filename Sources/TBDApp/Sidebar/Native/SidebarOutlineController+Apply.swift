@@ -9,7 +9,8 @@ private let outlineLogger = Logger(subsystem: "com.tbd.app", category: "native-s
 extension SidebarOutlineController {
     // MARK: Apply
 
-    /// Applies `latest`, then mirrors `AppState`'s selection into the outline.
+    /// Applies `latest`, then mirrors `AppState`'s selection into the outline
+    /// and centres a selection made elsewhere and a pending scroll target.
     /// The selection guard covers the whole apply, through `endUpdates`: the
     /// selection changes the outline posts while rows move are not echoed.
     func apply(_ latest: SidebarTree) {
@@ -31,6 +32,9 @@ extension SidebarOutlineController {
         if rowViewsNeedRefresh {
             refreshRowViewConfigurations()
         }
+        // Both centre the same row when a navigation sets both: the second
+        // finds it centred already and leaves the scroll alone.
+        centerSelectionIfChanged()
         scrollPendingTargetToCenter()
         isApplyingModelSelection = false
         reconcileVanishedSelection()

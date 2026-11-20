@@ -27,6 +27,41 @@ extension SidebarOutlineController {
         }
     }
 
+    /// Centres the first selected row, in display order, when `AppState`
+    /// holds a selection the outline has not shown: one made outside the
+    /// sidebar, by back and forward, a notification, a shortcut or the jump
+    /// menu. Centred even when the row is in view already. Runs after
+    /// `applyModelSelection()`.
+    ///
+    /// The first apply only takes the selection, so the first load never
+    /// scrolls, and a rebuild that leaves the selection alone never does
+    /// either: the user may have scrolled away since. A selected row the
+    /// outline does not show — in a collapsed section, filtered out, only in
+    /// the dock — is skipped, and nothing is expanded for it. While structure
+    /// is held the change waits for the apply that ends the hold, as the
+    /// pending scroll target does.
+    func centerSelectionIfChanged() {
+        let selection = SidebarSelectionKey(appState)
+        guard let shown = lastShownSelection else {
+            lastShownSelection = selection
+            return
+        }
+        guard selection != shown, !isHoldingStructure else { return }
+        lastShownSelection = selection
+        guard let row = outline.selectedRowIndexes.first else { return }
+        centerRow(row)
+    }
+
+    /// Takes `AppState`'s selection as shown where the user is looking, so
+    /// the apply that mirrors it leaves the scroll alone. Called for every
+    /// selection the user makes in the sidebar — a click, a ⌘- or ⇧-click or
+    /// an arrow key in the outline, a click in the dock — since moving the
+    /// list under the pointer would lose the row just clicked; and for a
+    /// vanished row pruned from a selection already shown.
+    func markSelectionShown() {
+        lastShownSelection = SidebarSelectionKey(appState)
+    }
+
     /// Tells `AppState`, once, when a selected worktree left the model during
     /// the apply — the daemon dropped it without `AppState` pruning the
     /// selection. A row merely out of view (a collapsed section, a filter)
@@ -41,7 +76,11 @@ extension SidebarOutlineController {
         writeSelection(selected.subtracting(vanished))
     }
 
+    /// Every write here is the sidebar's own — the user's selection, or a
+    /// vanished row pruned from one already shown — so the selection it
+    /// leaves, read back after the `didSet` has routed it, is taken as shown.
     private func writeSelection(_ ids: Set<UUID>) {
+        defer { markSelectionShown() }
         guard ids != appState.selectedWorktreeIDs else { return }
         appStateSelectionWriteCount += 1
         appState.selectedWorktreeIDs = ids

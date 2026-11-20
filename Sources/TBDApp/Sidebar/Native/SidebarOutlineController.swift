@@ -43,7 +43,8 @@ import TBDShared
 /// `AppState.selectedWorktreeIDs` through `SidebarSelectionBridge`, whose
 /// `didSet` routes it; every apply ends by selecting the rows `AppState`
 /// names, under a guard that keeps the outline's own notifications from being
-/// echoed back. Each rebuild starts with `SidebarView`'s reveals.
+/// echoed back. A selection made outside the sidebar is also centred in the
+/// list. Each rebuild starts with `SidebarView`'s reveals.
 @MainActor
 final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     /// Why structural changes are being held.
@@ -124,6 +125,12 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// Selection notifications the guard kept from being written back: what
     /// a test counts to prove the guard ran. Written only by the controller.
     var suppressedSelectionNotificationCount = 0
+    /// The selection the outline last showed: taken by each apply, and by
+    /// every selection the user makes in the sidebar. Nil until the first
+    /// apply. An apply that finds `AppState` holding another one was handed
+    /// a selection made elsewhere — back and forward, a notification, a
+    /// shortcut — and centres its row (`centerSelectionIfChanged`).
+    var lastShownSelection: SidebarSelectionKey?
 
     /// `SidebarView`'s reveal state, mirrored: the selection reveal's last
     /// value and whether the first one has run, the Ended reveal's last key,

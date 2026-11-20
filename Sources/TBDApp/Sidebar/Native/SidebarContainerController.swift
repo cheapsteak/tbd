@@ -10,7 +10,8 @@ import SwiftUI
 /// at most five rows and 40% of the list above it. It is recomputed on every
 /// layout and whenever the dock's row count changes.
 ///
-/// The outline and the dock share one sheet presenter and one `+` menu.
+/// The outline and the dock share one sheet presenter and one `+` menu, and a
+/// selection the user makes in the dock never scrolls the outline.
 @MainActor
 final class SidebarContainerController: NSViewController {
     let outlineController: SidebarOutlineController
@@ -33,6 +34,9 @@ final class SidebarContainerController: NSViewController {
         let dock = dockController
         outline.onScratchDirectoriesChanged = { [weak dock] in dock?.scheduleRebuild() }
         dock.onRowCountChange = { [weak self] in self?.dockRowCountChanged() }
+        // A click in the dock moves neither list: the outline takes the
+        // selection as shown, so it does not scroll to the row's copy there.
+        dock.onUserSelection = { [weak outline] in outline?.markSelectionShown() }
     }
 
     @available(*, unavailable)

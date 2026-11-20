@@ -490,6 +490,44 @@ struct DockTableControllerTests {
         #expect(h.state.selectedWorktreeIDs == [a.id], h.evidence(names))
     }
 
+    /// A pinned row clicked in the dock leaves the outline where it is,
+    /// though the outline shows the row too, far below: the user is looking
+    /// at the dock. The same selection made elsewhere centres it there.
+    @Test func dockClickDoesNotScrollTheOutline() throws {
+        let h = DockHarness("centerOnDockClick")
+        defer { h.tearDown() }
+        h.suite.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        var rows = (0..<60).map { SidebarOutlineControllerTests.row("row \($0)", repo, order: $0) }
+        let pin = Self.pinned("pin", repo, order: 40, pinOrder: 0)
+        rows[40] = pin
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: rows]
+        h.state.selectedWorktreeIDs = [rows[0].id]
+        h.mount(size: NSSize(width: 320, height: 300))
+        let clip = h.outlineController.scrollView.contentView
+        let names = [pin.id: "pin", rows[0].id: "row 0"]
+        try #require(h.outlineRow(.worktree(pin.id)) >= 0, h.evidence(names))
+        try #require(h.row(.worktree(pin.id)) >= 0, h.evidence(names))
+        try #require(clip.bounds.minY < 0.5, h.evidence(names))
+
+        // Control: selected from outside the sidebar, the row is centred in
+        // the outline, and back at row 0 the outline is at the top again.
+        h.state.selectedWorktreeIDs = [pin.id]
+        h.flush()
+        try #require(clip.bounds.minY > 0.5, "The outline never scrolled to the row; the check below would be vacuous")
+        h.state.selectedWorktreeIDs = [rows[0].id]
+        h.flush()
+        try #require(clip.bounds.minY < 0.5, h.evidence(names))
+
+        h.table.selectRowIndexes(IndexSet(integer: h.row(.worktree(pin.id))), byExtendingSelection: false)
+        try #require(h.state.selectedWorktreeIDs == [pin.id], h.evidence(names))
+        h.flush()
+        let outlineSelected = h.outlineSelectedIDs
+        #expect(outlineSelected == [.worktree(pin.id)], h.evidence(names))
+        #expect(clip.bounds.minY < 0.5, "A click in the dock scrolled the outline to \(clip.bounds.minY)")
+    }
+
     // MARK: Pasteboard types
 
     @Test func dockRejectsSidebarPayload() throws {
