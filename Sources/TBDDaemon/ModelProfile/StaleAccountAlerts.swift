@@ -94,7 +94,7 @@ public actor StaleAccountAlerts {
                 guard notifying, !latched.contains(candidate.profileID) else { continue }
                 latched.insert(candidate.profileID)
                 toAlert.append(candidate)
-            case .wrongKind, .noCredential, .optedOut, .sameAccount:
+            case .wrongKind, .noCredential, .optedOut, .sameAccount, .fableOut:
                 continue
             }
         }

@@ -62,6 +62,7 @@ extension RPCRouter {
         let usageByID = try await db.modelProfileUsage.fetchAll()
         let oauthSnapshots = await oauthUsagePoller?.allSnapshots() ?? [:]
         let liveSessionCounts = try await db.terminals.liveSessionCountsByProfile()
+        let fableReadings = await modelProfileResolver.fable?.all() ?? [:]
         let result = profiles.map { profile -> ModelProfileWithUsage in
             // Bedrock profiles have no isolated config dir; everything else
             // gets one at ~/tbd/profiles/<uuid>/claude. loginIdentity is only
@@ -89,7 +90,8 @@ extension RPCRouter {
                 configDirPath: configDirPath,
                 usageSnapshot: oauthSnapshots[profile.id],
                 tokenTail: tokenTail,
-                liveSessions: liveSessionCounts[profile.id] ?? 0
+                liveSessions: liveSessionCounts[profile.id] ?? 0,
+                fable: fableReadings[profile.id]
             )
         }
         let config = try await db.config.get()
@@ -676,42 +678,72 @@ extension RPCRouter {
     /// in a repo.
     func handleModelProfileExecEnvironment(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileExecEnvironmentParams.self, from: paramsData)
-        guard let row = try await db.modelProfiles.get(id: params.id) else {
-            return RPCResponse(error: "Profile not found")
+        let outcome = try await ProfileExecEnvironmentBuilder.build(
+            profileID: params.id, resolver: modelProfileResolver,
+            configDirManager: configDirManager, config: db.config)
+        switch outcome {
+        case .refused(let message):
+            return RPCResponse(error: message)
+        case .built(let result):
+            return try RPCResponse(result: result)
         }
-        // Only an API-key profile with no stored key resolves to nil.
-        guard let profile = try await modelProfileResolver.loadByID(row.id) else {
-            return RPCResponse(error: "Profile '\(row.name)' has no stored API key. "
-                + "Add one in Settings → Model Profiles in the TBD app.")
+    }
+
+    // MARK: - Fable availability
+
+    /// `modelProfile.fableCheck` — force a Fable probe now for the named
+    /// profiles, or for every pool profile (signed-in and token, not opted
+    /// out) when none are named, and return the readings.
+    func handleModelProfileFableCheck(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfileFableCheckParams.self, from: paramsData)
+        guard let store = modelProfileResolver.fable else {
+            return RPCResponse(error: "This daemon does not check Fable availability.")
         }
-        if profile.kind == .oauthToken, profile.secret == nil {
-            return RPCResponse(error: "Profile '\(row.name)' has no stored setup token. "
-                + "Mint one with `claude setup-token` and paste it into Settings → Model Profiles → "
-                + "\"Replace token…\" in the TBD app.")
+        let all = try await db.modelProfiles.list()
+        let chosen: [ModelProfile]
+        if let ids = params.ids {
+            let wanted = Set(ids)
+            chosen = all.filter { wanted.contains($0.id) }
+        } else {
+            chosen = all.filter {
+                ($0.kind == .oauth || $0.kind == .oauthToken) && $0.poolOptOut != true
+            }
         }
-        let configDir = await configDirManager.resolveConfigDir(for: profile)
-        if profile.kind != .bedrock, configDir == nil {
-            return RPCResponse(error: "Could not prepare the config dir for profile '\(row.name)'; "
-                + "the daemon log has the reason.")
+        let readings = await store.refresh(chosen.map(\.id), force: true)
+        let entries = chosen.compactMap { profile -> ModelProfileFableCheckEntry? in
+            readings[profile.id].map {
+                ModelProfileFableCheckEntry(profileID: profile.id, name: profile.name, fable: $0)
+            }
         }
-        let config = try await db.config.get()
-        let environment = ClaudeSpawnCommandBuilder.execEnvironment(
-            profileSecret: profile.secret,
-            profileKind: profile.kind,
-            profileBaseURL: profile.baseURL,
-            profileModel: profile.model,
-            profileAwsRegion: profile.awsRegion,
-            profileAwsProfile: profile.awsProfile,
-            profileConfigDir: configDir,
-            envOverrides: EnvOverrideResolver.merge(
-                global: config.envOverrides, repo: nil, profile: profile.envOverrides)
-        )
-        return try RPCResponse(result: ModelProfileExecEnvironmentResult(
-            profileID: profile.profileID,
-            name: profile.name,
-            kind: profile.kind,
-            environment: environment
-        ))
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return try RPCResponse(result: ModelProfileFableCheckResult(profiles: entries))
+    }
+
+    /// `claude.fableCreditsOut` — a session's StopFailure hook saw the
+    /// out-of-usage-credits message. Marks the terminal's profile out, but only
+    /// when the terminal's model is a Fable model: the same line on another
+    /// model would mean something else. Fire-and-forget, so every miss is a
+    /// quiet no-op.
+    func handleFableCreditsOut(
+        _ paramsData: Data, connection: RPCConnectionContext? = nil
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(FableCreditsOutParams.self, from: paramsData)
+        guard let store = modelProfileResolver.fable,
+              let terminal = try await db.terminals.get(id: params.terminalID),
+              let profileID = terminal.profileID,
+              let reading = FableProbeClassifier.classify(screenText: params.rawMessage, now: Date())
+        else { return .ok() }
+        if await hookCallerRefused(
+            method: RPCMethod.claudeFableCreditsOut, terminal: terminal, connection: connection) {
+            return .ok()
+        }
+        let profileModel = try await db.modelProfiles.get(id: profileID)?.model
+        guard FableModel.isFable(terminal.claudeSpawnExtras?.model ?? profileModel) else {
+            return .ok()
+        }
+        await store.record(reading, for: profileID)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
     }
 
     // MARK: - Pool Opt-Out
