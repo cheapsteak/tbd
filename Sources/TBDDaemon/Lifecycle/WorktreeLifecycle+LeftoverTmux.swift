@@ -121,11 +121,15 @@ extension WorktreeLifecycle {
     /// tab, tearing down a scratch space and forgetting a worktree. It runs no
     /// tmux command, and the caller deletes the row either way.
     ///
-    /// **A live row's session keeps running.** Its tmux server may still be
-    /// running a session an earlier build started there, and TBD can neither
-    /// reach nor stop it, so deleting the row leaves that session running. The
-    /// close goes ahead regardless: refusing it would leave a tab TBD can
-    /// neither show nor end with no way to close it. What the daemon does is
+    /// **A live row's session keeps running.** So may the session of a row
+    /// parked with its park still in flight (`pendingSessionIncarnationID`
+    /// set): an earlier build's tmux hibernate signalled the agent and left
+    /// the row so when its respawn failed, and the agent may not have exited.
+    /// Both are closed as live rows. The tmux server may still be running a
+    /// session an earlier build started there, and TBD can neither reach nor
+    /// stop it, so deleting the row leaves that session running. The close
+    /// goes ahead regardless: refusing it would leave a tab TBD can neither
+    /// show nor end with no way to close it. What the daemon does is
     /// say so, at `.notice`, with the command that ends the server, and keep
     /// the session in the record: a row with a session id gets a Closed
     /// Terminals entry with no screen, marked with the server
@@ -135,9 +139,10 @@ extension WorktreeLifecycle {
     /// never while it may still be running it. A row with no session id has
     /// nothing to resume and no screen to keep, so it gets no entry.
     ///
-    /// **A parked row's entry comes from the row.** Its agent was ended when
-    /// it was parked, and the screen the park saved, `suspendedSnapshot`, is
-    /// what its Closed Terminals entry keeps, with its session id.
+    /// **A parked row's entry comes from the row** when its park is complete
+    /// (`WorktreeLifecycle.sessionHasEnded`). Its agent was ended when it was
+    /// parked, and the screen the park saved, `suspendedSnapshot`, is what its
+    /// Closed Terminals entry keeps, with its session id.
     ///
     /// Either entry is written only when `history` is given: the hard-delete
     /// paths (forget, scratch delete) remove the worktree's history right
@@ -149,7 +154,7 @@ extension WorktreeLifecycle {
     static func closeLeftoverTmuxRow(
         _ terminal: Terminal, server: String?, history: TerminalHistoryStore?
     ) async {
-        if terminal.isParked {
+        if sessionHasEnded(terminal, teardownStoppedIt: false) {
             if let history {
                 await history.recordOnClose(terminal: terminal, capture: terminal.suspendedSnapshot)
             }

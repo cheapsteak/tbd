@@ -319,6 +319,29 @@ struct TmuxResumeGateRPCTests {
         #expect(resumed.success, "error: \(resumed.error ?? "nil")")
     }
 
+    /// Closing a tmux row whose park is in flight closes it as a live row:
+    /// its agent may still be running, so its Closed Terminals entry is marked
+    /// with the server rather than written from the park, and a resume of its
+    /// session afterwards waits for the server although no row names it.
+    @Test func closingATmuxRowWhoseParkIsInFlightMarksItsEntry() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let row = try await openATmuxRow(f, in: f.worktree, state: .parkInFlight)
+
+        let deleted = try await f.send(
+            RPCMethod.terminalDelete, TerminalDeleteParams(terminalID: row.id))
+        #expect(deleted.success, "error: \(deleted.error ?? "nil")")
+        let entry = try #require(try await f.db.terminalHistory.list(worktreeID: f.worktree.id)
+            .first { $0.id == row.id })
+        #expect(entry.liveOnTmuxServer == "tbd-acme")
+        #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
+
+        let refused = try await f.send(
+            RPCMethod.sessionResume,
+            SessionResumeParams(worktreeID: f.worktree.id, identity: identity))
+        try await expectRefused(refused, f, terminalsBefore: [])
+    }
+
     /// A row whose transport is NULL, as most rows written before the
     /// transport column read, is on tmux to the gate just as `'tmux'` is.
     @Test func terminalCreateResumingWaitsWhileATmuxRowWithANullTransportCarriesTheSession() async throws {

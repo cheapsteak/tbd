@@ -11,6 +11,11 @@ cannot show, send to, park or end a tmux session. A row recorded as `tmux` is
 therefore in one of three states, and the migration treats each differently:
 
 - **Parked.** The row is only rewritten; its next wake starts it on the holder.
+  A row parked with its park still in flight (`pendingSessionIncarnationID`
+  set) is the exception: an earlier build's tmux hibernate signalled the agent
+  and left the park so when the window's respawn failed, so the agent may still
+  be running. It is judged by its tmux server first, as a live row is, and
+  moves as a parked row once the server is gone.
 - **Live, with its tmux server gone.** The session ended with the server. A
   session with a conversation is parked with its identity kept, rewritten and
   woken on the holder; a shell gets a fresh login shell there.
@@ -58,9 +63,13 @@ exist. The in-place profile swap — park, re-home, wake, one tab, same row, sam
 session id — is the same shape with a different column rewritten
 ([spec](2026-09-22-holder-in-place-profile-swap-design.md)).
 
-- **A parked session** is only rewritten. Nothing is running, so there is
-  nothing to stop and nothing to respawn; its next ordinary wake lands on the
-  holder.
+- **A parked session whose park is complete** is only rewritten. Nothing is
+  running, so there is nothing to stop and nothing to respawn; its next
+  ordinary wake lands on the holder. A session parked with its park still in
+  flight is refused while its tmux server may run, as a live one is, because
+  the rewrite takes the row out of the resume gate's reach and the next wake
+  would start the session beside the tmux agent; once the server is gone it is
+  only rewritten.
 - **A live session whose tmux server is gone, with a conversation to resume** —
   Claude, or Codex with a recorded thread — is parked with its identity kept,
   rewritten, and woken. The park is the one reconcile makes for the same row
@@ -74,9 +83,9 @@ session id — is the same shape with a different column rewritten
 - **A live session whose tmux server may still be running** is refused with
   `tmux -L <server> kill-server` and the advice that goes with it.
 
-The probe comes first for a live row, before anything else is decided about it:
-nothing about a session still running in tmux can change until tmux has
-stopped. The holder-unspawnable refusal comes before any park, so a refusal
+The probe comes first for a live row and for a row whose park is in flight,
+before anything else is decided about it: nothing about a session still running
+in tmux can change until tmux has stopped. The holder-unspawnable refusal comes before any park, so a refusal
 never leaves a parked row behind.
 
 ### The writes are compare-and-sets, not a lock
@@ -196,20 +205,23 @@ worktree's `tmuxServer`, so no model field is added.
 **Closing.** Closing a tmux row's tab deletes the row and runs no tmux
 command, and so do archiving or forgetting its worktree, deleting or archiving
 a scratch space, and reconcile's archive of a worktree gone from git. Each is
-recorded as dispatched. What else happens depends on whether the row was
-parked:
+recorded as dispatched. What else happens depends on whether the row's session
+ended (`WorktreeLifecycle.sessionHasEnded`):
 
-- **Live** – the session keeps running in its server. The daemon logs a notice
-  naming the server and `tmux -L <server> kill-server`, and the notice in the
-  app says that closing the tab leaves the session running in tmux. A row with
-  a session id gets a Closed Terminals entry with no screen, marked with the
-  server (`TerminalHistoryEntry.liveOnTmuxServer`): the conversation stays
-  resumable from it like any other closed tab's, and the mark makes every
-  resume of that session id ask first (below). A row
-  with no session id has nothing to resume and no screen to keep, so it gets
-  no entry. Its session directory is left for `OrphanGC`.
-- **Parked** – the session ended when the row was parked, so its Closed
-  Terminals entry carries the screen the park stored, and no mark.
+- **Live, or parked with its park in flight** – the session keeps running in
+  its server, or may: a park in flight signalled the agent without seeing it
+  end. The daemon logs a notice naming the server and
+  `tmux -L <server> kill-server`, and for a live row the notice in the app says
+  that closing the tab leaves the session running in tmux. A row with a session
+  id gets a Closed Terminals entry with no screen, marked with the server
+  (`TerminalHistoryEntry.liveOnTmuxServer`): the conversation stays resumable
+  from it like any other closed tab's, and the mark makes every resume of that
+  session id ask first (below). A row with no session id has nothing to resume
+  and no screen to keep, so it gets no entry. Its session directory is left for
+  `OrphanGC`.
+- **Parked, with the park complete** – the session ended when the row was
+  parked, so its Closed Terminals entry carries the screen the park stored, and
+  no mark.
 
 Either entry is written on every one of these paths but two, which remove
 every entry the worktree had: forgetting a worktree and deleting a scratch
@@ -487,7 +499,9 @@ never unlinks it, and nothing TBD runs creates one any more.
   server may run live and untouched, never probes a parked row, and asks the
   probe once per server name.
 - A migration of a live row whose server may still run refuses with the
-  still-running advice and calls nothing else; one whose server is gone parks,
+  still-running advice and calls nothing else, and so does a migration of a
+  row parked with its park in flight, which moves once the server is gone; a
+  live row whose server is gone parks,
   rewrites and wakes in that order, or moves a shell; an unspawnable holder
   refuses before any park; a lost park or rewrite compare-and-set is a skip.
   One case runs the production operations, so the probe's wiring is covered.
@@ -519,8 +533,9 @@ never unlinks it, and nothing TBD runs creates one any more.
 - Closing a tmux row's tab, archiving its worktree, reconcile's archive and a
   pre-session hook tab's close run no tmux command and delete the row. A live
   row with a session id gets a Closed Terminals entry with no screen, marked
-  with the worktree's server; a live row without one gets no entry; a parked
-  row's entry carries its stored screen and no mark.
+  with the worktree's server, and so does a row parked with its park in
+  flight; a live row without one gets no entry; a parked row's entry carries
+  its stored screen and no mark.
 - A marked entry survives the newest-50 prune, a later save of the same entry
   keeps its mark, and the lookup returns each server marked for the given
   session ids, across worktrees.

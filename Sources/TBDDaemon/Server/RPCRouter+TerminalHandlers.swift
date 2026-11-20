@@ -856,9 +856,10 @@ extension RPCRouter {
             }
             transportCleanupFailure = await disposeHolder(for: terminal)
         case .tmux:
-            // Nothing to dispose of and nothing to fail: a live row's session
-            // may keep running in tmux, which the daemon logs, and a parked
-            // row keeps its saved screen in Closed Terminals. Recorded as the
+            // Nothing to dispose of and nothing to fail: a live row's session,
+            // or that of a row whose park is in flight, may keep running in
+            // tmux, which the daemon logs, and a row whose park is complete
+            // keeps its saved screen in Closed Terminals. Recorded as the
             // dispatch it is, the way a holder close with nothing left to kill
             // is.
             await WorktreeLifecycle.closeLeftoverTmuxRow(

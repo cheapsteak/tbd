@@ -297,8 +297,9 @@ extension WorktreeLifecycle {
 
         // Each ended session's directory goes, draft included, unless another
         // row naming the same session may still be running. The teardown
-        // above SIGKILLed each holder's job, and a parked tmux row's session
-        // ended when it was parked. When the login shell execs Claude, as zsh
+        // above SIGKILLed each holder's job, and a parked tmux row with no park
+        // in flight ended its session when it was parked (`sessionHasEnded`).
+        // When the login shell execs Claude, as zsh
         // does for the spawn command's `-c`, that process is Claude and the
         // mod's final write on `session.end` lands before the removal;
         // otherwise a late write can recreate the directory, and `OrphanGC`'s
