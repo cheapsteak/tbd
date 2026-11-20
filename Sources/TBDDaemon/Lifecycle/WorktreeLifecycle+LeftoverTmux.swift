@@ -114,6 +114,47 @@ extension WorktreeLifecycle {
             throw failure
         }
     }
+
+    /// The tmux half of every teardown that deletes a tmux row: closing its
+    /// tab (`terminal.delete`, and `server.stop`'s tab close), archiving its
+    /// worktree, reconcile's archive of a vanished worktree, closing a hook
+    /// tab, tearing down a scratch space and forgetting a worktree. It runs no
+    /// tmux command, and the caller deletes the row either way.
+    ///
+    /// **A live row's session keeps running.** Its tmux server may still be
+    /// running a session an earlier build started there, and TBD can neither
+    /// reach nor stop it, so deleting the row leaves that session running with
+    /// nothing in TBD naming it. The close goes ahead regardless: refusing it
+    /// would leave a tab TBD can neither show nor end with no way to close it.
+    /// What the daemon does is say so, at `.notice`, with the command that ends
+    /// the server. A live row gets no Closed Terminals entry: there is no
+    /// screen to keep, and an entry would carry the id of a session that may
+    /// still be running, so reopening it would start a second agent on the
+    /// same session.
+    ///
+    /// **A parked row's entry comes from the row.** Its agent was ended when
+    /// it was parked, and the screen the park saved, `suspendedSnapshot`, is
+    /// what its Closed Terminals entry keeps, with its session id. Only when
+    /// `history` is given: the hard-delete paths (forget, scratch delete)
+    /// remove the worktree's history right after.
+    ///
+    /// - Parameter server: the tmux server the row's worktree names, nil when
+    ///   the worktree row could not be read.
+    static func closeLeftoverTmuxRow(
+        _ terminal: Terminal, server: String?, history: TerminalHistoryStore?
+    ) async {
+        if terminal.isParked {
+            if let history {
+                await history.recordOnClose(terminal: terminal, capture: terminal.suspendedSnapshot)
+            }
+            return
+        }
+        guard let server else {
+            logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; its worktree row could not be read, so its tmux server is unknown, and its session may still be running there")
+            return
+        }
+        logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; its session may still be running in tmux server \(server, privacy: .public). \(LeftoverTmuxSession.endingAdvice(server: server), privacy: .public)")
+    }
 }
 
 /// What `WorktreeLifecycle.parkLeftoverTmuxRow` did with a row. The cases are

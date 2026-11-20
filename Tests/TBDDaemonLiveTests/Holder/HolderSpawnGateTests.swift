@@ -508,11 +508,10 @@ struct HolderSpawnGateTests {
         #expect(holderPID != childPID)
         #expect(holderProcessIsAlive(holderPID))
         #expect(holderProcessIsAlive(childPID))
-        #expect(spawn.windowID.isEmpty)
-        #expect(spawn.paneID.isEmpty)
-
         let row = try #require(try await fixture.db.terminals.get(id: spawn.terminalID))
         #expect(row.transport == .holder)
+        #expect(row.tmuxWindowID.isEmpty)
+        #expect(row.tmuxPaneID.isEmpty)
         #expect(row.label == TerminalLabel.preSession)
 
         let issued = fixture.tmuxCommands()

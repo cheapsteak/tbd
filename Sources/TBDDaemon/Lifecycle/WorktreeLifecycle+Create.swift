@@ -1552,37 +1552,33 @@ extension WorktreeLifecycle {
         carryover: ConversationCarryover? = nil,
         preparedCodexLaunch: CodexLaunchPreparation? = nil
     ) async throws -> [(id: UUID, label: String)] {
-        try await tmux.withWorktreeServerLock(
-            db: db,
-            worktreeID: worktree.id,
-            allowedStatuses: [worktree.status, .creating]
-        ) { currentWorktree in
-            try await spawnPrimaryTerminalsWhileLocked(
-                worktree: currentWorktree.worktree,
-                repo: repo,
-                worktreePath: worktreePath,
-                skipClaude: skipClaude,
-                archivedClaudeSessions: archivedClaudeSessions,
-                archivedClaudeSpawnExtras: archivedClaudeSpawnExtras,
-                archivedAgentTabs: archivedAgentTabs,
-                preparedArchivedCodexLaunches: preparedArchivedCodexLaunches,
-                initialPrompt: initialPrompt,
-                cols: cols,
-                rows: rows,
-                preSessionTerminalID: preSessionTerminalID,
-                overrideProfileID: overrideProfileID,
-                modelOverride: modelOverride,
-                codexModelOverride: codexModelOverride,
-                primaryAgentPreference: primaryAgentPreference,
-                claudeSpawnExtras: claudeSpawnExtras,
-                carryover: carryover,
-                preparedCodexLaunch: preparedCodexLaunch)
-        }
+        let currentWorktree = try await Self.worktreeForSpawn(
+            db: db, id: worktree.id, allowedStatuses: [worktree.status, .creating])
+        return try await spawnPrimaryTerminalsForCurrentWorktree(
+            worktree: currentWorktree.worktree,
+            repo: repo,
+            worktreePath: worktreePath,
+            skipClaude: skipClaude,
+            archivedClaudeSessions: archivedClaudeSessions,
+            archivedClaudeSpawnExtras: archivedClaudeSpawnExtras,
+            archivedAgentTabs: archivedAgentTabs,
+            preparedArchivedCodexLaunches: preparedArchivedCodexLaunches,
+            initialPrompt: initialPrompt,
+            cols: cols,
+            rows: rows,
+            preSessionTerminalID: preSessionTerminalID,
+            overrideProfileID: overrideProfileID,
+            modelOverride: modelOverride,
+            codexModelOverride: codexModelOverride,
+            primaryAgentPreference: primaryAgentPreference,
+            claudeSpawnExtras: claudeSpawnExtras,
+            carryover: carryover,
+            preparedCodexLaunch: preparedCodexLaunch)
     }
 
-    /// Implementation of `spawnPrimaryTerminals` while the worktree's current
-    /// tmux server is exclusively locked through every terminal-row commit.
-    private func spawnPrimaryTerminalsWhileLocked(
+    /// Implementation of `spawnPrimaryTerminals`, given the worktree row as it
+    /// was read again just before the spawn.
+    private func spawnPrimaryTerminalsForCurrentWorktree(
         worktree: Worktree,
         repo: Repo?,
         worktreePath: String?,
@@ -2013,8 +2009,6 @@ extension WorktreeLifecycle {
                 setupAutoCloseSpawn = PreSessionSpawn(
                     terminalID: plannedTerminalID2,
                     tmuxServer: worktree.tmuxServer,
-                    windowID: setupTerminal.tmuxWindowID,
-                    paneID: setupTerminal.tmuxPaneID,
                     markerPath: setupMarkerPath,
                     hookPath: setupHookPath,
                     transport: setupTerminal.transport,

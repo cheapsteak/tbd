@@ -68,43 +68,6 @@ public enum PaneOwnership: Sendable, Equatable {
     }
 }
 
-/// Serializes tmux resource ownership transitions per server.
-///
-/// A tmux window becomes externally visible before the database row that owns
-/// it can commit. Reconciliation has the inverse multi-system transaction: it
-/// snapshots database ownership before killing an untracked tmux resource.
-/// Both operations use this coordinator so neither can observe the other's
-/// half-finished state. Different servers remain independent.
-actor TmuxServerResourceCoordinator {
-    private var lockedServers: Set<String> = []
-    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
-
-    func withLock<Result: Sendable>(
-        server: String,
-        operation: @Sendable () async throws -> Result
-    ) async rethrows -> Result {
-        if lockedServers.contains(server) {
-            await withCheckedContinuation { continuation in
-                waiters[server, default: []].append(continuation)
-            }
-        } else {
-            lockedServers.insert(server)
-        }
-        defer { release(server: server) }
-        return try await operation()
-    }
-
-    private func release(server: String) {
-        if var queued = waiters[server], !queued.isEmpty {
-            let next = queued.removeFirst()
-            waiters[server] = queued.isEmpty ? nil : queued
-            next.resume()
-        } else {
-            lockedServers.remove(server)
-        }
-    }
-}
-
 public struct TmuxManager: Sendable {
     /// Hard ceiling on any single tmux subprocess. tmux control operations
     /// (respawn-window, new-session, kill-window, capture-pane, …) normally
@@ -132,9 +95,6 @@ public struct TmuxManager: Sendable {
     /// `tmuxPath()`'s own default expression already does.
     let tmuxPathOverride: String?
     private let counter: Counter
-    /// Shared by every value-copy of this manager (lifecycle, router, and
-    /// hibernation coordinator) so all daemon paths use one lock domain.
-    private let resourceCoordinator: TmuxServerResourceCoordinator
     /// Optional test hook that records every dryRun command invocation. When set,
     /// dry-run paths still no-op, but the recorder receives the argv that would
     /// have been passed to tmux. Used by spawn / swap integration tests to assert
@@ -270,7 +230,6 @@ public struct TmuxManager: Sendable {
         self.subprocessTimeout = subprocessTimeout
         self.tmuxPathOverride = tmuxPathOverride
         self.counter = Counter()
-        self.resourceCoordinator = TmuxServerResourceCoordinator()
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
         self.dryRunListWindows = dryRunListWindows
@@ -290,15 +249,6 @@ public struct TmuxManager: Sendable {
         self.dryRunWindowPresence = dryRunWindowPresence
         self.realModeServerPresenceOverride = realModeServerPresenceOverride
         self.realModeWindowPresenceOverride = realModeWindowPresenceOverride
-    }
-
-    /// Runs one ownership transition while exclusively holding `server`.
-    /// Release is structural, including thrown and cancelled operations.
-    func withServerResourceLock<Result: Sendable>(
-        server: String,
-        operation: @Sendable () async throws -> Result
-    ) async rethrows -> Result {
-        try await resourceCoordinator.withLock(server: server, operation: operation)
     }
 
     // MARK: - Static Command Builders

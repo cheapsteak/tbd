@@ -174,12 +174,11 @@ extension RPCRouter {
 
         // A server whose tab exited is started again in a new tab. A session
         // is never restarted in place: close the exited tab — its final output
-        // was saved when it exited, or is captured by the close on a tab still
-        // on tmux — then open a new one. A failed close throws, which fails
-        // this server only.
+        // was saved when it exited — then open a new one. A failed close
+        // throws, which fails this server only.
         if let existing, case .exited = existing.status {
-            let (cleanupFailure, refusal) = try await closeTerminalTab(existing.terminal, actuationID: nil)
-            logTabCloseProblems(existing.terminal, cleanupFailure, refusal)
+            let cleanupFailure = try await closeTerminalTab(existing.terminal, actuationID: nil)
+            logTabCloseProblems(existing.terminal, cleanupFailure)
         }
 
         let terminalID = UUID()
@@ -189,16 +188,14 @@ extension RPCRouter {
         let rows = TmuxManager.defaultRows
         let serverName = server.name
         let spawnEnv = env
-        let terminal = try await tmux.withWorktreeServerLock(
-            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-        ) { current in
-            try await self.lifecycle.spawnTerminal(
-                id: terminalID, worktreeID: current.id,
-                workingDirectory: cwd, command: command, env: spawnEnv, sensitiveEnv: [:],
-                cols: cols, rows: rows, label: label, claudeSessionID: nil, profileID: nil,
-                kind: .shell, transport: transport,
-                serverName: serverName)
-        }
+        let current = try await WorktreeLifecycle.worktreeForSpawn(
+            db: db, id: worktree.id, allowedStatuses: [worktree.status])
+        let terminal = try await lifecycle.spawnTerminal(
+            id: terminalID, worktreeID: current.id,
+            workingDirectory: cwd, command: command, env: spawnEnv, sensitiveEnv: [:],
+            cols: cols, rows: rows, label: label, claudeSessionID: nil, profileID: nil,
+            kind: .shell, transport: transport,
+            serverName: serverName)
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label)))
         return terminal
@@ -333,8 +330,8 @@ extension RPCRouter {
     /// returned as that server's failure rather than ending the request.
     private func closeServerTab(_ terminal: Terminal) async -> String? {
         do {
-            let (cleanupFailure, refusal) = try await closeTerminalTab(terminal, actuationID: nil)
-            logTabCloseProblems(terminal, cleanupFailure, refusal)
+            let cleanupFailure = try await closeTerminalTab(terminal, actuationID: nil)
+            logTabCloseProblems(terminal, cleanupFailure)
             return nil
         } catch {
             devServerLogger.warning("""
@@ -361,8 +358,8 @@ extension RPCRouter {
     /// A server tab's close still deletes the row when the transport-level
     /// teardown fails or is refused; the call's row records the server's
     /// outcome, so the teardown's own problem is logged.
-    private func logTabCloseProblems(_ terminal: Terminal, _ cleanupFailure: String?, _ refusal: String?) {
-        guard let problem = cleanupFailure ?? refusal else { return }
+    private func logTabCloseProblems(_ terminal: Terminal, _ cleanupFailure: String?) {
+        guard let problem = cleanupFailure else { return }
         devServerLogger.warning("""
             dev server tab \(terminal.id.uuidString, privacy: .public) closed with a teardown problem: \
             \(problem, privacy: .public)

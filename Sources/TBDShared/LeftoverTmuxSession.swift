@@ -28,6 +28,11 @@ public enum LeftoverTmuxSession {
             + "other tmux tabs, or restart the Mac, which ends it too."
     }
 
+    /// What closing the tab does to the session: nothing. Closing deletes the
+    /// row and runs no tmux command, so the session keeps running in tmux.
+    public static let closingLeavesItRunning =
+        "Closing this tab leaves the session running in tmux."
+
     /// The label of the app's button that asks the daemon to look again.
     public static let checkAgainTitle = "Check Again"
 
@@ -41,6 +46,7 @@ public enum LeftoverTmuxSession {
     /// (`nothingToKeepRefusal`).
     public static func notice(server: String) -> String {
         "This session is still running in tmux, which this version of TBD can no longer show. "
+            + closingLeavesItRunning + " "
             + endingAdvice(server: server)
             + " Then choose \(checkAgainTitle). Once tmux has stopped, a tab with a conversation "
             + "is parked, and \(TransportMigrationVocabulary.menuTitle) brings it back on the "

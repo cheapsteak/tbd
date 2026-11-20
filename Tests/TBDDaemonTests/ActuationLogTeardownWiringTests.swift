@@ -7,16 +7,17 @@ import Testing
 /// Tier 2 — dry-run tmux plus a real (temp-directory) actuation log.
 ///
 /// The teardown surfaces: `worktree.archive`, `worktree.forget`,
-/// `scratch.delete` and `scratch.archive` all kill a worktree's windows, and
+/// `scratch.delete` and `scratch.archive` all end a worktree's sessions, and
 /// `worktree.rerunPreSession` spawns one. Each writes ONE row naming the
-/// worktree — the per-terminal kills inside the lifecycle are sub-steps of the
-/// one thing the caller asked for — and each refuses its act when the record is
-/// unwritable.
+/// worktree — the per-terminal teardowns inside the lifecycle are sub-steps of
+/// the one thing the caller asked for — and each refuses its act when the
+/// record is unwritable.
 ///
 /// Also here, because they are about *when* a row is written rather than which:
-/// `terminal.delete`'s failed kill reads as transport-failed rather than
-/// dispatched, and `terminal.swapProfile`'s row precedes the transcript copy it
-/// makes on the resume path.
+/// `terminal.delete`'s failed holder disposal reads as transport-failed rather
+/// than dispatched, closing a row left on tmux reads as dispatched, and
+/// `terminal.swapProfile`'s row precedes the transcript copy it makes on the
+/// resume path.
 @Suite("Actuation log teardown wiring")
 struct ActuationLogTeardownWiringTests {
 
@@ -508,24 +509,22 @@ struct ActuationLogTeardownWiringTests {
         #expect(try await db.terminals.list(worktreeID: worktree.id).count == 2)
     }
 
-    // MARK: - terminal.delete: a kill that failed is not a dispatch
+    // MARK: - terminal.delete: a teardown that failed is not a dispatch
 
-    @Test("terminal.delete records a failed kill as transport-failed, and still closes")
-    func deleteRecordsFailedKillAsTransportFailed() async throws {
-        struct TmuxWentAway: Error, CustomStringConvertible {
-            var description: String { "no server running on tbd-acme" }
-        }
+    @Test("terminal.delete records a failed holder disposal as transport-failed, and still closes")
+    func deleteRecordsFailedDisposalAsTransportFailed() async throws {
         let logPath = try makeLogPath()
         let db = try TBDDatabase(inMemory: true)
-        let router = makeRouter(
-            db: db, logPath: logPath,
-            tmux: TmuxManager(dryRun: true, dryRunKillWindowError: { _, _ in TmuxWentAway() }))
+        // No holder registry is wired, so the holder row's disposal can only
+        // report that its holder and job were left running.
+        let router = makeRouter(db: db, logPath: logPath)
         let worktree = try await makeWorktree(in: db, terminals: 0)
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder, holderPID: 9101, childPID: 0)
 
         // The UX is unchanged: the deletion proceeds and the response is the
-        // same one a clean kill returns.
+        // same one a clean disposal returns.
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalDelete,
             params: TerminalDeleteParams(terminalID: terminal.id),
@@ -534,30 +533,47 @@ struct ActuationLogTeardownWiringTests {
         #expect(try response.decodeResult(TerminalDeleteResult.self).closed)
         #expect(try await db.terminals.get(id: terminal.id) == nil)
 
-        // Only the record knows the kill failed — which is the point.
+        // Only the record knows the disposal failed — which is the point.
         let written = try rows(at: logPath)
         #expect(written.count == 2)
         #expect(written.first?["kind"] as? String == "dispose")
         let outcome = try #require(written.last)
         #expect(outcome["result"] as? String == "transport-failed")
-        #expect(outcome["error"] as? String == "\(TmuxWentAway())")
+        #expect((outcome["error"] as? String)?.contains("no holder registry") == true)
         #expect(outcome["reason"] == nil)
     }
 
-    @Test("a clean kill still reads as dispatched")
-    func deleteWithLiveTmuxStaysDispatched() async throws {
+    /// A row an earlier build left on tmux is closed like a holder whose
+    /// disposal had nothing to kill: no tmux command runs, and the close reads
+    /// as dispatched whether the row is live or parked.
+    @Test("closing a row left on tmux runs no tmux command and reads as dispatched",
+          arguments: [false, true])
+    func deleteOfATmuxRowIsDispatchedWithoutTmux(parked: Bool) async throws {
         let logPath = try makeLogPath()
         let db = try TBDDatabase(inMemory: true)
-        let router = makeRouter(db: db, logPath: logPath)
+        let recorded = RecordedTmuxArgs()
+        let router = makeRouter(
+            db: db, logPath: logPath,
+            tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) }))
         let worktree = try await makeWorktree(in: db, terminals: 0)
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            claudeSessionID: "sess-acme", kind: .claude)
+        if parked {
+            try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-acme")
+        }
 
-        _ = await router.handle(try RPCRequest(
+        let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalDelete,
             params: TerminalDeleteParams(terminalID: terminal.id)))
 
-        #expect(try rows(at: logPath).last?["result"] as? String == "dispatched")
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        #expect(recorded.snapshot().isEmpty,
+                "closing a tmux row ran a tmux command: \(recorded.snapshot())")
+        let written = try rows(at: logPath)
+        #expect(written.count == 2)
+        #expect(written.last?["result"] as? String == "dispatched")
     }
 
     // MARK: - terminal.swapProfile: the row precedes the transcript copy

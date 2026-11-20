@@ -126,15 +126,15 @@ extension RPCRouter {
         return try RPCResponse(result: wt)
     }
 
-    /// Close out a scratch space's terminals: kill tmux windows, delete terminals
-    /// + tabs, clear pending questions + per-session overlays (mirrors
-    /// forgetWorktree). Shared by `scratch.delete` and `scratch.archive` — both
+    /// Close out a scratch space's terminals: end their sessions, delete
+    /// terminals + tabs, clear pending questions + per-session overlays
+    /// (mirrors forgetWorktree). Shared by `scratch.delete` and `scratch.archive` — both
     /// tear down the terminal/tab state identically before mutating the row
     /// itself (delete removes it, archive flips its status).
     ///
     /// Deliberately writes no row: both callers record one worktree-named row of
     /// their own before calling this, and a row here would double-count every
-    /// teardown (the same reason `captureThenKillWindow` stays silent).
+    /// teardown (the same reason `disposeHolder` stays silent).
     ///
     /// `keepsHistory` is true for archive, which leaves the worktree's Closed
     /// Terminals history in place, and false for delete, which hard-deletes it
@@ -151,16 +151,16 @@ extension RPCRouter {
         var sessions = WorktreeLifecycle.SessionTeardownTally()
         for t in terminals {
             var stopped = false
-            // The rows go away below either way, so a holder row must be
-            // reclaimed here rather than refused: `tmuxWindowID` is the empty
-            // string by construction, so the kill in the else-branch addresses
-            // nothing while the holder, its job and its rendezvous files outlive
-            // the row that was their only record. Same branch, same reason, as
-            // `handleTerminalDelete`. On archive its Closed Terminals entry is
-            // written first, because the disposal releases the reader the
-            // capture is read from — the same order the repo-worktree archive
-            // uses.
-            if t.transport == .holder {
+            switch t.transport {
+            case .holder:
+                // The rows go away below either way, so a holder row must be
+                // reclaimed here rather than refused: the holder, its job and
+                // its rendezvous files would outlive the row that was their
+                // only record. Same branch, same reason, as
+                // `handleTerminalDelete`. On archive its Closed Terminals entry
+                // is written first, because the disposal releases the reader
+                // the capture is read from — the same order the repo-worktree
+                // archive uses.
                 if keepsHistory {
                     await WorktreeLifecycle.recordHolderClosedTerminal(
                         t, registry: holderRegistry, resolver: holderScreenResolver,
@@ -172,35 +172,12 @@ extension RPCRouter {
                 } else {
                     stopped = true
                 }
-            } else {
-                // Refuse to kill a window whose pane belongs to a DIFFERENT
-                // terminal — see `TmuxManager.paneOwnership`. The row is
-                // gone from the DB either way (below); only the tmux-side
-                // teardown is gated, the same asymmetry `handleTerminalDelete`
-                // uses.
-                let ownership = await tmux.paneOwnership(
-                    terminalID: t.id, server: wt.tmuxServer, paneID: t.tmuxPaneID)
-                if ownership.permitsTeardown {
-                    // The lifecycle's kill waits for the pane's process to
-                    // exit and escalates a wedged one. When the login shell
-                    // execs Claude, as zsh does for the spawn command's `-c`,
-                    // that process is Claude and nothing writes to the
-                    // session's directory after archive removes it; otherwise
-                    // a late `session.end` write can recreate it, and
-                    // `OrphanGC`'s session-directory arm reclaims it after
-                    // `gcGraceSeconds`. A failed kill of a pane whose process
-                    // could not be read may have left it running, so that
-                    // session keeps its directory.
-                    stopped = await lifecycle.tearDownWindow(
-                        server: wt.tmuxServer, windowID: t.tmuxWindowID, paneID: t.tmuxPaneID
-                    ).stoppedPane
-                } else {
-                    scratchLogger.warning("""
-                        scratch teardown: leaving window \(t.tmuxWindowID, privacy: .public) \
-                        untouched for terminal \(t.id, privacy: .public) — \
-                        \(ownership.refusalDetail ?? "", privacy: .public)
-                        """)
-                }
+            case .tmux:
+                // No tmux command runs, so a session still running in tmux
+                // keeps running and keeps its directory.
+                await WorktreeLifecycle.closeLeftoverTmuxRow(
+                    t, server: wt.tmuxServer,
+                    history: keepsHistory ? db.terminalHistory : nil)
             }
             sessions.record(t, teardownStoppedIt: stopped)
         }
@@ -529,11 +506,11 @@ extension RPCRouter {
         if let mainWorktree = try await db.worktrees.listLocal(repoID: repo.id, status: .main).first {
             // ALL row mutations in ONE transaction (terminals re-parented, tab
             // state migrated, main worktree inheriting the scratch tmux server
-            // so the live panes stay reachable, scratch row retired with its
-            // promotion pointer). A mid-sequence failure rolls everything back
-            // — the scratch row stays un-promoted and retryable, and no
-            // half-migrated state can leave `scratch.delete` free to tmux-kill
-            // live un-reparented terminals.
+            // name, scratch row retired with its promotion pointer). A
+            // mid-sequence failure rolls everything back — the scratch row
+            // stays un-promoted and retryable, and no half-migrated state can
+            // leave `scratch.delete` free to end the sessions of live
+            // un-reparented terminals.
             let movedPanelSurfaces: [WorkspaceTabSurface]
             do {
                 if let failureHook = scratchPromoteMigrationFailureHook { try await failureHook() }

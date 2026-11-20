@@ -6,7 +6,7 @@ import TBDShared
 // A row exists for acts that touch a session's **process, pty, or lifecycle**.
 //
 //  - IN: spawning or disposing of a session, parking or waking one, and
-//    sending payload into one — local (tmux) or remote (provider).
+//    sending payload into one — local (holder) or remote (provider).
 //  - OUT: DB-only settings *about* a session (`setKeepWarm`, `setPin`,
 //    renames, config writes, worktree/notes/repo mutations). Nothing there
 //    reaches a process, so nothing there is an actuation.
@@ -17,8 +17,8 @@ import TBDShared
 //
 // Two layers write, and only two: the **RPC handler** for anything a caller
 // asked for, and a **rail's own entry point** for anything the daemon started
-// by itself. The shared lifecycle internals in between — `captureThenKillWindow`,
-// `tearDownWindow`, `performHibernate`, `closeScratchTerminals` — stay
+// by itself. The shared lifecycle internals in between — `disposeHolder`,
+// `closeLeftoverTmuxRow`, `performHibernate`, `closeScratchTerminals` — stay
 // silent, because both `worktree.archive` and the boot-time reconcile sweep
 // reach them and a row down there would double-count every archive. Reconcile
 // is an entry point in its own right (boot is what invoked it), so its rows are

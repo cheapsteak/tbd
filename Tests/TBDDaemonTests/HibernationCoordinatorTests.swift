@@ -1113,13 +1113,12 @@ struct HibernationCoordinatorTests {
                 "the parked row does not name the replacement it launched")
     }
 
-    // MARK: - Wake: the same-terminal claim, and the server-resource lock
+    // MARK: - Wake: the same-terminal claim
     //
     // Actors are reentrant across awaits and SocketServer runs RPCs
     // concurrently, so `wakesInFlight` claims a terminal before its first
     // suspension: a second wake of the same terminal is refused as in flight
-    // rather than launching a second replacement. The lock tests cover the
-    // tmux server-resource lock: same key serializes, different keys don't.
+    // rather than launching a second replacement.
 
     @Test func concurrentWakesForSameTerminalClaimBeforeDatabaseLookup() async throws {
         let (db, _, terminalID) = try await setup(transport: .holder)
@@ -1201,66 +1200,6 @@ struct HibernationCoordinatorTests {
         try await db.terminals.setHibernated(
             id: terminalID, sessionID: "sess-retry")
         #expect((await subject.wake(terminalID: terminalID)).isOk)
-    }
-
-    /// Focused lock-helper semantics: a second acquirer of the SAME key waits
-    /// until the holder releases; a DIFFERENT key proceeds immediately. Driven
-    /// by AsyncStream handshakes (no sleeps): A provably holds the lock, C
-    /// (other key) completes while A holds it, B (same key) only runs after A.
-    @Test func serverResourceLockSerializesSameKeyAndNotDifferentKeys() async throws {
-        let tmux = TmuxManager(dryRun: true)
-        let events = RecordedTmuxCommands()
-        let (enteredStream, enteredCont) = AsyncStream.makeStream(of: Void.self)
-        let (releaseStream, releaseCont) = AsyncStream.makeStream(of: Void.self)
-
-        let taskA = Task {
-            await tmux.withServerResourceLock(server: "s1") {
-                enteredCont.yield()
-                var it = releaseStream.makeAsyncIterator()
-                _ = await it.next()
-                events.append(["A-end"])
-            }
-        }
-        // Wait until A provably HOLDS the s1 lock.
-        var enteredIt = enteredStream.makeAsyncIterator()
-        _ = await enteredIt.next()
-
-        let taskB = Task {
-            await tmux.withServerResourceLock(server: "s1") { events.append(["B-ran"]) }
-        }
-        let taskC = Task {
-            await tmux.withServerResourceLock(server: "s2") { events.append(["C-ran"]) }
-        }
-        // A different key must proceed while s1 is held...
-        _ = await taskC.value
-        // ...and the same key must still be waiting.
-        #expect(!events.snapshot().contains(["B-ran"]),
-                "same-key acquirer must wait for the holder to release")
-
-        releaseCont.yield()
-        _ = await taskB.value
-        _ = await taskA.value
-        let snapshot = events.snapshot()
-        guard let aEnd = snapshot.firstIndex(of: ["A-end"]),
-              let bRan = snapshot.firstIndex(of: ["B-ran"]) else {
-            Issue.record("expected both A-end and B-ran to have run; got \(snapshot)")
-            return
-        }
-        #expect(aEnd < bRan, "B must only run after A releases; got \(snapshot)")
-    }
-
-    @Test func serverResourceLockReleasesAfterThrow() async {
-        struct ExpectedFailure: Error {}
-        let tmux = TmuxManager(dryRun: true)
-
-        await #expect(throws: ExpectedFailure.self) {
-            try await tmux.withServerResourceLock(server: "s1") {
-                throw ExpectedFailure()
-            }
-        }
-
-        let nextAcquirerRan = await tmux.withServerResourceLock(server: "s1") { true }
-        #expect(nextAcquirerRan, "a thrown operation must structurally release the server lock")
     }
 
     /// A wake whose replacement fails to start reports the failure and leaves

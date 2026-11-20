@@ -16,7 +16,8 @@ extension WorktreeLifecycle {
     /// What `forget` does (mirrors the archive/reconcile cleanup, minus the disk
     /// removal and the archive hook):
     /// 1. Inserts a `forgotten_worktree` tombstone for the path (see below).
-    /// 2. Kills the worktree's tmux windows.
+    /// 2. Ends the worktree's sessions: each holder and its job are reclaimed,
+    ///    and a row on tmux runs no tmux command.
     /// 3. Deletes its terminals + tabs and clears their pending questions and
     ///    per-session ClaudeHookOverlay files.
     /// 4. Hard-deletes the worktree row (so it's gone from BOTH the active and
@@ -58,43 +59,26 @@ extension WorktreeLifecycle {
             )
         }
 
-        // Mirror the archive/reconcile cleanup: kill tmux windows, delete
-        // terminals + tabs, clear pending questions, and reclaim per-session
-        // ClaudeHookOverlay files. Deliberately NO git worktree remove and NO
-        // archive hook.
+        // Mirror the archive/reconcile cleanup: end each terminal's session,
+        // delete terminals + tabs, clear pending questions, and reclaim
+        // per-session ClaudeHookOverlay files. Deliberately NO git worktree
+        // remove and NO archive hook.
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
         for terminal in terminals {
-            // A holder row is reclaimed, not refused: its row goes away below
-            // either way, and the kill in the else-branch addresses an empty
-            // window id while the holder and the job it forked outlive the only
-            // record of their pids. Same branch, same reason, as
-            // `handleTerminalDelete` and `closeScratchTerminals`.
-            if terminal.transport == .holder {
+            switch terminal.transport {
+            case .holder:
+                // Reclaimed, not refused: its row goes away below either way,
+                // and the holder and the job it forked would outlive the only
+                // record of their pids. Same branch, same reason, as
+                // `handleTerminalDelete` and `closeScratchTerminals`.
                 if let failure = await disposeHolder(for: terminal) {
                     forgetLogger.warning(
                         "forget left a holder running: \(failure, privacy: .public)")
                 }
-            } else {
-                // Refuse to kill a window whose pane belongs to a DIFFERENT
-                // terminal — see `TmuxManager.paneOwnership`. The row is
-                // gone from the DB either way (below); only the tmux-side
-                // teardown is gated, the same asymmetry `handleTerminalDelete`
-                // uses.
-                let ownership = await tmux.paneOwnership(
-                    terminalID: terminal.id, server: worktree.tmuxServer,
-                    paneID: terminal.tmuxPaneID)
-                if ownership.permitsTeardown {
-                    try? await tmux.killWindow(
-                        server: worktree.tmuxServer,
-                        windowID: terminal.tmuxWindowID
-                    )
-                } else {
-                    forgetLogger.warning("""
-                        forget: leaving window \(terminal.tmuxWindowID, privacy: .public) \
-                        untouched for terminal \(terminal.id, privacy: .public) — \
-                        \(ownership.refusalDetail ?? "", privacy: .public)
-                        """)
-                }
+            case .tmux:
+                // No history: forget hard-deletes it right below.
+                await Self.closeLeftoverTmuxRow(
+                    terminal, server: worktree.tmuxServer, history: nil)
             }
         }
 

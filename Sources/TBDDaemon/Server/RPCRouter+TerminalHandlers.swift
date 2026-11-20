@@ -363,32 +363,29 @@ extension RPCRouter {
             let codexLaunchOptions = CodexLaunchOptions.recorded(
                 model: params.model, disabledFeatures: codexDisabledFeatures,
                 codexHome: guardedCodexHome?.path)
-            let terminal = try await actuating(actuationID) {
-                try await tmux.withWorktreeServerLock(
-                    db: db, worktreeID: params.worktreeID,
-                    allowedStatuses: [worktree.status]
-                ) { currentWorktree in
-                    try await lifecycle.spawnTerminal(
-                        id: plannedTerminalID,
-                        worktreeID: params.worktreeID,
-                        workingDirectory: currentWorktree.path,
-                        command: CodexSpawnCommandBuilder.build(
-                            initialPrompt: codexResumeThreadID == nil ? params.prompt : nil,
-                            resumeThreadID: codexResumeThreadID,
-                            executablePath: codexPreparation.executablePath,
-                            model: params.model,
-                            disabledFeatures: codexDisabledFeatures),
-                        env: codexSpawnEnv,
-                        sensitiveEnv: codexEnvOverrides,
-                        cols: resolvedCols,
-                        rows: resolvedRows,
-                        label: TerminalLabel.codex,
-                        claudeSessionID: codexResumeThreadID,
-                        profileID: nil,
-                        kind: .codex,
-                        transport: decidedTransport,
-                        codexLaunchOptions: codexLaunchOptions)
-                }
+            let terminal = try await actuating(actuationID) { () async throws -> Terminal in
+                let currentWorktree = try await WorktreeLifecycle.worktreeForSpawn(
+                    db: db, id: params.worktreeID, allowedStatuses: [worktree.status])
+                return try await lifecycle.spawnTerminal(
+                    id: plannedTerminalID,
+                    worktreeID: params.worktreeID,
+                    workingDirectory: currentWorktree.path,
+                    command: CodexSpawnCommandBuilder.build(
+                        initialPrompt: codexResumeThreadID == nil ? params.prompt : nil,
+                        resumeThreadID: codexResumeThreadID,
+                        executablePath: codexPreparation.executablePath,
+                        model: params.model,
+                        disabledFeatures: codexDisabledFeatures),
+                    env: codexSpawnEnv,
+                    sensitiveEnv: codexEnvOverrides,
+                    cols: resolvedCols,
+                    rows: resolvedRows,
+                    label: TerminalLabel.codex,
+                    claudeSessionID: codexResumeThreadID,
+                    profileID: nil,
+                    kind: .codex,
+                    transport: decidedTransport,
+                    codexLaunchOptions: codexLaunchOptions)
             }
 
             subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -616,29 +613,25 @@ extension RPCRouter {
         let spawnProfileID = resolvedProfile?.profileID
         let terminal: Terminal
         do {
-            terminal = try await actuating(actuationID) {
-                try await tmux.withWorktreeServerLock(
-                    db: db, worktreeID: params.worktreeID,
-                    allowedStatuses: [worktree.status]
-                ) { currentWorktree in
-                    let spawned = try await lifecycle.spawnTerminal(
-                        id: plannedTerminalID,
-                        worktreeID: params.worktreeID,
-                        workingDirectory: currentWorktree.path,
-                        command: spawn.command,
-                        env: spawnEnv,
-                        sensitiveEnv: primarySensitiveEnv,
-                        cols: resolvedCols,
-                        rows: resolvedRows,
-                        label: label,
-                        claudeSessionID: claudeSessionID,
-                        profileID: spawnProfileID,
-                        kind: terminalKind,
-                        transport: transport,
-                        sessionIncarnationID: sessionMod?.incarnationID,
-                        claudeSpawnExtras: spawnExtras)
-                    return spawned
-                }
+            terminal = try await actuating(actuationID) { () async throws -> Terminal in
+                let currentWorktree = try await WorktreeLifecycle.worktreeForSpawn(
+                    db: db, id: params.worktreeID, allowedStatuses: [worktree.status])
+                return try await lifecycle.spawnTerminal(
+                    id: plannedTerminalID,
+                    worktreeID: params.worktreeID,
+                    workingDirectory: currentWorktree.path,
+                    command: spawn.command,
+                    env: spawnEnv,
+                    sensitiveEnv: primarySensitiveEnv,
+                    cols: resolvedCols,
+                    rows: resolvedRows,
+                    label: label,
+                    claudeSessionID: claudeSessionID,
+                    profileID: spawnProfileID,
+                    kind: terminalKind,
+                    transport: transport,
+                    sessionIncarnationID: sessionMod?.incarnationID,
+                    claudeSpawnExtras: spawnExtras)
             }
         } catch {
             await lifecycle.sessionTitles.release(spawnTitle)
@@ -733,18 +726,19 @@ extension RPCRouter {
         // case. A dead session cannot be mid-turn, so it stays closeable
         // without --force.
         //
-        // The qualifier is asked of the row's OWN transport — see
-        // `sessionLivenessForActivityRails`. Asking tmux for every row is how
-        // this rail silently stopped applying to holder-backed sessions.
+        // The qualifier is asked of the row's holder — see
+        // `sessionLivenessForActivityRails`. A tmux row is not asked at all:
+        // closing one runs no tmux command and ends no process
+        // (`WorktreeLifecycle.closeLeftoverTmuxRow`), so no in-flight turn is
+        // at risk and the rail has nothing to protect.
         //
         // It has THREE answers, and only an observed stop lifts the rail: a
         // rail that cannot establish the session ended must fail closed, or it
         // skips its own confirmation exactly when nobody can say what is
         // running.
-        if params.respectActivityRails == true,
+        if params.respectActivityRails == true, terminal.transport == .holder,
            terminal.activityState == .working || terminal.activityState == .waitingForUser {
-            let liveness = try await sessionLivenessForActivityRails(
-                terminal: terminal, actuationID: actuationID)
+            let liveness = await sessionLivenessForActivityRails(terminal: terminal)
             if liveness != .stopped {
                 let message = Self.closeRailsRefusal(
                     terminalID: params.terminalID,
@@ -774,13 +768,11 @@ extension RPCRouter {
             )
         }
 
-        let (transportCleanupFailure, teardownRefusal) = try await closeTerminalTab(
+        let transportCleanupFailure = try await closeTerminalTab(
             terminal, actuationID: actuationID)
 
         if let transportCleanupFailure {
             await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
-        } else if let teardownRefusal {
-            await finishActuation(actuationID, .refused(.targetMismatch), error: teardownRefusal)
         } else {
             await finishActuation(actuationID, .dispatched)
         }
@@ -792,19 +784,21 @@ extension RPCRouter {
     }
 
     /// The teardown half of `terminal.delete`: cancel a pending auto-resume,
-    /// capture scrollback into Closed Terminals, kill the window (or dispose
-    /// the holder), delete the row and its tab, clear pending prompts, drop
-    /// the per-session overlay, and broadcast `.terminalRemoved`. Shared with
-    /// `server.stop`, which closes a server's tab under its own actuation row.
+    /// write the Closed Terminals entry and dispose of the holder (a tmux row
+    /// runs no tmux command: `WorktreeLifecycle.closeLeftoverTmuxRow`), delete
+    /// the row and its tab, clear pending prompts, drop the per-session
+    /// overlay, and broadcast `.terminalRemoved`. Shared with `server.stop`,
+    /// which closes a server's tab under its own actuation row.
     ///
-    /// Returns the two strings `handleTerminalDelete` turns into its outcome
-    /// row; the caller decides how to record them. With an `actuationID`, a
-    /// throw also writes that row's `transport-failed` outcome before it
-    /// propagates; `server.*` passes nil, because its one outcome row covers
-    /// every server in the call and a tab close is one step inside it.
+    /// Returns the transport failure `handleTerminalDelete` turns into its
+    /// outcome row, or nil; the caller decides how to record it. With an
+    /// `actuationID`, a throw also writes that row's `transport-failed`
+    /// outcome before it propagates; `server.*` passes nil, because its one
+    /// outcome row covers every server in the call and a tab close is one step
+    /// inside it.
     func closeTerminalTab(
         _ terminal: Terminal, actuationID: String?
-    ) async throws -> (transportCleanupFailure: String?, teardownRefusal: String?) {
+    ) async throws -> String? {
         func step<T>(_ body: () async throws -> T) async throws -> T {
             guard let actuationID else { return try await body() }
             return try await actuating(actuationID, body)
@@ -814,10 +808,10 @@ extension RPCRouter {
             await limitResumeScheduler?.wake()
         }
 
-        // Capture the pane's scrollback just before the window dies so the
-        // user can view it read-only later (Session History → Closed
-        // Terminals). Strictly best-effort: any failure logs inside
-        // captureOnClose and the close proceeds unchanged.
+        // The worktree, for the Closed Terminals entry: one is written only for
+        // a local worktree, because an entry under a worktree this daemon has
+        // no row for is one no history view lists and no worktree delete
+        // reclaims.
         let worktree = try await step {
             try await db.worktrees.getLocal(id: terminal.worktreeID)
         }
@@ -827,77 +821,34 @@ extension RPCRouter {
         // carried out separately, or the record would call a close that
         // reclaimed nothing `dispatched`.
         var transportCleanupFailure: String?
-        // Set when the tmux-side teardown was deliberately skipped because the
-        // pane now belongs to a different terminal. Recorded as a refusal, not
-        // a transport failure: nothing failed, the guard did its job.
-        var teardownRefusal: String?
-        if terminal.transport == .holder {
+        switch terminal.transport {
+        case .holder:
             // The one path in the holder family that DOES the work instead of
             // refusing it. Its siblings refuse because acting on a holder row's
             // empty tmux coordinate would corrupt a row describing a live
             // process; here the row is going away either way, and a refusal
-            // would cause the leak rather than prevent it.
-            //
-            // The tmux branch below is not merely a no-op for this row, it is
-            // the leak: `tmuxPaneID`/`tmuxWindowID` are empty by construction,
-            // so the capture and the kill address a coordinate that names
-            // nothing while the holder process, the job it forked, and the
-            // socket and lock files at its rendezvous all outlive the row. The
-            // row was the only record of those pids, so this is the last moment
-            // anything can reclaim them.
+            // would cause the leak rather than prevent it. The row was the only
+            // record of the holder's and its job's pids, so this is the last
+            // moment anything can reclaim them.
             //
             // The Closed Terminals entry is written first, from the daemon's
-            // own emulator rather than a tmux pane: disposal releases the
-            // reader the capture is read from. Only for a local worktree, as
-            // on the tmux branch: an entry under a worktree this daemon has no
-            // row for is one no history view lists and no worktree delete
-            // reclaims.
+            // own emulator: disposal releases the reader the capture is read
+            // from.
             if worktree != nil {
                 await WorktreeLifecycle.recordHolderClosedTerminal(
                     terminal, registry: holderRegistry, resolver: holderScreenResolver,
                     history: db.terminalHistory)
             }
             transportCleanupFailure = await disposeHolder(for: terminal)
-        } else if let worktree {
-            // Refuse to kill a window whose pane belongs to a DIFFERENT
-            // terminal — see `TmuxManager.paneOwnership` for why. A
-            // close racing a recycled coordinate must not `kill-window` a
-            // session it was never asked to touch.
-            //
-            // The two refusals are recorded as what they are rather than as a
-            // tmux error: a recycled coordinate is a deliberate protective
-            // skip (`refused(.targetMismatch)`); an unreadable identity means
-            // the read-only consultation itself failed to run, which IS a
-            // transport failure — just not one caused by the kill.
-            let ownership = await tmux.paneOwnership(
-                terminalID: terminal.id, server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
-
-            if let detail = ownership.refusalDetail {
-                let message =
-                    "pane \(terminal.tmuxPaneID): \(detail), so the window was left untouched"
-                logger.warning("""
-                    terminalDelete: refusing to kill-window for terminal \
-                    \(terminal.id.uuidString, privacy: .public) — \
-                    \(message, privacy: .public)
-                    """)
-                if case .ownedByAnother = ownership {
-                    teardownRefusal = message
-                } else {
-                    transportCleanupFailure = message
-                }
-            } else {
-                await db.terminalHistory.captureOnClose(terminal: terminal) {
-                    try await tmux.capturePaneScrollback(
-                        server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
-                }
-                // Kill the tmux window
-                do {
-                    try await tmux.killWindow(
-                        server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
-                } catch {
-                    transportCleanupFailure = "\(error)"
-                }
-            }
+        case .tmux:
+            // Nothing to dispose of and nothing to fail: a live row's session
+            // may keep running in tmux, which the daemon logs, and a parked
+            // row keeps its saved screen in Closed Terminals. Recorded as the
+            // dispatch it is, the way a holder close with nothing left to kill
+            // is.
+            await WorktreeLifecycle.closeLeftoverTmuxRow(
+                terminal, server: worktree?.tmuxServer,
+                history: worktree == nil ? nil : db.terminalHistory)
         }
 
         // Delete from DB
@@ -918,7 +869,7 @@ extension RPCRouter {
             terminalID: terminal.id
         )))
 
-        return (transportCleanupFailure, teardownRefusal)
+        return transportCleanupFailure
     }
 
     /// What a row's own transport can say about whether its session is still
@@ -931,8 +882,8 @@ extension RPCRouter {
         /// The transport says the session is running, or nothing has recorded
         /// that it stopped.
         case running
-        /// Something observed the session end: a tmux window that is gone, or
-        /// a holder that collected its job's exit status.
+        /// Something observed the session end: a holder that collected its
+        /// job's exit status.
         case stopped
         /// The session's supervisor is gone, which does not establish that the
         /// job it supervised is. See `activityRailLiveness(holderStatus:)`.
@@ -999,71 +950,37 @@ extension RPCRouter {
             + why + "Pass --force to close anyway."
     }
 
-    /// What can this session's own transport say about whether it is running?
+    /// What can this session's holder say about whether it is running?
     ///
     /// Only `terminal.delete`'s activity rails ask, and only to decide whether
-    /// a `.working` / `.waitingForUser` row is worth refusing to close. It is
-    /// deliberately an *escape hatch* rather than a liveness guarantee: the
-    /// rail is on by default for the CLI, and a wrong "yes" costs a `--force`
-    /// while a wrong "no" kills an in-flight turn. That asymmetry is why the
-    /// answer that cannot be established (`.unknown`) refuses.
+    /// a holder row reading `.working` / `.waitingForUser` is worth refusing to
+    /// close. It is deliberately an *escape hatch* rather than a liveness
+    /// guarantee: the rail is on by default for the CLI, and a wrong "yes"
+    /// costs a `--force` while a wrong "no" kills an in-flight turn. That
+    /// asymmetry is why the answer that cannot be established (`.unknown`)
+    /// refuses.
     ///
-    /// **The tmux question and the holder question are different questions,
-    /// and asking the tmux one for every row is the defect this replaces.** A
-    /// holder row's `tmuxWindowID` is the empty string by construction and
-    /// `TmuxManager.windowExists` swallows its errors, so tmux answered "that
-    /// window is gone" for every holder-backed session — the one answer that
-    /// switches the rail off. A busy holder session was closeable without
-    /// `--force`, and nothing said so.
-    ///
-    /// The holder leg reads the registry's recorded status through
+    /// It reads the registry's recorded status through
     /// `activityRailLiveness(holderStatus:)`, which owns that mapping and the
     /// reasoning behind both of its polarities.
     ///
-    /// It is the *last known* status, not a fresh probe, and that is the one
-    /// place the two legs are not equivalent. What keeps the gap small is the
-    /// registry's own reclaimer: when a session's drain reaches the end of its
-    /// output it asks the holder whether the child exited, records the answer,
-    /// and releases the reader — so a child that exits while the daemon is up
-    /// stops reading as `.alive` within a poll slice or two of its exit rather
-    /// than waiting for the next adoption. A session whose job closed its
-    /// terminal and kept running still reads `.alive`, correctly.
+    /// It is the *last known* status, not a fresh probe. What keeps the gap
+    /// small is the registry's own reclaimer: when a session's drain reaches
+    /// the end of its output it asks the holder whether the child exited,
+    /// records the answer, and releases the reader — so a child that exits
+    /// while the daemon is up stops reading as `.alive` within a poll slice or
+    /// two of its exit rather than waiting for the next adoption. A session
+    /// whose job closed its terminal and kept running still reads `.alive`,
+    /// correctly.
     private func sessionLivenessForActivityRails(
-        terminal: Terminal, actuationID: String
-    ) async throws -> ActivityRailLiveness {
-        if terminal.transport == .holder {
-            // No worktree lookup on this leg: it exists only to name a tmux
-            // server, and this row has none. A daemon with no registry wired
-            // has adopted nothing and can spawn nothing, so it has no holder
-            // sessions to protect and no fact to protect them with.
-            guard let holderRegistry else { return .stopped }
-            return Self.activityRailLiveness(
-                holderStatus: await holderRegistry.lastKnownStatus(for: terminal.id))
-        }
-        // Resolved inside the rails branch, not in the condition list, so the
-        // lookup keeps its short-circuit (only reached when the rails are on
-        // and the row looks busy) while a DB failure still confirms the request
-        // row before it propagates.
-        let railWorktree = try await actuating(actuationID) {
-            try await db.worktrees.getLocal(id: terminal.worktreeID)
-        }
-        guard let railWorktree else { return .stopped }
-        // Tri-state, and the type has said so all along: `ActivityRailLiveness`
-        // carries `.unknown` for exactly this, and the holder leg above already
-        // returns it. The tmux leg was the one collapsing "tmux says the window
-        // is gone" into the same answer as "tmux never answered" — and only
-        // `.stopped` lifts the rail, so a probe that timed out during a busy
-        // moment read as an observed exit and let a `--respectActivityRails`
-        // close delete the row and kill the window of a session that was
-        // mid-turn. A rail that cannot establish the session ended has to fail
-        // closed.
-        switch await tmux.probeWindow(
-            server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID
-        ) {
-        case .alive: return .running
-        case .absent: return .stopped
-        case .unknown: return .unknown
-        }
+        terminal: Terminal
+    ) async -> ActivityRailLiveness {
+        // A daemon with no registry wired has adopted nothing and can spawn
+        // nothing, so it has no holder sessions to protect and no fact to
+        // protect them with.
+        guard let holderRegistry else { return .stopped }
+        return Self.activityRailLiveness(
+            holderStatus: await holderRegistry.lastKnownStatus(for: terminal.id))
     }
 
     /// Tears down the holder behind a row that is about to be deleted: stops
@@ -1332,26 +1249,24 @@ extension RPCRouter {
     ) async throws -> Terminal {
         // The transport is decided like every other spawn's — once, by the
         // caller, from the same gate — and carried here rather than re-asked.
-        let terminal = try await tmux.withWorktreeServerLock(
-            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-        ) { currentWorktree in
-            try await lifecycle.spawnTerminal(
-                id: plannedTerminalID,
-                worktreeID: currentWorktree.id,
-                workingDirectory: currentWorktree.path,
-                command: spawnCommand,
-                env: env,
-                sensitiveEnv: sensitiveEnv,
-                cols: cols,
-                rows: rows,
-                label: label,
-                claudeSessionID: claudeSessionID,
-                profileID: profileID,
-                kind: kind,
-                transport: transport,
-                sessionIncarnationID: sessionIncarnationID,
-                claudeSpawnExtras: claudeSpawnExtras)
-        }
+        let currentWorktree = try await WorktreeLifecycle.worktreeForSpawn(
+            db: db, id: worktree.id, allowedStatuses: [worktree.status])
+        let terminal = try await lifecycle.spawnTerminal(
+            id: plannedTerminalID,
+            worktreeID: currentWorktree.id,
+            workingDirectory: currentWorktree.path,
+            command: spawnCommand,
+            env: env,
+            sensitiveEnv: sensitiveEnv,
+            cols: cols,
+            rows: rows,
+            label: label,
+            claudeSessionID: claudeSessionID,
+            profileID: profileID,
+            kind: kind,
+            transport: transport,
+            sessionIncarnationID: sessionIncarnationID,
+            claudeSpawnExtras: claudeSpawnExtras)
         var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
         if !order.contains(terminal.id) { order.append(terminal.id) }
         try await db.worktrees.setTabOrder(worktreeID: worktree.id, tabIDs: order)
@@ -2510,13 +2425,10 @@ extension RPCRouter {
     /// re-homing means. The transcript carry is the caller's: it has already
     /// happened upstream by the time either reaches here.
     ///
-    /// Under the worktree's tmux-server lock, as the cold swap has always
-    /// been. That lock does not start a server and is not about tmux here: it
-    /// is the daemon's per-worktree mutual exclusion, and it re-reads the
-    /// worktree under the caller's `allowedStatuses` so a row being archived
-    /// out from under the write is rejected rather than raced. It is taken for
-    /// this write alone and never held across the park, which polls for a
-    /// process to exit.
+    /// The worktree is read again first, under the caller's
+    /// `allowedStatuses`, so a worktree archived since the caller looked is
+    /// refused rather than written to, and the write itself is a
+    /// compare-and-set against the row as the caller read it.
     ///
     /// - Parameter freshSessionID: the conversation the row is to hold once it
     ///   is re-homed, for the holder arm's `.fresh` plan — a blank session is
@@ -2540,18 +2452,15 @@ extension RPCRouter {
         freshTranscriptPath: String? = nil
     ) async throws -> Terminal {
         let expected = TerminalReplacementSnapshot(terminal: terminal)
-        let updated = try await tmux.withWorktreeServerLock(
-            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-        ) { _ in
-            guard let updated = try await self.db.terminals.setParkedProfileID(
-                id: terminal.id,
-                expectedState: expected,
-                profileID: destProfileID,
-                sessionID: freshSessionID,
-                transcriptPath: freshTranscriptPath) else {
-                throw StaleTerminalReplacementError()
-            }
-            return updated
+        _ = try await WorktreeLifecycle.worktreeForSpawn(
+            db: db, id: worktree.id, allowedStatuses: [worktree.status])
+        guard let updated = try await db.terminals.setParkedProfileID(
+            id: terminal.id,
+            expectedState: expected,
+            profileID: destProfileID,
+            sessionID: freshSessionID,
+            transcriptPath: freshTranscriptPath) else {
+            throw StaleTerminalReplacementError()
         }
         subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
             terminalID: updated.id,
@@ -2979,26 +2888,24 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         // The transport is decided like every other spawn's — once, by the
         // caller, from the same gate — and carried here rather than re-asked.
-        let newTerminal = try await tmux.withWorktreeServerLock(
-            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-        ) { currentWorktree in
-            try await lifecycle.spawnTerminal(
-                id: plannedTerminalID,
-                worktreeID: currentWorktree.id,
-                workingDirectory: currentWorktree.path,
-                command: spawnCommand,
-                env: env,
-                sensitiveEnv: sensitiveEnv,
-                cols: cols,
-                rows: rows,
-                label: "claude",
-                claudeSessionID: storedSessionID,
-                profileID: profileID,
-                kind: .claude,
-                transport: transport,
-                sessionIncarnationID: sessionIncarnationID,
-                claudeSpawnExtras: claudeSpawnExtras)
-        }
+        let currentWorktree = try await WorktreeLifecycle.worktreeForSpawn(
+            db: db, id: worktree.id, allowedStatuses: [worktree.status])
+        let newTerminal = try await lifecycle.spawnTerminal(
+            id: plannedTerminalID,
+            worktreeID: currentWorktree.id,
+            workingDirectory: currentWorktree.path,
+            command: spawnCommand,
+            env: env,
+            sensitiveEnv: sensitiveEnv,
+            cols: cols,
+            rows: rows,
+            label: "claude",
+            claudeSessionID: storedSessionID,
+            profileID: profileID,
+            kind: .claude,
+            transport: transport,
+            sessionIncarnationID: sessionIncarnationID,
+            claudeSpawnExtras: claudeSpawnExtras)
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: newTerminal.id, worktreeID: newTerminal.worktreeID, label: newTerminal.label

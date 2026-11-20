@@ -289,103 +289,23 @@ public struct WorktreeLifecycle: Sendable {
                     graceAttempts: reaperGraceAttempts, pollInterval: reaperPollInterval)
     }
 
-    /// What `tearDownWindow` did to one window.
-    struct WindowTeardown: Equatable, Sendable {
-        /// The kill error's description, or nil when `kill-window` went through.
-        let killFailure: String?
-        /// The pane's process as tmux answered before the kill, or nil when it
-        /// could not be read. A tmux that cannot answer reports `0`.
-        let panePID: Int32?
-
-        /// Whether nothing the teardown aimed at can still be running: the kill
-        /// went through, or the pane's process was read and reaped. A failed
-        /// kill of a pane whose process could not be read may have left it
-        /// running.
-        var stoppedPane: Bool {
-            killFailure == nil || (panePID ?? 0) > 0
-        }
-    }
-
-    /// Kill a tmux window, then confirm the pane process actually died and
-    /// escalate (SIGTERM→SIGKILL) if it survived the SIGHUP (wedged agent),
-    /// reporting what it did: the pane's process is read, the window killed,
-    /// and the process escalated against even when the kill threw, since it
-    /// may still be alive.
-    func tearDownWindow(
-        server: String, windowID: String, paneID: String
-    ) async -> WindowTeardown {
-        let panePID = Int32((try? await tmux.panePID(server: server, paneID: paneID)) ?? "")
-        var killFailure: String?
-        do {
-            try await tmux.killWindow(server: server, windowID: windowID)
-        } catch {
-            killFailure = "\(error)"
-            logger.warning("killWindow failed on \(server, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
-        }
-        // Escalate even if killWindow threw — the pane process may still be alive.
-        if let panePID { await reaper.escalateAfterHangup(panePID) }
-        return WindowTeardown(killFailure: killFailure, panePID: panePID)
-    }
-
-    /// Capture a live terminal's scrollback into Closed Terminals history
-    /// (best-effort), then kill its window and reap the pane. Used by the
-    /// archive paths (explicit archive + reconcile auto-archive), where the
-    /// worktree row and its `terminal_history` rows survive — unlike the
-    /// hard-delete paths (Forget/Recovery/scratch.delete) that wipe history
-    /// immediately after and so deliberately skip the capture. Capturing must
-    /// happen before the window dies; mirrors `closeHookTerminal`'s
-    /// never-throws capture (failures are logged inside `captureOnClose` and
-    /// never block the teardown).
-    ///
-    /// Returns whether the pane's process can no longer be running: false when
-    /// it refused to touch the window, which leaves the process as it was, and
-    /// false when the kill failed and the pane's process could not be read to
-    /// reap (`WindowTeardown.stoppedPane`); true otherwise.
-    @discardableResult
-    func captureThenKillWindow(terminal: Terminal, server: String) async -> Bool {
-        // Refuse to capture or kill a pane that belongs to a DIFFERENT
-        // terminal — see `TmuxManager.paneOwnership`. Shared by both
-        // callers of this function (explicit archive, and the vanished-
-        // worktree reconcile sweep), so guarding here covers both: a stale
-        // worktree's recorded coordinate colliding with a live sibling
-        // worktree's terminal (several worktrees of one repo share a tmux
-        // server) must not capture the stranger's screen into this row's
-        // Closed Terminals history, nor destroy their window.
-        let ownership = await tmux.paneOwnership(
-            terminalID: terminal.id, server: server, paneID: terminal.tmuxPaneID)
-        guard ownership.permitsTeardown else {
-            logger.warning("""
-                captureThenKillWindow: leaving window \(terminal.tmuxWindowID, privacy: .public) \
-                untouched for terminal \(terminal.id, privacy: .public) — \
-                \(ownership.refusalDetail ?? "", privacy: .public)
-                """)
-            return false
-        }
-        await db.terminalHistory.captureOnClose(terminal: terminal) {
-            try await tmux.capturePaneScrollback(server: server, paneID: terminal.tmuxPaneID)
-        }
-        return await tearDownWindow(
-            server: server,
-            windowID: terminal.tmuxWindowID,
-            paneID: terminal.tmuxPaneID
-        ).stoppedPane
-    }
-
     /// Whether a terminal's session has no process left once a teardown of it
     /// has run, so its session-mod directory may go. The mod writes the box
     /// one last time when its process ends, and a removal ahead of that write
     /// would be undone by it.
     ///
     /// A teardown that stopped the process settles it. What a teardown waits
-    /// on is the pane's process or the holder's job. When the login shell
-    /// execs Claude, as zsh does for the spawn command's `-c`, that process is
-    /// Claude and its final write lands before the removal. Otherwise Claude
+    /// on is the holder's job. When the login shell execs Claude, as zsh does
+    /// for the spawn command's `-c`, that process is Claude and its final
+    /// write lands before the removal. Otherwise Claude
     /// can still be shutting down when the wait ends, its late `session.end`
     /// write can recreate the directory, and `OrphanGC`'s session-directory
     /// arm reclaims it once nothing names it and `gcGraceSeconds` has passed.
     ///
     /// Otherwise only a parked row qualifies, because a park already ended the
-    /// process — except while the park is still in flight:
+    /// process. A live row on tmux never does: closing it runs no tmux
+    /// command, so its session may still be running. A parked row is excluded
+    /// while the park is still in flight:
     /// `pendingSessionIncarnationID` is set from the moment the park is
     /// recorded until the agent has been replaced, and the agent may still be
     /// running in between. A session left running keeps its directory, and
@@ -430,18 +350,14 @@ public struct WorktreeLifecycle: Sendable {
         }
     }
 
-    /// The holder-transport counterpart of `tearDownWindow`, for the
-    /// teardown paths that delete a terminal's row: stop the daemon's reader,
-    /// tell the holder to let go of the pty master, and kill the job it forked.
-    /// Returns a description of what was left running, or nil.
+    /// The teardown for a holder row, for the paths that delete a terminal's
+    /// row: stop the daemon's reader, tell the holder to let go of the pty
+    /// master, and kill the job it forked. Returns a description of what was
+    /// left running, or nil.
     ///
-    /// It is a *replacement* for the tmux teardown beside it, not an addition.
-    /// A holder row's `tmuxWindowID` and `tmuxPaneID` are the empty string by
-    /// construction, so `captureThenKillWindow` captures nothing, kills nothing,
-    /// and reaps nothing for such a row — which makes it the leak rather than a
-    /// harmless no-op, since the row about to be deleted is the only record of
-    /// the holder and child pids, and once it is gone no sweep covers them
-    /// unless the holder is still alive to answer a handshake
+    /// It has to run before the row goes: the row about to be deleted is the
+    /// only record of the holder and child pids, and once it is gone no sweep
+    /// covers them unless the holder is still alive to answer a handshake
     /// (`RowlessHolderCollector`). The holder inventory in
     /// `WorktreeLifecycle+Reconcile` does not help here: it judges rows that
     /// still exist, and `AgentReaper`'s holder leg reads the same rows.
@@ -472,8 +388,7 @@ public struct WorktreeLifecycle: Sendable {
         return await registry.abandon(terminal: terminal)
     }
 
-    /// The holder half of `captureThenKillWindow`'s capture: write a holder
-    /// row's Closed Terminals entry. The one place every history-keeping holder
+    /// Write a holder row's Closed Terminals entry. The one place every history-keeping holder
     /// teardown goes through — `terminal.delete`, worktree archive, reconcile's
     /// auto-archive, the hook-tab close and scratch archive — and never the
     /// hard-delete paths (forget, recovery, scratch delete), which wipe the

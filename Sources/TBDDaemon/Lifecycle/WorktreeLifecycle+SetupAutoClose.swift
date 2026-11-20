@@ -43,14 +43,12 @@ extension WorktreeLifecycle {
     }
 
     /// Detached tail of a flag-on setup spawn: await the marker (reusing the
-    /// pre-session polling, including its dead-window and deadline races),
+    /// pre-session polling, including its closed-tab and deadline races),
     /// then close the tab on exit 0. Any other outcome leaves the tab alone —
     /// the wrapped command already exec'd a shell there on failure, and a
     /// timeout/killed pane needs no daemon action.
     func finishAutoCloseSetup(worktree: Worktree, setup: PreSessionSpawn) async {
-        let outcome = await waitForPreSessionCompletion(
-            preSession: setup, tmuxServer: setup.tmuxServer
-        )
+        let outcome = await waitForPreSessionCompletion(preSession: setup)
         // The marker must never outlive the wait, whatever the outcome.
         try? FileManager.default.removeItem(atPath: setup.markerPath)
 

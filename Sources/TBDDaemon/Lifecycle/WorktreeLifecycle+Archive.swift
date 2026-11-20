@@ -113,9 +113,9 @@ extension WorktreeLifecycle {
 
     // MARK: - Archive
 
-    /// Archives a worktree, cleaning up tmux windows and removing the git worktree.
+    /// Archives a worktree, ending its sessions and removing the git worktree.
     ///
-    /// Phase 1 (fast): Validates, updates DB status, kills tmux windows.
+    /// Phase 1 (fast): Validates, updates DB status, ends the sessions.
     /// Returns the worktree and repo for phase 2.
     ///
     /// Refuses, before it changes anything, a worktree whose folder holds
@@ -146,7 +146,7 @@ extension WorktreeLifecycle {
 
         // Refuse to archive a worktree whose direct children are still active
         // or being created. `force` bypasses the check for cascade flows like
-        // repo deletion. Performed before any tmux/disk work.
+        // repo deletion. Performed before any session or disk work.
         if !force {
             try await db.worktrees.assertArchivable(id: worktreeID)
         }
@@ -254,21 +254,22 @@ extension WorktreeLifecycle {
         // started.
         await stopDevServersForArchive(worktree: worktree)
 
-        // Capture each terminal's scrollback into Closed Terminals history,
-        // then kill its tmux window, reaping any wedged agent that survives
-        // kill-window's SIGHUP. The archived worktree row and its history rows
-        // survive, so the captured output stays readable later.
+        // Write each terminal's Closed Terminals entry, then end its session:
+        // a holder row's holder and job are reclaimed, and a tmux row runs no
+        // tmux command (`closeLeftoverTmuxRow`), so a session still running in
+        // a tmux server an earlier build started keeps running. The archived
+        // worktree row and its history rows survive, so the entries stay
+        // readable later.
         var sessions = SessionTeardownTally()
         for terminal in terminals {
-            // A holder row takes the holder teardown instead. Its rows are
-            // deleted below just as a tmux row's are, so refusing here would
-            // leak rather than protect, and `captureThenKillWindow` would
-            // capture, kill and reap against empty coordinates while the holder
-            // and its job outlive the only record of their pids. Its Closed
-            // Terminals entry is written before the disposal releases the
-            // reader it is captured from.
             let stopped: Bool
-            if terminal.transport == .holder {
+            switch terminal.transport {
+            case .holder:
+                // Its rows are deleted below, so refusing here would leak
+                // rather than protect: the row is the only record of the
+                // holder's and its job's pids. Its Closed Terminals entry is
+                // written before the disposal releases the reader it is
+                // captured from.
                 await Self.recordHolderClosedTerminal(
                     terminal, registry: holderRegistry, resolver: holderScreenResolver,
                     history: db.terminalHistory)
@@ -279,21 +280,24 @@ extension WorktreeLifecycle {
                 } else {
                     stopped = true
                 }
-            } else {
-                stopped = await captureThenKillWindow(
-                    terminal: terminal, server: worktree.tmuxServer)
+            case .tmux:
+                await Self.closeLeftoverTmuxRow(
+                    terminal, server: worktree.tmuxServer, history: db.terminalHistory)
+                stopped = false
             }
             sessions.record(terminal, teardownStoppedIt: stopped)
         }
 
         // Each ended session's directory goes, draft included, unless another
         // row naming the same session may still be running. The teardown
-        // above waited for each pane's process to exit, escalating to SIGKILL,
-        // or SIGKILLed the holder's job. When the login shell execs Claude, as
-        // zsh does for the spawn command's `-c`, that process is Claude and
-        // the mod's final write on `session.end` lands before the removal;
+        // above SIGKILLed each holder's job, and a parked tmux row's session
+        // ended when it was parked. When the login shell execs Claude, as zsh
+        // does for the spawn command's `-c`, that process is Claude and the
+        // mod's final write on `session.end` lands before the removal;
         // otherwise a late write can recreate the directory, and `OrphanGC`'s
-        // session-directory arm reclaims it after `gcGraceSeconds`.
+        // session-directory arm reclaims it after `gcGraceSeconds`. A live
+        // tmux row's session may still be running, so its directory stays for
+        // `OrphanGC`.
         removeSessionDirectories(for: sessions)
 
         // Delete terminals from db

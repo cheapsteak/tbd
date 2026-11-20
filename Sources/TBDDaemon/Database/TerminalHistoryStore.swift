@@ -62,15 +62,14 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
 }
 
 /// Read-only closed-terminal history: at close time the daemon captures the
-/// pane's scrollback so the user can view it later.
+/// terminal's screen and scrollback so the user can view it later.
 ///
 /// Captured TEXT is file-backed at
 /// `~/tbd/terminal-history/<worktreeID>/<terminalID>.txt`
 /// (`TBDConstants.terminalHistoryPath`); the DB row keeps display metadata.
-/// Empty/whitespace-only captures store nothing (no file, no row) on the
-/// tmux path (`captureOnClose`); the holder path (`recordOnClose`) writes the
-/// row without a file instead. Entries for a dev server's saved last output
-/// carry `serverName` and `exitCode` (`recordServerExit`).
+/// A close with no capture, or an empty or whitespace-only one, writes the
+/// row without a file (`recordOnClose`). Entries for a dev server's saved last
+/// output carry `serverName` and `exitCode` (`recordServerExit`).
 public struct TerminalHistoryStore: Sendable {
     // ponytail: hard cap of the newest 50 captures per worktree; make it a
     // config knob only if someone actually asks for more retention.
@@ -101,41 +100,26 @@ public struct TerminalHistoryStore: Sendable {
 
     // MARK: - Capture
 
-    /// Best-effort capture at terminal close. Runs `capture`, then stores the
-    /// text (file + metadata row) and prunes the worktree to the newest
-    /// `maxEntriesPerWorktree` records. NEVER throws — any failure is logged
-    /// and the close proceeds unchanged. Empty/whitespace-only captures store
-    /// nothing.
-    public func captureOnClose(terminal: Terminal, capture: () async throws -> String) async {
-        let text: String
-        do {
-            text = try await capture()
-        } catch {
-            logger.warning("scrollback capture failed for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return
-        }
-        await store(terminal: terminal, text: text, closedAt: Date())
-    }
-
-    /// Holder-transport close: writes an entry whether or not there is a
-    /// capture. NEVER throws.
+    /// Terminal close: writes an entry whether or not there is a capture, then
+    /// prunes the worktree to the newest `maxEntriesPerWorktree` records.
+    /// NEVER throws — any failure is logged and the close proceeds unchanged.
     ///
-    /// Unlike `captureOnClose`, a missing or blank capture still writes the
-    /// metadata row (no content file, `lineCount` 0). A holder's screen can be
-    /// unreadable at close for a reason that says nothing about the session —
-    /// a viewer holds the pty, so the daemon's copy is frozen — and the entry
-    /// is still what lets a Claude session be revived by its session id.
+    /// A missing or blank capture still writes the metadata row (no content
+    /// file, `lineCount` 0). A holder's screen can be unreadable at close for a
+    /// reason that says nothing about the session — a viewer holds the pty, so
+    /// the daemon's copy is frozen — and the entry is still what lets a Claude
+    /// session be revived by its session id.
     /// Revive already handles a missing file (the shell path skips the `cat`),
     /// and the viewer reads a missing file as empty.
     ///
     /// A capture-less close of a terminal that already has an entry leaves
     /// that entry alone. A second close of one terminal is a retried teardown
-    /// (the rows survived a failed delete or an unrecorded reconcile kill), and
-    /// by then the first close has disposed the holder, so the retry can only
-    /// answer "no capture": overwriting would throw away the first close's
-    /// capture, as the tmux path never does when its capture fails. The check
-    /// and the insert are one transaction, and a capture-less close touches no
-    /// file, so it cannot remove a capture a concurrent close is writing.
+    /// (the rows survived a failed delete or an unrecorded reconcile teardown),
+    /// and by then the first close has disposed the holder, so the retry can
+    /// only answer "no capture": overwriting would throw away the first
+    /// close's capture. The check and the insert are one transaction, and a
+    /// capture-less close touches no file, so it cannot remove a capture a
+    /// concurrent close is writing.
     public func recordOnClose(terminal: Terminal, capture: String?) async {
         await persist(
             terminal: terminal, text: Self.nonBlank(capture), closedAt: Date(),
@@ -150,7 +134,7 @@ public struct TerminalHistoryStore: Sendable {
     }
 
     /// `text` unless it is empty or whitespace-only — the one statement of
-    /// what counts as "no capture" for both close paths. Scans only up to the
+    /// what counts as "no capture" for every close path. Scans only up to the
     /// first visible character rather than trimming a copy of the capture.
     private static func nonBlank(_ text: String?) -> String? {
         guard let text, text.unicodeScalars.contains(where: {

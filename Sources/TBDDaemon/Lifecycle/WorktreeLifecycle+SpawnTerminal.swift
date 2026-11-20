@@ -56,6 +56,24 @@ struct TerminalSpawnTransport: Sendable {
 }
 
 extension WorktreeLifecycle {
+    /// The worktree a spawn is about to open a terminal in, read again just
+    /// before the spawn, so a worktree archived, deleted or moved to another
+    /// status since the caller looked is refused rather than given a new
+    /// session. Throws `WorktreeLifecycleError.worktreeNotFound` when the row
+    /// is gone or its status is not one of `allowedStatuses`.
+    ///
+    /// Static and handed the database, because the router's spawn paths call
+    /// it with their own database as the lifecycle's do with theirs.
+    static func worktreeForSpawn(
+        db: TBDDatabase, id: UUID, allowedStatuses: Set<WorktreeStatus>
+    ) async throws -> LocalWorktree {
+        guard let current = try await db.worktrees.getLocal(id: id),
+              allowedStatuses.contains(current.status) else {
+            throw WorktreeLifecycleError.worktreeNotFound(id)
+        }
+        return current
+    }
+
     /// **The one place a terminal is spawned and its row written.**
     ///
     /// Every spawn path — the primary terminal at worktree creation, the setup
