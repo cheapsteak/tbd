@@ -1033,19 +1033,70 @@ struct SidebarOutlineControllerTests {
         #expect(h.clip.bounds.minY < 0.5, "Forward to row 0 left the list at \(h.clip.bounds.minY)")
     }
 
-    /// The first load selects the row `AppState` names without scrolling to
-    /// it.
-    @Test func firstLoadDoesNotScrollToTheSelection() throws {
+    /// A controller whose first load finds a selection already set — the
+    /// main window closed and opened again, or the saved selection restored
+    /// before the first load — opens the list on the selected row.
+    @Test func firstLoadCentersTheSelection() throws {
         let h = OutlineHarness("center.firstLoad")
         defer { h.tearDown() }
         let rows = Self.mountTallList(h, history: [[40]])
 
         let selected = h.row(.worktree(rows[40].id))
         try #require(selected >= 0)
-        try #require(h.outline.rect(ofRow: selected).minY > h.clip.bounds.maxY,
-                     "The selected row is in view already; the check below would be vacuous")
+        try #require(h.outline.rect(ofRow: selected).minY > h.clip.bounds.height,
+                     "The selected row is in the first screenful; the check below would be vacuous")
         #expect(h.outline.selectedRowIndexes == IndexSet(integer: selected))
-        #expect(h.clip.bounds.minY < 0.5, "The first load scrolled to \(h.clip.bounds.minY)")
+        try Self.expectCentered(.worktree(rows[40].id), in: h)
+    }
+
+    /// A first load with nothing selected leaves the list at the top.
+    @Test func firstLoadWithNoSelectionDoesNotScroll() throws {
+        let h = OutlineHarness("center.firstLoadEmpty")
+        defer { h.tearDown() }
+        _ = Self.mountTallList(h, history: [])
+        try #require(h.state.selectedWorktreeIDs.isEmpty)
+        try #require(h.state.selectedRemoteSession == nil)
+        #expect(h.outline.selectedRowIndexes.isEmpty)
+        #expect(h.clip.bounds.minY < 0.5, "A first load with nothing selected scrolled to \(h.clip.bounds.minY)")
+    }
+
+    /// A first load that runs before the view is laid out in a window finds
+    /// a clip view with no height, so no middle to centre on. The first
+    /// layout that gives it a height centres the selected row, and a later
+    /// layout leaves the scroll alone.
+    @Test func selectionFoundBeforeTheFirstLayoutIsCenteredOnce() throws {
+        let h = OutlineHarness("center.beforeLayout")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let rows = (0..<60).map { Self.row("row \($0)", repo, order: $0) }
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: rows]
+        h.state.selectedWorktreeIDs = [rows[40].id]
+
+        // The first load, before the view is in any window.
+        h.controller.flushPendingRebuild()
+        try #require(h.controller.hasLoaded, "The first load never ran")
+        try #require(h.clip.bounds.height == 0,
+                     "The clip view had a height before mounting; the check below would be vacuous")
+        let selected = h.row(.worktree(rows[40].id))
+        try #require(selected >= 0)
+        try #require(h.outline.selectedRowIndexes == IndexSet(integer: selected))
+
+        h.mount(size: NSSize(width: 320, height: 200))
+        // The layout pass that follows the view's sizing in its window,
+        // marked so it runs whatever the mount itself marked.
+        h.controller.view.needsLayout = true
+        h.host?.layout()
+        try #require(h.outline.rect(ofRow: selected).minY > h.clip.bounds.height,
+                     "The selected row is in the first screenful; the check below would be vacuous")
+        try Self.expectCentered(.worktree(rows[40].id), in: h)
+
+        h.outline.scroll(NSPoint(x: 0, y: 0))
+        try #require(h.clip.bounds.minY < 0.5, "The outline never scrolled back to the top")
+        h.controller.view.needsLayout = true
+        h.host?.layout()
+        #expect(h.clip.bounds.minY < 0.5, "A later layout centred the row again, at \(h.clip.bounds.minY)")
     }
 
     /// Once the selection is centred, the user may scroll away; a rebuild
@@ -1246,9 +1297,9 @@ struct SidebarOutlineControllerTests {
         try Self.expectCentered(.worktree(rows[40].id), in: h)
     }
 
-    /// In the launch order: the first load runs with nothing selected, and
-    /// the saved selection is restored once the daemon's data has loaded.
-    /// The restored row is centred.
+    /// In the usual launch order: the first load runs with nothing selected,
+    /// and the saved selection is restored once the daemon's data has
+    /// loaded. The restored row is centred.
     @Test func selectionRestoredAfterTheFirstLoadIsCentered() throws {
         let h = OutlineHarness("center.restore")
         defer { h.tearDown() }

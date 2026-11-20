@@ -10,7 +10,8 @@ extension SidebarOutlineController {
     // MARK: Apply
 
     /// Applies `latest`, then mirrors `AppState`'s selection into the outline
-    /// and centres a selection made elsewhere and a pending scroll target.
+    /// and centres a selection made elsewhere, a pending scroll target, and
+    /// a centre an earlier apply kept until the outline had a height.
     /// The selection guard covers the whole apply, through `endUpdates`: the
     /// selection changes the outline posts while rows move are not echoed.
     func apply(_ latest: SidebarTree) {
@@ -36,6 +37,7 @@ extension SidebarOutlineController {
         // finds it centred already and leaves the scroll alone.
         centerSelectionIfChanged()
         scrollPendingTargetToCenter()
+        centerDeferredRow()
         isApplyingModelSelection = false
         reconcileVanishedSelection()
         // Rows may have moved under a still pointer.

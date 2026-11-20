@@ -149,8 +149,32 @@ extension SidebarOutlineController {
 
     /// Scrolls so `row`'s middle sits at the middle of the visible area, as
     /// far as the content allows: a row near either end stops short of it.
+    ///
+    /// A clip view with no height has no middle: the view is not laid out
+    /// in a window yet, as a first apply can find it. The row is then kept
+    /// and centred once, by the first layout or apply that finds a height
+    /// (`centerDeferredRow`). A later centre replaces it.
     func centerRow(_ row: Int) {
+        guard scrollView.contentView.bounds.height > 0 else {
+            deferredCenterID = (outline.item(atRow: row) as? SidebarItem)?.id
+            return
+        }
+        deferredCenterID = nil
         outline.tile()
         scroll(toY: outline.rect(ofRow: row).midY - scrollView.contentView.bounds.height / 2)
+    }
+
+    /// Centres the row `centerRow` kept for want of a height, once the clip
+    /// view has one. Runs after every layout and at the end of every apply.
+    /// A row no longer selected or no longer shown is dropped; while
+    /// structure is held the centre waits for the apply that ends the hold.
+    func centerDeferredRow() {
+        guard let id = deferredCenterID, scrollView.contentView.bounds.height > 0,
+              !isHoldingStructure else { return }
+        deferredCenterID = nil
+        guard modelSelectionIDs.contains(id), let item = items.existing(id) else { return }
+        let row = outline.row(forItem: item)
+        guard row >= 0 else { return }
+        centerRow(row)
     }
 }
