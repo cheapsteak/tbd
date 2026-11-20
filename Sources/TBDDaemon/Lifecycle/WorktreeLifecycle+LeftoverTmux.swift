@@ -155,6 +155,51 @@ extension WorktreeLifecycle {
         }
         logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; its session may still be running in tmux server \(server, privacy: .public). \(LeftoverTmuxSession.endingAdvice(server: server), privacy: .public)")
     }
+
+    /// The revive gate for tabs whose tmux row was live at archive: the
+    /// refusal when one of `tabs` is marked `liveOnTmuxAtArchive` and the
+    /// probe says `server` may still be running, nil otherwise.
+    ///
+    /// Archive keeps such a row's tab in the record, and a revive relaunches
+    /// every tab on the pty holder. A session still running in its tmux
+    /// server would then run twice on one session id, so the whole revive is
+    /// refused until the server is gone. `tabs` is what the revive would
+    /// relaunch, and the probe is asked only when one of them is marked: an
+    /// archive with no live tmux row costs a revive nothing. Every marked tab
+    /// names the same server, the worktree's, so one answer covers them all.
+    ///
+    /// A transition measure, like the probe it asks: on 2027-01-15 parking on
+    /// sight replaces it. See
+    /// `docs/specs/2026-10-11-holder-transport-migration-design.md`, "A live
+    /// row whose tmux server outlived the update".
+    func liveTmuxReviveRefusal(
+        relaunching tabs: [ArchivedAgentTab], server: String
+    ) async -> LiveTmuxReviveRefusal? {
+        guard tabs.contains(where: { $0.liveOnTmuxAtArchive == true }) else { return nil }
+        guard await leftoverTmuxProbe.state(server) == .running else { return nil }
+        logger.notice("revive refused: a tab was live on tmux at archive and tmux server \(server, privacy: .public) may still be running it")
+        return LiveTmuxReviveRefusal(server: server)
+    }
+}
+
+/// A revive the live-tmux gate refused (`liveTmuxReviveRefusal`): a tab it
+/// would relaunch was live on tmux when its worktree was archived, and that
+/// worktree's tmux server may still be running the session. Thrown before the
+/// revive writes anything, so the archived record and the worktree are as
+/// they were.
+struct LiveTmuxReviveRefusal: Error, Equatable, LocalizedError, CustomStringConvertible {
+    /// The worktree's tmux server, as `tmux -L` takes it.
+    let server: String
+
+    /// What the person is told, with the command that ends the server.
+    var message: String { LeftoverTmuxSession.reviveRefusal(server: server) }
+
+    /// The refusal as a handler answers it, with the code every refusal over
+    /// a session still running in tmux carries.
+    var coded: CodedRefusal { CodedRefusal(text: message, code: .terminalOnTmux) }
+
+    var errorDescription: String? { message }
+    var description: String { message }
 }
 
 /// What `WorktreeLifecycle.parkLeftoverTmuxRow` did with a row. The cases are

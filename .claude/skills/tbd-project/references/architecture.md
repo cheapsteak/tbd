@@ -115,6 +115,7 @@ What TBD still does with tmux:
 
 - Server names use the djb2 hash of the repo path (`TmuxManager.serverName`), deterministic and surviving DB recreation; the probe and the notice both name the server this way.
 - Closing a tmux row's tab — or archiving or forgetting its worktree, deleting or archiving a scratch space, or reconcile's archive of a worktree gone from git — deletes the row and runs no tmux command (`WorktreeLifecycle.closeLeftoverTmuxRow`). A live row's session keeps running in its server, and the row gets no Closed Terminals entry, because revive could otherwise start a second agent on the same session; a parked row's entry carries the screen the park stored.
+- Archiving keeps a live tmux row's tab in the worktree's archived record, marked `liveOnTmuxAtArchive`, and a revive relaunches every tab on the holder. Before it does, a revive that would relaunch a marked tab probes the worktree's server and, while it may be running, refuses whole with `terminalOnTmux` and the kill-server advice, writing nothing (`WorktreeLifecycle.liveTmuxReviveRefusal`). Resuming one archived conversation on a fresh branch asks the same.
 
 How TBD used to serve tmux sessions, and why it never used control mode: `docs/tmux-integration.md`, kept as the design record.
 

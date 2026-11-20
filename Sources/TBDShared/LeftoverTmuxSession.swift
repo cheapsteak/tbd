@@ -71,4 +71,17 @@ public enum LeftoverTmuxSession {
             + endingAdvice(server: server)
             + " Then run `tbd terminal migrate \(terminalID.uuidString)` to move it to the pty holder."
     }
+
+    /// The refusal for a revive that would relaunch a tab whose tmux row was
+    /// live when its worktree was archived, while that worktree's tmux server
+    /// may still be running the session. Relaunching it on the pty holder
+    /// would start a second agent on the same session id, so the revive waits
+    /// until the server is gone.
+    public static func reviveRefusal(server: String) -> String {
+        "This worktree had a session running in tmux when it was archived, and that tmux "
+            + "server may still be running it, so reviving now would start a second agent on "
+            + "the same conversation. "
+            + endingAdvice(server: server)
+            + " Then revive the worktree again."
+    }
 }

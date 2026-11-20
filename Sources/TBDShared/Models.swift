@@ -236,11 +236,19 @@ public struct ArchivedAgentTab: Codable, Sendable, Equatable {
     public let profileID: UUID?
     public let claudeSpawnExtras: ClaudeSpawnExtras?
     public let codexLaunchOptions: CodexLaunchOptions?
+    /// True when the tab came from a tmux row that was live, not parked, when
+    /// its worktree was archived. Archive runs no tmux command, so that
+    /// session may still be running in the worktree's tmux server, and a
+    /// revive asks the leftover-tmux probe about that server before it
+    /// relaunches the tab. Nil for every other tab, and on records written
+    /// before the field.
+    public let liveOnTmuxAtArchive: Bool?
 
     public init(identity: AgentSessionIdentity, label: String? = nil, ordinal: Int,
                 isPrimary: Bool, profileID: UUID? = nil,
                 claudeSpawnExtras: ClaudeSpawnExtras? = nil,
-                codexLaunchOptions: CodexLaunchOptions? = nil) {
+                codexLaunchOptions: CodexLaunchOptions? = nil,
+                liveOnTmuxAtArchive: Bool? = nil) {
         self.identity = identity
         self.label = label
         self.ordinal = ordinal
@@ -248,6 +256,7 @@ public struct ArchivedAgentTab: Codable, Sendable, Equatable {
         self.profileID = profileID
         self.claudeSpawnExtras = claudeSpawnExtras
         self.codexLaunchOptions = codexLaunchOptions
+        self.liveOnTmuxAtArchive = liveOnTmuxAtArchive
     }
 }
 

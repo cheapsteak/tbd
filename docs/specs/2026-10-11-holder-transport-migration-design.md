@@ -212,17 +212,44 @@ parked:
 `terminal.delete`'s activity rails apply to holder rows only: closing a tmux
 row ends no process, so there is no turn in flight to protect.
 
+**Reviving.** Archive keeps every tab with a session to resume in the
+worktree's archived record, a live tmux row's included, because a revive brings
+every tab back on the pty holder. A live tmux row's tab is marked
+(`ArchivedAgentTab.liveOnTmuxAtArchive`): its session may still be running in
+the worktree's tmux server, and relaunching it would start a second agent on
+the same session id. So before a revive relaunches anything, it asks the probe
+about the worktree's `tmuxServer` when a tab it would relaunch is marked. One
+answer covers every marked tab, since they all name that server.
+
+- **Running** – the whole revive refuses with `terminalOnTmux` and the same
+  ending advice, `tmux -L <server> kill-server` or a restart. Nothing is
+  written: the record keeps every tab, marks included, and the worktree stays
+  archived with no checkout re-added, so the same revive succeeds once the
+  server is gone.
+- **Gone** – the revive goes ahead and relaunches every tab on the holder,
+  each with its session id.
+- **Nothing marked** – a revive that relaunches no marked tab asks nothing:
+  the archive had no live tmux row, or the revive skips the agent tabs.
+
+Resuming one archived conversation on a fresh branch resumes it on the same
+session id, so it asks the same question about that conversation's tab, before
+the new worktree exists. The marker is a field of the JSON record, so it adds
+no column; a record without it reads as unmarked.
+
 **When it runs.** Reconcile probes once per server name per pass, wherever it
 runs: at daemon startup, on demand (`tbd cleanup`, a repo add), and on a timer —
 the hourly orphan maintenance (`Daemon.performOrphanMaintenance`) runs
 `reconcileScratchTerminals`, which probes the servers of scratch worktrees'
 live tmux rows, and like the rest of that pass it answers to the GC switch.
 Check Again is `terminal.recreateWindow`, which probes the row's server and
-parks the row once it is gone. A migration probes the row it is asked to move.
+parks the row once it is gone. A migration probes the row it is asked to move,
+and a revive the server of the marked tabs it would relaunch.
 
 **This probe is a transition measure; on 2027-01-15 it is replaced by parking
 on sight.** No tmux server started before 2026-11-14 should still be running by
-then, so a live tmux row can be parked without asking.
+then, so a live tmux row can be parked without asking. The revive gate goes the
+same day, for the same reason: no session a marked tab names can still be
+running, so a marked tab is relaunched like any other.
 
 ## What migrates, and what is skipped
 
@@ -439,6 +466,13 @@ never unlinks it, and nothing TBD runs creates one any more.
   pre-session hook tab's close run no tmux command and delete the row. A live
   row gets no Closed Terminals entry; a parked row's entry carries its stored
   screen.
+- Archive keeps a live tmux row's tab in the record, marked, beside a holder
+  row's unmarked one. A revive whose marked tab's server may still run refuses
+  with `terminalOnTmux`, spawns nothing, and leaves the record and the archived
+  worktree as they were; once the server is gone it relaunches the tab on the
+  holder with the same session id. A parked tmux row's tab is unmarked and
+  revives on the holder without the probe being asked. The probe is injected,
+  so no test runs tmux.
 
 ## Rejected alternatives
 
