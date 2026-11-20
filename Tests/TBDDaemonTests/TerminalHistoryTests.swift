@@ -166,7 +166,8 @@ import Testing
                 terminalID: fx.terminal.id,
                 tmuxServer: fx.worktree.tmuxServer,
                 markerPath: "/dev/null",
-                hookPath: "/dev/null"))
+                hookPath: "/dev/null",
+                transport: .tmux))
 
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
         #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)

@@ -40,7 +40,7 @@ struct PreSessionSpawn: Sendable {
         tmuxServer: String,
         markerPath: String,
         hookPath: String,
-        transport: TerminalTransport = .tmux,
+        transport: TerminalTransport,
         holderPID: Int32? = nil,
         childPID: Int32? = nil,
         childStartedAt: Date? = nil

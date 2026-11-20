@@ -674,7 +674,7 @@ struct PreSessionHookTests {
         let lifecycle = makeLifecycle(db: db, timeout: 0)
         let spawn = PreSessionSpawn(
             terminalID: UUID(), tmuxServer: "test-server",
-            markerPath: markerPath, hookPath: "/dev/null"
+            markerPath: markerPath, hookPath: "/dev/null", transport: .tmux
         )
         let outcome = await lifecycle.waitForPreSessionCompletion(preSession: spawn)
         #expect(outcome == .completed(exitCode: 0),
