@@ -2467,7 +2467,7 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     /// session it carried kept running there. Every resume of
     /// `claudeSessionID` is refused while that server may still be running
     /// (docs/specs/2026-10-11-holder-transport-migration-design.md, "Resuming
-    /// a session a closed tmux row carried"). Nil on every other entry, and on
+    /// a session a tmux row carries"). Nil on every other entry, and on
     /// JSON and rows written before the column.
     public var liveOnTmuxServer: String?
 

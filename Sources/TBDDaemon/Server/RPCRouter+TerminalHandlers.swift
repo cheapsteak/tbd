@@ -240,7 +240,8 @@ extension RPCRouter {
         // `session.resume`, the History pane's Resume, `--resume` — before
         // start admission and before the trust seed, the transcript sync, the
         // session title and the session mod's spawn record, which all name
-        // the session: a session a deleted live tmux row carried may still be
+        // the session: a session an unparked tmux row carries, its tab still
+        // showing it on tmux, or a deleted live tmux row carried may still be
         // running in that row's tmux server. `spawnTerminal` asks again.
         if let resumeID = params.resumeSessionID,
            let refusal = try await actuating(actuationID, {
@@ -1084,8 +1085,9 @@ extension RPCRouter {
             // The resume gate (`TmuxResumeGate`), before start admission and
             // before the trust seed, the transcript sync, the session title
             // and the session mod's spawn record: an entry a live tmux row's
-            // close wrote is marked, and its session may still be running in
-            // that row's tmux server. `spawnTerminal` asks again.
+            // close wrote is marked, an unparked tmux row may carry the same
+            // session, and either way it may still be running in that row's
+            // tmux server. `spawnTerminal` asks again.
             if let refusal = try await actuating(actuationID, {
                 try await lifecycle.tmuxResumeRefusal(resuming: [sessionID])
             }) {

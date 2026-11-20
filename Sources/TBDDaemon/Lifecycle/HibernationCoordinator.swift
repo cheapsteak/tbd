@@ -105,8 +105,9 @@ public enum WakeResult: Equatable, Sendable {
     case respawnFailed(reason: String)
     /// The row is on the tmux transport, which TBD no longer starts, reaches
     /// or stops sessions on (`tmuxWakeRefusal`), or its session may still be
-    /// running in tmux because a live tmux row TBD deleted carried it too
-    /// (`TmuxResumeGate`). Nothing was touched and an `initialPrompt` was not
+    /// running in tmux because an unparked tmux row carries it too, or a live
+    /// tmux row TBD deleted carried it (`TmuxResumeGate`). Nothing was touched
+    /// and an `initialPrompt` was not
     /// delivered. `reason` says what to do: a parked tmux row's names
     /// `tbd terminal migrate`, and the others say the session may still be
     /// running in tmux and how to end it.
@@ -1147,15 +1148,16 @@ public actor HibernationCoordinator {
         if resumePlan.identity.agentKind == .codex, let initialPrompt, !initialPrompt.isEmpty {
             return .respawnFailed(reason: "Codex wake cannot deliver an initial prompt; resume without a prompt, then send it to the session.")
         }
-        // The resume gate (`TmuxResumeGate`), before anything is written: a
-        // live tmux row TBD deleted may have carried this row's session too,
-        // and its tmux server may still be running it, so waking this row
-        // would start a second agent on it. One read of the marked entries for
-        // an unmarked session, which is every session but those; the probe is
-        // asked only about a server a mark names. The row stays parked.
+        // The resume gate (`TmuxResumeGate`), before anything is written: an
+        // unparked tmux row may carry this row's session too, or a live tmux
+        // row TBD deleted may have carried it, and that row's tmux server may
+        // still be running it, so waking this row would start a second agent
+        // on it. Two indexed reads for a session neither names, which is
+        // every session but those; the probe is asked only about a server
+        // they name. The row stays parked.
         do {
             if let refusal = try await TmuxResumeGate(
-                history: db.terminalHistory, probe: leftoverTmuxProbe
+                history: db.terminalHistory, terminals: db.terminals, probe: leftoverTmuxProbe
             ).refusal(resuming: [sessionID]) {
                 return .onTmux(reason: refusal.message)
             }

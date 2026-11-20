@@ -13,8 +13,10 @@ import Testing
 /// marked.
 ///
 /// The mark comes from `terminal.delete` of a live tmux row, the close the
-/// History pane's Resume and Closed Terminals then reach by session id. The
-/// probe is injected and switchable, so no test asks a real socket.
+/// History pane's Resume and Closed Terminals then reach by session id. An
+/// unparked tmux row left open names its session the same way, in its
+/// worktree's server; a parked one names none. The probe is injected and
+/// switchable, so no test asks a real socket.
 @Suite("Resume gate RPCs")
 struct TmuxResumeGateRPCTests {
     /// What the injected probe answers, switchable mid-test.
@@ -107,16 +109,18 @@ struct TmuxResumeGateRPCTests {
         return entry
     }
 
-    /// Everything a refusal must say and leave: the code, the advice, a
-    /// not-eligible outcome, no spawn, no row, and the mark still in place.
+    /// Everything a refusal must say and leave: the code, the advice naming
+    /// `server`, a not-eligible outcome, no spawn, no row, the marks as they
+    /// were, and the probe asked about `server` alone.
     private func expectRefused(
         _ response: RPCResponse, _ f: Fixture, terminalsBefore: [Terminal],
+        server: String = "tbd-acme", marks: [String] = ["tbd-acme"],
         sourceLocation: SourceLocation = #_sourceLocation
     ) async throws {
         #expect(!response.success, sourceLocation: sourceLocation)
         #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue,
                 sourceLocation: sourceLocation)
-        #expect(response.error == LeftoverTmuxSession.resumeRefusal(server: "tbd-acme"),
+        #expect(response.error == LeftoverTmuxSession.resumeRefusal(server: server),
                 sourceLocation: sourceLocation)
         let outcome = try f.lastOutcome()
         #expect(outcome.result == .synchronous(.refused), sourceLocation: sourceLocation)
@@ -125,8 +129,34 @@ struct TmuxResumeGateRPCTests {
         #expect(try await f.db.terminals.list(worktreeID: f.worktree.id) == terminalsBefore,
                 sourceLocation: sourceLocation)
         #expect(try await f.db.terminalHistory.liveOnTmuxServers(sessionIDs: [Self.sessionID])
-            == ["tbd-acme"], sourceLocation: sourceLocation)
-        #expect(f.probe.servers == ["tbd-acme"], sourceLocation: sourceLocation)
+            == marks, sourceLocation: sourceLocation)
+        #expect(f.probe.servers == [server], sourceLocation: sourceLocation)
+    }
+
+    /// A tmux Claude row on `sessionID` in `worktree`, left open: unparked,
+    /// its tab showing that the session is still on tmux, or parked when
+    /// `parked`.
+    private func openATmuxRow(
+        _ f: Fixture, in worktree: Worktree, parked: Bool = false
+    ) async throws -> Terminal {
+        let row = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: TerminalLabel.claudeCode, claudeSessionID: Self.sessionID, kind: .claude,
+            transport: .tmux)
+        if parked {
+            try await f.db.terminals.setHibernated(id: row.id, sessionID: Self.sessionID, reason: .auto)
+        }
+        return try #require(try await f.db.terminals.get(id: row.id))
+    }
+
+    /// A second worktree of the fixture's repo, on a tmux server of its own.
+    private func otherWorktree(_ f: Fixture) async throws -> Worktree {
+        let repoID = try #require(f.worktree.repoID)
+        let path = f.root.appendingPathComponent("other").path
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        return try await f.db.worktrees.create(
+            repoID: repoID, name: "acme-other", branch: "other", path: path,
+            tmuxServer: "tbd-acme-other")
     }
 
     private var identity: AgentSessionIdentity {
@@ -167,6 +197,77 @@ struct TmuxResumeGateRPCTests {
         #expect(resumed.success, "error: \(resumed.error ?? "nil")")
         #expect(f.probe.servers.isEmpty)
         #expect(f.holder.launches.count == 1)
+    }
+
+    // MARK: - An unparked tmux row on the session
+
+    /// The History pane's Resume of the session a tmux tab in the same
+    /// worktree still shows: the gate reads the open row as it reads a mark,
+    /// probing the worktree's server, and leaves the row alone.
+    @Test func sessionResumeWaitsWhileAnOpenTmuxRowCarriesTheSession() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let row = try await openATmuxRow(f, in: f.worktree)
+        let params = SessionResumeParams(worktreeID: f.worktree.id, identity: identity)
+
+        let refused = try await f.send(RPCMethod.sessionResume, params)
+        try await expectRefused(refused, f, terminalsBefore: [row], marks: [])
+
+        f.server.state = .absent
+        let resumed = try await f.send(RPCMethod.sessionResume, params)
+        #expect(resumed.success, "error: \(resumed.error ?? "nil")")
+        let terminal = try resumed.decodeResult(Terminal.self)
+        #expect(terminal.transport == .holder)
+        let command = try #require(f.holder.launch(for: terminal.id)?.commandLine)
+        #expect(command.contains("--resume \(Self.sessionID)"))
+        #expect(try await f.db.terminals.get(id: row.id) == row)
+    }
+
+    /// `terminal.create` resuming the session, while a tmux row in another
+    /// worktree carries it: the gate looks in every worktree, and the server
+    /// it asks about is that row's worktree's.
+    @Test func terminalCreateResumingWaitsWhileATmuxRowInAnotherWorktreeCarriesTheSession() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let other = try await otherWorktree(f)
+        let row = try await openATmuxRow(f, in: other)
+        let params = TerminalCreateParams(
+            worktreeID: f.worktree.id, type: .claude, resumeSessionID: Self.sessionID)
+
+        let refused = try await f.send(RPCMethod.terminalCreate, params)
+        try await expectRefused(
+            refused, f, terminalsBefore: [], server: "tbd-acme-other", marks: [])
+        #expect(try await f.db.terminals.list(worktreeID: other.id) == [row])
+
+        f.server.state = .absent
+        let created = try await f.send(RPCMethod.terminalCreate, params)
+        #expect(created.success, "error: \(created.error ?? "nil")")
+        let terminal = try created.decodeResult(Terminal.self)
+        #expect(terminal.transport == .holder)
+        #expect(terminal.claudeSessionID == Self.sessionID)
+        let command = try #require(f.holder.launch(for: terminal.id)?.commandLine)
+        #expect(command.contains("--resume \(Self.sessionID)"))
+        #expect(try await f.db.terminals.get(id: row.id) == row)
+    }
+
+    /// A parked tmux row's session ended when it was parked, so it is no
+    /// reason to ask. The probe answers `.running`: a start that asked it would
+    /// be refused.
+    @Test func aParkedTmuxRowOnTheSessionIsNotProbed() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        _ = try await openATmuxRow(f, in: f.worktree, parked: true)
+
+        let resumed = try await f.send(
+            RPCMethod.sessionResume,
+            SessionResumeParams(worktreeID: f.worktree.id, identity: identity))
+        #expect(resumed.success, "error: \(resumed.error ?? "nil")")
+        let created = try await f.send(RPCMethod.terminalCreate, TerminalCreateParams(
+            worktreeID: f.worktree.id, type: .claude, resumeSessionID: Self.sessionID))
+        #expect(created.success, "error: \(created.error ?? "nil")")
+
+        #expect(f.probe.servers.isEmpty, "a parked tmux row's server was probed: \(f.probe.servers)")
+        #expect(f.holder.launches.count == 2)
     }
 
     // MARK: - terminalHistory.revive

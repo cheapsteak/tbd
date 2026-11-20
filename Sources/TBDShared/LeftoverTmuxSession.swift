@@ -72,16 +72,16 @@ public enum LeftoverTmuxSession {
             + " Then run `tbd terminal migrate \(terminalID.uuidString)` to move it to the pty holder."
     }
 
-    /// The refusal for any start of a session a live tmux row carried when
-    /// TBD closed its tab, while that row's tmux server may still be running
-    /// it: a revive, a History or Closed Terminals resume, a wake. Starting it
+    /// The refusal for any start of a session an unparked tmux row carries, or
+    /// a live tmux row carried when TBD closed its tab, while that row's tmux
+    /// server may still be running it: a revive, a History or Closed Terminals
+    /// resume, a wake. Starting it
     /// on the pty holder would put a second agent on the same session id, so
     /// the start waits until the server is gone. Worded for every one of those
     /// actions, so it ends by asking for the same action again.
     public static func resumeRefusal(server: String) -> String {
-        "This conversation was running in tmux when TBD closed its tab, and that tmux "
-            + "server may still be running it, so starting it here would put a second agent on "
-            + "the same conversation. "
+        "This conversation was started in tmux, and that tmux server may still be running "
+            + "it, so starting it here would put a second agent on the same conversation. "
             + endingAdvice(server: server)
             + " Then try again."
     }

@@ -2,7 +2,7 @@
 -- the Closed Terminals entry of a live tmux row TBD deleted without running
 -- tmux, NULL on every other entry
 -- (docs/specs/2026-10-11-holder-transport-migration-design.md, "Resuming a
--- session a closed tmux row carried"). Every resume of a session id looks its
+-- session a tmux row carries"). Every resume of a session id looks its
 -- marks up before starting it on the pty holder, so the partial index holds
 -- only the marked entries. No DEFAULT: every entry written before this column
 -- carries no mark, which is NULL.

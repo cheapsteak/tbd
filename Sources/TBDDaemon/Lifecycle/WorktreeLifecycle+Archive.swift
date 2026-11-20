@@ -616,8 +616,9 @@ extension WorktreeLifecycle {
         }
         // The resume gate (`TmuxResumeGate`), also before anything is
         // written: a session this revive relaunches — an archived tab, or the
-        // History pane's preferred session, which the plan carries — may have
-        // been carried by a live tmux row TBD deleted, archive's own teardown
+        // History pane's preferred session, which the plan carries — may be
+        // carried by an unparked tmux row in another worktree, or have been
+        // carried by a live tmux row TBD deleted, archive's own teardown
         // included, and may still be running in that row's tmux server.
         // Relaunching it would start a second agent on it, so the whole
         // revive is refused, leaving the record and the worktree as they

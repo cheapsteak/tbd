@@ -801,6 +801,32 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// The tmux servers of the unparked tmux rows naming one of `sessionIDs`,
+    /// in any worktree, each once and in name order: the servers those
+    /// sessions may still be running in. A row's server is its worktree's. A
+    /// parked row is left out, because its session ended when it was parked,
+    /// and so is a row of a worktree with no tmux server of its own, which a
+    /// remote lane is. Empty when no such row exists, which is one read of the
+    /// partial index `idx_terminal_live_tmux_session`.
+    ///
+    /// The transport and park terms repeat the index's own condition word for
+    /// word, literal included, because SQLite uses a partial index only for a
+    /// query whose condition contains that of the index.
+    public func liveTmuxServers(sessionIDs: [String]) async throws -> [String] {
+        guard !sessionIDs.isEmpty else { return [] }
+        return try await writer.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT DISTINCT worktree.tmuxServer FROM terminal
+                JOIN worktree ON worktree.id = terminal.worktreeID
+                WHERE terminal.transport IS NOT 'holder'
+                AND terminal.hibernatedAt IS NULL AND terminal.suspendedAt IS NULL
+                AND terminal.claudeSessionID IN (\(databaseQuestionMarks(count: sessionIDs.count)))
+                AND worktree.tmuxServer != ''
+                ORDER BY worktree.tmuxServer
+                """, arguments: StatementArguments(sessionIDs))
+        }
+    }
+
     /// List terminals, optionally filtered by worktree.
     public func list(worktreeID: UUID? = nil) async throws -> [Terminal] {
         try await writer.read { db in
