@@ -16,16 +16,20 @@ import Darwin
 /// `path` must be absolute. `posix_spawn` runs it as given, with no `PATH`
 /// search, and the kernel records it as given, so repeated slashes lengthen
 /// the recorded path without changing what runs. The child gets `environment`
-/// and nothing of this process's environment, and inherits this process's
-/// open descriptors until it is ended. Start only a program that touches no
-/// TBD store; `/bin/sleep` is the one the suites use.
+/// and nothing of this process's environment, and it starts with no open
+/// descriptors at all, stdio included (`POSIX_SPAWN_CLOEXEC_DEFAULT`): every
+/// suite shares this test process, so an inherited descriptor could be
+/// another suite's lock or pipe, held open until the child is ended. Start
+/// only a program that needs no stdio and touches no TBD store; `/bin/sleep`
+/// is the one the suites use.
 public struct ExactArgvChild: Sendable {
-    /// `posix_spawn` refused to start the child. Thrown, so its text is the
+    /// A call that starts the child failed. Thrown, so its text is the
     /// failing test's primary line; there is no child to end.
     public struct SpawnFailed: Error, CustomStringConvertible {
+        public let call: String
         public let path: String
         public let code: Int32
-        public var description: String { "posix_spawn of \(path) failed with \(code)" }
+        public var description: String { "\(call) for \(path) failed with \(code)" }
     }
 
     public let pid: pid_t
@@ -43,8 +47,20 @@ public struct ExactArgvChild: Sendable {
             for argument in arguments { free(argument) }
             for entry in entries { free(entry) }
         }
-        let code = posix_spawn(&pid, path, nil, nil, &arguments, &entries)
-        guard code == 0 else { throw SpawnFailed(path: path, code: code) }
+
+        var attributes: posix_spawnattr_t?
+        let initialized = posix_spawnattr_init(&attributes)
+        guard initialized == 0 else {
+            throw SpawnFailed(call: "posix_spawnattr_init", path: path, code: initialized)
+        }
+        defer { posix_spawnattr_destroy(&attributes) }
+        let flagged = posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
+        guard flagged == 0 else {
+            throw SpawnFailed(call: "posix_spawnattr_setflags", path: path, code: flagged)
+        }
+
+        let code = posix_spawn(&pid, path, nil, &attributes, &arguments, &entries)
+        guard code == 0 else { throw SpawnFailed(call: "posix_spawn", path: path, code: code) }
         self.pid = pid
     }
 
