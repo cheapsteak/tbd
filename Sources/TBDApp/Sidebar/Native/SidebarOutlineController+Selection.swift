@@ -34,8 +34,8 @@ extension SidebarOutlineController {
 
     /// Centres a row selected outside the sidebar — by back and forward, a
     /// notification, a shortcut, the jump menu, or the selection restored at
-    /// launch — even when it is in view already. Runs after
-    /// `applyModelSelection()`.
+    /// launch — even when it is in view already, and the selection the first
+    /// apply finds. Runs after `applyModelSelection()`.
     ///
     /// Only a row the outline had not shown selected counts: of those, the
     /// first in display order is centred. So a selection that only shrank —
@@ -46,11 +46,18 @@ extension SidebarOutlineController {
     /// after the user scrolled elsewhere; a placeholder the user navigated
     /// away from, still in the model, is an ordinary change.
     ///
-    /// The first apply only takes the selection, so the first load never
-    /// scrolls. The selection restored at launch lands after it, once the
-    /// daemon's data has loaded, and is centred:
-    /// `connectAndLoadInitialState` expands its repo so the row can be seen,
-    /// and at launch the user has no scroll position to lose.
+    /// The first apply has no shown selection to compare with, so every row
+    /// it finds selected counts: the list opens on the selected row, and an
+    /// empty selection scrolls nothing. At launch it usually finds nothing:
+    /// the saved selection is restored once the daemon's data has loaded,
+    /// and the apply after that centres it as a change,
+    /// `connectAndLoadInitialState` having expanded its repo so the row can
+    /// be seen. Nothing orders the two, though: the restore can land first,
+    /// and a controller made later, for a main window closed and opened
+    /// again, finds a selection already set. The user has no scroll position
+    /// to lose either way. A first apply that runs before the outline has a
+    /// height leaves the centre to the first layout that gives it one
+    /// (`centerRow`).
     ///
     /// A new row the outline does not show — in a collapsed section, filtered
     /// out, only in the dock — is skipped, and nothing is expanded for it.
@@ -60,6 +67,7 @@ extension SidebarOutlineController {
         let selection = modelSelectionIDs
         guard let shown = lastShownSelection else {
             recordShownSelection(selection)
+            centerFirstShownRow(of: selection)
             return
         }
         guard selection != shown, !isHoldingStructure else { return }
@@ -67,7 +75,13 @@ extension SidebarOutlineController {
         let swappedPlaceholder = lastShownPlaceholdersLeftTheModel()
         recordShownSelection(selection)
         guard !added.isEmpty, !swappedPlaceholder else { return }
-        let rows = added.compactMap { id -> Int? in
+        centerFirstShownRow(of: added)
+    }
+
+    /// Centres the first row of `ids`, in display order, that the outline
+    /// shows. Nothing scrolls when it shows none of them.
+    private func centerFirstShownRow(of ids: Set<SidebarNodeID>) {
+        let rows = ids.compactMap { id -> Int? in
             guard let item = items.existing(id) else { return nil }
             let row = outline.row(forItem: item)
             return row >= 0 ? row : nil

@@ -44,7 +44,8 @@ import TBDShared
 /// `didSet` routes it; every apply ends by selecting the rows `AppState`
 /// names, under a guard that keeps the outline's own notifications from being
 /// echoed back. A row selected outside the sidebar is also centred in the
-/// list. Each rebuild starts with `SidebarView`'s reveals.
+/// list, as is the selection the first load finds. Each rebuild starts with
+/// `SidebarView`'s reveals.
 @MainActor
 final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     /// Why structural changes are being held.
@@ -136,6 +137,10 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// creation placeholder at the time, otherwise empty: what tells the
     /// placeholder's swap for its real row from a navigation.
     var lastShownPlaceholderIDs: Set<UUID> = []
+    /// The row a centre was asked for while the clip view had no height,
+    /// kept for the first layout or apply that finds one
+    /// (`centerDeferredRow`). Nil while no centre waits.
+    var deferredCenterID: SidebarNodeID?
 
     /// `SidebarView`'s reveal state, mirrored: the selection reveal's last
     /// value and whether the first one has run, the Ended reveal's last key,
@@ -347,9 +352,12 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     }
 
     /// The one column spans the sidebar's width, so cells and row views do.
+    /// A centre asked for before the outline had a height runs once it has
+    /// one.
     override func viewDidLayout() {
         super.viewDidLayout()
         outline.sizeLastColumnToFit()
+        centerDeferredRow()
     }
 
     // MARK: Public surface
