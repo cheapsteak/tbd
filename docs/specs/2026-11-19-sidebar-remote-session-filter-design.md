@@ -98,11 +98,17 @@ or cuts it shorter. A long name truncates by that square.
 
 ### When it exists
 
-The button exists while the repo's list holds at least one registry row or
-loose registry session, counted before the selection exception below. A repo
-with only local rows, or only local and cloud rows, never shows it. Selecting
-a hidden row therefore never makes the button vanish under the pointer; the
+The button exists while the filter would hide at least one row or session in
+the repo, judged without the selection exception below. A repo with only
+local rows, or only local and cloud rows, never shows it, and neither does a
+repo whose only registry rows stay in view as ancestors of kept rows.
+Selecting a hidden row never makes the button vanish under the pointer; the
 count simply drops by the rows the selection brings back.
+
+"Registry provider" here means any provider name other than `claude-cloud`,
+not membership in the currently loaded provider list. That list is empty
+until the app's first fetch and is cleared while remote backends are
+unavailable, so judging by it would bring hidden rows back at every launch.
 
 When the filter is on and nothing is left to hide, the button goes away and
 the setting stays on. A registry session that arrives later is hidden at once,
