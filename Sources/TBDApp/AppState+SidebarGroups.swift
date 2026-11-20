@@ -224,19 +224,29 @@ extension AppState {
             .sorted(by: Worktree.precedesSibling)
     }
 
-    /// The repository section's rows under the current grouping setting.
-    /// `matchedSessions` is `sidebarMatchedRemoteSessions(repoID:)`, evaluated
-    /// only when ungrouped.
+    /// The repository section's rows under the current grouping setting,
+    /// less what the repo's registry filter hides
+    /// (`sidebarRegistryRemoteFilter(repoID:)`). `matchedSessions` is
+    /// `sidebarMatchedRemoteSessions(repoID:)`, evaluated only when ungrouped.
     func sidebarRepositoryLayout(
         repoID: UUID, grouped: Bool, collapseEnded: Bool,
         matchedSessions: @autoclosure () -> [RemoteSessionInfo]
     ) -> SidebarSectionLayout {
         .repository(
             grouped: grouped, collapseEnded: collapseEnded, unread: unreadByRemoteSession,
-            topLevel: sidebarTopLevelWorktrees(repoID: repoID),
+            topLevel: sidebarShownTopLevelWorktrees(repoID: repoID),
             matchedSessions: matchedSessions(),
             remoteGroups: sidebarRemoteGroups(repoID: repoID),
             hibernation: sidebarHibernation(repoID: repoID))
+    }
+
+    /// `sidebarTopLevelWorktrees(repoID:)` less the rows the repo's registry
+    /// filter hides: the ungrouped section's inline rows. The unfiltered list
+    /// stays the full sibling list that drag reorder indexes into.
+    private func sidebarShownTopLevelWorktrees(repoID: UUID) -> [Worktree] {
+        let rows = sidebarTopLevelWorktrees(repoID: repoID)
+        let hidden = sidebarRegistryRemoteFilter(repoID: repoID).hiddenWorktreeIDs
+        return hidden.isEmpty ? rows : rows.filter { !hidden.contains($0.id) }
     }
 
     /// A provider's unmatched sessions under the current grouping setting.
@@ -273,8 +283,50 @@ extension AppState {
         }
     }
 
-    /// The repo's remote sessions as the sidebar shows them: filtered and sorted
-    /// by `SidebarSessionPlacement.matchedRemoteSessionIndices`, memoized per repo.
+    /// The repo's remote sessions as the sidebar shows them:
+    /// `sidebarUnfilteredMatchedRemoteSessions(repoID:)` less the sessions the
+    /// repo's registry filter hides. With the filter off it is that list.
+    func sidebarMatchedRemoteSessions(repoID: UUID) -> [RemoteSessionInfo] {
+        let all = sidebarUnfilteredMatchedRemoteSessions(repoID: repoID)
+        let hidden = sidebarRegistryRemoteFilter(repoID: repoID).hiddenSessionIDs
+        return hidden.isEmpty ? all : all.filter { !hidden.contains($0.id) }
+    }
+
+    /// What one repo section's registry filter hides
+    /// (`SidebarRegistryRemoteFilter`), memoized per repo in
+    /// `sidebarRegistryFilterCache`. Spec:
+    /// `docs/specs/2026-11-19-sidebar-remote-session-filter-design.md`.
+    ///
+    /// The section's rows are its top-level rows and every descendant
+    /// `childrenIndex()` reaches, across repos, as the tree builder renders
+    /// them. The selection is an input only while this repo is filtered, so
+    /// an unfiltered sidebar never recomputes on a selection change.
+    ///
+    /// Reads every tracked input before consulting the memo, for the
+    /// warm-cache dependency reason in `AppState.swift`: `worktrees`,
+    /// `remoteSessions`, the saved set, and the selection while filtered.
+    func sidebarRegistryRemoteFilter(repoID: UUID) -> SidebarRegistryRemoteFilter {
+        let rows = worktrees[repoID] ?? []
+        _ = remoteSessions
+        let isOn = sidebarRegistryRemoteHiddenRepoIDs.contains(repoID)
+        let selectedRows: Set<UUID> = isOn ? selectedWorktreeIDs : []
+        var selectedSession: UUID?
+        if isOn, let selection = selectedRemoteSession {
+            selectedSession = RemoteSessionIdentity.uuid(provider: selection.provider, sessionID: selection.sessionID)
+        }
+        if let cached = sidebarRegistryFilterCache[repoID] { return cached }
+        let filter = SidebarRegistryRemoteFilter(
+            roots: Self.topLevelWorktrees(rows), children: childrenIndex(),
+            sessions: sidebarUnfilteredMatchedRemoteSessions(repoID: repoID), isOn: isOn,
+            selectedWorktreeIDs: selectedRows, selectedSessionID: selectedSession)
+        sidebarRegistryFilterCache[repoID] = filter
+        return filter
+    }
+
+    /// The repo's remote sessions before the registry filter: filtered and
+    /// sorted by `SidebarSessionPlacement.matchedRemoteSessionIndices`,
+    /// memoized per repo. The registry filter reads this list, and
+    /// `sidebarMatchedRemoteSessions(repoID:)` drops what it hides.
     ///
     /// The memo stores positions into `remoteSessions`, not values, so a hit
     /// returns the CURRENT elements: `state`, `agentState`, `gone` and `lastSeen`
@@ -286,7 +338,7 @@ extension AppState {
     ///
     /// Reads `remoteSessions` and `worktrees[repoID]` before consulting the memo,
     /// for the warm-cache dependency reason in `AppState.swift`.
-    func sidebarMatchedRemoteSessions(repoID: UUID) -> [RemoteSessionInfo] {
+    func sidebarUnfilteredMatchedRemoteSessions(repoID: UUID) -> [RemoteSessionInfo] {
         let sessions = remoteSessions
         let adopted = SidebarSessionPlacement.adoptedLocations(worktrees[repoID] ?? [])
         if let memo = sidebarMatchedSessionsCache[repoID], memo.adopted == adopted {
@@ -299,13 +351,17 @@ extension AppState {
         return indices.map { sessions[$0] }
     }
 
+    /// A repository section's Remote and Exited partition, less what the
+    /// repo's registry filter hides: hidden roots, hidden descendants in the
+    /// liveness walk, and hidden sessions.
     func sidebarRemoteGroups(repoID: UUID) -> SidebarRemoteGroups {
         let snapshot = sidebarRemoteSnapshot
         let rows = worktrees[repoID] ?? []
         return SidebarRemoteGroups(
             roots: Self.topLevelWorktrees(rows),
             remainder: sidebarMatchedRemoteSessions(repoID: repoID),
-            snapshot: snapshot, unread: unreadByRemoteSession, worktreeUnread: unreadByWorktree)
+            snapshot: snapshot, unread: unreadByRemoteSession, worktreeUnread: unreadByWorktree,
+            hidden: sidebarRegistryRemoteFilter(repoID: repoID).hiddenWorktreeIDs)
     }
 
     func sidebarRemoteGroups(provider: String) -> SidebarRemoteGroups {
@@ -322,17 +378,33 @@ extension AppState {
     /// Each rendered parent walks its remote descendants once per input change,
     /// rather than on every row render. Read every tracked input before a hit:
     /// Observation replaces a view's dependency set on each evaluation.
+    ///
+    /// Rows the registry filter of the parent's section hides are dropped,
+    /// as roots and from the walk. The section is the repo of the parent's
+    /// top-level ancestor. The saved set is always an input; the selection
+    /// is one only while some repo is filtered, matching
+    /// `invalidateSidebarRegistryFilterForSelection`.
     func sidebarRemoteGroups(parentID: UUID) -> SidebarRemoteGroups {
         let snapshot = sidebarRemoteSnapshot
         let unread = unreadByRemoteSession, worktreeUnread = unreadByWorktree
+        let filtered = sidebarRegistryRemoteHiddenRepoIDs
+        if !filtered.isEmpty {
+            _ = selectedWorktreeIDs
+            _ = selectedRemoteSession
+        }
         if let cached = sidebarParentRemoteGroupsCache[parentID] { return cached }
+        var hidden: Set<UUID> = []
+        if !filtered.isEmpty, let sectionRepoID = snapshot.ancestorPath(to: parentID)?.first?.repoID,
+           filtered.contains(sectionRepoID) {
+            hidden = sidebarRegistryRemoteFilter(repoID: sectionRepoID).hiddenWorktreeIDs
+        }
         // Scratch stays in its flat section, even when reparented through the
         // CLI. Keep it in the snapshot for conservative descendant liveness,
         // but never offer it as a second rendered row beneath its parent.
         let roots = (snapshot.children[parentID] ?? []).filter { $0.repoID != nil }
         let groups = SidebarRemoteGroups(
             roots: roots, remainder: [], snapshot: snapshot,
-            unread: unread, worktreeUnread: worktreeUnread)
+            unread: unread, worktreeUnread: worktreeUnread, hidden: hidden)
         sidebarParentRemoteGroupsCache[parentID] = groups
         return groups
     }

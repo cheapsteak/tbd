@@ -63,7 +63,10 @@ struct SidebarBuildOptions: Equatable {
 /// Membership and order come from `AppState`'s sidebar helpers
 /// (`sidebarRepositoryLayout`, `sidebarRemoteGroups(parentID:)`,
 /// `children(of:)` and the rest), which the reveal pass and the dock read too,
-/// so no two surfaces disagree about which rows a section holds.
+/// so no two surfaces disagree about which rows a section holds. A repo
+/// section also drops what its registry filter hides
+/// (`sidebarRegistryRemoteFilter(repoID:)`): the layout and the parent groups
+/// already leave those rows out, and the ungrouped subtree walk skips them.
 ///
 /// It never writes to `AppState` — the memo caches those helpers fill are
 /// `@ObservationIgnored` — because the controller runs it inside
@@ -129,6 +132,9 @@ private struct BuildPass {
     var emittedSessions: Set<UUID> = []
     var emittedRepos: Set<UUID> = []
     var emittedProviders: Set<String> = []
+    /// The rows the registry filter of the repo section being built hides,
+    /// which the ungrouped subtree walk skips. Empty outside a repo section.
+    var sectionHidden: Set<UUID> = []
 
     init(appState: AppState, options: SidebarBuildOptions, models: SidebarRowModelFactory) {
         self.appState = appState
@@ -195,6 +201,7 @@ private struct BuildPass {
         var children: [SidebarNode] = []
         if repo.expanded {
             let appState = self.appState
+            sectionHidden = appState.sidebarRegistryRemoteFilter(repoID: repo.id).hiddenWorktreeIDs
             let layout = appState.sidebarRepositoryLayout(
                 repoID: repo.id, grouped: options.workflowGroups, collapseEnded: options.collapseEnded,
                 matchedSessions: appState.sidebarMatchedRemoteSessions(repoID: repo.id))
@@ -232,6 +239,7 @@ private struct BuildPass {
                 children.append(groupNode(id, count: hibernation.hibernatedCount, summary: nil,
                                           depth: 0, hidden: hidden, children: rows))
             }
+            sectionHidden = []
         }
         return SidebarNode(id: .repoHeader(repo.id), kind: .repoHeader(models.repoHeader(repo)),
                            children: children, isExpanded: repo.expanded)
@@ -285,7 +293,7 @@ private struct BuildPass {
                                                 depth: depth + 1, sectionRepoID: sectionRepoID, hidden: hidden))
                 }
             } else {
-                for child in appState.children(of: worktree.id) {
+                for child in appState.children(of: worktree.id) where !sectionHidden.contains(child.id) {
                     if let node = subtree(child, ancestry: ancestry + 1, depth: depth + 1,
                                           sectionRepoID: sectionRepoID, hidden: hidden) {
                         children.append(node)
@@ -526,11 +534,26 @@ struct SidebarRowModelFactory {
 
     // MARK: Headers
 
-    /// A repo section's header.
+    /// A repo section's header. It carries the registry filter button
+    /// whenever the filter would hide something, whether or not the repo is
+    /// expanded.
     func repoHeader(_ repo: Repo) -> SectionHeaderModel {
-        SectionHeaderModel(
+        let filter = appState.sidebarRegistryRemoteFilter(repoID: repo.id)
+        return SectionHeaderModel(
             title: repo.displayName, isExpanded: repo.expanded, isHidden: repo.hidden,
-            isMissing: repo.status == .missing, isSelected: appState.selectedRepoID == repo.id)
+            isMissing: repo.status == .missing, isSelected: appState.selectedRepoID == repo.id,
+            registryFilter: filter.showsButton ? registryFilterButton(filter) : nil)
+    }
+
+    /// The header button for a filter that would hide something, naming each
+    /// provider by its headline where the roster has it and by its registry
+    /// name otherwise.
+    private func registryFilterButton(_ filter: SidebarRegistryRemoteFilter) -> SidebarRegistryFilterButton {
+        let names = filter.providerNames.map { name in
+            providersByName[name].map { RemoteProviderIdentityPresentation.headline($0) } ?? name
+        }
+        return SidebarRegistryFilterButton(
+            isOn: filter.isOn, count: filter.count, providerNames: Array(Set(names)).sorted())
     }
 
     /// The Scratch section's header.
