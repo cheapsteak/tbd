@@ -3,6 +3,7 @@ import Foundation
 @testable import SwiftTerm
 import Testing
 @testable import TBDApp
+import TBDGhosttyShaderTypes
 @testable import TBDGhosttyTerminal
 import TestSupport
 
@@ -182,11 +183,12 @@ struct TerminalEngineCommandHoverTests {
         #expect(afterMove.isEmpty, "a move over the new text underlined \(afterMove)")
     }
 
-    /// The underline goes where the font puts one, as the renderer draws a program's underline: as
-    /// thick as the font's underline, centred on its position, on every row the link covers. An
-    /// odd thickness centred there would have its edges between device pixels, so the line sits
-    /// half a pixel lower, edges whole. libghostty-only: the SwiftTerm view draws its own.
-    @Test("a ⌘-hover underline sits at the font's underline position, as thick as the font's underline",
+    /// The underline goes where the font puts one, on every row the link covers, and where the
+    /// renderer draws a program's dotted underline over the same cells: as thick as the font's
+    /// underline, centred on its position. Where those edges would fall between device pixels, as
+    /// an odd thickness centred there puts them, the line sits half a pixel lower, edges whole.
+    /// libghostty-only: the SwiftTerm view draws its own.
+    @Test("a ⌘-hover underline sits at the font's underline position, where the renderer draws a dotted underline",
           .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice))
     func underlineSitsAtTheFontsUnderline() async throws {
         let fixture = try HoverFixture(kind: .ghostty, width: 400)
@@ -210,25 +212,48 @@ struct TerminalEngineCommandHoverTests {
         let cellHeight = Double(grid.cellSizePx.y)
         let thickness = Double(metrics.underlineThickness)
         let fontCentre = Double(metrics.baseline + metrics.underlineOffset)
-        try #require(fontCentre - thickness / 2 >= 0 && fontCentre + thickness / 2 + 0.5 <= cellHeight,
-                     "the font's underline, \(thickness) px at \(fontCentre), leaves a \(cellHeight) px cell")
+        // The renderer keeps a box three thicknesses tall around the line inside the cell; this
+        // font's fits unmoved, so its line stays centred on the font's position.
+        try #require(fontCentre - 1.5 * thickness >= 0 && fontCentre + 1.5 * thickness <= cellHeight,
+                     "the font's underline box, 3 × \(thickness) px around \(fontCentre), leaves a \(cellHeight) px cell")
         let drop = metrics.underlineThickness.isMultiple(of: 2) ? 0 : 0.5
 
         for (span, layer) in zip(spans, layers) {
-            // Device pixels down from the top of the span's row.
-            let top = Double(layer.frame.minY) * scale - Double(grid.originPx.y) - Double(span.row) * cellHeight
+            // Device pixels down from the top of the grid, and of the span's row.
+            let gridTop = Double(layer.frame.minY) * scale - Double(grid.originPx.y)
+            let top = gridTop - Double(span.row) * cellHeight
             let height = Double(layer.frame.height) * scale
             #expect(isNear(height, thickness),
                     "row \(span.row): the line is \(height) px thick, the font's underline \(thickness) px")
             #expect(isNear(top, top.rounded()), "row \(span.row): its top edge, \(top) px, is between device pixels")
             #expect(isNear(top + height / 2, fontCentre + drop),
                     "row \(span.row): centred \(top + height / 2) px down its row, the font's underline at \(fontCentre) px")
+
+            // The rect the renderer draws a program's dotted underline over the same cells with.
+            var runs = DecorationRuns(row: span.row, metrics: metrics)
+            for column in span.columns {
+                runs.add(.underline(UInt32(TKZ_RECT_STYLE_UNDERLINE_DOTTED)), column: column, color: 0)
+            }
+            var rects: [TkzRectInstance] = []
+            runs.flush(into: &rects)
+            try #require(rects.count == 1, "row \(span.row): the renderer drew \(rects.count) rects for one run")
+            let rect = rects[0]
+            // The renderer's line runs along the middle of its rect.
+            let rendererTop = Double(rect.originPx.y) + Double(rect.sizePx.y) / 2 - Double(rect.thicknessPx) / 2
+            let lower = gridTop - rendererTop
+            #expect(isNear(height, Double(rect.thicknessPx)),
+                    "row \(span.row): the line is \(height) px thick, the renderer's \(rect.thicknessPx) px")
+            #expect(isNear(lower, 0) || isNear(lower, 0.5),
+                    "row \(span.row): the line's top is \(lower) px below the renderer's, at \(rendererTop) px")
+            #expect(isNear(Double(layer.frame.minX) * scale - Double(grid.originPx.x), Double(rect.originPx.x))
+                        && isNear(Double(layer.frame.width) * scale, Double(rect.sizePx.x)),
+                    "row \(span.row): the line spans \(layer.frame) pt, the renderer's rect \(rect.originPx), \(rect.sizePx) px")
         }
     }
 
-    /// Dotted as the renderer draws a program's SGR 4:4 underline: square-ended dots as long as the
-    /// line is thick, with gaps as long, the first dot at the link's first cell. libghostty-only:
-    /// the SwiftTerm view draws its own.
+    /// Dotted as the renderer draws a program's SGR 4:4 underline: flat-ended (butt) dots as long
+    /// as the line is thick, with gaps as long, the first dot at the link's first cell.
+    /// libghostty-only: the SwiftTerm view draws its own.
     @Test("a ⌘-hover underline is dotted, its dots and gaps as long as it is thick",
           .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice))
     func underlineIsDotted() async throws {

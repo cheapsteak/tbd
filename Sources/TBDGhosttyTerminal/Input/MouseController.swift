@@ -988,11 +988,19 @@ final class MouseController: NSObject {
 
     /// Draws (or moves) the hover underline under `spans`, viewport cells, one layer per row.
     ///
-    /// The underline is the dotted underline the renderer draws for a program's SGR 4:4, in the
-    /// link colour: the font's underline thickness `t`, centred on the font's underline position
-    /// and kept inside the cell, in square-ended dots `t` long with gaps `t` long, the first dot at
-    /// the link's first cell on each row. Its edges sit on whole device pixels, which keeps the
-    /// dots crisp; for an odd `t` that puts the line half a pixel below the font's position.
+    /// The underline is the dotted underline the renderer draws for a program's SGR 4:4, drawn
+    /// where the renderer draws it, in the link colour:
+    ///
+    /// - **Weight** – the font's underline thickness, `t`.
+    /// - **Position** – along the middle of a box `3t` tall, centred on the font's underline
+    ///   position and kept inside the cell, as `DecorationRuns` places it; a font whose underline
+    ///   sits near the cell's bottom has its line lifted.
+    /// - **Dots** – flat-ended (butt) dots `t` long with gaps `t` long, the first dot at the
+    ///   link's first cell on each row.
+    /// - **Pixels** – edges on whole device pixels, which keeps the dots crisp. Where the
+    ///   renderer's line has edges between pixels, as an odd `t` centred on the font's position
+    ///   does, this one sits half a pixel lower rather than higher, so it never rises into the
+    ///   glyphs: Monaco 12 at a backing scale of 1 centres its underline on the baseline itself.
     ///
     /// `CALayer` sublayers rather than a renderer feature: the underline is transient hover
     /// decoration, not terminal content, and this keeps the frame path untouched.
@@ -1004,9 +1012,11 @@ final class MouseController: NSObject {
         let cellW = Double(grid.cellSizePx.x), cellH = Double(grid.cellSizePx.y)
         let metrics = view.renderContext.metrics
         let thickness = Double(metrics.underlineThickness)
-        // The line's top edge, in device pixels down from the top of its cell.
+        // In device pixels down from the top of the cell: the renderer's box for the underline
+        // (`DecorationRuns`), then the line's top edge, a thickness into it, on a whole pixel.
         let centre = Double(metrics.baseline + metrics.underlineOffset)
-        let top = min(max((centre - thickness / 2).rounded(.up), 0), max(cellH - thickness, 0))
+        let boxTop = min(max(centre - 1.5 * thickness, 0), max(cellH - 3 * thickness, 0))
+        let top = (boxTop + thickness).rounded(.up)
         let lineWidth = CGFloat(thickness / scale)
 
         while linkOverlays.count > spans.count {
