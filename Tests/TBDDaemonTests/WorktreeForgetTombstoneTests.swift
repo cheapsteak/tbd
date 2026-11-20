@@ -30,6 +30,8 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
         hooks: HookResolver()
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+    // A fixed answer, so reconcile never asks this machine's tmux servers.
+    lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
     return lifecycle
 }
 

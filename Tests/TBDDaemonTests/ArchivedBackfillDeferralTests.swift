@@ -65,9 +65,12 @@ struct ArchivedBackfillDeferralTests {
         let git = GitManager()
         let broken = try await makeBrokenArchivedRow(
             db: db, git: git, tempDir: tempDir, repoDir: repoDir)
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
         )
+        // A fixed answer, so reconciliation never asks this machine's tmux
+        // servers.
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
 
         await Daemon().performStartupReconciliation(
             mockMode: nil, database: db, git: git, lifecycle: lifecycle,

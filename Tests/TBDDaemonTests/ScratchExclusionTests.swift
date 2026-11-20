@@ -127,7 +127,9 @@ struct ScratchExclusionTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        // A fixed answer, so the pass never asks this machine's tmux servers.
+        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         let scratch = try await db.worktrees.createScratch(
             name: "s", displayName: "s", path: "/tmp/scr-\(UUID().uuidString)", tmuxServer: "tbd-scratch")
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
