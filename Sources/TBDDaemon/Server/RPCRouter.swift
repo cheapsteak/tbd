@@ -18,8 +18,6 @@ public final class RPCRouter: Sendable {
     public let composerDrafts = ComposerDraftRegistry()
     public let prManager: PRStatusManager
     public let hibernationCoordinator: HibernationCoordinator
-    /// Exact-token SessionStart rendezvous for Codex-to-Claude replacement
-    /// and its Codex rollback/recovery process.
     /// Append-only record of every state-changing actuation this router
     /// performs. Shared with the daemon-internal rails (see `Daemon.swift`) so
     /// the whole daemon writes one file. Handlers append a request row before

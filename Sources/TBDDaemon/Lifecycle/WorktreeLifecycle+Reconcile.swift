@@ -505,9 +505,9 @@ extension WorktreeLifecycle {
             // reach, and the row is already exactly what this pass would
             // produce.
             for terminal in terminals where !terminal.isParked {
-                // A nonparked Codex row with a pending incarnation is a
-                // Continue in Claude fence an earlier build left unfinished,
-                // and no build finishes one now. The row still holds its Codex
+                // A nonparked Codex row with a pending incarnation is an
+                // unfinished Continue in Claude fence, which nothing in the
+                // daemon finishes. The row still holds its Codex
                 // source identity. The recovery park below would carry the
                 // fence onto a parked row, where it reads as a park still in
                 // flight, so the row is kept as it is and logged instead;

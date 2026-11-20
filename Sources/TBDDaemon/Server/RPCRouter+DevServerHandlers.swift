@@ -355,9 +355,9 @@ extension RPCRouter {
         }
     }
 
-    /// A server tab's close still deletes the row when the transport-level
-    /// teardown fails or is refused; the call's row records the server's
-    /// outcome, so the teardown's own problem is logged.
+    /// A server tab's close still deletes the row when the holder teardown
+    /// fails; the call's row records the server's outcome, so the teardown's
+    /// own problem is logged.
     private func logTabCloseProblems(_ terminal: Terminal, _ cleanupFailure: String?) {
         guard let problem = cleanupFailure else { return }
         devServerLogger.warning("""

@@ -139,7 +139,8 @@ extension WorktreeLifecycle {
     /// remove the worktree's history right after.
     ///
     /// - Parameter server: the tmux server the row's worktree names, nil when
-    ///   the worktree row could not be read.
+    ///   the caller has no local worktree row for it: the row is gone, or the
+    ///   worktree is remote.
     static func closeLeftoverTmuxRow(
         _ terminal: Terminal, server: String?, history: TerminalHistoryStore?
     ) async {
@@ -150,7 +151,7 @@ extension WorktreeLifecycle {
             return
         }
         guard let server else {
-            logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; its worktree row could not be read, so its tmux server is unknown, and its session may still be running there")
+            logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; there is no local worktree row for it, gone or remote, so its tmux server is unknown, and its session may still be running there")
             return
         }
         logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; its session may still be running in tmux server \(server, privacy: .public). \(LeftoverTmuxSession.endingAdvice(server: server), privacy: .public)")
