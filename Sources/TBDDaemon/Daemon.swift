@@ -1902,11 +1902,8 @@ public final class Daemon: Sendable {
             // `orphanGC` is always non-nil here.
             if let orphanGC {
                 let maintenanceLifecycle = lifecycle
-                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog, rpcRouter] in
-                    // Sweep once immediately (cold recovery), then every hour,
-                    // with what an earlier build's interrupted Continue in
-                    // Claude left behind.
-                    await rpcRouter.reconcilePendingContinueInClaude()
+                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog] in
+                    // Sweep once immediately (cold recovery), then every hour.
                     await Self.performOrphanMaintenance(
                         orphanGC: orphanGC,
                         lifecycle: maintenanceLifecycle,
@@ -1916,7 +1913,6 @@ public final class Daemon: Sendable {
                         // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(3600))
                         guard !Task.isCancelled else { break }
-                        await rpcRouter.reconcilePendingContinueInClaude()
                         await Self.performOrphanMaintenance(
                             orphanGC: orphanGC,
                             lifecycle: maintenanceLifecycle,

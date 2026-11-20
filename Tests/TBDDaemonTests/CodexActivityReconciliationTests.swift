@@ -945,8 +945,7 @@ struct CodexActivityReconciliationTests {
             id: first.id, sessionID: "first", transcriptPath: firstPath.path)
         try await db.terminals.updateSession(
             id: second.id, sessionID: "second", transcriptPath: secondPath.path)
-        // Continue in Claude's rollout reads are what take baselines; the list
-        // only prunes them.
+        // `observe` is what takes baselines; the list only prunes them.
         _ = await router.codexActivityTracker.observe(
             transcriptPath: firstPath.path, worktreeID: firstWorktree.id)
         _ = await router.codexActivityTracker.observe(

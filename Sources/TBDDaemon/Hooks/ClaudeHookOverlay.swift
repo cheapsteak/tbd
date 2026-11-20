@@ -593,8 +593,8 @@ public enum ClaudeHookOverlay {
 }
 
 /// The overlay of a spawn that replaces a process in an existing row — a wake,
-/// an in-place profile swap, Continue in Claude — planned when the command is
-/// composed, and written only at launch.
+/// an in-place profile swap — planned when the command is composed, and
+/// written only at launch.
 ///
 /// Those spawns compose their command well before they launch, and some of
 /// them never launch: a wake that adopts a holder still running starts

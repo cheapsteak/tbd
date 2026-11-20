@@ -730,10 +730,9 @@ public struct ClaudeSpawnExtras: Codable, Sendable, Equatable {
 /// the Codex features turned off for it, and its dedicated Codex home.
 ///
 /// Recorded on the terminal row at spawn, because every later relaunch of
-/// Codex in that same tab — recreating a dead window, or restoring Codex after
-/// a failed continue-in-Claude — has nothing else to read them from, and a
-/// relaunch without them would quietly start the tab on the default model with
-/// those features back on, or on the shared home without its guard.
+/// Codex in that same tab has nothing else to read them from, and a relaunch
+/// without them would quietly start the tab on the default model with those
+/// features back on, or on the shared home without its guard.
 public struct CodexLaunchOptions: Codable, Sendable, Equatable {
     /// Passed to Codex as `-c model="<id>"`. Nil when the tab took the `tbd`
     /// Codex profile's model.

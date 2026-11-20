@@ -930,9 +930,10 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     #expect(try encodedRow(try #require(try await db.terminals.get(id: codex.id))) == encodedRow(codex))
 }
 
-/// A nonparked Codex row with a pending incarnation is the durable handoff for
-/// Continue-in-Claude rollback, preserved even when its server is gone.
-@Test func testReconcilePreservesPendingCodexRecoveryHandoff() async throws {
+/// A nonparked Codex row with a pending incarnation is a Continue in Claude
+/// fence an earlier build left unfinished. Reconcile keeps it as it is, even
+/// when its server is gone, rather than park it with the fence still set.
+@Test func testReconcileKeepsAnUnfinishedContinueInClaudeFence() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
     let (db, lifecycle, repo, claude) = try await makeReconcileFixture(

@@ -152,7 +152,7 @@ actor TerminalTransportMigrator {
 
     /// The refusal for a request that would start, restart or replace the
     /// process behind a row still on the tmux transport: a wake, a window
-    /// recreate, an in-place profile swap, Continue in Claude.
+    /// recreate, an in-place profile swap.
     ///
     /// TBD opens sessions only on the pty holder, so none of those can run on
     /// such a row; migrating it is the way forward, and this says how. It names

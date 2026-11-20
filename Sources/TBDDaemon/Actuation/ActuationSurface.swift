@@ -90,7 +90,6 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// Parks a session, rewrites its transport and wakes it on the pty holder.
     case terminalMigrateTransport
     case terminalContinueInCodex
-    case terminalContinueInClaude
     case terminalHistoryRevive
     /// Creates a worktree and spawns its primary terminals. The row names the
     /// worktree, not a terminal: those are minted inside the lifecycle phase.
@@ -165,7 +164,6 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalSwapProfile: return RPCMethod.terminalSwapProfile
         case .terminalMigrateTransport: return RPCMethod.terminalMigrateTransport
         case .terminalContinueInCodex: return RPCMethod.terminalContinueInCodex
-        case .terminalContinueInClaude: return RPCMethod.terminalContinueInClaude
         case .terminalHistoryRevive: return RPCMethod.terminalHistoryRevive
         case .worktreeCreate: return RPCMethod.worktreeCreate
         case .scratchCreate: return RPCMethod.scratchCreate
@@ -194,7 +192,6 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
              .terminalMigrateTransport,
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
-             .terminalContinueInClaude,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
              .worktreeRerunPreSession, .remoteCreate, .remoteUnarchive, .serverStart: return .spawn
         case .terminalDelete, .worktreeArchive, .worktreeForget, .repoRemove,

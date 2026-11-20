@@ -34,6 +34,7 @@ struct RetiredRuntimeFilesTests {
             "statusline-capture-\(key).json",
             "statusline-capture-\(key).json.48213.tmp.json",
             RetiredRuntimeFiles.leaseCredentialDirectoryName + "/" + credential,
+            "continue-in-claude-packet-\(key.lowercased())-\(UUID().uuidString.lowercased()).txt",
         ]
     }
 
@@ -47,8 +48,9 @@ struct RetiredRuntimeFilesTests {
             #expect(Self.exists(name, in: dir), "\(name) was not seeded")
         }
 
-        // The script, two captures, and the credential directory counted once.
-        #expect(RetiredRuntimeFiles(runtimeDir: dir).removeAll() == 4)
+        // The script, two captures, the credential directory counted once, and
+        // the packet.
+        #expect(RetiredRuntimeFiles(runtimeDir: dir).removeAll() == 5)
 
         for name in retired {
             #expect(!Self.exists(name, in: dir), "\(name) survived")
@@ -83,7 +85,8 @@ struct RetiredRuntimeFilesTests {
             "claude-overlay.json",
             "claude-overlay-session-\(key).json",
             "mod-key",
-            "continue-in-claude-packet-\(key.lowercased())-\(UUID().uuidString.lowercased()).txt",
+            "continue-in-claude-packet-\(key.lowercased()).txt",
+            "continue-in-claude-packet-\(key.lowercased())-\(UUID().uuidString.lowercased()).json",
             "statusline-tee.sh.bak",
             "statusline-capture-\(key).txt",
             "statusline-capture-.json",
@@ -96,7 +99,7 @@ struct RetiredRuntimeFilesTests {
         for name in unrelated { try Self.seed(name, in: dir) }
         for name in Self.retiredNames() { try Self.seed(name, in: dir) }
 
-        #expect(RetiredRuntimeFiles(runtimeDir: dir).removeAll() == 4)
+        #expect(RetiredRuntimeFiles(runtimeDir: dir).removeAll() == 5)
 
         for name in unrelated {
             #expect(Self.exists(name, in: dir), "\(name) was removed")
@@ -124,6 +127,20 @@ struct RetiredRuntimeFilesTests {
         #expect(RetiredRuntimeFiles.isStatuslineCapture(name) == isCapture)
     }
 
+    @Test(arguments: [
+        ("continue-in-claude-packet-0f3c2a7e-1b2c-4d5e-8f90-abcdef012345-11111111-2222-3333-4444-555555555555.txt", true),
+        ("continue-in-claude-packet-0F3C2A7E-1B2C-4D5E-8F90-ABCDEF012345-11111111-2222-3333-4444-555555555555.txt", true),
+        ("continue-in-claude-packet-0f3c2a7e-1b2c-4d5e-8f90-abcdef012345.txt", false),
+        ("continue-in-claude-packet-0f3c2a7e-1b2c-4d5e-8f90-abcdef012345_11111111-2222-3333-4444-555555555555.txt", false),
+        ("continue-in-claude-packet-0f3c2a7e-1b2c-4d5e-8f90-abcdef012345-11111111-2222-3333-4444-55555555555z.txt", false),
+        ("continue-in-claude-packet-0f3c2a7e-1b2c-4d5e-8f90-abcdef012345-11111111-2222-3333-4444-555555555555.json", false),
+        ("continue-in-claude-packet-.txt", false),
+        ("statusline-tee.sh", false),
+    ])
+    func packetNamesMatchOnlyThePacketShape(name: String, isPacket: Bool) {
+        #expect(RetiredRuntimeFiles.isContinuationPacket(name) == isPacket)
+    }
+
     /// A retired entry that cannot be removed — here the credential directory,
     /// made read-only so its file cannot be unlinked — is logged and left; the
     /// others are still removed and the call returns normally.
@@ -137,8 +154,9 @@ struct RetiredRuntimeFilesTests {
         for name in Self.retiredNames() { try Self.seed(name, in: dir) }
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: leases.path)
 
-        // The script and the two captures; not the credential directory.
-        #expect(RetiredRuntimeFiles(runtimeDir: dir).removeAll() == 3)
+        // The script, the two captures and the packet; not the credential
+        // directory.
+        #expect(RetiredRuntimeFiles(runtimeDir: dir).removeAll() == 4)
 
         #expect(!Self.exists(RetiredRuntimeFiles.teeScriptName, in: dir))
         #expect(FileManager.default.fileExists(atPath: leases.path))

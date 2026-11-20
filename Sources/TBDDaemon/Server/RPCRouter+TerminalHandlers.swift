@@ -858,7 +858,6 @@ extension RPCRouter {
         }
         await pendingQuestions.clear(terminalID: terminal.id)
         await broadcastPendingPrompts(terminalID: terminal.id)
-        await continueInClaudeReadiness.clear(terminalID: terminal.id)
         await lifecycle.sessionTitles.forget(terminalID: terminal.id)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
@@ -4762,26 +4761,6 @@ extension RPCRouter {
         }()
         let effectiveTranscriptPath = cleanedPath ?? terminal.transcriptPath
 
-        // Provider continuation keeps the durable row on its Codex source
-        // identity until readiness and the final database commit agree.
-        // `applySessionStart` deliberately rejects pending rows, so intercept
-        // only the exact pending token and leave the source row untouched.
-        if terminal.kind == .codex,
-           !terminal.isParked,
-           let pendingIncarnationID = terminal.pendingSessionIncarnationID,
-           params.sessionIncarnationID == pendingIncarnationID {
-            _ = await continueInClaudeReadiness.noteReady(
-                ContinueInClaudeReadyEvent(
-                    sessionID: params.sessionID,
-                    transcriptPath: cleanedPath,
-                    source: params.source,
-                    cwd: params.cwd,
-                    observedAt: observedAt),
-                for: .init(
-                    terminalID: terminal.id,
-                    incarnationID: pendingIncarnationID))
-            return .ok()
-        }
         let observedTranscriptBoundary = terminal.isCodexTerminal
             ? observedTranscriptBoundary(atAbsolutePath: effectiveTranscriptPath)
             : nil
