@@ -818,6 +818,126 @@ struct SidebarDragDropTests {
         #expect(sent.beforeWorktreeID == nil)
     }
 
+    /// Workflow groups on. Stored top level `[r1, r2, hidden, l1]`: `r1` and
+    /// `r2` cloud rows in the Remote group, `hidden` an "acme" row the
+    /// filter hides, `l1` an inline row. A gap in the Remote group shows that
+    /// group's rows alone. `r2` dropped back into its own gap, the end of
+    /// the group, moves nothing, though `l1` follows it in the full list.
+    /// `r1` dropped at the end of the group lands directly after `r2`,
+    /// before `hidden`, and stores `[r2, r1, hidden, l1]`, not the end of the
+    /// whole list, `[r2, hidden, l1, r1]`.
+    @Test func dropInAGroupJudgesOnlyThatGroupsRows() async throws {
+        let h = OutlineHarness("drag.hiddenGrouped")
+        defer { h.tearDown() }
+        h.defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let main = SidebarOutlineControllerTests.row("main", repo, status: .main)
+        let r1 = Self.cloudRow("r1", repo, order: 0)
+        let r2 = Self.cloudRow("r2", repo, order: 1)
+        let hidden = SidebarGroupFixtures.row("hidden", repoID: repo.id, remote: "one", order: 2)
+        let l1 = SidebarOutlineControllerTests.row("l1", repo, order: 3)
+        let remote = SidebarGroupID(owner: .repository(repo.id), kind: .remote)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [main, r1, r2, hidden, l1]]
+        h.state.expandedSidebarGroups = [remote]
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        let recorder = MoveRecorder()
+        recorder.install(on: h.state)
+        h.mount()
+        let names = [main.id: "main", r1.id: "r1", r2.id: "r2", hidden.id: "hidden", l1.id: "l1"]
+        let group = SidebarNodeID.group(remote)
+        let groupRows = h.controller.tree.children(of: group).map { $0.id }
+        let shownInGroup: [SidebarNodeID] = [.worktree(r1.id), .worktree(r2.id)]
+        try #require(groupRows == shownInGroup, h.evidence(names))
+        let l1Parent = h.controller.tree.parent(of: .worktree(l1.id))
+        try #require(l1Parent == .repoHeader(repo.id), h.evidence(names))
+        let end = groupRows.count
+
+        // `r2` back into its own gap, under both branches of the filter.
+        let decision = SidebarDropDecision.place(parent: nil, before: nil)
+        let kept = h.controller.confirmedMove(decision, at: (group, end), carried: [r2.id])
+        #expect(kept == SidebarDropOutcome.unchanged)
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        let unfiltered = h.controller.confirmedMove(decision, at: (group, end), carried: [r2.id])
+        #expect(unfiltered == SidebarDropOutcome.move(SidebarDropMove(ids: [r2.id], newParentID: nil, before: nil)))
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        h.controller.flushPendingRebuild()
+
+        // `r1` to the end of the group, through the outline.
+        let state = h.state
+        let asked = FireRecorder<SidebarDropMove>()
+        h.controller.moveWorktreesForTesting = { move in
+            asked.record(move)
+            return state.moveWorktrees(ids: move.ids, newParentID: move.newParentID, before: move.before)
+        }
+        let info = try Self.startDrag(pressing: .worktree(r1.id), in: h)
+        defer { info.release() }
+        let operation = try Self.validate(info, parent: group, childIndex: end, depth: 1, in: h)
+        #expect(operation == .move)
+        let accepted = try Self.accept(info, parent: group, childIndex: end, in: h)
+        #expect(accepted, h.evidence(names))
+        Self.endSession(in: h)
+
+        let moves = asked.values
+        #expect(moves == [SidebarDropMove(ids: [r1.id], newParentID: nil, before: hidden.id)])
+        let order = AppState.topLevelWorktrees(h.state.worktrees[repo.id] ?? []).map { $0.id }
+        #expect(order == [r2.id, r1.id, hidden.id, l1.id], h.evidence(names))
+        await recorder.waitForCount(1)
+        let sent = try #require(recorder.sent.first)
+        #expect(sent.worktreeIDs == [r1.id])
+        #expect(sent.newParentID == nil)
+        #expect(sent.beforeWorktreeID == hidden.id)
+    }
+
+    /// The same under a parent row's Remote group: `parent`'s children
+    /// `[r1, r2, hidden, l1]`, with `l1` inline under `parent` and the cloud
+    /// rows in its Remote group.
+    @Test func dropInAParentRowsGroupJudgesOnlyThatGroupsRows() throws {
+        let h = OutlineHarness("drag.hiddenGroupedParent")
+        defer { h.tearDown() }
+        h.defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let main = SidebarOutlineControllerTests.row("main", repo, status: .main)
+        let parent = SidebarOutlineControllerTests.row("parent", repo, order: 0)
+        let r1 = Self.cloudRow("r1", repo, parent: parent.id, order: 0)
+        let r2 = Self.cloudRow("r2", repo, parent: parent.id, order: 1)
+        let hidden = SidebarGroupFixtures.row("hidden", repoID: repo.id, remote: "one", parent: parent.id, order: 2)
+        let l1 = SidebarOutlineControllerTests.row("l1", repo, parent: parent.id, order: 3)
+        let remote = SidebarGroupID(owner: .parent(parent.id), kind: .remote)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [main, parent, r1, r2, hidden, l1]]
+        h.state.expandedSidebarGroups = [remote]
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        h.mount()
+        let names = [main.id: "main", parent.id: "parent", r1.id: "r1", r2.id: "r2", hidden.id: "hidden", l1.id: "l1"]
+        let group = SidebarNodeID.group(remote)
+        let groupRows = h.controller.tree.children(of: group).map { $0.id }
+        let shownInGroup: [SidebarNodeID] = [.worktree(r1.id), .worktree(r2.id)]
+        try #require(groupRows == shownInGroup, h.evidence(names))
+        let l1Parent = h.controller.tree.parent(of: .worktree(l1.id))
+        try #require(l1Parent == .worktree(parent.id), h.evidence(names))
+        let end = groupRows.count
+
+        let decision = SidebarDropDecision.place(parent: parent.id, before: nil)
+        let kept = h.controller.confirmedMove(decision, at: (group, end), carried: [r2.id])
+        #expect(kept == SidebarDropOutcome.unchanged)
+        let moved = h.controller.confirmedMove(decision, at: (group, end), carried: [r1.id])
+        #expect(moved == SidebarDropOutcome.move(SidebarDropMove(ids: [r1.id], newParentID: parent.id, before: hidden.id)))
+
+        // Control: with the filter off, the decision is sent as it is.
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        let unfiltered = h.controller.confirmedMove(decision, at: (group, end), carried: [r1.id])
+        #expect(unfiltered == SidebarDropOutcome.move(SidebarDropMove(ids: [r1.id], newParentID: parent.id, before: nil)))
+    }
+
+    /// A row on the compiled cloud provider, which no registry filter hides.
+    private static func cloudRow(_ name: String, _ repo: Repo, parent: UUID? = nil, order: Int) -> Worktree {
+        let location = WorktreeLocation.remote(provider: ClaudeCloudProvider.name, sessionID: name)
+        return Worktree(repoID: repo.id, name: name, displayName: name, branch: "feature",
+                        path: location.storagePath ?? "/tmp/acme", status: .active, tmuxServer: "acme",
+                        sortOrder: order, parentWorktreeID: parent, location: location)
+    }
+
     // MARK: The session
 
     @Test func structureHeldDuringDragAppliedAtEnd() throws {

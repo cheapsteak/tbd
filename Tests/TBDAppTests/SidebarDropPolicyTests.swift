@@ -627,6 +627,72 @@ struct SidebarDropPolicyTests {
         #expect(landing == stray)
     }
 
+    // With workflow groups on, a gap shows one group's rows: `gapRows`. A
+    // sibling filed under another group does not show there, as a hidden
+    // one does not. Siblings `[r1, r2, h, l1]` throughout: `r1` and `r2` in
+    // the Remote group, `h` a row the filter hides, `l1` an inline row.
+
+    /// `r2` dropped back into its own gap, the end of the Remote group,
+    /// leaves the group's rows in the order they stand and moves nothing.
+    /// Judged over the whole sibling list, `l1` counts as shown, and the
+    /// move to the end of the list stores `[r1, h, l1, r2]`: with the filter
+    /// off the Remote group would show `r1, h, r2` instead of `r1, r2, h`.
+    @Test func aDropBackIntoItsOwnGroupGapMovesNothing() {
+        let (r1, r2, h, l1) = (UUID(), UUID(), UUID(), UUID())
+        let siblings = [r1, r2, h, l1]
+        let keeps = SidebarDropPolicy.keepsShownOrder(nil, siblings: siblings, carried: [r2], hidden: [h],
+                                                      gapRows: [r1, r2])
+        #expect(keeps)
+        // Control: without the gap's rows, `l1` counts as shown.
+        let flat = SidebarDropPolicy.keepsShownOrder(nil, siblings: siblings, carried: [r2], hidden: [h])
+        #expect(!flat)
+    }
+
+    /// `r1` dropped at the end of the Remote group lands directly after the
+    /// group's last shown row, `r2`, before the hidden row and the inline
+    /// row that follow it, rather than at the end of the whole list.
+    @Test func theEndOfAGroupLandsDirectlyAfterItsLastShownRow() {
+        let (r1, r2, h, l1) = (UUID(), UUID(), UUID(), UUID())
+        let siblings = [r1, r2, h, l1]
+        let keeps = SidebarDropPolicy.keepsShownOrder(nil, siblings: siblings, carried: [r1], hidden: [h],
+                                                      gapRows: [r1, r2])
+        #expect(!keeps)
+        let landing = SidebarDropPolicy.landingBefore(nil, siblings: siblings, carried: [r1], hidden: [h],
+                                                      gapRows: [r1, r2])
+        #expect(landing == h)
+        let placed = SiblingPlacement.place(group: siblings, carried: [r1], before: landing)
+        #expect(placed == [r2, r1, h, l1])
+        // Control: without the gap's rows, the end of the group is the end
+        // of the whole list.
+        let flat = SidebarDropPolicy.landingBefore(nil, siblings: siblings, carried: [r1], hidden: [h])
+        #expect(flat == nil)
+    }
+
+    /// Between two shown rows of a group, a row of another group directly
+    /// above the lower one is passed over as a hidden row is: the dropped
+    /// row lands directly after the shown row above the gap.
+    @Test func aRowOfAnotherGroupAboveTheGapIsPassedOver() {
+        let (r1, l1, h, r2, r3) = (UUID(), UUID(), UUID(), UUID(), UUID())
+        let siblings = [r1, l1, h, r2, r3]
+        let landing = SidebarDropPolicy.landingBefore(r2, siblings: siblings, carried: [r3], hidden: [h],
+                                                      gapRows: [r1, r2, r3])
+        #expect(landing == l1)
+        let placed = SiblingPlacement.place(group: siblings, carried: [r3], before: landing)
+        #expect(placed == [r1, r3, l1, h, r2])
+    }
+
+    /// With nothing hidden the mapping is the identity, the gap's rows given
+    /// or not: a section the filter leaves alone stores what it always did.
+    @Test func landingBeforeIsTheIdentityWithNothingHiddenInAGroup() {
+        let (r1, r2, l1) = (UUID(), UUID(), UUID())
+        let siblings = [r1, r2, l1]
+        for before in [r1, r2, nil] as [UUID?] {
+            let landing = SidebarDropPolicy.landingBefore(before, siblings: siblings, carried: [r1], hidden: [],
+                                                          gapRows: [r1, r2])
+            #expect(landing == before)
+        }
+    }
+
     // MARK: Cost
 
     /// A decision reads only the nodes on the paths it asks about. Over an

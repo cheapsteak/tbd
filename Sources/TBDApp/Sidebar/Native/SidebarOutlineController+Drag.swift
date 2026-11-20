@@ -242,21 +242,27 @@ extension SidebarOutlineController {
 
     /// The place of `carried` before `before` among `parent`'s children (nil:
     /// the top level of the section's repo). When the section's registry
-    /// filter hides any row, it is `.unchanged` if the place leaves the shown rows
-    /// in the order they stand (`SidebarDropPolicy.keepsShownOrder`), and
-    /// otherwise `before` mapped onto the full sibling list
-    /// (`SidebarDropPolicy.landingBefore`). It is `before` itself in a section
-    /// that is no repo's, or whose filter hides nothing.
+    /// filter hides any row, it is `.unchanged` if the place leaves the rows
+    /// the gap shows in the order they stand
+    /// (`SidebarDropPolicy.keepsShownOrder`), and otherwise `before` mapped
+    /// onto the full sibling list (`SidebarDropPolicy.landingBefore`). It is
+    /// `before` itself in a section that is no repo's, or whose filter hides
+    /// nothing, so a section the filter leaves alone stores exactly what it
+    /// did, workflow groups on or off.
     ///
     /// The section is the repo whose header `position`'s parent sits under,
-    /// which is the filter that decided what the gap shows. A hidden creating
-    /// placeholder is left out of the siblings, so the rows never land before
-    /// a row the daemon has not heard of; a shown one stays, so the mapping
-    /// never moves the rows above it.
+    /// which is the filter that decided what the gap shows. The rows the gap
+    /// shows are the worktree rows under `position`'s parent in the fresh
+    /// tree: with workflow groups on, that parent is one group's node, and
+    /// the siblings filed under the other groups do not show in the gap. A
+    /// hidden creating placeholder is left out of the siblings, so the rows
+    /// never land before a row the daemon has not heard of; a shown one
+    /// stays, so the mapping never moves the rows above it.
     private func placement(before: UUID?, parent: UUID?, position: SidebarDropPolicy.Retarget,
                            carried: [UUID], in index: SidebarDropIndex) -> SidebarDropOutcome {
         let unmapped = SidebarDropOutcome.move(SidebarDropMove(ids: carried, newParentID: parent, before: before))
-        guard let repoID = Self.sectionRepoID(of: position.parent, in: index) else { return unmapped }
+        guard let gapParent = position.parent, let gapEntry = index.entry(gapParent),
+              let repoID = Self.sectionRepoID(of: gapParent, in: index) else { return unmapped }
         let hidden = appState.sidebarRegistryRemoteFilter(repoID: repoID).hiddenWorktreeIDs
         guard !hidden.isEmpty else { return unmapped }
         let rows: [Worktree]
@@ -267,10 +273,16 @@ extension SidebarOutlineController {
         }
         let pending = appState.pendingWorktreeIDs
         let siblings = rows.map { $0.id }.filter { !(hidden.contains($0) && pending.contains($0)) }
-        if SidebarDropPolicy.keepsShownOrder(before, siblings: siblings, carried: carried, hidden: hidden) {
+        var gapRows: Set<UUID> = []
+        for child in gapEntry.node.children {
+            if case .worktree(let uuid) = child.id { gapRows.insert(uuid) }
+        }
+        if SidebarDropPolicy.keepsShownOrder(before, siblings: siblings, carried: carried, hidden: hidden,
+                                             gapRows: gapRows) {
             return .unchanged
         }
-        let landing = SidebarDropPolicy.landingBefore(before, siblings: siblings, carried: Set(carried), hidden: hidden)
+        let landing = SidebarDropPolicy.landingBefore(before, siblings: siblings, carried: Set(carried),
+                                                      hidden: hidden, gapRows: gapRows)
         return .move(SidebarDropMove(ids: carried, newParentID: parent, before: landing))
     }
 
