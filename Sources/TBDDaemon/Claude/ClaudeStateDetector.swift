@@ -64,35 +64,20 @@ public struct ClaudeStateDetector: Sendable {
             .appendingPathComponent("\(pid).json")
     }
 
-    /// The session id of the Claude process a recapture target names, on either
-    /// transport.
+    /// The session id of the Claude process a recapture target names.
     public func captureSessionID(target: SessionRecaptureTarget) async -> String? {
         switch target {
-        case .tmuxPane(let server, let paneID):
-            return await captureSessionID(server: server, paneID: paneID)
         case .holderChild(let pid):
             return await captureSessionID(rootPID: Int(pid))
         }
     }
 
-    public func captureSessionID(server: String, paneID: String) async -> String? {
-        guard let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
-              let panePID = Int(pidStr) else { return nil }
-        return await captureSessionID(rootPID: panePID)
-    }
-
     /// Resolve a session id from the root pid of a session's own process tree.
     ///
-    /// The same ladder serves both transports because the pid means the same
-    /// shape of thing on each. On tmux the root is `#{pane_pid}`: with
-    /// `zsh -i -l -c "claude …"` (see
-    /// `ShellLaunchComposer.shellFlags(forShell:)`) zsh may exec into Claude
-    /// directly, so that pid IS the Claude process, and
-    /// otherwise it is the shell that started one. On the holder the root is
-    /// the job the holder forked — the `zsh -c` shell composed by
-    /// `holderLaunch`, or Claude itself once that shell execs into it — which
-    /// is the identical pair of cases. So: read the root's session file first,
-    /// and fall back to the single `claude` child beneath it.
+    /// The root is the job the holder forked: the `zsh -c` shell composed by
+    /// `holderLaunch`, or Claude itself once that shell execs into it. So: read
+    /// the root's session file first, and fall back to the single `claude`
+    /// child beneath it.
     func captureSessionID(rootPID: Int) async -> String? {
         if let id = readSessionID(forPID: rootPID) { return id }
 

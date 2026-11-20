@@ -77,9 +77,6 @@ public struct WorktreeLifecycle: Sendable {
     public let preSessionPollInterval: TimeInterval
     /// Process-signal seam for the agent reaper. Injectable for tests.
     public let processSignaller: ProcessSignaller
-    /// Reaper grace knobs (kept small in tests to avoid real sleeps).
-    public let reaperGraceAttempts: Int
-    public let reaperPollInterval: Duration
     /// Resolves the Codex CLI before lifecycle code creates tmux or DB state.
     /// Stored as a seam so tests do not require Codex or ChatGPT.app installed.
     let codexExecutableResolver: @Sendable () throws -> String
@@ -231,8 +228,6 @@ public struct WorktreeLifecycle: Sendable {
         preSessionPollInterval: TimeInterval = 0.5,
         processSignaller: ProcessSignaller = ProductionProcessSignaller(),
         checkoutTemplates: CheckoutTemplateStore = .shared,
-        reaperGraceAttempts: Int = 30,
-        reaperPollInterval: Duration = .milliseconds(100),
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         sessionsDir: URL = TBDConstants.sessionsDir(),
@@ -254,8 +249,6 @@ public struct WorktreeLifecycle: Sendable {
         self.preSessionPollInterval = preSessionPollInterval
         self.processSignaller = processSignaller
         self.checkoutTemplates = checkoutTemplates
-        self.reaperGraceAttempts = reaperGraceAttempts
-        self.reaperPollInterval = reaperPollInterval
         self.codexExecutableResolver = codexExecutableResolver ?? {
             if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
             return try CodexExecutableResolver.resolve()
@@ -281,12 +274,6 @@ public struct WorktreeLifecycle: Sendable {
         }
         return configDirManager.ambientConfigDirectory
             .appendingPathComponent("projects", isDirectory: true)
-    }
-
-    /// The agent reaper composed from the injected signaller seam.
-    var reaper: AgentReaper {
-        AgentReaper(signaller: processSignaller,
-                    graceAttempts: reaperGraceAttempts, pollInterval: reaperPollInterval)
     }
 
     /// Whether a terminal's session has no process left once a teardown of it

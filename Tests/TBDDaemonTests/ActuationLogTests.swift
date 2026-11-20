@@ -248,21 +248,10 @@ struct ActuationLogTests {
         #expect(ActuationOutcome.classify(WakeResult.conditionNotMet) == .refused(.notEligible))
         #expect(ActuationOutcome.detail(WakeResult.conditionNotMet) != nil)
 
-        // A row that claims awake whose pane disagrees. The two shapes must not
-        // collapse onto one reason: a gone or exited pane is the named target
-        // genuinely being absent, while a stale coordinate that resolved to a
-        // live STRANGER is the case `targetMismatch` was added for — calling
-        // that one `notFound` would claim a target is missing when a perfectly
-        // healthy other one answered.
-        #expect(ActuationOutcome.classify(
-            WakeResult.sessionGone(paneID: "%0", detail: .paneMissing)) == .refused(.notFound))
-        #expect(ActuationOutcome.classify(
-            WakeResult.sessionGone(paneID: "%0", detail: .processExited)) == .refused(.notFound))
-        #expect(ActuationOutcome.classify(
-            WakeResult.sessionGone(
-                paneID: "%0",
-                detail: .paneBelongsToAnotherTerminal(actualTerminalID: UUID().uuidString)))
-            == .refused(.targetMismatch))
+        // A row that claims awake whose holder's job has exited: the named
+        // target is genuinely absent.
+        #expect(ActuationOutcome.classify(WakeResult.sessionGone) == .refused(.notFound))
+        #expect(ActuationOutcome.detail(WakeResult.sessionGone) != nil)
     }
 
     // MARK: - Rotation

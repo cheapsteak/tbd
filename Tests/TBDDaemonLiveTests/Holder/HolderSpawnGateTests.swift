@@ -443,12 +443,11 @@ struct HolderSpawnGateTests {
     // MARK: - Fork-session swap
 
     /// A `.fork` swap lands on a real holder, and its session recapture
-    /// addresses the holder's CHILD rather than a pane.
+    /// addresses the holder's CHILD.
     ///
-    /// The target assertion is the load-bearing half. A holder row's pane id is
-    /// the empty string by construction, so a fork that kept scheduling
-    /// `.tmuxPane` would poll a coordinate that can never resolve — and would
-    /// write whatever it happened to find onto the row.
+    /// The target assertion is the load-bearing half: the pid it names is the
+    /// one the holder recorded for the job it forked, so the recapture reads
+    /// that job's session and no other.
     @Test func forkSwapSpawnsOntoTheHolderAndRecapturesItsChild() async throws {
         let recapture = RecaptureProbe()
         let fixture = try await GateFixture.make(recapture: recapture)
@@ -485,7 +484,6 @@ struct HolderSpawnGateTests {
                 deadline: TestDeadlines.saturatedPass))
         }
         #expect(recapture.targets == [.holderChild(pid: childPID)])
-        #expect(recapture.panes.isEmpty, "a holder fork scheduled a pane recapture")
 
         // The source tab is untouched — a fork copies, it does not move.
         #expect(try await fixture.db.terminals.get(id: source.id) != nil)
@@ -729,15 +727,6 @@ private final class RecaptureProbe: @unchecked Sendable {
     /// Every target recapture was scheduled against, in order.
     var targets: [SessionRecaptureTarget] {
         lock.withLock { recorded }
-    }
-
-    /// The panes recapture was scheduled against, in order — the tmux targets
-    /// only, so an assertion about panes keeps meaning what it always did.
-    var panes: [String] {
-        targets.compactMap {
-            if case .tmuxPane(_, let paneID) = $0 { return paneID }
-            return nil
-        }
     }
 
     func scheduler(db: TBDDatabase, tmux: TmuxManager) -> SessionRecaptureScheduler {

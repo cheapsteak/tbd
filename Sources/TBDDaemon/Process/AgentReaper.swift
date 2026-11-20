@@ -55,8 +55,7 @@ public enum HolderChildDecision: Sendable, Equatable {
 }
 
 /// Reaps agent processes nothing else will end: a holder session's job whose
-/// holder is gone (`sweepHolderChildren`, every 60 seconds), and a pane
-/// process that survives a window teardown (`escalateAfterHangup`).
+/// holder is gone (`sweepHolderChildren`, every 60 seconds).
 public struct AgentReaper: Sendable {
     let signaller: ProcessSignaller
     /// Number of liveness polls before escalating / giving up.
@@ -66,8 +65,7 @@ public struct AgentReaper: Sendable {
     /// The holder-transport sessions to sweep, with their recorded pids.
     /// Injected as a closure so the reaper stays a database-free value type —
     /// the same division of labor `HolderRendezvousCollector` keeps with
-    /// `OrphanGC`. Defaulted to empty for the callers that only escalate a
-    /// teardown.
+    /// `OrphanGC`. Defaulted to empty.
     let holderSessions: @Sendable () async -> [HolderChildRecord]
     /// How far a child's start time may sit from its record's identity anchor
     /// (`HolderChildRecord.createdAt`) and still be believed to be that
@@ -101,35 +99,6 @@ public struct AgentReaper: Sendable {
         }
         let basename = arg0.split(separator: "/").last.map(String.init) ?? String(arg0)
         return basename == "claude" || basename == "codex"
-    }
-
-    /// SIGTERM → poll for `graceAttempts × pollInterval` → SIGKILL if still alive.
-    /// Used by `escalateAfterHangup` once the hangup's grace has run out.
-    func reap(_ pid: Int32) async {
-        signaller.terminate(pid)
-        for _ in 0..<graceAttempts {
-            if !signaller.isAlive(pid) { return }
-            // swiftlint:disable:next no_raw_task_sleep - already seamed: `graceAttempts` / `pollInterval` are injected `init` parameters (and `WorktreeLifecycle` re-exposes both as `reaperGraceAttempts` / `reaperPollInterval`), exercised by Tests/TBDDaemonTests/Process/AgentReaperTests.swift at .milliseconds(1); see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(for: pollInterval)
-        }
-        if signaller.isAlive(pid) {
-            logger.warning("reaper: pid \(pid, privacy: .public) survived SIGTERM — sending SIGKILL")
-            signaller.forceKill(pid)
-        }
-    }
-
-    /// Called right after `kill-window` (which already sent SIGHUP). A healthy
-    /// agent exits within the grace window — only a wedged one survives, and is
-    /// then escalated. No-op if the pid is already gone.
-    func escalateAfterHangup(_ pid: Int32) async {
-        for _ in 0..<graceAttempts {
-            if !signaller.isAlive(pid) { return }
-            // swiftlint:disable:next no_raw_task_sleep - already seamed: `graceAttempts` / `pollInterval` are injected `init` parameters (and `WorktreeLifecycle` re-exposes both as `reaperGraceAttempts` / `reaperPollInterval`), exercised by Tests/TBDDaemonTests/Process/AgentReaperTests.swift at .milliseconds(1); see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(for: pollInterval)
-        }
-        guard signaller.isAlive(pid) else { return }
-        logger.warning("reaper: agent pid \(pid, privacy: .public) survived kill-window SIGHUP — escalating")
-        await reap(pid)
     }
 
     // MARK: - Holder transport

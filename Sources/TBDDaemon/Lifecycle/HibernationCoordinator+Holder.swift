@@ -793,10 +793,7 @@ extension HibernationCoordinator {
             holder forked (pid \(childPID, privacy: .public)) is gone — reporting sessionGone \
             instead of "already awake"
             """)
-        // No pane id to name, and the empty string is what the row carries.
-        // `RPCRouter.unparkedWakeMessage` phrases an empty one as "its
-        // holder-backed session" rather than as a pane that does not exist.
-        return .sessionGone(paneID: "", detail: .processExited)
+        return .sessionGone
     }
 
     /// Wake a parked holder row onto a spawn command the CALLER composed — the

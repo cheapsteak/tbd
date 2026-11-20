@@ -971,10 +971,9 @@ struct HolderTmuxAssumptionGateTests {
     /// An UNPARKED holder row is CLASSIFIED rather than refused for its
     /// transport, and the classification comes from the PROCESS TABLE rather
     /// than from a tmux pane: this row's recorded job is gone, so the answer is
-    /// `.sessionGone` with an empty pane id, which is what `unparkedWakeMessage`
-    /// phrases as "its holder-backed session". Nothing is mutated and no tmux
-    /// command is issued — a tmux classification of the same row would have
-    /// probed the empty pane id.
+    /// `.sessionGone`, which `unparkedWakeMessage` phrases as "its
+    /// holder-backed session". Nothing is mutated and no tmux command is
+    /// issued.
     @Test("a wake of an unparked holder row is classified, not refused for its transport")
     func wakeOfAnUnparkedHolderRowIsClassified() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -992,7 +991,7 @@ struct HolderTmuxAssumptionGateTests {
         // about a fixture pid.
         let result = await coordinator(db, tmux: tmux, signaller: deadChildSignaller())
             .wake(terminalID: terminal.id)
-        #expect(result == .sessionGone(paneID: "", detail: .processExited))
+        #expect(result == .sessionGone)
 
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,

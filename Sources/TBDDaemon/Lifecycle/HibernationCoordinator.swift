@@ -63,37 +63,19 @@ extension HibernateEligibilityPolicy {
     }
 }
 
-/// How an unparked terminal's pane disagreed with the row that claims it is
-/// awake. Only states tmux gave a positive answer for appear here; "the probe
-/// failed" is deliberately not a case, because it is not a disagreement.
-public enum UnparkedPaneDisagreement: Equatable, Sendable {
-    /// The pane the row names is gone, or its window is. A read that failed
-    /// is never this case: a failed read is not a disagreement.
-    case paneMissing
-    /// The pane object survives (`remain-on-exit`) but its process has exited,
-    /// so the row's "awake" refers to a shell, not a session.
-    case processExited
-    /// The pane is alive but answers with a DIFFERENT terminal's id: this row's
-    /// coordinate went stale and now points at a stranger's pane after tmux
-    /// reused the id (#384). Someone else's live pane is not evidence that this
-    /// session is healthy.
-    case paneBelongsToAnotherTerminal(actualTerminalID: String)
-}
-
 public enum WakeResult: Equatable, Sendable {
     /// The wake respawned the agent. Carries the incarnation
     /// `prepareHibernatedAgentRespawn` minted for that spawn, which is what
     /// scopes a caller's wait to the session THIS call started.
     case ok(sessionIncarnationID: UUID?)
     case notHibernated   // idempotent no-op: nothing to wake
-    /// The row is NOT parked — TBD believes this terminal is awake — but its
-    /// pane says otherwise, so there is no live session for an "already awake"
-    /// answer to refer to. `detail` names which way it disagreed. Distinct from
-    /// `.notHibernated` so a caller can tell a benign idempotent no-op from a
-    /// terminal that needs recovery, and so a dropped `prompt` is reported
-    /// rather than silently discarded. Nothing is respawned — see
-    /// `classifyUnparkedHolderWake`.
-    case sessionGone(paneID: String, detail: UnparkedPaneDisagreement)
+    /// The row is NOT parked — TBD believes this terminal is awake — but the
+    /// job its holder forked has exited, so there is no live session for an
+    /// "already awake" answer to refer to. Distinct from `.notHibernated` so a
+    /// caller can tell a benign idempotent no-op from a terminal that needs
+    /// recovery, and so a dropped `prompt` is reported rather than silently
+    /// discarded. Nothing is respawned — see `classifyUnparkedHolderWake`.
+    case sessionGone
     case notFound        // terminal/worktree DB row missing — NOT tmux failures
     case noSessionID
     /// The parked row has no provider-qualified recovery plan, such as a
