@@ -36,13 +36,12 @@ extension WorktreeLifecycle {
         }
         let sessionID = identity.sessionID
         let sourceTab = archived.archivedAgentTabs?.first { $0.identity == identity }
-        // The same live-tmux gate a revive in place asks: this resumes the
-        // session on a new branch, but on the same session id, so a session
-        // still running in tmux would run twice. Asked before the new
-        // worktree exists.
-        if let refusal = await liveTmuxReviveRefusal(
-            relaunching: sourceTab.map { [$0] } ?? [], server: archived.tmuxServer
-        ) {
+        // The resume gate a revive in place asks (`TmuxResumeGate`), keyed by
+        // the session id whether or not an archived tab names it: a session a
+        // deleted live tmux row carried may still be running in its tmux
+        // server, and this starts it again on a new branch. Asked before the
+        // fetch and before the new worktree exists.
+        if let refusal = try await tmuxResumeRefusal(resuming: [sessionID]) {
             throw refusal
         }
         let preparedCodexLaunch: CodexLaunchPreparation?

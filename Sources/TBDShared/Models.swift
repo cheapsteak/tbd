@@ -236,19 +236,11 @@ public struct ArchivedAgentTab: Codable, Sendable, Equatable {
     public let profileID: UUID?
     public let claudeSpawnExtras: ClaudeSpawnExtras?
     public let codexLaunchOptions: CodexLaunchOptions?
-    /// True when the tab came from a tmux row that was live, not parked, when
-    /// its worktree was archived. Archive runs no tmux command, so that
-    /// session may still be running in the worktree's tmux server, and a
-    /// revive asks the leftover-tmux probe about that server before it
-    /// relaunches the tab. Nil for every other tab, and on records written
-    /// before the field.
-    public let liveOnTmuxAtArchive: Bool?
 
     public init(identity: AgentSessionIdentity, label: String? = nil, ordinal: Int,
                 isPrimary: Bool, profileID: UUID? = nil,
                 claudeSpawnExtras: ClaudeSpawnExtras? = nil,
-                codexLaunchOptions: CodexLaunchOptions? = nil,
-                liveOnTmuxAtArchive: Bool? = nil) {
+                codexLaunchOptions: CodexLaunchOptions? = nil) {
         self.identity = identity
         self.label = label
         self.ordinal = ordinal
@@ -256,7 +248,6 @@ public struct ArchivedAgentTab: Codable, Sendable, Equatable {
         self.profileID = profileID
         self.claudeSpawnExtras = claudeSpawnExtras
         self.codexLaunchOptions = codexLaunchOptions
-        self.liveOnTmuxAtArchive = liveOnTmuxAtArchive
     }
 }
 
@@ -2471,12 +2462,21 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     /// reopen from Closed Terminals starts with the same values. Absent in
     /// JSON and rows written before the column, which read as nil.
     public var claudeSpawnExtras: ClaudeSpawnExtras?
+    /// The tmux server the closed terminal's session may still be running in:
+    /// set when TBD deleted a live tmux row without running tmux, so the
+    /// session it carried kept running there. Every resume of
+    /// `claudeSessionID` is refused while that server may still be running
+    /// (docs/specs/2026-10-11-holder-transport-migration-design.md, "Resuming
+    /// a session a closed tmux row carried"). Nil on every other entry, and on
+    /// JSON and rows written before the column.
+    public var liveOnTmuxServer: String?
 
     public init(id: UUID, worktreeID: UUID, label: String? = nil,
                 kind: TerminalKind? = nil, closedAt: Date = Date(),
                 claudeSessionID: String? = nil, lineCount: Int = 0,
                 serverName: String? = nil, exitCode: Int32? = nil,
-                claudeSpawnExtras: ClaudeSpawnExtras? = nil) {
+                claudeSpawnExtras: ClaudeSpawnExtras? = nil,
+                liveOnTmuxServer: String? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.label = label
@@ -2487,6 +2487,7 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         self.serverName = serverName
         self.exitCode = exitCode
         self.claudeSpawnExtras = claudeSpawnExtras
+        self.liveOnTmuxServer = liveOnTmuxServer
     }
 }
 

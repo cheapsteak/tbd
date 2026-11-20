@@ -89,8 +89,7 @@ internal func preferredArchivedAgentTabs(_ tabs: [ArchivedAgentTab], preferred: 
     return tabs.map { tab in
         ArchivedAgentTab(identity: tab.identity, label: tab.label, ordinal: tab.ordinal,
             isPrimary: tab.identity == preferred, profileID: tab.profileID,
-            claudeSpawnExtras: tab.claudeSpawnExtras, codexLaunchOptions: tab.codexLaunchOptions,
-            liveOnTmuxAtArchive: tab.liveOnTmuxAtArchive)
+            claudeSpawnExtras: tab.claudeSpawnExtras, codexLaunchOptions: tab.codexLaunchOptions)
     }
 }
 
@@ -190,10 +189,11 @@ extension WorktreeLifecycle {
         order.append(contentsOf: omitted.map(\.id))
         // Every tab with a session to resume is kept, a live tmux row's
         // included, because a revive brings each one back on the pty holder.
-        // A live tmux row is marked: archive runs no tmux command, so its
-        // session may still be running in the worktree's tmux server, and a
-        // revive asks about that server before it relaunches the tab
-        // (`liveTmuxReviveRefusal`).
+        // Archive runs no tmux command, so a live tmux row's session may still
+        // be running in the worktree's tmux server: the teardown below marks
+        // its Closed Terminals entry with that server (`closeLeftoverTmuxRow`),
+        // and a revive asks about the mark before it relaunches the tab
+        // (`TmuxResumeGate`).
         var agentTabs: [ArchivedAgentTab] = []
         for (ordinal, id) in order.enumerated() {
             guard let terminal = terminals.first(where: { $0.id == id }),
@@ -203,8 +203,7 @@ extension WorktreeLifecycle {
                 isPrimary: id == activeID, profileID: terminal.profileID,
                 claudeSpawnExtras: terminal.claudeSpawnExtras,
                 codexLaunchOptions: terminal.kind == .codex
-                    ? try await db.terminals.codexLaunchOptionsForRelaunch(id: id) : nil,
-                liveOnTmuxAtArchive: terminal.transport == .tmux && !terminal.isParked ? true : nil))
+                    ? try await db.terminals.codexLaunchOptionsForRelaunch(id: id) : nil))
         }
 
         // A prior restore may have started only part of its snapshot. Keep
@@ -214,8 +213,7 @@ extension WorktreeLifecycle {
             agentTabs.append(ArchivedAgentTab(identity: tab.identity, label: tab.label,
                 ordinal: (agentTabs.map(\.ordinal).max() ?? -1) + 1,
                 isPrimary: agentTabs.isEmpty && tab.isPrimary, profileID: tab.profileID,
-                claudeSpawnExtras: tab.claudeSpawnExtras, codexLaunchOptions: tab.codexLaunchOptions,
-                liveOnTmuxAtArchive: tab.liveOnTmuxAtArchive))
+                claudeSpawnExtras: tab.claudeSpawnExtras, codexLaunchOptions: tab.codexLaunchOptions))
         }
 
         // Capture a branch rename without writing ahead of the archive
@@ -616,14 +614,17 @@ extension WorktreeLifecycle {
         if Self.reviveAsksSpawnGate(isRetry: isRetry, skipClaude: skipClaude, missingTabs: missingTabs) {
             _ = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
         }
-        // The live-tmux gate, also before anything is written: a tab this
-        // revive relaunches that was live on tmux at archive may still be
-        // running in the worktree's tmux server, and relaunching it would
-        // start a second agent on its session. A refused revive leaves the
-        // record and the worktree as they were. With `skipClaude` no archived
-        // tab is relaunched, so there is nothing to ask about.
-        if let refusal = await liveTmuxReviveRefusal(
-            relaunching: skipClaude ? [] : missingTabs, server: worktree.tmuxServer
+        // The resume gate (`TmuxResumeGate`), also before anything is
+        // written: a session this revive relaunches — an archived tab, or the
+        // History pane's preferred session, which the plan carries — may have
+        // been carried by a live tmux row TBD deleted, archive's own teardown
+        // included, and may still be running in that row's tmux server.
+        // Relaunching it would start a second agent on it, so the whole
+        // revive is refused, leaving the record and the worktree as they
+        // were. With `skipClaude` no archived tab is relaunched, so there is
+        // nothing to ask about. Each relaunch asks again in `spawnTerminal`.
+        if let refusal = try await tmuxResumeRefusal(
+            resuming: skipClaude ? [] : missingTabs.map(\.identity.sessionID)
         ) {
             throw refusal
         }

@@ -87,6 +87,17 @@ extension WorktreeLifecycle {
     /// the transport and the pids, the stamp `ProcessIdentityCheck` later
     /// compares, and the cleanup for a spawn whose row could not be written.
     ///
+    /// **It is also where the resume gate is asked for every new row.** A spawn
+    /// that names a session — a resume, a restored archived tab, a fork of a
+    /// session, or a fresh session whose id was just minted — is refused with
+    /// `TmuxResumeRefusal` before anything starts while a live tmux row TBD
+    /// deleted carried that session and its tmux server may still be running
+    /// it (`TmuxResumeGate`). A fresh id has no mark, so it costs one read.
+    /// Callers that write anything for the session before they get here — a
+    /// spawn record, a session title, a revive's restore plan, a new worktree
+    /// — ask the same gate first, so this answer is the backstop for a mark
+    /// written in between.
+    ///
     /// - Parameters:
     ///   - env: inlined as `export K='v';` in front of the command, so it lands
     ///     after every startup file has run — where code reading
@@ -131,6 +142,10 @@ extension WorktreeLifecycle {
         claudeSpawnExtras: ClaudeSpawnExtras? = nil,
         codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> Terminal {
+        if let claudeSessionID,
+           let refusal = try await tmuxResumeRefusal(resuming: [claudeSessionID]) {
+            throw refusal
+        }
         let registry = transport.registry
         let holderHandle = try await registry.spawn(
             terminalID: id,

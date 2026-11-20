@@ -104,10 +104,12 @@ public enum WakeResult: Equatable, Sendable {
     /// found".
     case respawnFailed(reason: String)
     /// The row is on the tmux transport, which TBD no longer starts, reaches
-    /// or stops sessions on (`tmuxWakeRefusal`). Nothing was touched and an
-    /// `initialPrompt` was not delivered. `reason` says what to do: a parked
-    /// row's names `tbd terminal migrate`, and a live row's says the session
-    /// is still running in tmux and how to end it.
+    /// or stops sessions on (`tmuxWakeRefusal`), or its session may still be
+    /// running in tmux because a live tmux row TBD deleted carried it too
+    /// (`TmuxResumeGate`). Nothing was touched and an `initialPrompt` was not
+    /// delivered. `reason` says what to do: a parked tmux row's names
+    /// `tbd terminal migrate`, and the others say the session may still be
+    /// running in tmux and how to end it.
     ///
     /// A refusal rather than a failed start, so no retry helps: the wake RPCs
     /// answer it with `RPCErrorCode.terminalOnTmux`, as every other request a
@@ -360,6 +362,13 @@ public actor HibernationCoordinator {
     /// the real kernel answers for.
     var holderProcessIsLive: @Sendable (Int32) -> Bool = { HolderSpawner.isLiveHolder(pid: $0) }
 
+    /// Whether a tmux server a Closed Terminals mark names is still running,
+    /// for the resume gate a wake asks (`TmuxResumeGate`). Asked only when the
+    /// session being woken carries a mark. Production uses the real probe;
+    /// tests replace it through `setLeftoverTmuxProbe`, so no real socket or
+    /// process is asked. A transition measure, like the probe.
+    var leftoverTmuxProbe: LeftoverTmuxServerProbe = .production()
+
     /// How the holder park observes and ends a child process. Injected so a
     /// test can state "the job ignored SIGTERM" in one line instead of
     /// arranging a real one, and can see which pid a park signalled.
@@ -467,6 +476,11 @@ public actor HibernationCoordinator {
     /// Replace the holder liveness check. Tests only — see `holderProcessIsLive`.
     func setHolderProcessIsLive(_ isLive: @escaping @Sendable (Int32) -> Bool) {
         holderProcessIsLive = isLive
+    }
+
+    /// Replace the leftover-tmux probe. Tests only — see `leftoverTmuxProbe`.
+    func setLeftoverTmuxProbe(_ probe: LeftoverTmuxServerProbe) {
+        leftoverTmuxProbe = probe
     }
 
     /// Wire the park snapshot's screen seam. Tests only — see
@@ -1068,7 +1082,14 @@ public actor HibernationCoordinator {
     /// **Only a holder row wakes.** A row on the tmux transport is refused
     /// before anything else about it is asked (`tmuxWakeRefusal`): a parked
     /// one names `tbd terminal migrate` and stays parked, and a live one says
-    /// it is still running in tmux. TBD no longer starts sessions on tmux.
+    /// it is still running in tmux. TBD no longer starts sessions on tmux. A
+    /// holder row whose session a deleted live tmux row also carried is
+    /// refused the same way while that row's tmux server may still be running
+    /// it (`TmuxResumeGate`), and stays parked.
+    ///
+    /// The in-place profile swap's wake (`wakeHolderAfterInPlaceChange`) does
+    /// not ask: it replaces a holder process that was running the session a
+    /// moment before, so it adds no agent the gate could prevent.
     ///
     /// An UNPARKED holder row whose job died is reported (`.sessionGone`) but
     /// not repaired — see `classifyUnparkedHolderWake`, which asks the process
@@ -1125,6 +1146,22 @@ public actor HibernationCoordinator {
         let sessionID = resumePlan.identity.sessionID
         if resumePlan.identity.agentKind == .codex, let initialPrompt, !initialPrompt.isEmpty {
             return .respawnFailed(reason: "Codex wake cannot deliver an initial prompt; resume without a prompt, then send it to the session.")
+        }
+        // The resume gate (`TmuxResumeGate`), before anything is written: a
+        // live tmux row TBD deleted may have carried this row's session too,
+        // and its tmux server may still be running it, so waking this row
+        // would start a second agent on it. One read of the marked entries for
+        // an unmarked session, which is every session but those; the probe is
+        // asked only about a server a mark names. The row stays parked.
+        do {
+            if let refusal = try await TmuxResumeGate(
+                history: db.terminalHistory, probe: leftoverTmuxProbe
+            ).refusal(resuming: [sessionID]) {
+                return .onTmux(reason: refusal.message)
+            }
+        } catch {
+            return .respawnFailed(
+                reason: "reading whether this session may still be running in tmux failed: \(error.localizedDescription)")
         }
         let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {

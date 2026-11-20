@@ -236,6 +236,20 @@ extension RPCRouter {
             prompt: params.prompt,
             agent: startAgent?.rawValue ?? (params.type ?? .shell).rawValue)
 
+        // The resume gate (`TmuxResumeGate`), for a resume of a session —
+        // `session.resume`, the History pane's Resume, `--resume` — before
+        // start admission and before the trust seed, the transcript sync, the
+        // session title and the session mod's spawn record, which all name
+        // the session: a session a deleted live tmux row carried may still be
+        // running in that row's tmux server. `spawnTerminal` asks again.
+        if let resumeID = params.resumeSessionID,
+           let refusal = try await actuating(actuationID, {
+               try await lifecycle.tmuxResumeRefusal(resuming: [resumeID])
+           }) {
+            await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
+            return refusal.coded.response
+        }
+
         // A Claude terminal's own values, kept on its row so later starts of
         // its session can reapply them; a resume honors the ones it is given
         // and copies none from an older row. The model among them is passed
@@ -1067,6 +1081,17 @@ extension RPCRouter {
         // Claude-kind with a live session id → resume it. Mirrors the
         // archived-session restore spawn in WorktreeLifecycle+Create.
         if entry.kind == .claude, let sessionID = entry.claudeSessionID {
+            // The resume gate (`TmuxResumeGate`), before start admission and
+            // before the trust seed, the transcript sync, the session title
+            // and the session mod's spawn record: an entry a live tmux row's
+            // close wrote is marked, and its session may still be running in
+            // that row's tmux server. `spawnTerminal` asks again.
+            if let refusal = try await actuating(actuationID, {
+                try await lifecycle.tmuxResumeRefusal(resuming: [sessionID])
+            }) {
+                await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
+                return refusal.coded.response
+            }
             // Start admission: only this branch launches an agent. Every
             // other kind opens a shell.
             if let held = await holdStartIfDenied(

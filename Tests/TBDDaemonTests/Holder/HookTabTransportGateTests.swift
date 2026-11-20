@@ -567,9 +567,9 @@ struct HookTabTransportGateTests {
     }
 
     /// A hook tab an earlier build left on tmux is closed without running a
-    /// tmux command: nothing is captured, nothing is killed, and — since its
-    /// session may still be running in tmux — no Closed Terminals entry is
-    /// written. The row, tab and order cleanup still runs.
+    /// tmux command: nothing is captured, nothing is killed, and — a shell
+    /// with no session to resume and no screen to keep — no Closed Terminals
+    /// entry is written. The row, tab and order cleanup still runs.
     @Test("closing a tmux hook tab runs no tmux command")
     func tmuxHookTabTeardownRunsNoTmux() async throws {
         let (_, cleanup) = isolateTBDHome()

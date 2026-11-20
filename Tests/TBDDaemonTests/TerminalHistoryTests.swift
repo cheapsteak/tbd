@@ -59,10 +59,11 @@ import Testing
     // MARK: - Closing a row left on tmux
     //
     // A row an earlier build started on tmux is closed without running a tmux
-    // command. A live one gets no Closed Terminals entry: its session may still
-    // be running in tmux, and an entry naming it would let revive start a
-    // second agent on the same session. A parked one ended its session when it
-    // was parked, and its entry carries the screen the park stored.
+    // command. A live one with a session gets a Closed Terminals entry with no
+    // screen, marked with the worktree's tmux server, because its session may
+    // still be running there: every resume of that session asks about the mark
+    // first (`TmuxResumeGate`). A parked one ended its session when it was
+    // parked, and its entry carries the screen the park stored, unmarked.
 
     /// A dry-run tmux that records every command it is asked to run and
     /// answers any capture with text no test expects to see in history.
@@ -73,7 +74,7 @@ import Testing
             dryRunCapturePane: { _, _ in "TMUX PANE TEXT" })
     }
 
-    @Test func deleteOfALiveTmuxRowWritesNoEntryAndRunsNoTmux() async throws {
+    @Test func deleteOfALiveTmuxRowWritesAMarkedEntryAndRunsNoTmux() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
         let recorder = RecordedTmuxArgs()
@@ -85,10 +86,33 @@ import Testing
         #expect(resp.success, "error: \(resp.error ?? "nil")")
 
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
-        #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty,
-                "a session that may still be running in tmux must not get a revivable entry")
+        let entry = try #require(
+            try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).first)
+        #expect(entry.id == fx.terminal.id)
+        #expect(entry.claudeSessionID == "sess-abc")
+        #expect(entry.liveOnTmuxServer == fx.worktree.tmuxServer,
+                "the session may still be running in tmux, so its entry must say where")
+        #expect(entry.lineCount == 0)
+        #expect(!FileManager.default.fileExists(atPath: fx.db.terminalHistory.contentPath(
+            worktreeID: fx.worktree.id, terminalID: fx.terminal.id)))
         #expect(recorder.snapshot().isEmpty,
                 "closing a tmux row ran a tmux command: \(recorder.snapshot())")
+    }
+
+    /// A live tmux row with no session has nothing to resume and no screen to
+    /// keep, so its close writes no entry.
+    @Test func deleteOfALiveTmuxShellRowWritesNoEntry() async throws {
+        let fx = try await makeFixture(label: "sh", kind: .shell, claudeSessionID: nil)
+        defer { fx.cleanup() }
+        let router = makeRouter(db: fx.db, tmux: TmuxManager(dryRun: true))
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: fx.terminal.id)))
+        #expect(resp.success, "error: \(resp.error ?? "nil")")
+
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
+        #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)
     }
 
     @Test func deleteOfAParkedTmuxRowRecordsItsStoredScreen() async throws {
@@ -115,6 +139,7 @@ import Testing
         #expect(entry.kind == .claude)
         #expect(entry.claudeSessionID == "sess-abc")
         #expect(entry.lineCount == 3)
+        #expect(entry.liveOnTmuxServer == nil, "a parked row's session ended at its park")
         let path = fx.db.terminalHistory.contentPath(
             worktreeID: fx.worktree.id, terminalID: fx.terminal.id)
         #expect(try String(contentsOfFile: path, encoding: .utf8) == snapshot)
@@ -202,7 +227,7 @@ import Testing
                 "archive ran a tmux command: \(recorder.snapshot())")
     }
 
-    @Test func archiveOfALiveTmuxRowWritesNoEntryAndStillArchives() async throws {
+    @Test func archiveOfALiveTmuxRowWritesAMarkedEntryAndStillArchives() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
         let recorder = RecordedTmuxArgs()
@@ -213,7 +238,9 @@ import Testing
 
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
         #expect(try await fx.db.worktrees.get(id: fx.worktree.id)?.status == .archived)
-        #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)
+        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
+        #expect(entries.map(\.id) == [fx.terminal.id])
+        #expect(entries.first?.liveOnTmuxServer == fx.worktree.tmuxServer)
         #expect(recorder.snapshot().isEmpty,
                 "archive ran a tmux command: \(recorder.snapshot())")
     }
@@ -291,6 +318,73 @@ import Testing
         let newestPath = fx.db.terminalHistory.contentPath(
             worktreeID: fx.worktree.id, terminalID: ids[50])
         #expect(FileManager.default.fileExists(atPath: newestPath))
+    }
+
+    /// A marked entry is outside the cap: pruning it would let a resume of its
+    /// session start a second agent while tmux may still run the first.
+    @Test func pruneKeepsAMarkedEntryBeyondTheNewestFifty() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
+        for i in 0..<51 {
+            let terminal = Terminal(
+                worktreeID: fx.worktree.id, tmuxWindowID: "@\(i)", tmuxPaneID: "%\(i)")
+            await fx.db.terminalHistory.store(
+                terminal: terminal, text: "output \(i)",
+                closedAt: Date().addingTimeInterval(TimeInterval(60 + i)))
+        }
+
+        let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
+        #expect(entries.count == 51)
+        #expect(entries.filter { $0.liveOnTmuxServer == nil }.count == 50)
+        #expect(entries.contains { $0.id == fx.terminal.id && $0.liveOnTmuxServer == "tbd-th" })
+    }
+
+    /// A live tmux close of a terminal that already has an entry marks that
+    /// entry, and a later re-save of it keeps the mark.
+    @Test func aLiveTmuxCloseMarksAnExistingEntryAndAReSaveKeepsIt() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        await fx.db.terminalHistory.store(
+            terminal: fx.terminal, text: "earlier close", closedAt: Date())
+
+        await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
+        let marked = try #require(
+            try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).first)
+        #expect(marked.liveOnTmuxServer == "tbd-th")
+        #expect(marked.lineCount == 1, "marking the entry must keep its capture")
+
+        await fx.db.terminalHistory.store(
+            terminal: fx.terminal, text: "a later close\nsecond line", closedAt: Date())
+        let resaved = try #require(
+            try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).first)
+        #expect(resaved.lineCount == 2)
+        #expect(resaved.liveOnTmuxServer == "tbd-th")
+    }
+
+    /// The gate's lookup: the servers marked for any of the session ids, in
+    /// any worktree, each once and in name order; nothing for an unmarked id.
+    @Test func liveOnTmuxServersReadsTheMarksOfTheGivenSessions() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        let other = try await fx.db.worktrees.create(
+            repoID: try #require(fx.worktree.repoID), name: "wt2", branch: "b2",
+            path: "/tmp/th-wt2-\(UUID().uuidString)", tmuxServer: "tbd-th2")
+        let sameSession = Terminal(
+            worktreeID: other.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            claudeSessionID: "sess-abc", kind: .claude)
+        let unmarked = Terminal(
+            worktreeID: other.id, tmuxWindowID: "@3", tmuxPaneID: "%3",
+            claudeSessionID: "sess-plain", kind: .claude)
+        await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
+        await fx.db.terminalHistory.recordLiveTmuxClose(terminal: sameSession, server: "tbd-th2")
+        await fx.db.terminalHistory.recordOnClose(terminal: unmarked, capture: nil)
+
+        let history = fx.db.terminalHistory
+        #expect(try await history.liveOnTmuxServers(sessionIDs: ["sess-abc"]) == ["tbd-th", "tbd-th2"])
+        #expect(try await history.liveOnTmuxServers(sessionIDs: ["sess-plain"]).isEmpty)
+        #expect(try await history.liveOnTmuxServers(sessionIDs: ["sess-none"]).isEmpty)
+        #expect(try await history.liveOnTmuxServers(sessionIDs: []).isEmpty)
     }
 
     // MARK: - Worktree hard-delete cleanup
@@ -508,7 +602,7 @@ import Testing
         }
         #expect(Set(columns) == Set([
             "id", "worktreeID", "label", "kind", "closedAt", "claudeSessionID", "lineCount",
-            "serverName", "exitCode", "claudeSpawnExtras"
+            "serverName", "exitCode", "claudeSpawnExtras", "liveOnTmuxServer"
         ]))
     }
 }
