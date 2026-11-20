@@ -19,8 +19,9 @@ protocol SidebarMenuHost: AnyObject {
 /// - a worktree row: `RowActionMenu` through `RowActionMenuActions`, then the
 ///   "New Cloud Session…" / "New Remote Session…" pair; for a row in a
 ///   multi-row selection, Archive Selection alone;
-/// - a repo header: Collapse or Expand, Rename…, Hide or Unhide, the two
-///   create items, Remove from List…;
+/// - a repo header: Collapse or Expand, Rename…, Hide or Unhide, the
+///   registry filter's "Hide <provider> Sessions" (checked while on) when the
+///   header has the filter button, the two create items, Remove from List…;
 /// - the Scratch header: Collapse or Expand, Edit Scratch Instructions…;
 /// - a remote session row: `RemoteSessionActionMenu` through
 ///   `RemoteSessionActionMenuActions`.
@@ -40,7 +41,9 @@ struct SidebarMenus {
             items = worktreeItems(worktree)
         case .repoHeader(let id):
             guard let repo = appState.repos.first(where: { $0.id == id }) else { return nil }
-            items = repoItems(repo)
+            var header: SectionHeaderModel?
+            if case .repoHeader(let model) = node.kind { header = model }
+            items = repoItems(repo, header: header)
         case .scratchHeader:
             items = scratchItems()
         case .remoteSession(let id):
@@ -116,7 +119,10 @@ struct SidebarMenus {
 
     // MARK: Repo headers
 
-    private func repoItems(_ repo: Repo) -> [NSMenuItem] {
+    /// - Parameter header: the header's model, whose registry filter decides
+    ///   whether the filter item exists and whether it is checked; the same
+    ///   existence rule as the header's button, which hover alone reveals.
+    private func repoItems(_ repo: Repo, header: SectionHeaderModel?) -> [NSMenuItem] {
         let host = self.host
         let state = appState
         let id = repo.id
@@ -130,6 +136,11 @@ struct SidebarMenus {
                 Task { await state.setRepoHidden(id: id, hidden: hidden) }
             },
         ]
+        if let filter = header?.registryFilter {
+            let item = SidebarMenuItem(filter.menuTitle) { state.toggleSidebarRegistryRemoteFilter(repoID: id) }
+            item.state = filter.isOn ? .on : .off
+            items.append(item)
+        }
         let cloud = CloudCreateEntryPresentation.cloudEntry(
             appState.remoteProviders,
             claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false)

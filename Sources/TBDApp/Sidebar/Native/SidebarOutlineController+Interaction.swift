@@ -287,6 +287,13 @@ extension SidebarOutlineController: SidebarMenuHost {
         }
     }
 
+    /// A repo header's registry filter: flips the repo in the saved set; the
+    /// observed write schedules the rebuild that hides or shows its rows.
+    @objc func registryFilterClicked(_ sender: NSView) {
+        guard case .repoHeader(let repoID)? = nodeID(for: sender) else { return }
+        appState.toggleSidebarRegistryRemoteFilter(repoID: repoID)
+    }
+
     /// Opens the pull request a worktree row's leading glyph stands for —
     /// the worst-state binding, as `PRBindingPresentation.iconBinding` picks
     /// it — when a click on the row lands on the glyph. The glyph is not a
