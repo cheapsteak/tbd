@@ -16,7 +16,8 @@ public enum ProcessEnvironmentMarkers: Sendable, Equatable {
     /// The environment was readable and holds neither marker.
     case noMarkers
     /// The environment could not be read: the call failed, the process is
-    /// protected, or the buffer held no environment entries at all.
+    /// protected, or the buffer held no whole environment: it held no entries
+    /// at all, or it ended before the environment did.
     case hidden
 }
 
@@ -32,7 +33,8 @@ public enum ProcessEnvironmentMarkers: Sendable, Equatable {
 /// The buffer is a native-endian `Int32` argc, the executable path and its NUL
 /// terminator padded with NULs to an 8-byte boundary, `argc` NUL-terminated
 /// argv strings starting at that boundary, then the environment as
-/// NUL-terminated `KEY=value` strings. `ProcArgsLayout` finds where the
+/// NUL-terminated `KEY=value` strings ended by an empty one, then strings the
+/// kernel adds for the process's own use. `ProcArgsLayout` finds where the
 /// environment starts, stepping over argv without reading it. Because argv
 /// starts at the boundary, an empty `argv[0]` is an argument like any other:
 /// a NUL told from the padding by its offset, not skipped with it.
@@ -84,6 +86,16 @@ public enum ProcessEnvironmentReader {
     /// environment entries is `.hidden` too — a live process always has at
     /// least `PATH`-like entries, so none means the kernel withheld them.
     ///
+    /// An empty entry ends the environment, and a buffer that ends before one
+    /// is `.hidden` as well, whatever entries it holds. That is how the kernel
+    /// withholds a protected process's environment, an Apple platform
+    /// binary's among them: it cuts the buffer after argv. It finds the cut by
+    /// skipping each run of NULs, so every empty argument merges with the NULs
+    /// before it and moves the cut one string later, past one more
+    /// environment entry. What is left is the start of the environment, not
+    /// the whole of it, and it can hold one marker while withholding the
+    /// other — the one that might name live work.
+    ///
     /// argv is stepped over by offset and never inspected.
     public static func parse(procArgs raw: [UInt8]) -> ProcessEnvironmentMarkers {
         guard let layout = ProcArgsLayout(procArgs: raw) else { return .hidden }
@@ -92,8 +104,9 @@ public enum ProcessEnvironmentReader {
         var entries = 0
         var worktree: String?
         var terminal: String?
-        while pos < raw.count {
-            guard let end = nextNul(in: raw, from: pos), end > pos else { break }
+        while true {
+            guard pos < raw.count, let end = nextNul(in: raw, from: pos) else { return .hidden }
+            if end == pos { break }
             entries += 1
             if worktree == nil, let value = value(in: raw, pos..<end, after: worktreePrefix) {
                 worktree = value

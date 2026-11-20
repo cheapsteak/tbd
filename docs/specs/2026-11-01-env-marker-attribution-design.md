@@ -38,6 +38,15 @@ read-only probe in `docs/research/2026-10-30-herdr/procenv_probe.py`:
 - **Escapees:** a process that left with `setsid` and a double fork was found
   by its marker alone.
 
+The kernel withholds a hidden process's environment by cutting the buffer
+after argv, and it finds the cut by skipping each run of NULs. An empty
+argument merges with the NULs before it, so each one moves the cut one string
+later and leaves one environment entry in the buffer. Measured on macOS 27
+with `/bin/sleep` started by `posix_spawn` with an empty `argv[0]` and the
+worktree marker as `env[0]`, under each of the eight amounts of path padding:
+the buffer holds that one entry and ends before the terminal marker. A whole
+environment ends with an empty entry; a cut one ends with the buffer.
+
 TBD sets the markers only on a terminal's job, so they reach what that job
 starts and nothing else. The daemon, a holder and a per-repo tmux server were
 probed directly and carry neither marker. The `tmux -CC attach` clients and the
@@ -133,8 +142,11 @@ retained or logged; environments hold secrets. It answers one of three ways:
 
 - **markers** – the environment is readable and holds at least one marker;
 - **no markers** – the environment is readable and holds neither;
-- **hidden** – zero entries, or the call failed. A process started under
-  `env -i` also reads as hidden, which only returns it to today's cwd rule.
+- **hidden** – zero entries, a buffer that ends before the environment does,
+  or the call failed. A process started under `env -i` also reads as
+  hidden, which only returns it to today's cwd rule. A cut-off environment is
+  hidden rather than read, because the entries the kernel withheld may hold
+  the marker that names live work.
 
 The reader runs after the sweep's `ps` snapshot, so a pid can be reissued in
 between. Right after `ps`, the sweep reads the kernel's process table once

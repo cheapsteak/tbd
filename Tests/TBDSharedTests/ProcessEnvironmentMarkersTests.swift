@@ -14,15 +14,20 @@ struct ProcessEnvironmentMarkersTests {
     /// padded with NULs so the two fill a multiple of 8 bytes; argv strings;
     /// env strings; then the empty entry that ends the environment and one of
     /// the strings the kernel puts after it. Every string is NUL-terminated.
+    /// With `closed` false the buffer stops after the last env string, as the
+    /// kernel cuts the buffer of a process whose environment it withholds.
     private static func bytes(
-        argc: Int32? = nil, exec: String = "/bin/x", argv: [String] = ["x"], env: [String]
+        argc: Int32? = nil, exec: String = "/bin/x", argv: [String] = ["x"], env: [String],
+        closed: Bool = true
     ) -> [UInt8] {
-        bytes(argc: argc, exec: exec, argv: argv, envBytes: env.map { Array($0.utf8) })
+        bytes(argc: argc, exec: exec, argv: argv, envBytes: env.map { Array($0.utf8) }, closed: closed)
     }
 
-    /// `bytes(argc:exec:argv:env:)` with each env entry given as raw bytes.
+    /// `bytes(argc:exec:argv:env:closed:)` with each env entry given as raw
+    /// bytes.
     private static func bytes(
-        argc: Int32? = nil, exec: String = "/bin/x", argv: [String] = ["x"], envBytes: [[UInt8]]
+        argc: Int32? = nil, exec: String = "/bin/x", argv: [String] = ["x"], envBytes: [[UInt8]],
+        closed: Bool = true
     ) -> [UInt8] {
         var out: [UInt8] = []
         withUnsafeBytes(of: argc ?? Int32(argv.count)) { out.append(contentsOf: $0) }
@@ -31,6 +36,7 @@ struct ProcessEnvironmentMarkersTests {
         while (out.count - 4) % 8 != 0 { out.append(0) }
         for arg in argv { out.append(contentsOf: Array(arg.utf8)); out.append(0) }
         for entry in envBytes { out.append(contentsOf: entry); out.append(0) }
+        guard closed else { return out }
         out.append(0)
         out.append(contentsOf: Array("ptr_munge=".utf8))
         out.append(contentsOf: [0, 0, 0, 0])
@@ -170,6 +176,28 @@ struct ProcessEnvironmentMarkersTests {
         #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .markers(worktreeID: "W", terminalID: "T"))
     }
 
+    // MARK: - Where the environment ends
+
+    /// The kernel's buffer for a protected process with an empty `argv[0]`:
+    /// cut after `env[0]`, with the terminal marker withheld behind it.
+    /// Fails against a reader that takes the start of the environment for
+    /// all of it, which reports the worktree marker alone.
+    @Test func anEnvironmentTheBufferCutsOffIsHidden() {
+        let cut = Self.bytes(argv: ["", "30"], env: ["TBD_WORKTREE_ID=W"], closed: false)
+        #expect(ProcessEnvironmentReader.parse(procArgs: cut) == .hidden)
+
+        // Ending inside an entry, before its terminator, is cut off too.
+        let unterminated = Self.bytes(argv: ["x"], env: ["TBD_TERMINAL_ID=T", "TBD_WORKTREE_ID=W"], closed: false)
+        #expect(ProcessEnvironmentReader.parse(procArgs: Array(unterminated.dropLast())) == .hidden)
+    }
+
+    /// The kernel's buffer for a protected process whose arguments are all
+    /// non-empty: cut straight after argv.
+    @Test func aBufferCutAfterArgvIsHidden() {
+        let cut = Self.bytes(argv: ["sleep", "30"], env: [], closed: false)
+        #expect(ProcessEnvironmentReader.parse(procArgs: cut) == .hidden)
+    }
+
     // MARK: - The real kernel
 
     @Test func aFailedCallIsHidden() {
@@ -192,8 +220,9 @@ struct ProcessEnvironmentMarkersTests {
     /// cut by skipping each run of NULs, so an empty `argv[0]` merges with the
     /// padding there and the cut lands one string late, after `env[0]`.
     /// Measured on macOS 27, the buffer holds the worktree marker and ends
-    /// before the terminal one. A kernel that gives the whole environment
-    /// shows both.
+    /// before the terminal one, and the reader calls that `.hidden`: the
+    /// environment is cut off. A kernel that gives the whole environment
+    /// shows both markers.
     ///
     /// Only this test's own environment is in the child, and the buffer is
     /// still never part of a failure message.
@@ -220,9 +249,7 @@ struct ProcessEnvironmentMarkersTests {
         #expect(startsAtTheFirstEntry)
 
         let markers = ProcessEnvironmentReader.markers(pid: child.pid)
-        let withheldAfterTheFirstEntry = ProcessEnvironmentMarkers.markers(
-            worktreeID: worktree, terminalID: nil)
         let whole = ProcessEnvironmentMarkers.markers(worktreeID: worktree, terminalID: terminal)
-        #expect(markers == withheldAfterTheFirstEntry || markers == whole)
+        #expect(markers == .hidden || markers == whole)
     }
 }
