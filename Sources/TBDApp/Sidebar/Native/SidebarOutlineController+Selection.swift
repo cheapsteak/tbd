@@ -6,18 +6,23 @@ import TBDShared
 extension SidebarOutlineController {
     // MARK: Selection
 
+    /// `AppState`'s selection as the outline's row IDs: its selected
+    /// worktrees and its selected remote session's row.
+    var modelSelectionIDs: Set<SidebarNodeID> {
+        let remote = appState.selectedRemoteSession.map {
+            RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID)
+        }
+        return SidebarSelectionBridge.outlineIDs(
+            selectedWorktreeIDs: appState.selectedWorktreeIDs, selectedRemoteSession: remote)
+    }
+
     /// Selects the rows `AppState` names: its selected worktrees and its
     /// selected remote session. A row the outline does not show is skipped.
     /// A row view draws the selection from the list's own (`isSelected`), so
     /// a selection alone reconfigures no row view.
     func applyModelSelection() {
-        let remote = appState.selectedRemoteSession.map {
-            RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID)
-        }
-        let wanted = SidebarSelectionBridge.outlineIDs(
-            selectedWorktreeIDs: appState.selectedWorktreeIDs, selectedRemoteSession: remote)
         var rows = IndexSet()
-        for id in wanted {
+        for id in modelSelectionIDs {
             guard let item = items.existing(id) else { continue }
             let row = outline.row(forItem: item)
             if row >= 0 { rows.insert(row) }
@@ -27,10 +32,86 @@ extension SidebarOutlineController {
         }
     }
 
+    /// Centres a row selected outside the sidebar — by back and forward, a
+    /// notification, a shortcut, the jump menu, or the selection restored at
+    /// launch — even when it is in view already. Runs after
+    /// `applyModelSelection()`.
+    ///
+    /// Only a row the outline had not shown selected counts: of those, the
+    /// first in display order is centred. So a selection that only shrank —
+    /// a row of several archived, an adopted lane's remote session pruned by
+    /// a refresh — never scrolls, and neither does a rebuild that left the
+    /// selection alone: the user may have scrolled away since. Nor does a
+    /// creation placeholder's swap for its real row, which can land long
+    /// after the user scrolled elsewhere; a placeholder the user navigated
+    /// away from, still in the model, is an ordinary change.
+    ///
+    /// The first apply only takes the selection, so the first load never
+    /// scrolls. The selection restored at launch lands after it, once the
+    /// daemon's data has loaded, and is centred:
+    /// `connectAndLoadInitialState` expands its repo so the row can be seen,
+    /// and at launch the user has no scroll position to lose.
+    ///
+    /// A new row the outline does not show — in a collapsed section, filtered
+    /// out, only in the dock — is skipped, and nothing is expanded for it.
+    /// While structure is held nothing is taken, so the change waits for the
+    /// apply that ends the hold, as the pending scroll target does.
+    func centerSelectionIfChanged() {
+        let selection = modelSelectionIDs
+        guard let shown = lastShownSelection else {
+            recordShownSelection(selection)
+            return
+        }
+        guard selection != shown, !isHoldingStructure else { return }
+        let added = selection.subtracting(shown)
+        let swappedPlaceholder = lastShownPlaceholdersLeftTheModel()
+        recordShownSelection(selection)
+        guard !added.isEmpty, !swappedPlaceholder else { return }
+        let rows = added.compactMap { id -> Int? in
+            guard let item = items.existing(id) else { return nil }
+            let row = outline.row(forItem: item)
+            return row >= 0 ? row : nil
+        }
+        guard let first = rows.min() else { return }
+        centerRow(first)
+    }
+
+    /// Takes `AppState`'s selection as shown where the user is looking, so
+    /// the apply that mirrors it leaves the scroll alone. Called for every
+    /// selection the user makes in the sidebar — a click, a ⌘- or ⇧-click or
+    /// an arrow key in the outline, a click in the dock — since moving the
+    /// list under the pointer would lose the row just clicked.
+    func markSelectionShown() {
+        recordShownSelection(modelSelectionIDs)
+    }
+
+    /// Records `selection` as shown, and whether its worktrees were all
+    /// creation placeholders.
+    private func recordShownSelection(_ selection: Set<SidebarNodeID>) {
+        lastShownSelection = selection
+        var worktreeIDs: Set<UUID> = []
+        for id in selection {
+            if case .worktree(let uuid) = id { worktreeIDs.insert(uuid) }
+        }
+        let allPlaceholders = !worktreeIDs.isEmpty && worktreeIDs.isSubset(of: appState.pendingWorktreeIDs)
+        lastShownPlaceholderIDs = allPlaceholders ? worktreeIDs : []
+    }
+
+    /// Whether the last shown selection was creation placeholders that are
+    /// all gone from the model: swapped for their real rows (local create,
+    /// remote lane adoption) or dropped by a failed create.
+    private func lastShownPlaceholdersLeftTheModel() -> Bool {
+        guard !lastShownPlaceholderIDs.isEmpty else { return false }
+        let live = Set(appState.allWorktrees.map(\.id))
+        return lastShownPlaceholderIDs.isDisjoint(with: live)
+    }
+
     /// Tells `AppState`, once, when a selected worktree left the model during
     /// the apply — the daemon dropped it without `AppState` pruning the
     /// selection. A row merely out of view (a collapsed section, a filter)
-    /// stays selected.
+    /// stays selected. The pruned selection only shrinks, so it never
+    /// scrolls, and it records nothing as shown: a centre waiting for a hold
+    /// to end still runs.
     func reconcileVanishedSelection() {
         let selected = appState.selectedWorktreeIDs
         let unshown = selected.filter { !tree.contains(.worktree($0)) }
@@ -74,6 +155,8 @@ extension SidebarOutlineController {
                 return self.outline.row(forItem: item) >= 0
             })
         writeSelection(ids)
+        // Read back after the `didSet` has routed it.
+        markSelectionShown()
         isApplyingModelSelection = true
         applyModelSelection()
         isApplyingModelSelection = false

@@ -1002,6 +1002,270 @@ struct SidebarOutlineControllerTests {
         #expect(h.state.pendingScrollToWorktreeID == nil)
     }
 
+    // MARK: Centring a selection made elsewhere
+
+    /// Back and forward write `AppState`'s selection and ask for no scroll.
+    /// The outline centres the row each lands on; an entry with two
+    /// worktrees centres the one shown first.
+    @Test func backAndForwardCenterTheSelectedRow() throws {
+        let h = OutlineHarness("center.backForward")
+        defer { h.tearDown() }
+        let rows = Self.mountTallList(h, history: [[40], [50, 30], [0]])
+        try #require(h.clip.bounds.minY < 0.5)
+        try #require(h.state.canGoBack)
+
+        h.state.navigateBack()
+        h.controller.flushPendingRebuild()
+        try #require(h.state.selectedWorktreeIDs == [rows[50].id, rows[30].id])
+        #expect(h.outline.selectedRowIndexes.count == 2)
+        try Self.expectCentered(.worktree(rows[30].id), in: h)
+
+        h.state.navigateBack()
+        h.controller.flushPendingRebuild()
+        try #require(h.state.selectedWorktreeIDs == [rows[40].id])
+        try Self.expectCentered(.worktree(rows[40].id), in: h)
+
+        // Row 0 sits at the top of the list, so centring it stops there.
+        h.state.navigateForward()
+        h.state.navigateForward()
+        h.controller.flushPendingRebuild()
+        try #require(h.state.selectedWorktreeIDs == [rows[0].id])
+        #expect(h.clip.bounds.minY < 0.5, "Forward to row 0 left the list at \(h.clip.bounds.minY)")
+    }
+
+    /// The first load selects the row `AppState` names without scrolling to
+    /// it.
+    @Test func firstLoadDoesNotScrollToTheSelection() throws {
+        let h = OutlineHarness("center.firstLoad")
+        defer { h.tearDown() }
+        let rows = Self.mountTallList(h, history: [[40]])
+
+        let selected = h.row(.worktree(rows[40].id))
+        try #require(selected >= 0)
+        try #require(h.outline.rect(ofRow: selected).minY > h.clip.bounds.maxY,
+                     "The selected row is in view already; the check below would be vacuous")
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: selected))
+        #expect(h.clip.bounds.minY < 0.5, "The first load scrolled to \(h.clip.bounds.minY)")
+    }
+
+    /// Once the selection is centred, the user may scroll away; a rebuild
+    /// that leaves the selection alone leaves the scroll alone too.
+    @Test func rebuildWithoutSelectionChangeKeepsTheScroll() throws {
+        let h = OutlineHarness("center.rebuild")
+        defer { h.tearDown() }
+        let rows = Self.mountTallList(h, history: [[0]])
+        h.state.selectedWorktreeIDs = [rows[40].id]
+        h.controller.flushPendingRebuild()
+        try Self.expectCentered(.worktree(rows[40].id), in: h)
+
+        h.outline.scroll(NSPoint(x: 0, y: 0))
+        try #require(h.clip.bounds.minY < 0.5, "The outline never scrolled back to the top")
+        let builds = h.controller.buildCount
+        h.state.devServerRunningWorktreeIDs = [rows[1].id]
+        h.controller.flushPendingRebuild()
+        try #require(h.controller.buildCount == builds + 1, "Nothing rebuilt; the check below would be vacuous")
+        #expect(h.clip.bounds.minY < 0.5, "A rebuild that kept the selection scrolled to \(h.clip.bounds.minY)")
+    }
+
+    /// A row the user clicks is where they are looking: the list does not
+    /// move under the pointer. The same selection made elsewhere centres the
+    /// row.
+    @Test func clickInTheOutlineDoesNotScroll() throws {
+        let h = OutlineHarness("center.click")
+        defer { h.tearDown() }
+        let rows = Self.mountTallList(h, history: [[0]])
+        let clip = h.clip.bounds
+        try #require(clip.minY < 0.5)
+        // The lowest row in full view, well below the middle.
+        let fullyShown = (0..<h.outline.numberOfRows).filter { h.outline.rect(ofRow: $0).maxY <= clip.maxY }
+        let clicked = try #require(fullyShown.last)
+        let clickedRows = rows.filter { h.row(.worktree($0.id)) == clicked }
+        let target = try #require(clickedRows.first, "The lowest row in view is not a worktree row")
+        try #require(h.outline.rect(ofRow: clicked).midY - clip.midY > 5,
+                     "The row is at the middle already; the check below would be vacuous")
+
+        h.outline.selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false)
+        try #require(h.state.selectedWorktreeIDs == [target.id], "The click never reached AppState")
+        h.controller.flushPendingRebuild()
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: clicked))
+        #expect(h.clip.bounds.minY < 0.5, "A click in the outline scrolled the list to \(h.clip.bounds.minY)")
+
+        // Control: away and back again from outside the sidebar, the row is
+        // centred.
+        h.state.selectedWorktreeIDs = [rows[0].id]
+        h.controller.flushPendingRebuild()
+        h.state.selectedWorktreeIDs = [target.id]
+        h.controller.flushPendingRebuild()
+        try Self.expectCentered(.worktree(target.id), in: h)
+    }
+
+    /// A selection made while a rename holds the structure is centred by the
+    /// apply that ends the hold, not before.
+    @Test func selectionChangedDuringHoldCentersWhenTheHoldEnds() throws {
+        let h = OutlineHarness("center.held")
+        defer { h.tearDown() }
+        let rows = Self.mountTallList(h, history: [[0]])
+
+        h.controller.beginHold(.rename)
+        h.state.selectedWorktreeIDs = [rows[40].id]
+        h.controller.flushPendingRebuild()
+        #expect(h.clip.bounds.minY < 0.5, "The outline scrolled while its structure was held")
+
+        h.controller.endHold(.rename)
+        try Self.expectCentered(.worktree(rows[40].id), in: h)
+    }
+
+    /// A row of a selection the outline prunes mid-hold, because it left the
+    /// model, does not cancel the centre waiting for the hold to end.
+    @Test func vanishedRowPrunedDuringHoldKeepsTheWaitingCenter() throws {
+        let h = OutlineHarness("center.heldPrune")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let open = Repo(path: "/tmp/acme", displayName: "acme")
+        let folded = Repo(path: "/tmp/acme-folded", displayName: "folded", expanded: false)
+        let rows = (0..<60).map { Self.row("row \($0)", open, order: $0) }
+        let hidden = Self.row("hidden", folded)
+        h.state.repos = [open, folded]
+        h.state.worktrees = [open.id: rows, folded.id: [hidden]]
+        h.state.selectedWorktreeIDs = [rows[0].id]
+        h.mount(size: NSSize(width: 320, height: 200))
+
+        h.controller.beginHold(.rename)
+        h.state.selectedWorktreeIDs = [rows[40].id, hidden.id]
+        h.controller.flushPendingRebuild()
+        try #require(h.clip.bounds.minY < 0.5, "The outline scrolled while its structure was held")
+
+        // The row in the collapsed section leaves the model, and the outline
+        // prunes it from the selection while the hold is still on.
+        h.state.worktrees[folded.id] = []
+        h.controller.flushPendingRebuild()
+        try #require(h.state.selectedWorktreeIDs == [rows[40].id], "The vanished row was never pruned")
+        try #require(h.controller.appStateSelectionWriteCount == 1)
+        #expect(h.clip.bounds.minY < 0.5, "The outline scrolled while its structure was held")
+
+        h.controller.endHold(.rename)
+        try Self.expectCentered(.worktree(rows[40].id), in: h)
+    }
+
+    /// Archiving one of two selected rows leaves the other selected; the list
+    /// stays where the user acted instead of jumping to the row that is left.
+    @Test func archivingOneOfTwoSelectedRowsDoesNotScroll() throws {
+        let h = OutlineHarness("center.shrink")
+        defer { h.tearDown() }
+        let rows = Self.mountTallList(h, history: [[5, 40]])
+        let acted = h.row(.worktree(rows[40].id))
+        try #require(acted >= 0)
+        h.outline.scroll(NSPoint(x: 0, y: h.outline.rect(ofRow: acted).minY - 60))
+        let before = h.clip.bounds.minY
+        try #require(before > 0.5, "The outline never scrolled to the row; the check below would be vacuous")
+
+        h.state.removeArchivedWorktreeFromState(id: rows[40].id)
+        try #require(h.state.selectedWorktreeIDs == [rows[5].id])
+        h.controller.flushPendingRebuild()
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(rows[5].id))))
+        #expect(abs(h.clip.bounds.minY - before) < 0.5,
+                "Archiving one of two selected rows scrolled the list: \(before) → \(h.clip.bounds.minY)")
+    }
+
+    /// A refresh that no longer reports an adopted lane's session clears
+    /// `selectedRemoteSession` while the lane stays selected: nothing was
+    /// selected, so nothing scrolls.
+    @Test func prunedRemoteSessionOfASelectedLaneDoesNotScroll() throws {
+        let h = OutlineHarness("center.remotePrune")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        var rows = (0..<60).map { Self.row("row \($0)", repo, order: $0) }
+        let lane = SidebarGroupFixtures.row("lane", repoID: repo.id, remote: "s1", order: 40)
+        rows[40] = lane
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: rows]
+        h.state.selectedWorktreeIDs = [rows[0].id]
+        h.mount(size: NSSize(width: 320, height: 200))
+
+        // Selecting the lane points the remote surface at its session.
+        h.state.selectedWorktreeIDs = [lane.id]
+        try #require(h.state.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+        h.controller.flushPendingRebuild()
+        try Self.expectCentered(.worktree(lane.id), in: h)
+
+        h.outline.scroll(NSPoint(x: 0, y: 0))
+        try #require(h.clip.bounds.minY < 0.5, "The outline never scrolled back to the top")
+        let builds = h.controller.buildCount
+        h.state.pruneRemoteSessionState(toKnownSessions: [])
+        try #require(h.state.selectedRemoteSession == nil)
+        try #require(h.state.selectedWorktreeIDs == [lane.id])
+        h.controller.flushPendingRebuild()
+        try #require(h.controller.buildCount == builds + 1, "Nothing rebuilt; the check below would be vacuous")
+        #expect(h.clip.bounds.minY < 0.5, "Pruning the lane's session scrolled the list to \(h.clip.bounds.minY)")
+    }
+
+    /// A creation placeholder swapped for its real row moves the selection
+    /// with it, which can land long after the user scrolled elsewhere: the
+    /// list stays put. Navigating away from a placeholder that is still in
+    /// the model is an ordinary change and centres.
+    @Test func placeholderSwapDoesNotScroll() throws {
+        let h = OutlineHarness("center.placeholderSwap")
+        defer { h.tearDown() }
+        let rows = Self.mountTallList(h, history: [[0]])
+        let repo = try #require(h.state.repos.first)
+
+        // As `createWorktree` draws and selects it.
+        let placeholder = Self.row("new", repo, order: 30, status: .creating)
+        h.state.pendingWorktreeIDs.insert(placeholder.id)
+        h.state.worktrees[repo.id]?.append(placeholder)
+        h.state.selectedWorktreeIDs = [placeholder.id]
+        h.controller.flushPendingRebuild()
+        try Self.expectCentered(.worktree(placeholder.id), in: h)
+
+        h.outline.scroll(NSPoint(x: 0, y: 0))
+        try #require(h.clip.bounds.minY < 0.5, "The outline never scrolled back to the top")
+        // As the create's success path swaps it: the row, then the selection,
+        // then the pending marker.
+        let real = Self.row("new", repo, order: 30)
+        let swapped = h.state.replaceCreationPlaceholder(
+            repoID: repo.id, placeholderID: placeholder.id, placeholderName: "new", with: real)
+        try #require(swapped != nil)
+        h.state.selectedWorktreeIDs = [real.id]
+        h.state.pendingWorktreeIDs.remove(placeholder.id)
+        h.controller.flushPendingRebuild()
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(real.id))))
+        #expect(h.clip.bounds.minY < 0.5, "The placeholder's swap scrolled the list to \(h.clip.bounds.minY)")
+
+        // Control: from a placeholder still being created, another row
+        // selected elsewhere is centred.
+        let creating = Self.row("creating", repo, order: 50, status: .creating)
+        h.state.pendingWorktreeIDs.insert(creating.id)
+        h.state.worktrees[repo.id]?.append(creating)
+        h.state.selectedWorktreeIDs = [creating.id]
+        h.controller.flushPendingRebuild()
+        h.outline.scroll(NSPoint(x: 0, y: 0))
+        try #require(h.clip.bounds.minY < 0.5, "The outline never scrolled back to the top")
+        h.state.selectedWorktreeIDs = [rows[40].id]
+        h.controller.flushPendingRebuild()
+        try Self.expectCentered(.worktree(rows[40].id), in: h)
+    }
+
+    /// In the launch order: the first load runs with nothing selected, and
+    /// the saved selection is restored once the daemon's data has loaded.
+    /// The restored row is centred.
+    @Test func selectionRestoredAfterTheFirstLoadIsCentered() throws {
+        let h = OutlineHarness("center.restore")
+        defer { h.tearDown() }
+        let rows = Self.mountTallList(h, history: [])
+        try #require(h.state.selectedWorktreeIDs.isEmpty)
+        try #require(h.clip.bounds.minY < 0.5)
+
+        // The key literal, because `AppState.selectionOrderKey` is private.
+        let saved = try JSONEncoder().encode([rows[40].id.uuidString])
+        h.defaults.set(saved, forKey: "com.tbd.app.selectionOrder")
+        let valid = h.state.allWorktrees.map(\.id)
+        h.state.restoreSavedSelection(validWorktreeIDs: valid)
+        try #require(h.state.selectedWorktreeIDs == [rows[40].id], "Nothing was restored")
+        h.controller.flushPendingRebuild()
+        try Self.expectCentered(.worktree(rows[40].id), in: h)
+    }
+
     @Test func arrowKeyFromRemoteRowMovesSelection() throws {
         let h = OutlineHarness("arrowKey")
         defer { h.tearDown() }
@@ -1069,7 +1333,35 @@ struct SidebarOutlineControllerTests {
                 sourceLocation: sourceLocation)
     }
 
+    /// `id`'s row sits at the middle of the clip view, to within a point.
+    static func expectCentered(_ id: SidebarNodeID, in h: OutlineHarness,
+                               sourceLocation: SourceLocation = #_sourceLocation) throws {
+        let row = h.row(id)
+        try #require(row >= 0, "The row is not shown", sourceLocation: sourceLocation)
+        let rowMid = h.outline.rect(ofRow: row).midY
+        let clipMid = h.clip.bounds.midY
+        #expect(abs(rowMid - clipMid) <= 1, "The row is not centred: row \(rowMid), clip \(clipMid)",
+                sourceLocation: sourceLocation)
+    }
+
     // MARK: Fixtures
+
+    /// Sixty worktree rows in one repo, in a sidebar 200 pt tall, mounted
+    /// after selecting each entry of `history` in turn — indexes into the
+    /// rows — so the last is selected at the first load and back has the
+    /// others to go to.
+    static func mountTallList(_ h: OutlineHarness, history: [[Int]]) -> [Worktree] {
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let rows = (0..<60).map { Self.row("row \($0)", repo, order: $0) }
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: rows]
+        for entry in history {
+            h.state.selectedWorktreeIDs = Set(entry.map { rows[$0].id })
+        }
+        h.mount(size: NSSize(width: 320, height: 200))
+        return rows
+    }
 
     static func row(_ name: String, _ repo: Repo, parent: UUID? = nil, order: Int = 0,
                     status: WorktreeStatus = .active) -> Worktree {

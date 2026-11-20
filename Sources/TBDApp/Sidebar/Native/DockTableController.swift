@@ -100,6 +100,10 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// Runs after an apply changed the number of rows; the container resizes
     /// the dock.
     var onRowCountChange: (() -> Void)?
+    /// Runs after the user changed the selection in the dock. The container
+    /// tells the outline, which then mirrors the selection without scrolling
+    /// to it: the user is looking at the dock, not at the list above.
+    var onUserSelection: (() -> Void)?
 
     /// Answers whether an unpromoted scratch row's directory exists. The
     /// container hands in the outline's cache of answers probed off the main
@@ -565,6 +569,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             extending: SidebarSelectionBridge.extendsSelection(selectionModifiers()),
             isShown: { shown.contains($0) })
         writeSelection(ids)
+        onUserSelection?()
         isApplyingModelSelection = true
         applyModelSelection()
         isApplyingModelSelection = false

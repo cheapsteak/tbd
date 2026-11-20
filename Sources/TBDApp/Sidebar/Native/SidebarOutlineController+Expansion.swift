@@ -144,6 +144,12 @@ extension SidebarOutlineController {
         guard let item = items.existing(.worktree(target)) else { return }
         let row = outline.row(forItem: item)
         guard row >= 0 else { return }
+        centerRow(row)
+    }
+
+    /// Scrolls so `row`'s middle sits at the middle of the visible area, as
+    /// far as the content allows: a row near either end stops short of it.
+    func centerRow(_ row: Int) {
         outline.tile()
         scroll(toY: outline.rect(ofRow: row).midY - scrollView.contentView.bounds.height / 2)
     }
