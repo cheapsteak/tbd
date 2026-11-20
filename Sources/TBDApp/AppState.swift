@@ -133,6 +133,7 @@ final class AppState {
             sidebarRemoteSnapshotCache = nil
             sidebarParentRemoteGroupsCache.removeAll()
             sidebarHibernationCache.removeAll()
+            sidebarRegistryFilterCache.removeAll()
         }
     }
     /// Repo-less scratch spaces (`Worktree.isScratch`), surfaced separately
@@ -277,6 +278,7 @@ final class AppState {
     var unreadTerminals: Set<UUID> = []
     var selectedWorktreeIDs: Set<UUID> = [] {
         didSet {
+            if selectedWorktreeIDs != oldValue { invalidateSidebarRegistryFilterForSelection() }
             // A repo ID in the set (not a worktree) is a repo selection:
             // remove it from the worktree set.
             let repoIDs = Set(repos.map(\.id))
@@ -455,6 +457,7 @@ final class AppState {
     /// (see `selectRemoteSession`'s doc comment).
     var selectedRemoteSession: RemoteSessionSelection? = nil {
         didSet {
+            if selectedRemoteSession != oldValue { invalidateSidebarRegistryFilterForSelection() }
             // Adopted lanes already signal through their worktree selection.
             // Clearing a target changes the reveal signature without a nonce.
             if selectedRemoteSession != nil && selectedWorktreeIDs.isEmpty {
@@ -567,6 +570,8 @@ final class AppState {
             // the match memo: its indices still name the same sessions.
             if !remoteSessions.elementsEqual(oldValue, by: SidebarSessionPlacement.sameMatchInputs) {
                 sidebarMatchedSessionsCache.removeAll()
+                // The registry filter reads only match inputs: membership, provider, id.
+                sidebarRegistryFilterCache.removeAll()
             }
         }
     }
@@ -639,6 +644,19 @@ final class AppState {
             persistExpandedSidebarGroups()
         }
     }
+    /// Repos whose sidebar section hides registry-provider remote sessions
+    /// (everything but cloud). Observed: the outline rebuilds on it. Loaded
+    /// from and written to `userDefaults` under
+    /// `sidebarRegistryRemoteHiddenRepoIDsKey`; see
+    /// docs/specs/2026-11-19-sidebar-remote-session-filter-design.md.
+    var sidebarRegistryRemoteHiddenRepoIDs: Set<UUID> = [] {
+        didSet {
+            guard sidebarRegistryRemoteHiddenRepoIDs != oldValue else { return }
+            persistSidebarRegistryRemoteHiddenRepoIDs()
+            sidebarRegistryFilterCache.removeAll()
+            sidebarParentRemoteGroupsCache.removeAll()
+        }
+    }
     /// An explicit re-selection must reveal a manually collapsed group too.
     var sidebarSelectionGeneration: UInt64 = 0
     @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
@@ -650,6 +668,10 @@ final class AppState {
     @ObservationIgnored var sidebarMatchedSessionsSortCount = 0
     /// Parent partitions share the snapshot and survive unrelated row renders.
     @ObservationIgnored var sidebarParentRemoteGroupsCache: [UUID: SidebarRemoteGroups] = [:]
+    /// Per-repo registry filter, filled by `sidebarRegistryRemoteFilter(repoID:)`
+    /// and cleared when `worktrees`, the match inputs of `remoteSessions`, the
+    /// saved set, or (while a repo is filtered) the selection changes.
+    @ObservationIgnored var sidebarRegistryFilterCache: [UUID: SidebarRegistryRemoteFilter] = [:]
     @ObservationIgnored var sidebarHibernationCache: [SidebarGroupID.Owner: SidebarHibernationPartition] = [:]
 
     /// Test seam: when set, replaces the daemon roundtrip for archived
@@ -2678,6 +2700,10 @@ final class AppState {
     /// prunes no remembered sidebar group.
     @ObservationIgnored lazy var reposFetcher: @MainActor () async throws -> [Repo] =
         { [daemonClient] in try await daemonClient.listRepos() }
+    /// How `removeRepo` asks the daemon to remove a repo (`id`, `force`) —
+    /// injectable so tests can drive the removal without a daemon.
+    @ObservationIgnored lazy var repoRemover: @MainActor (UUID, Bool) async throws -> Void =
+        { [daemonClient] id, force in try await daemonClient.removeRepo(repoID: id, force: force) }
     /// How `refreshWorktrees(repoID:)` fetches the non-archived worktree
     /// list — injectable for the same reason as `reposFetcher`, so tests can
     /// drive the list merge without a real daemon.
@@ -2931,6 +2957,7 @@ final class AppState {
         }
         skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
         expandedSidebarGroups = Self.restoredSidebarGroups(defaults: userDefaults)
+        sidebarRegistryRemoteHiddenRepoIDs = Self.restoredSidebarRegistryRemoteHiddenRepoIDs(defaults: userDefaults)
         startMemoryPressureMonitor()
         registerFocusObservers()
         watchGhosttyTerminalEngineFlag()
@@ -4430,6 +4457,7 @@ final class AppState {
                 updateNavigationFlags()
             }
             pruneExpandedSidebarGroups(repoIDs: Set(fetchedRepos.map(\.id)))
+            pruneSidebarRegistryRemoteHiddenRepoIDs(repoIDs: Set(fetchedRepos.map(\.id)))
         } catch {
             logger.error("Failed to list repos: \(error)")
             handleConnectionError(error)
