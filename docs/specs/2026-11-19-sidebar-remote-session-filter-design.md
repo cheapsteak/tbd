@@ -162,7 +162,10 @@ menu item is the path that does not depend on hover.
   sibling list. Hidden rows keep their order among themselves and never move
   as a side effect. A drop that leaves the visible order as it was moves
   nothing at all, so dropping a row back into its own gap cannot slip it past
-  a hidden neighbour.
+  a hidden neighbour. With grouping on, "visible" means visible in the drop's
+  own group: rows filed under another group are passed over like hidden rows,
+  and a drop at the end of a group lands directly after that group's last
+  visible row. A row still being created is never the anchor of a move.
 - **Folded or hidden repo.** No change: the filter acts only on rows the repo
   would otherwise show.
 - **Repo removed.** Removing a repo from TBD removes its ID from the saved set,
