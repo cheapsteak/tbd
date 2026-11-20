@@ -1,11 +1,12 @@
 import Darwin
 import Foundation
 import Testing
+import TestSupport
 
 @testable import TBDShared
 
 /// The KERN_PROCARGS2 parser, run on literal buffers laid out the way the
-/// kernel lays them out, plus two cases that ask the real kernel. Failure
+/// kernel lays them out, plus cases that ask the real kernel. Failure
 /// messages never include buffer contents: environments hold secrets.
 @Suite("Process environment markers")
 struct ProcessEnvironmentMarkersTests {
@@ -179,5 +180,49 @@ struct ProcessEnvironmentMarkersTests {
     @Test func theRealCallReadsThisProcess() throws {
         let raw = try #require(ProcessEnvironmentReader.procArgs(pid: getpid()))
         #expect(raw.count > 4)
+    }
+
+    /// The real kernel's layout, for the reader: `/bin/sleep` started with an
+    /// empty `argv[0]` under exec paths that need each amount of padding, and
+    /// with the worktree marker as `env[0]`. The environment starts at
+    /// `env[0]` whatever the padding.
+    ///
+    /// `/bin/sleep` is an Apple platform binary, and the kernel withholds such
+    /// a process's environment by cutting the buffer after argv. It finds the
+    /// cut by skipping each run of NULs, so an empty `argv[0]` merges with the
+    /// padding there and the cut lands one string late, after `env[0]`.
+    /// Measured on macOS 27, the buffer holds the worktree marker and ends
+    /// before the terminal one. A kernel that gives the whole environment
+    /// shows both.
+    ///
+    /// Only this test's own environment is in the child, and the buffer is
+    /// still never part of a failure message.
+    @Test("a real process started with an empty argv[0] has its environment start at env[0]",
+          arguments: pathsNeedingEachPadding)
+    func aRealProcesssEnvironmentStartsAtItsFirstEntry(path: String, padding: Int) throws {
+        let worktree = UUID().uuidString
+        let terminal = UUID().uuidString
+        let worktreeEntry = "\(ProcessEnvironmentReader.worktreeKey)=\(worktree)"
+        let child = try ExactArgvChild(
+            path: path, argv: ["", "30"],
+            environment: [worktreeEntry, "\(ProcessEnvironmentReader.terminalKey)=\(terminal)"])
+        defer { child.end() }
+
+        let read = ProcessEnvironmentReader.procArgs(pid: child.pid)
+        let raw = try #require(read)
+        let parsed = ProcArgsLayout(procArgs: raw)
+        let layout = try #require(parsed)
+        let argumentLengths = layout.argumentRanges.map(\.count)
+        #expect(layout.argumentsStart == 4 + path.utf8.count + 1 + padding)
+        #expect(argumentLengths == [0, 2])
+        let startsAtTheFirstEntry = raw[layout.environmentStart...]
+            .starts(with: Array(worktreeEntry.utf8) + [0])
+        #expect(startsAtTheFirstEntry)
+
+        let markers = ProcessEnvironmentReader.markers(pid: child.pid)
+        let withheldAfterTheFirstEntry = ProcessEnvironmentMarkers.markers(
+            worktreeID: worktree, terminalID: nil)
+        let whole = ProcessEnvironmentMarkers.markers(worktreeID: worktree, terminalID: terminal)
+        #expect(markers == withheldAfterTheFirstEntry || markers == whole)
     }
 }

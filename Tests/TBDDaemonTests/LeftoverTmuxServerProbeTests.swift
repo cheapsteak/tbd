@@ -430,25 +430,6 @@ struct LeftoverTmuxServerProbeTests {
 
     // MARK: - Which processes are tmux, and whose
 
-    /// Starts `path` with exactly `argv`, `argv[0]` included, and an empty
-    /// environment, and returns its pid. `endChild(_:)` ends and reaps it.
-    private static func spawnChild(path: String, argv: [String]) throws -> pid_t {
-        var pid: pid_t = 0
-        var arguments: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }
-        arguments.append(nil)
-        defer { for argument in arguments { free(argument) } }
-        var environment: [UnsafeMutablePointer<CChar>?] = [nil]
-        let code = posix_spawn(&pid, path, nil, nil, &arguments, &environment)
-        try #require(code == 0, "posix_spawn of \(path) failed with \(code)")
-        return pid
-    }
-
-    private static func endChild(_ pid: pid_t) {
-        kill(pid, SIGKILL)
-        var status: Int32 = 0
-        _ = waitpid(pid, &status, 0)
-    }
-
     /// The case the command name exists for: a package manager upgraded tmux
     /// and deleted the old version's binary, so `proc_pidpath` fails for the
     /// server still running from it. Its kernel command name is still `tmux`,
@@ -562,10 +543,10 @@ struct LeftoverTmuxServerProbeTests {
     /// under the command name it was executed as, owned by this user.
     @Test("the process table gives a real process's command name and real user id")
     func theTableGivesARealProcesssCommandNameAndOwner() throws {
-        let pid = try Self.spawnChild(path: "/bin/sleep", argv: ["sleep", "30"])
-        defer { Self.endChild(pid) }
+        let child = try ExactArgvChild(path: "/bin/sleep", argv: ["sleep", "30"])
+        defer { child.end() }
 
-        let entry = try #require(ProcessTableSnapshot.read()?.entries[pid])
+        let entry = try #require(ProcessTableSnapshot.read()?.entries[child.pid])
         #expect(entry.command == Array("sleep".utf8))
         #expect(entry.realUserID == getuid())
     }
@@ -707,10 +688,10 @@ struct LeftoverTmuxServerProbeTests {
             ("/bin/sleep", ["sleep", "30"]),
           ])
     func aRealProcesssArgvReadsBack(path: String, argv: [String]) throws {
-        let pid = try Self.spawnChild(path: path, argv: argv)
-        defer { Self.endChild(pid) }
+        let child = try ExactArgvChild(path: path, argv: argv)
+        defer { child.end() }
 
-        let raw = try #require(ProcessEnvironmentReader.procArgs(pid: pid))
+        let raw = try #require(ProcessEnvironmentReader.procArgs(pid: child.pid))
         #expect(LeftoverTmuxServerProbe.arguments(inProcArgs: raw) == argv)
     }
 }
