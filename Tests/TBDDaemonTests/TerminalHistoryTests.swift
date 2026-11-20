@@ -200,6 +200,28 @@ import Testing
                 "closing a tmux hook tab ran a tmux command: \(recorder.snapshot())")
     }
 
+    /// A hook tab left on tmux whose session id makes its close a mark, and
+    /// whose mark cannot be written, keeps its row, which keeps naming its
+    /// session to the resume gate.
+    @Test func closeHookTerminalOnTmuxKeepsARowWhoseEntryCannotBeMarked() async throws {
+        let fx = try await makeFixture(
+            label: TerminalLabel.preSession, kind: .shell, claudeSessionID: "sess-hook")
+        defer { fx.cleanup() }
+        try await fx.db.failTerminalHistoryWritesForTests()
+
+        await makeLifecycle(db: fx.db).closeHookTerminal(
+            worktree: fx.worktree,
+            preSession: PreSessionSpawn(
+                terminalID: fx.terminal.id,
+                tmuxServer: fx.worktree.tmuxServer,
+                markerPath: "/dev/null",
+                hookPath: "/dev/null",
+                transport: .tmux))
+
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) != nil)
+        #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)
+    }
+
     // MARK: - Archive
 
     @Test func archiveOfAParkedTmuxRowRecordsItsStoredScreenAndKeepsArchivedRow() async throws {
@@ -325,7 +347,7 @@ import Testing
     @Test func pruneKeepsAMarkedEntryBeyondTheNewestFifty() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
-        await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
+        try await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
         for i in 0..<51 {
             let terminal = Terminal(
                 worktreeID: fx.worktree.id, tmuxWindowID: "@\(i)", tmuxPaneID: "%\(i)")
@@ -340,6 +362,30 @@ import Testing
         #expect(entries.contains { $0.id == fx.terminal.id && $0.liveOnTmuxServer == "tbd-th" })
     }
 
+    /// The mark is the one history write that throws: once the row is
+    /// deleted it is the only record that the session may still be running,
+    /// so its caller has to learn that it failed. Marking an existing entry
+    /// throws the same way.
+    @Test func aLiveTmuxCloseThatCannotBeWrittenThrows() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        try await fx.db.failTerminalHistoryWritesForTests()
+
+        await #expect(throws: (any Error).self) {
+            try await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
+        }
+        #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)
+
+        try await fx.db.restoreTerminalHistoryWritesForTests()
+        await fx.db.terminalHistory.recordOnClose(terminal: fx.terminal, capture: nil)
+        try await fx.db.failTerminalHistoryWritesForTests()
+        await #expect(throws: (any Error).self) {
+            try await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
+        }
+        let entry = try #require(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).first)
+        #expect(entry.liveOnTmuxServer == nil)
+    }
+
     /// A live tmux close of a terminal that already has an entry marks that
     /// entry, and a later re-save of it keeps the mark.
     @Test func aLiveTmuxCloseMarksAnExistingEntryAndAReSaveKeepsIt() async throws {
@@ -348,7 +394,7 @@ import Testing
         await fx.db.terminalHistory.store(
             terminal: fx.terminal, text: "earlier close", closedAt: Date())
 
-        await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
+        try await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
         let marked = try #require(
             try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).first)
         #expect(marked.liveOnTmuxServer == "tbd-th")
@@ -376,8 +422,8 @@ import Testing
         let unmarked = Terminal(
             worktreeID: other.id, tmuxWindowID: "@3", tmuxPaneID: "%3",
             claudeSessionID: "sess-plain", kind: .claude)
-        await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
-        await fx.db.terminalHistory.recordLiveTmuxClose(terminal: sameSession, server: "tbd-th2")
+        try await fx.db.terminalHistory.recordLiveTmuxClose(terminal: fx.terminal, server: "tbd-th")
+        try await fx.db.terminalHistory.recordLiveTmuxClose(terminal: sameSession, server: "tbd-th2")
         await fx.db.terminalHistory.recordOnClose(terminal: unmarked, capture: nil)
 
         let history = fx.db.terminalHistory

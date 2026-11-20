@@ -76,8 +76,9 @@ extension WorktreeLifecycle {
                         "forget left a holder running: \(failure, privacy: .public)")
                 }
             case .tmux:
-                // No history: forget hard-deletes it right below.
-                await Self.closeLeftoverTmuxRow(
+                // No history: forget hard-deletes it right below. With no
+                // entry to mark, the close cannot fail.
+                try await Self.closeLeftoverTmuxRow(
                     terminal, server: worktree.tmuxServer, history: nil)
             }
         }

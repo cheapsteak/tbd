@@ -141,9 +141,14 @@ public struct TerminalHistoryStore: Sendable {
     /// as a capture-less `recordOnClose` does, marked with `server`, and marks
     /// the terminal's existing entry when it already has one. The mark is what
     /// every resume of the entry's session id asks about before it starts that
-    /// session on the pty holder (`TmuxResumeGate`). NEVER throws.
-    public func recordLiveTmuxClose(terminal: Terminal, server: String) async {
-        await persist(
+    /// session on the pty holder (`TmuxResumeGate`).
+    ///
+    /// Throws when the entry cannot be written, unlike every other close
+    /// here: once the row is deleted the mark is the only record that the
+    /// session may still be running, so a caller that cannot write it keeps
+    /// the row (`WorktreeLifecycle.closeLeftoverTmuxRow`).
+    public func recordLiveTmuxClose(terminal: Terminal, server: String) async throws {
+        try await write(
             terminal: terminal, text: nil, closedAt: Date(),
             keepingExistingEntryWithoutText: true, liveOnTmuxServer: server)
     }
@@ -165,88 +170,98 @@ public struct TerminalHistoryStore: Sendable {
         return text
     }
 
+    /// `write`, best-effort: a failure is logged and the close proceeds.
+    private func persist(
+        terminal: Terminal, text: String?, closedAt: Date,
+        keepingExistingEntryWithoutText: Bool = false
+    ) async {
+        do {
+            try await write(
+                terminal: terminal, text: text, closedAt: closedAt,
+                keepingExistingEntryWithoutText: keepingExistingEntryWithoutText)
+        } catch {
+            logger.warning("failed to store closed-terminal history for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Writes the content file (when there is text — callers pass it through
     /// `nonBlank`), the metadata row, and prunes. Without text it writes the
     /// row alone, and with `keepingExistingEntryWithoutText` only when the
     /// terminal has no entry yet; a kept entry still takes `liveOnTmuxServer`.
     /// A re-save never clears a mark the entry already has.
-    private func persist(
+    private func write(
         terminal: Terminal, text: String?, closedAt: Date,
         keepingExistingEntryWithoutText: Bool = false,
         liveOnTmuxServer: String? = nil
-    ) async {
+    ) async throws {
         let path = contentPath(worktreeID: terminal.worktreeID, terminalID: terminal.id)
         let keepExisting = keepingExistingEntryWithoutText && text == nil
-        do {
-            if let text {
-                try FileManager.default.createDirectory(
-                    atPath: (path as NSString).deletingLastPathComponent,
-                    withIntermediateDirectories: true
-                )
-                try text.write(toFile: path, atomically: true, encoding: .utf8)
-            }
-
-            let entry = TerminalHistoryEntry(
-                id: terminal.id,
-                worktreeID: terminal.worktreeID,
-                label: terminal.label,
-                kind: terminal.kind,
-                closedAt: closedAt,
-                claudeSessionID: terminal.claudeSessionID,
-                lineCount: text.map {
-                    $0.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
-                } ?? 0,
-                // A Claude tab's values only. A failed pre-session hook's
-                // shell row keeps the create's values while its tab lives,
-                // and a reopen of a shell entry has no use for them.
-                claudeSpawnExtras: terminal.isClaudeTab ? terminal.claudeSpawnExtras : nil,
-                liveOnTmuxServer: liveOnTmuxServer
+        if let text {
+            try FileManager.default.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true
             )
-            let record = TerminalHistoryRecord(from: entry)
-            let worktreeID = terminal.worktreeID
-            let pruned = try await writer.write { db -> [String] in
-                if keepExisting,
-                   try TerminalHistoryRecord.exists(db, key: record.id) {
-                    if let liveOnTmuxServer {
-                        try db.execute(
-                            sql: "UPDATE terminal_history SET liveOnTmuxServer = ? WHERE id = ?",
-                            arguments: [liveOnTmuxServer, record.id])
-                    }
-                    return []
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+
+        let entry = TerminalHistoryEntry(
+            id: terminal.id,
+            worktreeID: terminal.worktreeID,
+            label: terminal.label,
+            kind: terminal.kind,
+            closedAt: closedAt,
+            claudeSessionID: terminal.claudeSessionID,
+            lineCount: text.map {
+                $0.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
+            } ?? 0,
+            // A Claude tab's values only. A failed pre-session hook's
+            // shell row keeps the create's values while its tab lives,
+            // and a reopen of a shell entry has no use for them.
+            claudeSpawnExtras: terminal.isClaudeTab ? terminal.claudeSpawnExtras : nil,
+            liveOnTmuxServer: liveOnTmuxServer
+        )
+        let record = TerminalHistoryRecord(from: entry)
+        let worktreeID = terminal.worktreeID
+        let pruned = try await writer.write { db -> [String] in
+            if keepExisting,
+               try TerminalHistoryRecord.exists(db, key: record.id) {
+                if let liveOnTmuxServer {
+                    try db.execute(
+                        sql: "UPDATE terminal_history SET liveOnTmuxServer = ? WHERE id = ?",
+                        arguments: [liveOnTmuxServer, record.id])
                 }
-                // A re-save (a later close of the same tab) carries no server
-                // fields — they are stamped only by `recordServerExit`. Keep
-                // the stored ones, or closing an exited server's tab would
-                // silently clear its saved last output. Its tmux mark is kept
-                // the same way.
-                var saved = record
-                if let existing = try TerminalHistoryRecord.fetchOne(db, key: saved.id) {
-                    if saved.serverName == nil {
-                        saved.serverName = existing.serverName
-                        saved.exitCode = existing.exitCode
-                    }
-                    saved.liveOnTmuxServer = saved.liveOnTmuxServer ?? existing.liveOnTmuxServer
-                }
-                try saved.save(db)
-                // Prune to the newest N unmarked entries; rowid breaks
-                // closedAt ties (insertion order).
-                let stale = try String.fetchAll(db, sql: """
-                    SELECT id FROM terminal_history
-                    WHERE worktreeID = ? AND liveOnTmuxServer IS NULL
-                    ORDER BY closedAt DESC, rowid DESC LIMIT -1 OFFSET ?
-                    """, arguments: [worktreeID.uuidString, Self.maxEntriesPerWorktree])
-                if !stale.isEmpty {
-                    try TerminalHistoryRecord.filter(keys: stale).deleteAll(db)
-                }
-                return stale
+                return []
             }
-            for staleID in pruned {
-                guard let staleUUID = UUID(uuidString: staleID) else { continue }
-                let stalePath = contentPath(worktreeID: worktreeID, terminalID: staleUUID)
-                try? FileManager.default.removeItem(atPath: stalePath)
+            // A re-save (a later close of the same tab) carries no server
+            // fields — they are stamped only by `recordServerExit`. Keep
+            // the stored ones, or closing an exited server's tab would
+            // silently clear its saved last output. Its tmux mark is kept
+            // the same way.
+            var saved = record
+            if let existing = try TerminalHistoryRecord.fetchOne(db, key: saved.id) {
+                if saved.serverName == nil {
+                    saved.serverName = existing.serverName
+                    saved.exitCode = existing.exitCode
+                }
+                saved.liveOnTmuxServer = saved.liveOnTmuxServer ?? existing.liveOnTmuxServer
             }
-        } catch {
-            logger.warning("failed to store closed-terminal history for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            try saved.save(db)
+            // Prune to the newest N unmarked entries; rowid breaks
+            // closedAt ties (insertion order).
+            let stale = try String.fetchAll(db, sql: """
+                SELECT id FROM terminal_history
+                WHERE worktreeID = ? AND liveOnTmuxServer IS NULL
+                ORDER BY closedAt DESC, rowid DESC LIMIT -1 OFFSET ?
+                """, arguments: [worktreeID.uuidString, Self.maxEntriesPerWorktree])
+            if !stale.isEmpty {
+                try TerminalHistoryRecord.filter(keys: stale).deleteAll(db)
+            }
+            return stale
+        }
+        for staleID in pruned {
+            guard let staleUUID = UUID(uuidString: staleID) else { continue }
+            let stalePath = contentPath(worktreeID: worktreeID, terminalID: staleUUID)
+            try? FileManager.default.removeItem(atPath: stalePath)
         }
     }
 

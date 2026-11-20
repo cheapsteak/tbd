@@ -460,7 +460,7 @@ struct WorktreeReviveFreshTests {
             label: TerminalLabel.claudeCode, claudeSessionID: "A", kind: .claude,
             transport: .tmux)
         let tmuxRow = try #require(try await db.terminals.get(id: created.id))
-        await db.terminalHistory.recordLiveTmuxClose(
+        try await db.terminalHistory.recordLiveTmuxClose(
             terminal: Terminal(
                 worktreeID: archived.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
                 claudeSessionID: "A", kind: .claude),

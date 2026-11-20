@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import DaemonTestSupport
 import TestSupport
 import Testing
@@ -72,7 +73,7 @@ struct TmuxResumeGateTests {
             tmuxRow = try #require(try await db.terminals.get(id: tmuxRow.id))
         }
         if closedBeforeArchive {
-            await WorktreeLifecycle.closeLeftoverTmuxRow(
+            try await WorktreeLifecycle.closeLeftoverTmuxRow(
                 tmuxRow, server: worktree.tmuxServer, history: db.terminalHistory)
             try await db.terminals.delete(id: tmuxRow.id)
         }
@@ -250,6 +251,88 @@ struct TmuxResumeGateTests {
         #expect(holder.launches.isEmpty)
     }
 
+    // MARK: - A mark that cannot be written
+
+    /// An archive whose live tmux row's mark cannot be written is refused
+    /// before it changes anything: the worktree stays active with its
+    /// checkout and every row, nothing is recorded, and the open tmux row
+    /// still names its session to the gate.
+    @Test func anArchiveWhoseMarkCannotBeWrittenIsRefusedAndKeepsEveryRow() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
+        let probe = RecordingLeftoverTmuxProbe { _ in .running }
+        var lifecycle = makeLifecycle(db: db, holder: holder)
+        lifecycle.leftoverTmuxProbe = probe.probe
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+        let sessionID = UUID().uuidString.lowercased()
+        let created = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@7", tmuxPaneID: "%7",
+            label: "Claude Code", claudeSessionID: sessionID, kind: .claude,
+            transport: .tmux)
+        let tmuxRow = try #require(try await db.terminals.get(id: created.id))
+        let rowsBefore = Set(try await db.terminals.list(worktreeID: worktree.id).map(\.id))
+        #expect(rowsBefore.count > 1, "the fixture has no holder tab beside the tmux row")
+        try await db.failTerminalHistoryWritesForTests()
+
+        await #expect(throws: LeftoverTmuxMarkUnwritable.self) {
+            try await lifecycle.archiveWorktree(worktreeID: worktree.id, force: true)
+        }
+
+        #expect(try await db.worktrees.get(id: worktree.id)?.status != .archived)
+        #expect(FileManager.default.fileExists(atPath: worktree.localPath))
+        #expect(Set(try await db.terminals.list(worktreeID: worktree.id).map(\.id)) == rowsBefore)
+        #expect(try await db.terminals.get(id: tmuxRow.id) == tmuxRow)
+        #expect(try await db.terminalHistory.list(worktreeID: worktree.id).isEmpty)
+        #expect(try await lifecycle.tmuxResumeRefusal(resuming: [sessionID])
+            == TmuxResumeRefusal(server: worktree.tmuxServer))
+    }
+
+    /// Reconcile's archive leaves a worktree whose live tmux row's mark cannot
+    /// be written for its next sweep, rows and all, and records the failure.
+    /// The next sweep that can write the mark archives the worktree.
+    @Test func reconcilesArchiveLeavesAWorktreeWhoseMarkCannotBeWrittenForTheNextSweep() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let probe = RecordingLeftoverTmuxProbe { _ in .running }
+        var lifecycle = makeLifecycle(db: db, holder: FakeHolderLaunch())
+        lifecycle.leftoverTmuxProbe = probe.probe
+        let actuationPath = tempDir.appendingPathComponent("actuation/actuations.jsonl").path
+        let actuationLog = ActuationLog(path: actuationPath)
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "acme", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "gone", branch: "gone-branch",
+            path: tempDir.appendingPathComponent("vanished").path, tmuxServer: "tbd-acme-gone")
+        let sessionID = UUID().uuidString.lowercased()
+        let tmuxRow = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Claude Code", claudeSessionID: sessionID, kind: .claude, transport: .tmux)
+        try await db.failTerminalHistoryWritesForTests()
+
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
+
+        #expect(try await db.worktrees.get(id: worktree.id)?.status != .archived)
+        #expect(try await db.terminals.list(worktreeID: worktree.id).map(\.id) == [tmuxRow.id])
+        #expect(try await db.terminalHistory.list(worktreeID: worktree.id).isEmpty)
+        let outcomes = try ActuationRecordReader(activePath: actuationPath).readRows()
+            .filter { $0.kind == .outcome }
+        #expect(outcomes.contains { $0.result == .synchronous(.transportFailed) })
+        #expect(try await lifecycle.tmuxResumeRefusal(resuming: [sessionID])
+            == TmuxResumeRefusal(server: "tbd-acme-gone"))
+
+        try await db.restoreTerminalHistoryWritesForTests()
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: actuationLog)
+
+        #expect(try await db.worktrees.get(id: worktree.id)?.status == .archived)
+        #expect(try await db.terminals.list(worktreeID: worktree.id).isEmpty)
+        let entry = try #require(try await db.terminalHistory.list(worktreeID: worktree.id).first)
+        #expect(entry.liveOnTmuxServer == "tbd-acme-gone")
+    }
+
     // MARK: - worktree.reviveConversationFresh
 
     /// A fresh-branch revive of a Codex thread resumes the thread itself, so
@@ -310,7 +393,7 @@ struct TmuxResumeGateTests {
         let marked = Terminal(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             claudeSessionID: "sess-marked", kind: .claude)
-        await db.terminalHistory.recordLiveTmuxClose(terminal: marked, server: "tbd-acme")
+        try await db.terminalHistory.recordLiveTmuxClose(terminal: marked, server: "tbd-acme")
         let transport = try TerminalSpawnTransport.decide(registry: lifecycle.holderRegistry).get()
         func spawn(_ id: UUID, session: String, forks: Bool = false) async throws -> Terminal {
             try await lifecycle.spawnTerminal(
@@ -355,5 +438,32 @@ struct TmuxResumeGateTests {
         #expect(refusal.message.contains("tmux -L tbd-acme kill-server"))
         #expect(refusal.message.contains("restart the Mac"))
         #expect(refusal.message.hasSuffix("Then try again."))
+    }
+}
+
+extension TBDDatabase {
+    /// Makes every write to `terminal_history` fail, as a write to a full disk
+    /// or a locked database does, so a test can show what a close does when
+    /// the mark that guards a session cannot be written. SQLite aborts the
+    /// statement from a trigger, so nothing in the daemon is substituted.
+    func failTerminalHistoryWritesForTests() async throws {
+        try await writerForTests.write { db in
+            try db.execute(sql: """
+                CREATE TRIGGER acme_history_insert_fails BEFORE INSERT ON terminal_history
+                BEGIN SELECT RAISE(ABORT, 'acme history write failed'); END;
+                CREATE TRIGGER acme_history_update_fails BEFORE UPDATE ON terminal_history
+                BEGIN SELECT RAISE(ABORT, 'acme history write failed'); END;
+                """)
+        }
+    }
+
+    /// Undoes `failTerminalHistoryWritesForTests`.
+    func restoreTerminalHistoryWritesForTests() async throws {
+        try await writerForTests.write { db in
+            try db.execute(sql: """
+                DROP TRIGGER acme_history_insert_fails;
+                DROP TRIGGER acme_history_update_fails;
+                """)
+        }
     }
 }

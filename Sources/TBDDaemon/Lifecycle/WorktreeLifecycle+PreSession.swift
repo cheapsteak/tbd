@@ -614,10 +614,17 @@ extension WorktreeLifecycle {
             // A hook tab an earlier build started on tmux. No tmux command
             // runs; the row's own teardown is all there is. A row that could
             // not be read has nothing to say about its session, and nothing to
-            // keep.
+            // keep. A row whose entry could not be marked is kept with its
+            // tab, so it keeps naming its session to the resume gate; closing
+            // the tab by hand tries again.
             if let terminal {
-                await Self.closeLeftoverTmuxRow(
-                    terminal, server: preSession.tmuxServer, history: db.terminalHistory)
+                do {
+                    try await Self.closeLeftoverTmuxRow(
+                        terminal, server: preSession.tmuxServer, history: db.terminalHistory)
+                } catch {
+                    logger.warning("keeping hook terminal \(terminalID, privacy: .public): \(String(describing: error), privacy: .public)")
+                    return
+                }
             }
         }
         do {

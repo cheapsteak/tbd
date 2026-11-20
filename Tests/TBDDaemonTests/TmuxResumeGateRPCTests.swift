@@ -342,6 +342,32 @@ struct TmuxResumeGateRPCTests {
         try await expectRefused(refused, f, terminalsBefore: [])
     }
 
+    /// A close whose mark cannot be written keeps the row: the delete fails,
+    /// says why and records the failure, nothing is written, and the open row
+    /// keeps naming its session, so a resume of it is still refused while the
+    /// server may run.
+    @Test func aCloseWhoseMarkCannotBeWrittenKeepsTheRowAndTheResumeStaysRefused() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let row = try await openATmuxRow(f, in: f.worktree)
+        try await f.db.failTerminalHistoryWritesForTests()
+
+        let deleted = try await f.send(
+            RPCMethod.terminalDelete, TerminalDeleteParams(terminalID: row.id))
+
+        #expect(!deleted.success)
+        #expect(deleted.error?.contains("Terminal \(row.id) was not closed") == true,
+                "error: \(deleted.error ?? "nil")")
+        #expect(try f.lastOutcome().result == .synchronous(.transportFailed))
+        #expect(try await f.db.terminals.list(worktreeID: f.worktree.id) == [row])
+        #expect(try await f.db.terminalHistory.list(worktreeID: f.worktree.id).isEmpty)
+
+        let refused = try await f.send(
+            RPCMethod.sessionResume,
+            SessionResumeParams(worktreeID: f.worktree.id, identity: identity))
+        try await expectRefused(refused, f, terminalsBefore: [row], marks: [])
+    }
+
     /// A row whose transport is NULL, as most rows written before the
     /// transport column read, is on tmux to the gate just as `'tmux'` is.
     @Test func terminalCreateResumingWaitsWhileATmuxRowWithANullTransportCarriesTheSession() async throws {

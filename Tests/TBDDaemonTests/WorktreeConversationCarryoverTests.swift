@@ -93,7 +93,7 @@ struct WorktreeConversationCarryoverTests {
             label: TerminalLabel.claudeCode, claudeSessionID: sourceSessionID, kind: .claude,
             transport: .tmux)
         let tmuxRow = try #require(try await db.terminals.get(id: created.id))
-        await db.terminalHistory.recordLiveTmuxClose(
+        try await db.terminalHistory.recordLiveTmuxClose(
             terminal: Terminal(
                 worktreeID: source.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
                 claudeSessionID: sourceSessionID, kind: .claude),

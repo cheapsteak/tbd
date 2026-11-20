@@ -119,7 +119,8 @@ extension WorktreeLifecycle {
     /// tab (`terminal.delete`, and `server.stop`'s tab close), archiving its
     /// worktree, reconcile's archive of a vanished worktree, closing a hook
     /// tab, tearing down a scratch space and forgetting a worktree. It runs no
-    /// tmux command, and the caller deletes the row either way.
+    /// tmux command, and the caller deletes the row afterwards unless it
+    /// throws.
     ///
     /// **A live row's session keeps running.** So may the session of a row
     /// parked with its park still in flight (`pendingSessionIncarnationID`
@@ -148,12 +149,33 @@ extension WorktreeLifecycle {
     /// paths (forget, scratch delete) remove the worktree's history right
     /// after, and with it every session that could be resumed from there.
     ///
+    /// **A mark that cannot be written keeps the row.** Once the row is
+    /// deleted the mark is the only record that its session may still be
+    /// running, so a failed write throws `LeftoverTmuxMarkUnwritable` and the
+    /// caller keeps the row, which names the session to the resume gate as
+    /// the mark would (`TerminalStore.liveTmuxServers`). Closing the tab
+    /// fails and says why; an archive of its worktree, repo worktree or
+    /// scratch space, is refused before it changes anything; reconcile's
+    /// archive leaves the worktree for its next sweep; a hook tab's close
+    /// keeps the tab. The notice is logged only once the mark is written. A
+    /// parked row's entry carries no mark, so a failure to write it is logged
+    /// and the close goes ahead, as any other close's is.
+    ///
+    /// **An unknown server leaves nothing to keep.** A row the caller has no
+    /// local worktree row for, because the worktree is gone or remote, names
+    /// no server, so neither record could ever be asked about its session:
+    /// the gate's open-row lookup reads the server from the row's worktree,
+    /// and a mark is a server to probe. A kept row would guard nothing and
+    /// leave a tab nobody could close, and a mark that always refused would
+    /// bar the session for good on evidence that names no server. So the
+    /// close goes ahead with the notice and no entry; the one caller that
+    /// passes no server passes no `history` either.
+    ///
     /// - Parameter server: the tmux server the row's worktree names, nil when
-    ///   the caller has no local worktree row for it: the row is gone, or the
-    ///   worktree is remote.
+    ///   the caller has no local worktree row for it.
     static func closeLeftoverTmuxRow(
         _ terminal: Terminal, server: String?, history: TerminalHistoryStore?
-    ) async {
+    ) async throws {
         if sessionHasEnded(terminal, teardownStoppedIt: false) {
             if let history {
                 await history.recordOnClose(terminal: terminal, capture: terminal.suspendedSnapshot)
@@ -164,10 +186,17 @@ extension WorktreeLifecycle {
             logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; there is no local worktree row for it, gone or remote, so its tmux server is unknown, and its session may still be running there")
             return
         }
-        logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; its session may still be running in tmux server \(server, privacy: .public). \(LeftoverTmuxSession.endingAdvice(server: server), privacy: .public)")
         if let history, terminal.claudeSessionID != nil {
-            await history.recordLiveTmuxClose(terminal: terminal, server: server)
+            do {
+                try await history.recordLiveTmuxClose(terminal: terminal, server: server)
+            } catch {
+                logger.error("keeping terminal \(terminal.id, privacy: .public) on tmux: its session may still be running in tmux server \(server, privacy: .public), and its Closed Terminals entry could not be marked with it: \(error.localizedDescription, privacy: .public)")
+                throw LeftoverTmuxMarkUnwritable(
+                    terminalID: terminal.id, server: server,
+                    reason: error.localizedDescription)
+            }
         }
+        logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; its session may still be running in tmux server \(server, privacy: .public). \(LeftoverTmuxSession.endingAdvice(server: server), privacy: .public)")
     }
 
     /// The resume gate (`TmuxResumeGate`) over this lifecycle's records and
@@ -261,6 +290,29 @@ struct TmuxResumeRefusal: Error, Equatable, LocalizedError, CustomStringConverti
     /// The refusal as a handler answers it, with the code every refusal over
     /// a session still running in tmux carries.
     var coded: CodedRefusal { CodedRefusal(text: message, code: .terminalOnTmux) }
+
+    var errorDescription: String? { message }
+    var description: String { message }
+}
+
+/// A tmux row's close that could not mark its Closed Terminals entry with the
+/// server its session may still be running in
+/// (`WorktreeLifecycle.closeLeftoverTmuxRow`). Thrown before the caller
+/// deletes anything, so the row stays and keeps naming its session to the
+/// resume gate.
+struct LeftoverTmuxMarkUnwritable: Error, Equatable, LocalizedError, CustomStringConvertible {
+    let terminalID: UUID
+    /// The tmux server, as `tmux -L` takes it.
+    let server: String
+    /// Why the write failed.
+    let reason: String
+
+    /// What the person is told.
+    var message: String {
+        "Terminal \(terminalID) was not closed. Its session may still be running in tmux "
+            + "server \(server), and the record that keeps a second agent from being started "
+            + "on it could not be saved (\(reason)), so the tab stays open. Try again."
+    }
 
     var errorDescription: String? { message }
     var description: String { message }

@@ -223,6 +223,29 @@ ended (`WorktreeLifecycle.sessionHasEnded`):
   parked, so its Closed Terminals entry carries the screen the park stored, and
   no mark.
 
+A mark that cannot be written keeps the row. Once the row is deleted, the mark
+is the only record that its session may still be running, and an open row names
+the session to the resume gate (below) as the mark would. So the write throws
+(`LeftoverTmuxMarkUnwritable`) and nothing is deleted:
+
+- **Closing the tab** fails with the reason and records `transport-failed`.
+- **Archiving a worktree or a scratch space** is refused before it changes
+  anything. The tmux rows are closed ahead of the status flip and of every
+  holder's disposal, since a row kept inside an archived worktree would go when
+  its repo is removed.
+- **Reconcile's archive** leaves the worktree for its next sweep, as it does a
+  teardown it could not record, and records the failure on that row's
+  dispose.
+- **A hook tab's close** keeps the tab.
+
+A parked row's entry carries no mark, so a failure to write it is logged and
+the close goes ahead, as for a holder row's entry. A row whose worktree the
+daemon has no local row for, gone or remote, names no server, so no record
+could guard its session: the gate's lookup takes a row's server from its
+worktree, and a mark is a server to probe. Its close goes ahead with the notice
+and writes nothing, rather than keeping a tab nobody could close or writing a
+mark that would refuse the session for good.
+
 Either entry is written on every one of these paths but two, which remove
 every entry the worktree had: forgetting a worktree and deleting a scratch
 space. Nothing in TBD names the session after those.
@@ -536,6 +559,13 @@ never unlinks it, and nothing TBD runs creates one any more.
   with the worktree's server, and so does a row parked with its park in
   flight; a live row without one gets no entry; a parked row's entry carries
   its stored screen and no mark.
+- A mark that cannot be written, failed by a trigger on `terminal_history`,
+  keeps the row. `terminal.delete` fails with the reason and records
+  `transport-failed`, and a `session.resume` of the session is still refused.
+  An archive and a scratch archive are refused with the worktree and every row
+  as they were. Reconcile's archive leaves the worktree, records the failure,
+  and archives it on the next sweep that can write the mark. A hook tab keeps
+  its row.
 - A marked entry survives the newest-50 prune, a later save of the same entry
   keeps its mark, and the lookup returns each server marked for the given
   session ids, across worktrees.

@@ -803,7 +803,9 @@ extension RPCRouter {
     /// runs no tmux command: `WorktreeLifecycle.closeLeftoverTmuxRow`), delete
     /// the row and its tab, clear pending prompts, drop the per-session
     /// overlay, and broadcast `.terminalRemoved`. Shared with `server.stop`,
-    /// which closes a server's tab under its own actuation row.
+    /// which closes a server's tab under its own actuation row. A live tmux
+    /// row whose Closed Terminals entry cannot be marked throws before
+    /// anything is deleted, and the row stays.
     ///
     /// Returns the transport failure `handleTerminalDelete` turns into its
     /// outcome row, or nil; the caller decides how to record it. With an
@@ -856,15 +858,19 @@ extension RPCRouter {
             }
             transportCleanupFailure = await disposeHolder(for: terminal)
         case .tmux:
-            // Nothing to dispose of and nothing to fail: a live row's session,
-            // or that of a row whose park is in flight, may keep running in
-            // tmux, which the daemon logs, and a row whose park is complete
-            // keeps its saved screen in Closed Terminals. Recorded as the
-            // dispatch it is, the way a holder close with nothing left to kill
-            // is.
-            await WorktreeLifecycle.closeLeftoverTmuxRow(
-                terminal, server: worktree?.tmuxServer,
-                history: worktree == nil ? nil : db.terminalHistory)
+            // Nothing to dispose of: a live row's session, or that of a row
+            // whose park is in flight, may keep running in tmux, which the
+            // daemon logs, and a row whose park is complete keeps its saved
+            // screen in Closed Terminals. Recorded as the dispatch it is, the
+            // way a holder close with nothing left to kill is. The one thing
+            // that can fail is the mark on a live row's entry, and then the
+            // close throws before the row is deleted, so the open row keeps
+            // guarding its session (`closeLeftoverTmuxRow`).
+            try await step {
+                try await WorktreeLifecycle.closeLeftoverTmuxRow(
+                    terminal, server: worktree?.tmuxServer,
+                    history: worktree == nil ? nil : db.terminalHistory)
+            }
         }
 
         // Delete from DB

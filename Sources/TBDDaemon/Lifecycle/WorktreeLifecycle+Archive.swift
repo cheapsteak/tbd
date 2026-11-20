@@ -216,6 +216,23 @@ extension WorktreeLifecycle {
                 claudeSpawnExtras: tab.claudeSpawnExtras, codexLaunchOptions: tab.codexLaunchOptions))
         }
 
+        // Every tmux row is closed before the status flip. Its close runs no
+        // tmux command and only writes its Closed Terminals entry
+        // (`closeLeftoverTmuxRow`), and a live row's entry is marked with the
+        // worktree's server, the record that keeps its session from being
+        // resumed beside the one tmux may still run. A mark that cannot be
+        // written throws here, so the archive is refused before it has
+        // changed the worktree, ended a session or deleted a row, and the
+        // open row keeps naming its session to the resume gate. Refusing is
+        // what keeps the row: a row left behind in an archived worktree would
+        // go when its repo is removed, which deletes an archived worktree's
+        // rows with it. Entries written for rows closed before the failing one
+        // stay; a retry keeps them as they are.
+        for terminal in terminals where terminal.transport == .tmux {
+            try await Self.closeLeftoverTmuxRow(
+                terminal, server: worktree.tmuxServer, history: db.terminalHistory)
+        }
+
         // Capture a branch rename without writing ahead of the archive
         // transaction: a snapshot failure must leave the live row unchanged.
         // git canonicalizes paths, so compare resolved-symlink forms.
@@ -262,11 +279,11 @@ extension WorktreeLifecycle {
         await stopDevServersForArchive(worktree: worktree)
 
         // Write each terminal's Closed Terminals entry, then end its session:
-        // a holder row's holder and job are reclaimed, and a tmux row runs no
-        // tmux command (`closeLeftoverTmuxRow`), so a session still running in
-        // a tmux server an earlier build started keeps running. The archived
-        // worktree row and its history rows survive, so the entries stay
-        // readable later.
+        // a holder row's holder and job are reclaimed. A tmux row was closed
+        // before the status flip and runs no tmux command, so a session still
+        // running in a tmux server an earlier build started keeps running.
+        // The archived worktree row and its history rows survive, so the
+        // entries stay readable later.
         var sessions = SessionTeardownTally()
         for terminal in terminals {
             let stopped: Bool
@@ -288,8 +305,7 @@ extension WorktreeLifecycle {
                     stopped = true
                 }
             case .tmux:
-                await Self.closeLeftoverTmuxRow(
-                    terminal, server: worktree.tmuxServer, history: db.terminalHistory)
+                // Closed before the status flip, above.
                 stopped = false
             }
             sessions.record(terminal, teardownStoppedIt: stopped)

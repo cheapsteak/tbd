@@ -304,6 +304,7 @@ extension WorktreeLifecycle {
             await stopDevServersForArchive(worktree: current)
             let terminals = try await db.terminals.list(worktreeID: current.id)
             var recordedEveryTeardown = true
+            var markedEveryLiveTmuxRow = true
             var sessions = SessionTeardownTally()
             for terminal in terminals {
                 var row = ActuationRow(
@@ -333,8 +334,16 @@ extension WorktreeLifecycle {
                     }
                     stopped = true
                 case .tmux:
-                    await Self.closeLeftoverTmuxRow(
-                        terminal, server: current.tmuxServer, history: db.terminalHistory)
+                    do {
+                        try await Self.closeLeftoverTmuxRow(
+                            terminal, server: current.tmuxServer, history: db.terminalHistory)
+                    } catch {
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID, result: .transportFailed,
+                            error: String(describing: error))
+                        markedEveryLiveTmuxRow = false
+                        continue
+                    }
                     stopped = false
                 }
                 sessions.record(terminal, teardownStoppedIt: stopped)
@@ -345,6 +354,13 @@ extension WorktreeLifecycle {
             // rows still recording those sessions must survive too.
             guard recordedEveryTeardown else {
                 logger.warning("reconcile: leaving \(current.id, privacy: .public) for the next sweep — the actuation record is unwritable, so its sessions were not ended")
+                continue
+            }
+            // A live tmux row whose Closed Terminals entry could not be marked
+            // is the only record that its session may still be running, so
+            // its rows survive the same way, and the next sweep marks it.
+            guard markedEveryLiveTmuxRow else {
+                logger.warning("reconcile: leaving \(current.id, privacy: .public) for the next sweep — a tmux row's Closed Terminals entry could not be marked with its server, so its row is kept to guard its session")
                 continue
             }
             // Only now, as in `beginArchiveWorktree`: every session counted

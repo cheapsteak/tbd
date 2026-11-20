@@ -148,6 +148,19 @@ extension RPCRouter {
         _ wt: Worktree, keepsHistory: Bool
     ) async throws -> WorktreeLifecycle.SessionTeardownTally {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
+        // Tmux rows first. Their close runs no tmux command, so a session
+        // still running in tmux keeps running and keeps its directory, and
+        // it only writes Closed Terminals entries (`closeLeftoverTmuxRow`).
+        // A live row's entry that cannot be marked throws here, before any
+        // holder is disposed of or any row deleted, so the archive fails
+        // with every session as it was and the open row keeps naming its
+        // session to the resume gate. Delete writes no entry, so it cannot
+        // fail here.
+        for t in terminals where t.transport == .tmux {
+            try await WorktreeLifecycle.closeLeftoverTmuxRow(
+                t, server: wt.tmuxServer,
+                history: keepsHistory ? db.terminalHistory : nil)
+        }
         var sessions = WorktreeLifecycle.SessionTeardownTally()
         for t in terminals {
             var stopped = false
@@ -173,11 +186,8 @@ extension RPCRouter {
                     stopped = true
                 }
             case .tmux:
-                // No tmux command runs, so a session still running in tmux
-                // keeps running and keeps its directory.
-                await WorktreeLifecycle.closeLeftoverTmuxRow(
-                    t, server: wt.tmuxServer,
-                    history: keepsHistory ? db.terminalHistory : nil)
+                // Closed above, before any holder.
+                break
             }
             sessions.record(t, teardownStoppedIt: stopped)
         }
