@@ -38,6 +38,28 @@ read-only probe in `docs/research/2026-10-30-herdr/procenv_probe.py`:
 - **Escapees:** a process that left with `setsid` and a double fork was found
   by its marker alone.
 
+The kernel withholds a hidden process's environment by cutting the buffer
+after argv, and it finds argv by skipping every NUL after the executable path.
+An empty `argv[0]` merges with the path's padding, so the cut lands one string
+late and leaves `env[0]` in the buffer. Measured on macOS 27 with `/bin/sleep`
+started by `posix_spawn` with an empty `argv[0]` and the worktree marker as
+`env[0]`, under each of the eight amounts of path padding: the buffer holds
+that one entry and ends before the terminal marker. An empty argument later in
+argv merges with nothing and moves nothing: measured with `/bin/sh` and an
+empty argument in the middle or at the end, the buffer ends right after argv.
+
+In every readable buffer measured, an empty entry follows the environment, and
+a cut buffer ends without one. That entry is measured layout, not something
+the kernel promises: it is alignment padding plus the NULs left where the
+process's startup code zeroed some of the strings the kernel adds after the
+environment. The reader ends the environment there, so losing the entry would
+read every environment as hidden, which the sweep treats as neutral, and
+marker-based reclaim would stop without an error.
+`theRealCallReadsThisProcess` in
+`Tests/TBDSharedTests/ProcessEnvironmentMarkersTests.swift` guards it: the test
+process is not a platform binary, and the test fails when its own environment
+reads as hidden.
+
 TBD sets the markers only on a terminal's job, so they reach what that job
 starts and nothing else. The daemon, a holder and a per-repo tmux server were
 probed directly and carry neither marker. The `tmux -CC attach` clients and the
@@ -133,8 +155,11 @@ retained or logged; environments hold secrets. It answers one of three ways:
 
 - **markers** – the environment is readable and holds at least one marker;
 - **no markers** – the environment is readable and holds neither;
-- **hidden** – zero entries, or the call failed. A process started under
-  `env -i` also reads as hidden, which only returns it to today's cwd rule.
+- **hidden** – zero entries, a buffer that ends before the environment does,
+  or the call failed. A process started under `env -i` also reads as
+  hidden, which only returns it to today's cwd rule. A cut-off environment is
+  hidden rather than read, because the entries the kernel withheld may hold
+  the marker that names live work.
 
 The reader runs after the sweep's `ps` snapshot, so a pid can be reissued in
 between. Right after `ps`, the sweep reads the kernel's process table once
