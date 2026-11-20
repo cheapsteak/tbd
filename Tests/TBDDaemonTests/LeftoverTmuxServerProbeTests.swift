@@ -523,6 +523,39 @@ struct LeftoverTmuxServerProbeTests {
         #expect(LeftoverTmuxServerProbe.tmuxExecutableNames(savedPath: nil) == ["tmux"])
     }
 
+    /// The probe reads `tmux-executable-path` itself. A missing file, one
+    /// that cannot be read as text, and a blank one all save nothing, so the
+    /// names are tmux alone.
+    @Test("a missing, unreadable or blank saved-path file leaves the names tmux alone")
+    func aSavedPathFileThatSavesNothing() throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let missing = URL(fileURLWithPath: "\(root)/missing/tmux-executable-path")
+        let directory = URL(fileURLWithPath: "\(root)/directory/tmux-executable-path")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let notText = URL(fileURLWithPath: "\(root)/not-text")
+        #expect(FileManager.default.createFile(atPath: notText.path, contents: Data([0xFF, 0xFE, 0x00, 0xC3])))
+        let blank = URL(fileURLWithPath: "\(root)/blank")
+        #expect(FileManager.default.createFile(atPath: blank.path, contents: Data(" \n\t\n".utf8)))
+
+        for file in [missing, directory, notText, blank] {
+            let saved = LeftoverTmuxServerProbe.savedTmuxExecutablePath(file: file)
+            #expect(saved == nil, "\(file.lastPathComponent) saved \(saved ?? "")")
+            #expect(LeftoverTmuxServerProbe.tmuxExecutableNames(savedPath: saved) == ["tmux"])
+        }
+    }
+
+    @Test("a saved-path file gives its path, trimmed")
+    func aSavedPathFileGivesItsPath() throws {
+        let (root, cleanup) = try makeScratchRoot()
+        defer { cleanup() }
+        let file = URL(fileURLWithPath: "\(root)/tmux-executable-path")
+        try "  /opt/acme/bin/acme-mux\n".write(to: file, atomically: true, encoding: .utf8)
+
+        #expect(LeftoverTmuxServerProbe.savedTmuxExecutablePath(file: file)
+            == "/opt/acme/bin/acme-mux")
+    }
+
     /// A saved path can be a link: the binary runs under the link's name or
     /// the name it resolves to, depending on how it was started, so both
     /// count.

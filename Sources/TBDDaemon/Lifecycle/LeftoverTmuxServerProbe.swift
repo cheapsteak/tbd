@@ -266,7 +266,7 @@ struct LeftoverTmuxServerProbe: Sendable {
         return tmuxProcesses(
             in: table,
             uid: uid,
-            names: tmuxExecutableNames(savedPath: TmuxExecutableResolver().savedPath),
+            names: tmuxExecutableNames(savedPath: savedTmuxExecutablePath()),
             executablePath: { ProcessLiveness.executablePath(pid: $0) },
             procArgs: { ProcessEnvironmentReader.procArgs(pid: $0) })
     }
@@ -298,10 +298,25 @@ struct LeftoverTmuxServerProbe: Sendable {
         return processes
     }
 
-    /// The names a tmux binary runs under: `tmux`, which is what the daemon's
-    /// `PATH` lookup finds, and the last component of the path saved through
-    /// `TmuxExecutableResolver`'s fallback, which accepts a binary of any
-    /// name, both as saved and with its symlinks resolved.
+    /// The tmux path saved in `tmux-executable-path` under the TBD home
+    /// (`TBDConstants.tmuxExecutablePathFile`), trimmed of surrounding
+    /// whitespace, or nil when the file is missing, unreadable or blank.
+    ///
+    /// The probe reads the file itself, because a server an earlier build
+    /// started may run from the binary that file names. The read goes when
+    /// the probe does. `file` is a seam for tests.
+    static func savedTmuxExecutablePath(
+        file: URL = TBDConstants.tmuxExecutablePathFile
+    ) -> String? {
+        guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        let path = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
+    }
+
+    /// The names a tmux binary runs under: `tmux`, which is what a `PATH`
+    /// lookup finds, and the last component of the saved path
+    /// (`savedTmuxExecutablePath`), which can name a binary of any name, both
+    /// as saved and with its symlinks resolved.
     static func tmuxExecutableNames(savedPath: String?) -> Set<String> {
         var names: Set<String> = ["tmux"]
         if let savedPath {
