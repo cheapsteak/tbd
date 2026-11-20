@@ -650,6 +650,119 @@ struct SidebarDragDropTests {
         #expect(sent?.newParentID == f.b.id)
     }
 
+    // MARK: Rows the registry filter hides
+    //
+    // Spec: docs/specs/2026-11-19-sidebar-remote-session-filter-design.md,
+    // "Drag to reorder".
+
+    /// `a`, then two "acme" rows the repo's filter hides, then `b` and `c`.
+    /// `c` dropped into the gap between `a` and `b` lands directly after
+    /// `a` in the full sibling list, before the hidden rows, which keep their
+    /// order; with the filter off the same decision lands before `b`.
+    @Test func dropBetweenShownRowsLandsAfterTheUpperOnePastHiddenRows() async throws {
+        let h = OutlineHarness("drag.hiddenSiblings")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let main = SidebarOutlineControllerTests.row("main", repo, status: .main)
+        let a = SidebarOutlineControllerTests.row("a", repo, order: 0)
+        let h1 = SidebarGroupFixtures.row("h1", repoID: repo.id, remote: "one", order: 1)
+        let h2 = SidebarGroupFixtures.row("h2", repoID: repo.id, remote: "two", order: 2)
+        let b = SidebarOutlineControllerTests.row("b", repo, order: 3)
+        let c = SidebarOutlineControllerTests.row("c", repo, order: 4)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [main, a, h1, h2, b, c]]
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        let recorder = MoveRecorder()
+        recorder.install(on: h.state)
+        h.mount()
+        let names = [main.id: "main", a.id: "a", h1.id: "h1", h2.id: "h2", b.id: "b", c.id: "c"]
+        let section = SidebarNodeID.repoHeader(repo.id)
+        let bNode = SidebarNodeID.worktree(b.id)
+        try #require(!h.shownIDs.contains(.worktree(h1.id)), h.evidence(names))
+        try #require(!h.shownIDs.contains(.worktree(h2.id)), h.evidence(names))
+        let aboveB = try Self.childIndex(of: bNode, under: section, in: h)
+
+        // Both branches of the filter, for the decision the drop below makes.
+        let decision = SidebarDropDecision.place(parent: nil, before: b.id)
+        let filtered = h.controller.confirmedMove(decision, at: (section, aboveB), carried: [c.id])
+        #expect(filtered == SidebarDropMove(ids: [c.id], newParentID: nil, before: h1.id))
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        let unfiltered = h.controller.confirmedMove(decision, at: (section, aboveB), carried: [c.id])
+        #expect(unfiltered == SidebarDropMove(ids: [c.id], newParentID: nil, before: b.id))
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        h.controller.flushPendingRebuild()
+
+        let state = h.state
+        let asked = FireRecorder<SidebarDropMove>()
+        h.controller.moveWorktreesForTesting = { move in
+            asked.record(move)
+            return state.moveWorktrees(ids: move.ids, newParentID: move.newParentID, before: move.before)
+        }
+        let info = try Self.startDrag(pressing: .worktree(c.id), in: h)
+        defer { info.release() }
+        let gap = try Self.childIndex(of: bNode, under: section, in: h)
+        let operation = try Self.validate(info, parent: section, childIndex: gap, depth: 0, in: h)
+        #expect(operation == .move)
+        let accepted = try Self.accept(info, parent: section, childIndex: gap, in: h)
+        #expect(accepted, h.evidence(names))
+        Self.endSession(in: h)
+
+        let moves = asked.values
+        #expect(moves == [SidebarDropMove(ids: [c.id], newParentID: nil, before: h1.id)])
+        let order = AppState.topLevelWorktrees(h.state.worktrees[repo.id] ?? []).map { $0.id }
+        #expect(order == [a.id, c.id, h1.id, h2.id, b.id], h.evidence(names))
+        await recorder.waitForCount(1)
+        let sent = try #require(recorder.sent.first)
+        #expect(sent.worktreeIDs == [c.id])
+        #expect(sent.newParentID == nil)
+        #expect(sent.beforeWorktreeID == h1.id)
+    }
+
+    /// A nest is not mapped: dropped onto a row whose only child the filter
+    /// hides, the row goes after every child, the hidden one too.
+    @Test func nestOntoARowWithHiddenChildrenIsNotRemapped() async throws {
+        let h = OutlineHarness("drag.hiddenNest")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let main = SidebarOutlineControllerTests.row("main", repo, status: .main)
+        let parent = SidebarOutlineControllerTests.row("parent", repo, order: 0)
+        let hidden = SidebarGroupFixtures.row("hidden", repoID: repo.id, remote: "one", parent: parent.id, order: 0)
+        let c = SidebarOutlineControllerTests.row("c", repo, order: 1)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [main, parent, hidden, c]]
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        let recorder = MoveRecorder()
+        recorder.install(on: h.state)
+        h.mount()
+        let names = [main.id: "main", parent.id: "parent", hidden.id: "hidden", c.id: "c"]
+        try #require(!h.shownIDs.contains(.worktree(hidden.id)), h.evidence(names))
+
+        let state = h.state
+        let asked = FireRecorder<SidebarDropMove>()
+        h.controller.moveWorktreesForTesting = { move in
+            asked.record(move)
+            return state.moveWorktrees(ids: move.ids, newParentID: move.newParentID, before: move.before)
+        }
+        let info = try Self.startDrag(pressing: .worktree(c.id), in: h)
+        defer { info.release() }
+        let target = SidebarNodeID.worktree(parent.id)
+        let onto = SidebarDropPolicy.dropOnItemIndex
+        let operation = try Self.validate(info, parent: target, childIndex: onto, in: h)
+        #expect(operation == .move)
+        let accepted = try Self.accept(info, parent: target, childIndex: onto, in: h)
+        #expect(accepted, h.evidence(names))
+        Self.endSession(in: h)
+
+        let moves = asked.values
+        #expect(moves == [SidebarDropMove(ids: [c.id], newParentID: parent.id, before: nil)])
+        let children = h.state.children(of: parent.id).map { $0.id }
+        #expect(children == [hidden.id, c.id])
+        await recorder.waitForCount(1)
+        let sent = try #require(recorder.sent.first)
+        #expect(sent.newParentID == parent.id)
+        #expect(sent.beforeWorktreeID == nil)
+    }
+
     // MARK: The session
 
     @Test func structureHeldDuringDragAppliedAtEnd() throws {

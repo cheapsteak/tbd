@@ -32,7 +32,8 @@ struct SidebarDropMove: Equatable {
 /// - **Destination.** `validateDrop` asks the policy, retargets only when its
 ///   answer differs from the proposal, and draws the nest highlight or the
 ///   insertion line. `acceptDrop` checks the decision against a fresh build
-///   of `AppState` and hands it to `moveWorktrees`. The drop never sets
+///   of `AppState`, maps a place past the rows a repo's registry filter
+///   hides, and hands it to `moveWorktrees`. The drop never sets
 ///   `animatesToDestination`: the rows are not in place until the hold ends.
 extension SidebarOutlineController {
     // MARK: Setup
@@ -195,6 +196,12 @@ extension SidebarOutlineController {
     /// ahead only when the answer there is the same decision. A carried row
     /// or a destination that left, or a destination that no longer takes the
     /// rows, rejects it, and nothing moves.
+    ///
+    /// A confirmed place is then mapped past the rows the section's registry
+    /// filter hides (`landingBefore(_:parent:position:carried:in:)`), so the
+    /// rows land directly after the shown row above the gap. The mapping
+    /// comes after the check because the fresh tree has no node for a hidden
+    /// row to anchor to.
     func confirmedMove(_ decision: SidebarDropDecision, at position: SidebarDropPolicy.Retarget,
                        carried: [UUID]) -> SidebarDropMove? {
         let current = SidebarDropIndex(tree: currentTree())
@@ -207,10 +214,51 @@ extension SidebarOutlineController {
         case .nest(let parent):
             return SidebarDropMove(ids: ordered, newParentID: parent, before: nil)
         case .place(let parent, let before):
-            return SidebarDropMove(ids: ordered, newParentID: parent, before: before)
+            let landing = landingBefore(before, parent: parent, position: position, carried: ordered, in: current)
+            return SidebarDropMove(ids: ordered, newParentID: parent, before: landing)
         case .reject:
             return nil
         }
+    }
+
+    /// `before` mapped onto the full sibling list of `parent` (nil: the top
+    /// level of the section's repo) when the section's registry filter hides
+    /// any row (`SidebarDropPolicy.landingBefore`); `before` itself in a
+    /// section that is no repo's, or whose filter hides nothing.
+    ///
+    /// The section is the repo whose header `position`'s parent sits under,
+    /// which is the filter that decided what the gap shows. A hidden creating
+    /// placeholder is left out of the siblings, so the rows never land before
+    /// a row the daemon has not heard of; a shown one stays, so the mapping
+    /// never moves the rows above it.
+    private func landingBefore(_ before: UUID?, parent: UUID?, position: SidebarDropPolicy.Retarget,
+                               carried: [UUID], in index: SidebarDropIndex) -> UUID? {
+        guard let repoID = Self.sectionRepoID(of: position.parent, in: index) else { return before }
+        let hidden = appState.sidebarRegistryRemoteFilter(repoID: repoID).hiddenWorktreeIDs
+        guard !hidden.isEmpty else { return before }
+        let rows: [Worktree]
+        if let parent {
+            rows = appState.children(of: parent)
+        } else {
+            rows = AppState.topLevelWorktrees(appState.worktrees[repoID] ?? [])
+        }
+        let pending = appState.pendingWorktreeIDs
+        let siblings = rows.map { $0.id }.filter { !(hidden.contains($0) && pending.contains($0)) }
+        return SidebarDropPolicy.landingBefore(before, siblings: siblings, carried: Set(carried), hidden: hidden)
+    }
+
+    /// The repo whose section holds `start`: the root its chain of parents
+    /// ends at, when that root is a repo header. Nil for the Scratch and
+    /// provider sections, and when the chain leaves the tree.
+    private static func sectionRepoID(of start: SidebarNodeID?, in index: SidebarDropIndex) -> UUID? {
+        var next = start
+        var root: SidebarNodeID?
+        while let id = next {
+            root = id
+            next = index.entry(id)?.parent
+        }
+        guard case .repoHeader(let repoID)? = root else { return nil }
+        return repoID
     }
 
     /// The proposal that names `decision`'s destination in `index`'s tree:

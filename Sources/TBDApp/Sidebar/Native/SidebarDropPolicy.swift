@@ -224,6 +224,39 @@ enum SidebarDropPolicy {
         return (.place(parent: lineage.owner, before: before), unchanged ? nil : answer)
     }
 
+    // MARK: Hidden siblings
+
+    /// Maps a `.place` decided among shown rows onto the full sibling list,
+    /// for a section whose registry filter hides some of its rows
+    /// (docs/specs/2026-11-19-sidebar-remote-session-filter-design.md, "Drag
+    /// to reorder").
+    ///
+    /// `before` — the first shown, uncarried row after the gap, nil for the
+    /// end of the group — moves up past the run of `hidden` rows directly
+    /// above it in `siblings`, so the rows land directly after the shown row
+    /// above the gap, and every hidden row keeps its place relative to the
+    /// others. The identity when no hidden row sits directly above `before`,
+    /// and when `before` is not in `siblings`.
+    ///
+    /// The decision itself stays over shown rows: a drop is confirmed by
+    /// resolving it again against a fresh tree, where a hidden row has no
+    /// node, so only the confirmed move is mapped. A nest is never mapped: a
+    /// nested row goes after every child, hidden ones too.
+    static func landingBefore(_ before: UUID?, siblings: [UUID], carried: Set<UUID>, hidden: Set<UUID>) -> UUID? {
+        guard !hidden.isEmpty else { return before }
+        let list = siblings.filter { !carried.contains($0) }
+        let end: Int
+        if let before {
+            guard let index = list.firstIndex(of: before) else { return before }
+            end = index
+        } else {
+            end = list.count
+        }
+        var start = end
+        while start > 0, hidden.contains(list[start - 1]) { start -= 1 }
+        return start < list.count ? list[start] : nil
+    }
+
     // MARK: The gap a proposal names
 
     /// The gap a between-rows proposal points at, as the node the rows would
