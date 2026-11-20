@@ -614,6 +614,8 @@ import Testing
             "20261107184853_phone_control",
             "20261110021849_local_agent_sessions",
             "20261113231818_config_ghostty_daemon_emulator",
+            "20261120205010_terminal_history_live_on_tmux_server",
+            "20261120232500_terminal_tmux_session_index",
         ]
         let expectedInline = ["20261101170100_side_panel_notes"]
         let found = try SQLMigrationLoader.bundled.get()
