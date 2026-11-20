@@ -1,7 +1,7 @@
 # Sidebar filter for registry-provider sessions
 
 **Date:** 2026-11-19
-**Status:** Approved design, not yet built.
+**Status:** Approved and built.
 **Builds on:** [`2026-08-10-remote-sessions-in-worktree-tree-design.md`](2026-08-10-remote-sessions-in-worktree-tree-design.md) (remote rows in the tree),
 [`2026-08-27-remote-create-menu-entries-design.md`](2026-08-27-remote-create-menu-entries-design.md) (the cloud provider versus registry providers),
 [`2026-10-06-sidebar-groups-toggle-design.md`](2026-10-06-sidebar-groups-toggle-design.md) (the optional Remote group).
@@ -71,6 +71,11 @@ else.
     match no repo.
   - TBD's notifications. The filter changes the list, never what TBD alerts on.
   - The toolbar's repo filter.
+  - The pinned dock. A pinned registry row stays in it: pinning is a choice
+    made row by row, and the filter does not overrule it.
+  - The Hibernated group. With grouping on, a local lane files under
+    Hibernated by looking at all of its descendants, hidden ones included, so
+    a lane with a live hidden registry child stays in the working list.
 
 **The count** is the number of hidden rows plus hidden loose sessions. A
 session counts once, so a session and its row are one.
@@ -94,7 +99,10 @@ repo or flips the filter, and one more click undoes either.
 
 When a repo has the button, the header keeps its 20 pt square in the layout
 whether or not the button is drawn. Hovering therefore never shifts the name
-or cuts it shorter. A long name truncates by that square.
+or cuts it shorter. A long name truncates by that square. While the filter is
+on, the space also holds the count, sized for the largest count the button can
+show – what the filter would hide with nothing selected – so a selection that
+lowers the count never moves the name's cut point either.
 
 ### When it exists
 
@@ -117,7 +125,8 @@ and the button returns, tinted and counted, so the filter never acts unseen.
 ### States
 
 - **Off:**
-  - Drawn only while the pointer is over the header row, like the `+`.
+  - Drawn only while the pointer is over the repo's section – its header or
+    any of its rows – which is when the `+` is drawn.
   - An outlined filter symbol.
   - Tooltip: "Hide <provider> sessions", naming the provider by its
     `RemoteProviderIdentityPresentation.headline`. When the repo has sessions
@@ -151,11 +160,14 @@ menu item is the path that does not depend on hover.
 - **Drag to reorder.** A drag moves among the visible rows. The dropped row
   lands directly after the visible row above the drop point in the full
   sibling list. Hidden rows keep their order among themselves and never move
-  as a side effect.
+  as a side effect. A drop that leaves the visible order as it was moves
+  nothing at all, so dropping a row back into its own gap cannot slip it past
+  a hidden neighbour.
 - **Folded or hidden repo.** No change: the filter acts only on rows the repo
   would otherwise show.
-- **Repo removed.** Removing a repo from TBD removes its ID from the saved set.
-  An ID left behind for any other reason is inert.
+- **Repo removed.** Removing a repo from TBD removes its ID from the saved set,
+  and so does every successful refresh of the repo list, which catches a repo
+  removed from the CLI. A failed refresh prunes nothing.
 
 ## Design
 
@@ -213,7 +225,7 @@ That makes the change additive UI rather than a change to where existing rows
 appear by default, which is the case the flag rule in `CLAUDE.md` covers.
 
 No daemon change, no migration, and no new durable external resource. The
-only state is the app setting, which the app prunes when a repo is removed.
+only state is the app setting, which the app prunes against the repo list.
 
 ## Testing
 
