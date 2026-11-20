@@ -71,16 +71,6 @@ extension RPCRouter {
             repo = try? await db.repos.get(id: repoID)
         }
 
-        // The pane's pid, when tmux can say. Best effort: an unreadable pid only
-        // means the pin falls back to the resolved executable, which the service
-        // does silently by design.
-        var panePID: Int32?
-        if terminal.transport == .tmux, !terminal.tmuxPaneID.isEmpty,
-           let raw = try? await tmux.panePID(
-               server: worktree.tmuxServer, paneID: terminal.tmuxPaneID) {
-            panePID = Int32(raw)
-        }
-
         let config = try await db.config.get()
         var environment = ProcessInfo.processInfo.environment
         environment.merge(
@@ -114,7 +104,6 @@ extension RPCRouter {
             for: CompletionInventoryService.Request(
                 terminalID: terminal.id,
                 childPID: terminal.childPID,
-                panePID: panePID,
                 configDir: configDir,
                 worktreePath: worktree.path,
                 environment: environment))

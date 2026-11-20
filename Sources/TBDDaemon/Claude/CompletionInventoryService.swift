@@ -50,8 +50,6 @@ public actor CompletionInventoryService {
         let terminalID: UUID
         /// The holder transport's recorded child pid, when there is one.
         let childPID: Int32?
-        /// The tmux pane's process id, when the handler could read one.
-        let panePID: Int32?
         /// The profile's Claude config directory, which decides the answer as
         /// much as the binary does.
         let configDir: String
@@ -166,14 +164,12 @@ public actor CompletionInventoryService {
     /// is a legitimate answer.
     static func pinnedExecutable(
         childPID: Int32?,
-        panePID: Int32?,
         executablePathForPID: (Int32) -> String?,
         fallback: () -> String?
     ) -> String? {
-        for pid in [childPID, panePID].compactMap({ $0 }) where pid > 0 {
-            guard let path = executablePathForPID(pid), !path.isEmpty else { continue }
-            let basename = (path as NSString).lastPathComponent
-            guard !AgentReaper.holderChildShellBasenames.contains(basename) else { continue }
+        if let pid = childPID, pid > 0,
+           let path = executablePathForPID(pid), !path.isEmpty,
+           !AgentReaper.holderChildShellBasenames.contains((path as NSString).lastPathComponent) {
             return path
         }
         return fallback()
@@ -182,7 +178,6 @@ public actor CompletionInventoryService {
     func inventory(for request: Request) async -> TerminalCompletionsResult {
         guard let executablePath = Self.pinnedExecutable(
             childPID: request.childPID,
-            panePID: request.panePID,
             executablePathForPID: executablePathForPID,
             fallback: resolveExecutable
         ) else {
