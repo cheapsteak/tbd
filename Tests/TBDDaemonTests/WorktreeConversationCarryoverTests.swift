@@ -58,6 +58,71 @@ struct WorktreeConversationCarryoverTests {
         )
     }
 
+    /// A Claude carryover starts its primary with `--fork-session`: a new
+    /// session id, never a second agent on the source. So its spawn asks no
+    /// resume gate (`TmuxResumeGate`), and the create goes ahead while an
+    /// unparked tmux row and a mark both name the source session and the
+    /// probe says their servers may run.
+    @Test func aClaudeCarryoverAsksNoResumeGateWhileATmuxRowCarriesTheSourceSession() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
+        let claudeHome = tempDir.appendingPathComponent("claude-home", isDirectory: true)
+        var lifecycle = makeCarryoverLifecycle(
+            db: db, holder: holder, claudeHome: claudeHome
+        )
+        let probe = RecordingLeftoverTmuxProbe { _ in .running }
+        lifecycle.leftoverTmuxProbe = probe.probe
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
+
+        let sourceSessionID = UUID().uuidString
+        try writeSourceTranscript(
+            sessionID: sourceSessionID, projectsRoot: claudeHome.appendingPathComponent("projects")
+        )
+        let source = try await db.worktrees.create(
+            repoID: repo.id, name: "acme-source", branch: "tbd/acme-source",
+            path: tempDir.appendingPathComponent("acme-source").path,
+            tmuxServer: "tbd-acme-source")
+        let created = try await db.terminals.create(
+            worktreeID: source.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: sourceSessionID, kind: .claude,
+            transport: .tmux)
+        let tmuxRow = try #require(try await db.terminals.get(id: created.id))
+        await db.terminalHistory.recordLiveTmuxClose(
+            terminal: Terminal(
+                worktreeID: source.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+                claudeSessionID: sourceSessionID, kind: .claude),
+            server: source.tmuxServer)
+        #expect(try await db.terminals.liveTmuxServers(sessionIDs: [sourceSessionID])
+            == [source.tmuxServer])
+        #expect(try await db.terminalHistory.liveOnTmuxServers(sessionIDs: [sourceSessionID])
+            == [source.tmuxServer])
+
+        let completion = try await lifecycle.completeCreateWorktree(
+            worktreeID: pending.id,
+            carryover: ConversationCarryover(
+                sourceSessionID: sourceSessionID, notesSeed: "# Revived conversation\n")
+        )
+        guard case .ready = completion else {
+            Issue.record("expected inline create to complete synchronously")
+            return
+        }
+
+        let claude = try #require(
+            try await db.terminals.list(worktreeID: pending.id).first { $0.kind == .claude })
+        #expect(claude.transport == .holder)
+        let command = try #require(claudeCommandLine(holder))
+        #expect(command.contains("--resume \(sourceSessionID)"), "\(command)")
+        #expect(command.contains("--fork-session"), "\(command)")
+        #expect(probe.servers.isEmpty, "the carryover asked the resume gate: \(probe.servers)")
+        #expect(try await db.terminals.get(id: tmuxRow.id) == tmuxRow)
+    }
+
     @Test func preSessionCreateCarriesConversationAfterHookCompletes() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }

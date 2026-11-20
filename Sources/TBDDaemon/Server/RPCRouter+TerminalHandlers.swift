@@ -2067,7 +2067,9 @@ extension RPCRouter {
         // place: the switch replaces the session's process, and TBD no longer
         // starts processes on tmux. Refused before anything is recorded or
         // carried, so the row is exactly as it was. A fork is unaffected — it
-        // opens a new tab, on the holder, and leaves this row alone.
+        // opens a new tab, on the holder, and leaves this row alone. Its tab
+        // forks the session or starts a fresh one, never a second agent on
+        // this one, so it asks no resume gate (`forksSession`).
         if mode == .inPlace, oldTerminal.transport != .holder {
             return RPCResponse(
                 error: Self.tmuxSwapRefusal(terminalID: oldTerminal.id),
@@ -2931,7 +2933,11 @@ extension RPCRouter {
             kind: .claude,
             transport: transport,
             sessionIncarnationID: sessionIncarnationID,
-            claudeSpawnExtras: claudeSpawnExtras)
+            claudeSpawnExtras: claudeSpawnExtras,
+            // A fork tab forks the source session or starts a fresh one; it
+            // never runs a second agent on the source, whose own tab may still
+            // be on tmux, so the resume gate is not asked.
+            forksSession: true)
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: newTerminal.id, worktreeID: newTerminal.worktreeID, label: newTerminal.label

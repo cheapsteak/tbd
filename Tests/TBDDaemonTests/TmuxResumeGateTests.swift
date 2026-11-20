@@ -9,8 +9,8 @@ import Testing
 /// lifecycle: every live tmux row TBD deletes leaves a Closed Terminals entry
 /// marked with its tmux server, and every start of that session on the pty
 /// holder asks the probe about the server first — a revive, a revive with the
-/// History pane's preferred session, a fresh-branch revive, and
-/// `spawnTerminal` itself.
+/// History pane's preferred session, a fresh-branch revive of a Codex thread,
+/// and `spawnTerminal` itself. A spawn that forks the session asks nothing.
 ///
 /// Each archived fixture is a real git worktree with a holder Claude tab,
 /// spawned through the holder double, beside a seeded live tmux Claude row.
@@ -252,29 +252,16 @@ struct TmuxResumeGateTests {
 
     // MARK: - worktree.reviveConversationFresh
 
-    /// Resuming the marked conversation on a fresh branch asks the same
-    /// question, before any new worktree exists.
-    @Test func aFreshBranchReviveOfTheMarkedConversationRefuses() async throws {
-        let fixture = try await archivedFixture(serverState: .running)
-        defer { fixture.tearDown() }
-        let worktreesBefore = try await fixture.db.worktrees.list(repoID: fixture.repo.id).count
-
-        await #expect(throws: TmuxResumeRefusal(server: fixture.worktree.tmuxServer)) {
-            _ = try await fixture.lifecycle.reviveConversationOnFreshBranch(
-                archivedWorktreeID: fixture.worktree.id, sessionID: fixture.tmuxSessionID)
-        }
-
-        #expect(try await fixture.db.worktrees.list(repoID: fixture.repo.id).count == worktreesBefore)
-        #expect(fixture.probe.servers == [fixture.worktree.tmuxServer])
-    }
-
-    /// The same, for a conversation no archived tab names: its tab was closed
+    /// A fresh-branch revive of a Codex thread resumes the thread itself, so
+    /// it asks the same question, keyed by the thread id, before any new
+    /// worktree exists. No archived tab names the thread: its tab was closed
     /// before the archive, and only its Closed Terminals entry carries the
-    /// mark.
-    @Test func aFreshBranchReviveAsksBySessionIDWithoutAnArchivedTab() async throws {
+    /// mark. A Claude conversation is carried over with `--fork-session` and
+    /// asks nothing (`WorktreeReviveFreshTests`).
+    @Test func aFreshBranchReviveOfACodexThreadAsksBySessionID() async throws {
         let fixture = try await archivedFixture(serverState: .running, closedBeforeArchive: true)
         defer { fixture.tearDown() }
-        let identity = AgentSessionIdentity(agentKind: .claude, sessionID: fixture.tmuxSessionID)
+        let identity = AgentSessionIdentity(agentKind: .codex, sessionID: fixture.tmuxSessionID)
         try await fixture.db.localAgentSessions.upsert(LocalAgentSession(
             worktreeID: fixture.worktree.id, identity: identity,
             firstObservedAt: .distantPast, lastObservedAt: .distantPast))
@@ -287,6 +274,7 @@ struct TmuxResumeGateTests {
         }
 
         #expect(try await fixture.db.worktrees.list(repoID: fixture.repo.id).count == worktreesBefore)
+        #expect(fixture.probe.servers == [fixture.worktree.tmuxServer])
     }
 
     // MARK: - spawnTerminal
@@ -294,7 +282,8 @@ struct TmuxResumeGateTests {
     /// The choke point every new row passes: a spawn naming a marked session
     /// starts nothing and writes no row while the server may run, and starts
     /// on the holder once it is gone. A fresh session id has no mark, so its
-    /// spawn asks no probe.
+    /// spawn asks no probe, and a spawn that forks the marked session
+    /// (`forksSession`) asks none either: it lands while the server may run.
     @Test func spawnTerminalAsksAboutTheSessionItNames() async throws {
         let (tempDir, _) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -323,13 +312,14 @@ struct TmuxResumeGateTests {
             claudeSessionID: "sess-marked", kind: .claude)
         await db.terminalHistory.recordLiveTmuxClose(terminal: marked, server: "tbd-acme")
         let transport = try TerminalSpawnTransport.decide(registry: lifecycle.holderRegistry).get()
-        func spawn(_ id: UUID, session: String) async throws -> Terminal {
+        func spawn(_ id: UUID, session: String, forks: Bool = false) async throws -> Terminal {
             try await lifecycle.spawnTerminal(
                 id: id, worktreeID: worktree.id, workingDirectory: tempDir.path,
-                command: "claude --resume \(session)", env: [:], sensitiveEnv: [:],
+                command: "claude --resume \(session)\(forks ? " --fork-session" : "")",
+                env: [:], sensitiveEnv: [:],
                 cols: 80, rows: 24, label: TerminalLabel.claudeCode,
                 claudeSessionID: session, profileID: nil, kind: .claude,
-                transport: transport)
+                transport: transport, forksSession: forks)
         }
 
         let fresh = try await spawn(UUID(), session: UUID().uuidString.lowercased())
@@ -343,6 +333,11 @@ struct TmuxResumeGateTests {
         #expect(holder.launch(for: refusedID) == nil)
         #expect(try await db.terminals.get(id: refusedID) == nil)
         #expect(probe.servers == ["tbd-acme"])
+
+        let forked = try await spawn(UUID(), session: "sess-marked", forks: true)
+        #expect(forked.transport == .holder)
+        #expect(holder.launch(for: forked.id) != nil)
+        #expect(probe.servers == ["tbd-acme"], "a spawn that forks asked the gate")
 
         server.state = .absent
         let resumed = try await spawn(UUID(), session: "sess-marked")

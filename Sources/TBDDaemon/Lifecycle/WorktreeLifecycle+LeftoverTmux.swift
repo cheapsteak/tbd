@@ -197,11 +197,14 @@ extension WorktreeLifecycle {
 /// (`TerminalHistoryEntry.liveOnTmuxServer`). A start of the same session id
 /// anywhere else would put a second agent on it while the first still runs: a
 /// revive that relaunches the worktree's archived tabs, a History pane
-/// resume, a Closed Terminals reopen, a fresh-branch revive, a wake of
-/// another tab on that session. So each asks this first, keyed by the session
-/// ids it would start, and is refused until the server is gone. A parked tmux
-/// row with no park in flight is no reason to ask: its session ended when it
-/// was parked (`WorktreeLifecycle.sessionHasEnded`).
+/// resume, a Closed Terminals reopen, a fresh-branch revive of a Codex
+/// thread, a wake of another tab on that session. So each asks this first,
+/// keyed by the session ids it would start, and is refused until the server
+/// is gone. A parked tmux row with no park in flight is no reason to ask: its
+/// session ended when it was parked (`WorktreeLifecycle.sessionHasEnded`).
+/// Nor is a fork: Claude's `--fork-session`, which a profile switch's fork
+/// tab, a carryover and a fresh-branch revive of a Claude conversation start
+/// with, writes a new session id and never a second agent on this one.
 ///
 /// Keyed by session id rather than by row or worktree, because the paths
 /// that resume a session reach it by id from different records — the

@@ -1910,7 +1910,11 @@ extension WorktreeLifecycle {
                 transport: transport,
                 sessionIncarnationID: primarySessionIncarnationID,
                 claudeSpawnExtras: primarySpawnExtras,
-                codexLaunchOptions: primaryCodexLaunchOptions)
+                codexLaunchOptions: primaryCodexLaunchOptions,
+                // A Claude carryover starts with `--fork-session`, so it runs no
+                // second agent on the source session. A Codex carryover resumes
+                // the thread itself and is asked.
+                forksSession: primaryTerminalKind == .claude && carryover != nil)
         } catch {
             await sessionTitles.release(primarySpawnTitle)
             throw error

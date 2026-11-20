@@ -431,6 +431,65 @@ struct WorktreeReviveFreshTests {
                 == ["A": extrasA, "B": extrasB])
     }
 
+    /// A Claude conversation is carried onto the fresh branch with
+    /// `--fork-session`: a new session id, never a second agent on the
+    /// source. So the revive asks no resume gate (`TmuxResumeGate`) and goes
+    /// ahead while an unparked tmux row in another worktree and a mark both
+    /// name the source session, and the probe says their servers may run.
+    @Test func freshReviveOfAClaudeConversationATmuxRowCarriesAsksNoResumeGate() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
+        var lifecycle = makeReviveFreshLifecycle(db: db, holder: holder)
+        let probe = RecordingLeftoverTmuxProbe { _ in .running }
+        lifecycle.leftoverTmuxProbe = probe.probe
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedSource(
+            db: db, repo: repo, tempDir: tempDir, sessions: ["A"],
+            archivedHeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        try writeSourceTranscript(sessionID: "A")
+        let other = try await db.worktrees.create(
+            repoID: repo.id, name: "acme-other", branch: "tbd/acme-other",
+            path: tempDir.appendingPathComponent("acme-other").path,
+            tmuxServer: "tbd-acme-other")
+        let created = try await db.terminals.create(
+            worktreeID: other.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "A", kind: .claude,
+            transport: .tmux)
+        let tmuxRow = try #require(try await db.terminals.get(id: created.id))
+        await db.terminalHistory.recordLiveTmuxClose(
+            terminal: Terminal(
+                worktreeID: archived.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+                claudeSessionID: "A", kind: .claude),
+            server: archived.tmuxServer)
+        #expect(try await db.terminals.liveTmuxServers(sessionIDs: ["A"]) == ["tbd-acme-other"])
+        #expect(try await db.terminalHistory.liveOnTmuxServers(sessionIDs: ["A"])
+            == [archived.tmuxServer])
+
+        let outcome = try await lifecycle.reviveConversationOnFreshBranch(
+            archivedWorktreeID: archived.id,
+            sessionID: "A",
+            date: operationDate
+        )
+        guard case .ready = outcome.completion else {
+            Issue.record("expected the fresh revive to complete synchronously")
+            return
+        }
+
+        let claude = try #require(
+            try await db.terminals.list(worktreeID: outcome.result.worktree.id)
+                .first { $0.kind == .claude })
+        #expect(claude.transport == .holder)
+        let command = try #require(launchedCommand(holder, containing: "claude "))
+        #expect(command.contains("--resume A"), "\(command)")
+        #expect(command.contains("--fork-session"), "\(command)")
+        #expect(probe.servers.isEmpty, "the fork asked the resume gate: \(probe.servers)")
+        #expect(try await db.terminals.get(id: tmuxRow.id) == tmuxRow)
+    }
+
     @Test func fetchFailureCreatesFromLocalBaseAndReturnsStaleWarning() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }

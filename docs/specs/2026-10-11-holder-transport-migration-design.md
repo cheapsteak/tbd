@@ -248,11 +248,16 @@ The question is asked where every new row on a session starts,
 `WorktreeLifecycle.spawnTerminal`. That covers a revive's relaunch of its
 archived tabs, the History pane's resume (`session.resume`, and `terminal.create`
 with a session to resume), a Closed Terminals reopen of a Claude entry, and a
-fresh-branch revive. A wake starts a session in an existing row, so
-`HibernationCoordinator.wake` asks the same, and a refused wake leaves the row
-parked. A profile change applied in place replaces the holder process of a row
-that is already running its session and starts no second agent, so it asks
-nothing.
+fresh-branch revive of a Codex thread. A wake starts a session in an existing
+row, so `HibernationCoordinator.wake` asks the same, and a refused wake leaves
+the row parked. A profile change applied in place replaces the holder process of
+a row that is already running its session and starts no second agent, so it
+asks nothing. Neither does a spawn that forks a Claude session
+(`spawnTerminal`'s `forksSession`): a profile switch's fork tab, a carryover
+into a new worktree and a fresh-branch revive of a Claude conversation start
+with `--fork-session`, or the fork tab with a fresh session, so each writes a
+new session id and puts no second agent on the one it names. A Codex
+carryover resumes the thread itself and asks.
 
 A request that writes before it reaches `spawnTerminal` asks before its first
 write as well:
@@ -261,7 +266,8 @@ write as well:
   History pane's preferred session, the whole revive refuses before it records
   the restore plan or re-adds the checkout, and the worktree stays archived. A
   revive that skips the agent tabs relaunches none, so it asks nothing.
-- **A fresh-branch revive** – before the new worktree exists.
+- **A fresh-branch revive of a Codex thread** – before the new worktree
+  exists.
 - **`terminal.create` resuming a session**, which `session.resume` reaches, and
   **a Closed Terminals reopen of a Claude entry** – before the trust seed, the
   transcript sync and the spawn record.
@@ -522,16 +528,20 @@ never unlinks it, and nothing TBD runs creates one any more.
   run, spawns nothing and leaves every record as it was; goes ahead on the
   holder once the server is gone; and asks no probe for a session that neither
   a mark nor a tmux row names. That holds for a revive in place with and without
-  a preferred session, a fresh-branch revive, `session.resume`, a Closed
-  Terminals reopen, `spawnTerminal` itself and a wake. The RPCs answer
-  `terminalOnTmux` and record `not-eligible`. A revive that skips the agent
-  tabs asks nothing.
+  a preferred session, a fresh-branch revive of a Codex thread,
+  `session.resume`, a Closed Terminals reopen, `spawnTerminal` itself and a
+  wake. The RPCs answer `terminalOnTmux` and record `not-eligible`. A revive
+  that skips the agent tabs asks nothing.
 - `session.resume` and `terminal.create` resuming a session refuse the same
   way while an unparked tmux row in any worktree carries the session and that
   worktree's server may run, leaving the tmux row as it was, and go ahead once
   the server is gone. A row whose transport is NULL counts as one on tmux, and
   so does a parked tmux row with a park in flight; a parked tmux row with no
   park in flight is not probed.
+- A profile switch's fork of a tab on tmux, a Claude carryover into a new
+  worktree and a fresh-branch revive of a Claude conversation go ahead while a
+  tmux row and a mark name the source session and the probe says its server
+  may run.
 - Archive keeps a live tmux row's tab in the record. Reconcile's archive of a
   vanished checkout followed by a History pane resume, and `terminal.delete`
   followed by `session.resume`, are refused end to end. The probe is injected,

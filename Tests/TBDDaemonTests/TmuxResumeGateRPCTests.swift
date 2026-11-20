@@ -380,17 +380,24 @@ struct TmuxResumeGateRPCTests {
         #expect(try await f.db.worktrees.get(id: f.worktree.id)?.status == .archived)
     }
 
-    @Test func reviveConversationFreshAnswersTheRefusalWithTheTmuxCode() async throws {
+    /// A fresh-branch revive of a Codex thread resumes the thread itself, so
+    /// it asks the gate. A Claude conversation is carried over with
+    /// `--fork-session` and asks nothing (`WorktreeReviveFreshTests`).
+    @Test func reviveConversationFreshOfACodexThreadAnswersTheRefusalWithTheTmuxCode() async throws {
         let f = try await fixture()
         defer { f.tearDown() }
         try await archiveNamingTheMarkedSession(f)
+        let codex = AgentSessionIdentity(agentKind: .codex, sessionID: Self.sessionID)
+        try await f.db.localAgentSessions.upsert(LocalAgentSession(
+            worktreeID: f.worktree.id, identity: codex,
+            firstObservedAt: .distantPast, lastObservedAt: .distantPast))
         let repoID = try #require(f.worktree.repoID)
         let worktreesBefore = try await f.db.worktrees.list(repoID: repoID).map(\.id)
 
         let refused = try await f.send(
             RPCMethod.worktreeReviveConversationFresh,
             WorktreeReviveConversationFreshParams(
-                archivedWorktreeID: f.worktree.id, sessionID: Self.sessionID))
+                archivedWorktreeID: f.worktree.id, sessionID: Self.sessionID, identity: codex))
 
         try await expectRefused(refused, f, terminalsBefore: [])
         #expect(try await f.db.worktrees.list(repoID: repoID).map(\.id) == worktreesBefore)
