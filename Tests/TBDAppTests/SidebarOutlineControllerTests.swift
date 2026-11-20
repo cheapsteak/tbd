@@ -1261,24 +1261,12 @@ struct SidebarOutlineControllerTests {
         let rows = Self.mountTallList(h, history: [[0]])
         let repo = try #require(h.state.repos.first)
 
-        // As `createWorktree` draws and selects it.
-        let placeholder = Self.row("new", repo, order: 30, status: .creating)
-        h.state.pendingWorktreeIDs.insert(placeholder.id)
-        h.state.worktrees[repo.id]?.append(placeholder)
-        h.state.selectedWorktreeIDs = [placeholder.id]
-        h.controller.flushPendingRebuild()
+        let placeholder = Self.showSelectedPlaceholder(repo, in: h)
         try Self.expectCentered(.worktree(placeholder.id), in: h)
 
         h.outline.scroll(NSPoint(x: 0, y: 0))
         try #require(h.clip.bounds.minY < 0.5, "The outline never scrolled back to the top")
-        // As the create's success path swaps it: the row, then the selection,
-        // then the pending marker.
-        let real = Self.row("new", repo, order: 30)
-        let swapped = h.state.replaceCreationPlaceholder(
-            repoID: repo.id, placeholderID: placeholder.id, placeholderName: "new", with: real)
-        try #require(swapped != nil)
-        h.state.selectedWorktreeIDs = [real.id]
-        h.state.pendingWorktreeIDs.remove(placeholder.id)
+        let real = try Self.swapPlaceholder(placeholder, repo, in: h)
         h.controller.flushPendingRebuild()
         #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(real.id))))
         #expect(h.clip.bounds.minY < 0.5, "The placeholder's swap scrolled the list to \(h.clip.bounds.minY)")
@@ -1294,6 +1282,56 @@ struct SidebarOutlineControllerTests {
         try #require(h.clip.bounds.minY < 0.5, "The outline never scrolled back to the top")
         h.state.selectedWorktreeIDs = [rows[40].id]
         h.controller.flushPendingRebuild()
+        try Self.expectCentered(.worktree(rows[40].id), in: h)
+    }
+
+    /// A placeholder swapped while a rename of another row holds the
+    /// structure leaves the list where it is when the hold ends, as a swap
+    /// outside a hold does.
+    @Test func placeholderSwapDuringHoldDoesNotScroll() throws {
+        let h = OutlineHarness("center.placeholderSwapHeld")
+        defer { h.tearDown() }
+        _ = Self.mountTallList(h, history: [[0]])
+        let repo = try #require(h.state.repos.first)
+        let placeholder = Self.showSelectedPlaceholder(repo, in: h)
+        h.outline.scroll(NSPoint(x: 0, y: 0))
+        try #require(h.clip.bounds.minY < 0.5, "The outline never scrolled back to the top")
+
+        h.controller.beginHold(.rename)
+        let real = try Self.swapPlaceholder(placeholder, repo, in: h)
+        h.controller.flushPendingRebuild()
+        try #require(!h.shownIDs.contains(.worktree(real.id)), "The real row landed while the structure was held")
+        #expect(h.clip.bounds.minY < 0.5, "The outline scrolled while its structure was held")
+
+        h.controller.endHold(.rename)
+        try #require(h.row(.worktree(real.id)) >= 0, "The real row never landed")
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(real.id))))
+        #expect(h.clip.bounds.minY < 0.5,
+                "The placeholder's swap scrolled the list when the hold ended, to \(h.clip.bounds.minY)")
+    }
+
+    /// A row selected elsewhere — by back, say — after a placeholder's swap
+    /// in the same hold is a navigation, and is centred when the hold ends:
+    /// the swap was taken by the apply that saw it, so it does not swallow
+    /// the navigation too.
+    @Test func selectionAfterAPlaceholderSwapDuringHoldCentersWhenTheHoldEnds() throws {
+        let h = OutlineHarness("center.placeholderSwapHeldThenNavigate")
+        defer { h.tearDown() }
+        let rows = Self.mountTallList(h, history: [[0]])
+        let repo = try #require(h.state.repos.first)
+        let placeholder = Self.showSelectedPlaceholder(repo, in: h)
+        h.outline.scroll(NSPoint(x: 0, y: 0))
+        try #require(h.clip.bounds.minY < 0.5, "The outline never scrolled back to the top")
+
+        h.controller.beginHold(.rename)
+        let real = try Self.swapPlaceholder(placeholder, repo, in: h)
+        h.controller.flushPendingRebuild()
+        try #require(!h.shownIDs.contains(.worktree(real.id)), "The real row landed while the structure was held")
+        h.state.selectedWorktreeIDs = [rows[40].id]
+        h.controller.flushPendingRebuild()
+        #expect(h.clip.bounds.minY < 0.5, "The outline scrolled while its structure was held")
+
+        h.controller.endHold(.rename)
         try Self.expectCentered(.worktree(rows[40].id), in: h)
     }
 
@@ -1412,6 +1450,31 @@ struct SidebarOutlineControllerTests {
         }
         h.mount(size: NSSize(width: 320, height: 200))
         return rows
+    }
+
+    /// A creation placeholder in `repo`, among `mountTallList`'s rows at
+    /// row 30's place, drawn and selected as `createWorktree` does, then
+    /// applied.
+    static func showSelectedPlaceholder(_ repo: Repo, in h: OutlineHarness) -> Worktree {
+        let placeholder = Self.row("new", repo, order: 30, status: .creating)
+        h.state.pendingWorktreeIDs.insert(placeholder.id)
+        h.state.worktrees[repo.id]?.append(placeholder)
+        h.state.selectedWorktreeIDs = [placeholder.id]
+        h.controller.flushPendingRebuild()
+        return placeholder
+    }
+
+    /// Swaps `placeholder` for its real row as the create's success path
+    /// does: the row, then the selection, then the pending marker. Nothing
+    /// is applied.
+    static func swapPlaceholder(_ placeholder: Worktree, _ repo: Repo, in h: OutlineHarness) throws -> Worktree {
+        let real = Self.row("new", repo, order: 30)
+        let swapped = h.state.replaceCreationPlaceholder(
+            repoID: repo.id, placeholderID: placeholder.id, placeholderName: "new", with: real)
+        try #require(swapped != nil, "The placeholder was never swapped")
+        h.state.selectedWorktreeIDs = [real.id]
+        h.state.pendingWorktreeIDs.remove(placeholder.id)
+        return real
     }
 
     static func row(_ name: String, _ repo: Repo, parent: UUID? = nil, order: Int = 0,

@@ -61,8 +61,15 @@ extension SidebarOutlineController {
     ///
     /// A new row the outline does not show — in a collapsed section, filtered
     /// out, only in the dock — is skipped, and nothing is expanded for it.
-    /// While structure is held nothing is taken, so the change waits for the
-    /// apply that ends the hold, as the pending scroll target does.
+    /// While structure is held, a change waits for the apply that ends the
+    /// hold, as the pending scroll target does. A placeholder's swap does not
+    /// wait: the first apply that sees it takes it, hold or not. Left for the
+    /// apply that ends the hold, it would swallow a row selected later in the
+    /// same hold as well; taken at once, that row counts as a change and is
+    /// centred when the hold ends. A row selected elsewhere just after the
+    /// swap, before any apply has seen it, lands in the same apply as the
+    /// swap and is taken with it, uncentred: that apply cannot tell the two
+    /// apart.
     func centerSelectionIfChanged() {
         let selection = modelSelectionIDs
         guard let shown = lastShownSelection else {
@@ -70,11 +77,15 @@ extension SidebarOutlineController {
             centerFirstShownRow(of: selection)
             return
         }
-        guard selection != shown, !isHoldingStructure else { return }
+        guard selection != shown else { return }
+        if lastShownPlaceholdersLeftTheModel() {
+            recordShownSelection(selection)
+            return
+        }
+        guard !isHoldingStructure else { return }
         let added = selection.subtracting(shown)
-        let swappedPlaceholder = lastShownPlaceholdersLeftTheModel()
         recordShownSelection(selection)
-        guard !added.isEmpty, !swappedPlaceholder else { return }
+        guard !added.isEmpty else { return }
         centerFirstShownRow(of: added)
     }
 
