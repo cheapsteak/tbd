@@ -84,17 +84,3 @@ enum SidebarSelectionBridge {
         }
     }
 }
-
-/// `AppState`'s selection as the sidebar's lists mirror it: the selected
-/// worktrees and the selected remote session. Each list keeps the one its
-/// last apply showed, to tell a new selection from a rebuild that left the
-/// selection alone.
-struct SidebarSelectionKey: Equatable {
-    let worktrees: Set<UUID>
-    let remote: RemoteSessionSelection?
-
-    @MainActor init(_ appState: AppState) {
-        worktrees = appState.selectedWorktreeIDs
-        remote = appState.selectedRemoteSession
-    }
-}

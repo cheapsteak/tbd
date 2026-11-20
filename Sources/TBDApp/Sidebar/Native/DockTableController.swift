@@ -157,12 +157,17 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     private var isApplyingModelSelection = false
     /// The selection the last apply mirrored; a new one scrolls its first row
     /// into view.
-    private var lastSelection: SidebarSelectionKey?
+    private var lastSelection: SelectionKey?
     /// The pins a drag carries, read from its pasteboard once per drag:
     /// `validateDrop` runs on every pointer move.
     private var dropPayloadCache: (sequence: Int, ids: [UUID])?
     private var renameEditor: SidebarRenameEditor?
     private weak var renamingCell: NSView?
+
+    private struct SelectionKey: Equatable {
+        let worktrees: Set<UUID>
+        let remote: RemoteSessionSelection?
+    }
 
     var isHoldingStructure: Bool { !holds.isEmpty }
 
@@ -540,7 +545,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// A selection that changed since the last apply scrolls its first dock
     /// row into view: opening a subtree can push the dock past its cap.
     private func scrollNewSelectionIntoView() {
-        let key = SidebarSelectionKey(appState)
+        let key = SelectionKey(worktrees: appState.selectedWorktreeIDs, remote: appState.selectedRemoteSession)
         defer { lastSelection = key }
         guard let previous = lastSelection, previous != key, let first = table.selectedRowIndexes.first else { return }
         table.scrollRowToVisible(first)
