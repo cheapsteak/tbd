@@ -930,6 +930,116 @@ struct SidebarDragDropTests {
         #expect(unfiltered == SidebarDropOutcome.move(SidebarDropMove(ids: [r1.id], newParentID: parent.id, before: nil)))
     }
 
+    /// Workflow groups on. Stored top level `[pending, r1, r2, hidden]`:
+    /// `pending` a creating placeholder, inline and sorted first, `r1` and
+    /// `r2` cloud rows in the Remote group, `hidden` an "acme" row the filter
+    /// hides. `r2` dropped at the top of the Remote group lands before `r1`.
+    /// The placeholder sits above `r1` in the full list but shows in another
+    /// group, so the mapping must not walk past it and name it as the row to
+    /// land before: the daemon has never heard of it, `moveWorktrees`
+    /// refuses it, and the drop would fail. Stored: `[pending, r2, r1,
+    /// hidden]`.
+    @Test func dropAtTheTopOfAGroupNeverLandsBeforeAPlaceholderOfAnotherGroup() async throws {
+        let h = OutlineHarness("drag.hiddenGroupedPlaceholder")
+        defer { h.tearDown() }
+        h.defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let main = SidebarOutlineControllerTests.row("main", repo, status: .main)
+        let pending = SidebarOutlineControllerTests.row("pending", repo, order: -1, status: .creating)
+        let r1 = Self.cloudRow("r1", repo, order: 0)
+        let r2 = Self.cloudRow("r2", repo, order: 1)
+        let hidden = SidebarGroupFixtures.row("hidden", repoID: repo.id, remote: "one", order: 2)
+        let remote = SidebarGroupID(owner: .repository(repo.id), kind: .remote)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [main, pending, r1, r2, hidden]]
+        h.state.pendingWorktreeIDs = [pending.id]
+        h.state.expandedSidebarGroups = [remote]
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        let recorder = MoveRecorder()
+        recorder.install(on: h.state)
+        h.mount()
+        let names = [main.id: "main", pending.id: "pending", r1.id: "r1", r2.id: "r2", hidden.id: "hidden"]
+        let group = SidebarNodeID.group(remote)
+        let groupRows = h.controller.tree.children(of: group).map { $0.id }
+        let shownInGroup: [SidebarNodeID] = [.worktree(r1.id), .worktree(r2.id)]
+        try #require(groupRows == shownInGroup, h.evidence(names))
+        let pendingParent = h.controller.tree.parent(of: .worktree(pending.id))
+        try #require(pendingParent == .repoHeader(repo.id), h.evidence(names))
+        let stored = AppState.topLevelWorktrees(h.state.worktrees[repo.id] ?? []).map { $0.id }
+        try #require(stored == [pending.id, r1.id, r2.id, hidden.id], h.evidence(names))
+
+        // Both branches of the filter, for the decision the drop below makes.
+        let decision = SidebarDropDecision.place(parent: nil, before: r1.id)
+        let expected = SidebarDropOutcome.move(SidebarDropMove(ids: [r2.id], newParentID: nil, before: r1.id))
+        let filtered = h.controller.confirmedMove(decision, at: (group, 0), carried: [r2.id])
+        #expect(filtered == expected)
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        let unfiltered = h.controller.confirmedMove(decision, at: (group, 0), carried: [r2.id])
+        #expect(unfiltered == expected)
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        h.controller.flushPendingRebuild()
+
+        // `r2` to the top of the group, through the outline.
+        let state = h.state
+        let asked = FireRecorder<SidebarDropMove>()
+        h.controller.moveWorktreesForTesting = { move in
+            asked.record(move)
+            return state.moveWorktrees(ids: move.ids, newParentID: move.newParentID, before: move.before)
+        }
+        let info = try Self.startDrag(pressing: .worktree(r2.id), in: h)
+        defer { info.release() }
+        let operation = try Self.validate(info, parent: group, childIndex: 0, depth: 1, in: h)
+        #expect(operation == .move)
+        let accepted = try Self.accept(info, parent: group, childIndex: 0, in: h)
+        #expect(accepted, h.evidence(names))
+        Self.endSession(in: h)
+
+        let moves = asked.values
+        #expect(moves == [SidebarDropMove(ids: [r2.id], newParentID: nil, before: r1.id)])
+        let order = AppState.topLevelWorktrees(h.state.worktrees[repo.id] ?? []).map { $0.id }
+        #expect(order == [pending.id, r2.id, r1.id, hidden.id], h.evidence(names))
+        await recorder.waitForCount(1)
+        let sent = try #require(recorder.sent.first)
+        #expect(sent.worktreeIDs == [r2.id])
+        #expect(sent.newParentID == nil)
+        #expect(sent.beforeWorktreeID == r1.id)
+    }
+
+    /// The same placeholder between two rows of the Remote group: stored
+    /// top level `[r1, pending, r2, hidden, r3]`. `r3` dropped between `r1`
+    /// and `r2` lands before `r2`, not before the placeholder above it.
+    @Test func dropBetweenGroupRowsNeverLandsBeforeAPlaceholderOfAnotherGroup() throws {
+        let h = OutlineHarness("drag.hiddenGroupedPlaceholderBetween")
+        defer { h.tearDown() }
+        h.defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let main = SidebarOutlineControllerTests.row("main", repo, status: .main)
+        let r1 = Self.cloudRow("r1", repo, order: 0)
+        let pending = SidebarOutlineControllerTests.row("pending", repo, order: 1, status: .creating)
+        let r2 = Self.cloudRow("r2", repo, order: 2)
+        let hidden = SidebarGroupFixtures.row("hidden", repoID: repo.id, remote: "one", order: 3)
+        let r3 = Self.cloudRow("r3", repo, order: 4)
+        let remote = SidebarGroupID(owner: .repository(repo.id), kind: .remote)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [main, r1, pending, r2, hidden, r3]]
+        h.state.pendingWorktreeIDs = [pending.id]
+        h.state.expandedSidebarGroups = [remote]
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        h.mount()
+        let names = [main.id: "main", r1.id: "r1", pending.id: "pending", r2.id: "r2", hidden.id: "hidden",
+                     r3.id: "r3"]
+        let group = SidebarNodeID.group(remote)
+        let groupRows = h.controller.tree.children(of: group).map { $0.id }
+        let shownInGroup: [SidebarNodeID] = [.worktree(r1.id), .worktree(r2.id), .worktree(r3.id)]
+        try #require(groupRows == shownInGroup, h.evidence(names))
+        let pendingParent = h.controller.tree.parent(of: .worktree(pending.id))
+        try #require(pendingParent == .repoHeader(repo.id), h.evidence(names))
+
+        let decision = SidebarDropDecision.place(parent: nil, before: r2.id)
+        let moved = h.controller.confirmedMove(decision, at: (group, 1), carried: [r3.id])
+        #expect(moved == SidebarDropOutcome.move(SidebarDropMove(ids: [r3.id], newParentID: nil, before: r2.id)))
+    }
+
     /// A row on the compiled cloud provider, which no registry filter hides.
     private static func cloudRow(_ name: String, _ repo: Repo, parent: UUID? = nil, order: Int) -> Worktree {
         let location = WorktreeLocation.remote(provider: ClaudeCloudProvider.name, sessionID: name)

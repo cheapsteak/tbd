@@ -250,6 +250,11 @@ enum SidebarDropPolicy {
     /// sibling directly above `before` shows, and when `before` is not in
     /// `siblings`.
     ///
+    /// The result is `before`, nil, or a sibling the walk passed over, one
+    /// that does not show in the gap. So a sibling that must never be named
+    /// as `before`, such as a creating placeholder, belongs in `siblings`
+    /// only where it shows in the gap, and there it stops the walk.
+    ///
     /// The decision itself stays over shown rows: a drop is confirmed by
     /// resolving it again against a fresh tree, where a hidden row has no
     /// node, so only the confirmed move is mapped. A nest is never mapped: a

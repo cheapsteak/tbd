@@ -254,10 +254,17 @@ extension SidebarOutlineController {
     /// which is the filter that decided what the gap shows. The rows the gap
     /// shows are the worktree rows under `position`'s parent in the fresh
     /// tree: with workflow groups on, that parent is one group's node, and
-    /// the siblings filed under the other groups do not show in the gap. A
-    /// hidden creating placeholder is left out of the siblings, so the rows
-    /// never land before a row the daemon has not heard of; a shown one
-    /// stays, so the mapping never moves the rows above it.
+    /// the siblings filed under the other groups do not show in the gap.
+    ///
+    /// A creating placeholder stays among the siblings only when the gap
+    /// shows it, and is left out otherwise: hidden by the filter (a hidden
+    /// row has no node in the fresh tree), or filed under another group.
+    /// The mapping lands at the end, before `before` (never a placeholder:
+    /// the decision skips them), or before a sibling it walked past, one the
+    /// gap does not show. So it never names a placeholder, a row the daemon
+    /// has not heard of and `AppState.moveWorktrees` refuses. A placeholder
+    /// the gap shows stops the walk, so the mapping never moves the rows
+    /// above it.
     private func placement(before: UUID?, parent: UUID?, position: SidebarDropPolicy.Retarget,
                            carried: [UUID], in index: SidebarDropIndex) -> SidebarDropOutcome {
         let unmapped = SidebarDropOutcome.move(SidebarDropMove(ids: carried, newParentID: parent, before: before))
@@ -271,12 +278,12 @@ extension SidebarOutlineController {
         } else {
             rows = AppState.topLevelWorktrees(appState.worktrees[repoID] ?? [])
         }
-        let pending = appState.pendingWorktreeIDs
-        let siblings = rows.map { $0.id }.filter { !(hidden.contains($0) && pending.contains($0)) }
         var gapRows: Set<UUID> = []
         for child in gapEntry.node.children {
             if case .worktree(let uuid) = child.id { gapRows.insert(uuid) }
         }
+        let pending = appState.pendingWorktreeIDs
+        let siblings = rows.map { $0.id }.filter { !pending.contains($0) || gapRows.contains($0) }
         if SidebarDropPolicy.keepsShownOrder(before, siblings: siblings, carried: carried, hidden: hidden,
                                              gapRows: gapRows) {
             return .unchanged
