@@ -39,13 +39,15 @@ read-only probe in `docs/research/2026-10-30-herdr/procenv_probe.py`:
   by its marker alone.
 
 The kernel withholds a hidden process's environment by cutting the buffer
-after argv, and it finds the cut by skipping each run of NULs. An empty
-argument merges with the NULs before it, so each one moves the cut one string
-later and leaves one environment entry in the buffer. Measured on macOS 27
-with `/bin/sleep` started by `posix_spawn` with an empty `argv[0]` and the
-worktree marker as `env[0]`, under each of the eight amounts of path padding:
-the buffer holds that one entry and ends before the terminal marker. A whole
-environment ends with an empty entry; a cut one ends with the buffer.
+after argv, and it finds argv by skipping every NUL after the executable path.
+An empty `argv[0]` merges with the path's padding, so the cut lands one string
+late and leaves `env[0]` in the buffer. Measured on macOS 27 with `/bin/sleep`
+started by `posix_spawn` with an empty `argv[0]` and the worktree marker as
+`env[0]`, under each of the eight amounts of path padding: the buffer holds
+that one entry and ends before the terminal marker. An empty argument later in
+argv merges with nothing and moves nothing: measured with `/bin/sh` and an
+empty argument in the middle or at the end, the buffer ends right after argv.
+A whole environment ends with an empty entry; a cut one ends with the buffer.
 
 TBD sets the markers only on a terminal's job, so they reach what that job
 starts and nothing else. The daemon, a holder and a per-repo tmux server were

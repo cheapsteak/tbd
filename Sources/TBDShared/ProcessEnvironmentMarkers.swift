@@ -89,12 +89,13 @@ public enum ProcessEnvironmentReader {
     /// An empty entry ends the environment, and a buffer that ends before one
     /// is `.hidden` as well, whatever entries it holds. That is how the kernel
     /// withholds a protected process's environment, an Apple platform
-    /// binary's among them: it cuts the buffer after argv. It finds the cut by
-    /// skipping each run of NULs, so every empty argument merges with the NULs
-    /// before it and moves the cut one string later, past one more
-    /// environment entry. What is left is the start of the environment, not
-    /// the whole of it, and it can hold one marker while withholding the
-    /// other — the one that might name live work.
+    /// binary's among them: it cuts the buffer after argv. It finds argv by
+    /// skipping every NUL after the executable path, so an empty `argv[0]`
+    /// merges with the path's padding and the cut lands one string late,
+    /// after `env[0]`. That one entry is the start of the environment, not the
+    /// whole of it, and it can hold one marker while withholding the other —
+    /// the one that might name live work. An empty argument later in argv
+    /// merges with nothing, and the cut stays right after argv.
     ///
     /// argv is stepped over by offset and never inspected.
     public static func parse(procArgs raw: [UInt8]) -> ProcessEnvironmentMarkers {

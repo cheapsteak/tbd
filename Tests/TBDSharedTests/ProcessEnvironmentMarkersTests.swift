@@ -191,10 +191,11 @@ struct ProcessEnvironmentMarkersTests {
         #expect(ProcessEnvironmentReader.parse(procArgs: Array(unterminated.dropLast())) == .hidden)
     }
 
-    /// The kernel's buffer for a protected process whose arguments are all
-    /// non-empty: cut straight after argv.
+    /// The kernel's buffer for a protected process whose `argv[0]` is not
+    /// empty: cut straight after argv, an empty argument later in it
+    /// included.
     @Test func aBufferCutAfterArgvIsHidden() {
-        let cut = Self.bytes(argv: ["sleep", "30"], env: [], closed: false)
+        let cut = Self.bytes(argv: ["sh", "", "30"], env: [], closed: false)
         #expect(ProcessEnvironmentReader.parse(procArgs: cut) == .hidden)
     }
 
@@ -216,9 +217,10 @@ struct ProcessEnvironmentMarkersTests {
     /// `env[0]` whatever the padding.
     ///
     /// `/bin/sleep` is an Apple platform binary, and the kernel withholds such
-    /// a process's environment by cutting the buffer after argv. It finds the
-    /// cut by skipping each run of NULs, so an empty `argv[0]` merges with the
-    /// padding there and the cut lands one string late, after `env[0]`.
+    /// a process's environment by cutting the buffer after argv. It finds argv
+    /// by skipping every NUL after the executable path, so an empty `argv[0]`
+    /// merges with the padding there and the cut lands one string late, after
+    /// `env[0]`.
     /// Measured on macOS 27, the buffer holds the worktree marker and ends
     /// before the terminal one, and the reader calls that `.hidden`: the
     /// environment is cut off. A kernel that gives the whole environment
