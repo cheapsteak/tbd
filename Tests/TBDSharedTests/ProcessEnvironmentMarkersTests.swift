@@ -213,24 +213,25 @@ struct ProcessEnvironmentMarkersTests {
 
     /// The real kernel's layout, for the reader: `/bin/sleep` started with an
     /// empty `argv[0]` under exec paths that need each amount of padding, and
-    /// with the worktree marker as `env[0]`. The environment starts at
-    /// `env[0]` whatever the padding.
+    /// with the worktree marker as `env[0]`. Whatever the padding, `argv[0]`
+    /// sits at the padded boundary and the environment starts right after
+    /// argv, at `env[0]`, or at the buffer's end when the kernel cut it there.
     ///
     /// `/bin/sleep` is an Apple platform binary, and the kernel withholds such
-    /// a process's environment by cutting the buffer after argv. It finds argv
-    /// by skipping every NUL after the executable path, so an empty `argv[0]`
-    /// merges with the padding there and the cut lands one string late, after
-    /// `env[0]`.
-    /// Measured on macOS 27, the buffer holds the worktree marker and ends
-    /// before the terminal one, and the reader calls that `.hidden`: the
-    /// environment is cut off. A kernel that gives the whole environment
-    /// shows both markers.
+    /// a process's environment by cutting the buffer after argv. Measured on
+    /// macOS 27, it finds argv by skipping every NUL after the executable
+    /// path, so an empty `argv[0]` merges with the padding there and the cut
+    /// lands one string late: the buffer holds the worktree marker and ends
+    /// before the terminal one. A kernel that counts argv from the boundary
+    /// cuts right after it instead, and leaves no entry at all. The reader
+    /// calls either `.hidden`: the environment is cut off. A kernel that gives
+    /// the whole environment shows both markers.
     ///
     /// Only this test's own environment is in the child, and the buffer is
     /// still never part of a failure message.
-    @Test("a real process started with an empty argv[0] has its environment start at env[0]",
+    @Test("a real process started with an empty argv[0] has its environment start right after argv",
           arguments: pathsNeedingEachPadding)
-    func aRealProcesssEnvironmentStartsAtItsFirstEntry(path: String, padding: Int) throws {
+    func aRealProcesssEnvironmentStartsRightAfterArgv(path: String, padding: Int) throws {
         let worktree = UUID().uuidString
         let terminal = UUID().uuidString
         let worktreeEntry = "\(ProcessEnvironmentReader.worktreeKey)=\(worktree)"
@@ -248,7 +249,8 @@ struct ProcessEnvironmentMarkersTests {
         #expect(argumentLengths == [0, 2])
         let startsAtTheFirstEntry = raw[layout.environmentStart...]
             .starts(with: Array(worktreeEntry.utf8) + [0])
-        #expect(startsAtTheFirstEntry)
+        let cutRightAfterArgv = layout.environmentStart == raw.count
+        #expect(startsAtTheFirstEntry || cutRightAfterArgv)
 
         let markers = ProcessEnvironmentReader.markers(pid: child.pid)
         let whole = ProcessEnvironmentMarkers.markers(worktreeID: worktree, terminalID: terminal)
