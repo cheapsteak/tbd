@@ -9,19 +9,47 @@ import Testing
 /// messages never include buffer contents: environments hold secrets.
 @Suite("Process environment markers")
 struct ProcessEnvironmentMarkersTests {
-    /// A buffer as the kernel lays it out: argc, exec path, two NULs of
-    /// padding, argv strings, then env strings (each NUL-terminated).
+    /// A buffer as the kernel lays it out: argc; the exec path and its NUL,
+    /// padded with NULs so the two fill a multiple of 8 bytes; argv strings;
+    /// env strings; then the empty entry that ends the environment and one of
+    /// the strings the kernel puts after it. Every string is NUL-terminated.
     private static func bytes(
         argc: Int32? = nil, exec: String = "/bin/x", argv: [String] = ["x"], env: [String]
+    ) -> [UInt8] {
+        bytes(argc: argc, exec: exec, argv: argv, envBytes: env.map { Array($0.utf8) })
+    }
+
+    /// `bytes(argc:exec:argv:env:)` with each env entry given as raw bytes.
+    private static func bytes(
+        argc: Int32? = nil, exec: String = "/bin/x", argv: [String] = ["x"], envBytes: [[UInt8]]
     ) -> [UInt8] {
         var out: [UInt8] = []
         withUnsafeBytes(of: argc ?? Int32(argv.count)) { out.append(contentsOf: $0) }
         out.append(contentsOf: Array(exec.utf8))
-        out.append(contentsOf: [0, 0])
+        out.append(0)
+        while (out.count - 4) % 8 != 0 { out.append(0) }
         for arg in argv { out.append(contentsOf: Array(arg.utf8)); out.append(0) }
-        for entry in env { out.append(contentsOf: Array(entry.utf8)); out.append(0) }
+        for entry in envBytes { out.append(contentsOf: entry); out.append(0) }
+        out.append(0)
+        out.append(contentsOf: Array("ptr_munge=".utf8))
+        out.append(contentsOf: [0, 0, 0, 0])
         return out
     }
+
+    /// Exec paths of 10 to 17 bytes, which with the terminator need each of
+    /// the eight amounts of padding, none to seven bytes, each paired with its
+    /// amount. The repeated slashes only lengthen the path: the kernel keeps
+    /// it as it was given.
+    static let pathsNeedingEachPadding: [(String, Int)] = [
+        ("/bin/sleep", 5),
+        ("/bin//sleep", 4),
+        ("/bin///sleep", 3),
+        ("/bin////sleep", 2),
+        ("/bin/////sleep", 1),
+        ("/bin//////sleep", 0),
+        ("/bin///////sleep", 7),
+        ("/bin////////sleep", 6),
+    ]
 
     @Test func bothMarkersAreRead() {
         let raw = Self.bytes(env: ["PATH=/bin", "TBD_WORKTREE_ID=W", "SECRET=s", "TBD_TERMINAL_ID=T"])
@@ -60,8 +88,7 @@ struct ProcessEnvironmentMarkersTests {
     /// Fails against a lossy decode, which repairs the value into replacement
     /// characters and reports a marker TBD never wrote.
     @Test func aValueThatIsNotUTF8IsAbsent() {
-        var raw = Self.bytes(env: ["PATH=/bin"])
-        raw.append(contentsOf: Array("TBD_WORKTREE_ID=".utf8) + [0xFF, 0xFE, 0])
+        let raw = Self.bytes(envBytes: [Array("PATH=/bin".utf8), Array("TBD_WORKTREE_ID=".utf8) + [0xFF, 0xFE]])
         #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .noMarkers)
     }
 
@@ -74,6 +101,75 @@ struct ProcessEnvironmentMarkersTests {
         let raw = Self.bytes(env: ["TBD_WORKTREE_ID=first", "TBD_WORKTREE_ID=second"])
         #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .markers(worktreeID: "first", terminalID: nil))
     }
+
+    // MARK: - Where argv ends
+
+    /// Fails against a reader that skips every NUL after the path: it takes
+    /// the empty `argv[0]` for padding, steps over `env[0]` as the last
+    /// argument, and loses the marker in it.
+    @Test func anEmptyArgvZeroLeavesTheFirstEntryReadable() {
+        let raw = Self.bytes(argv: ["", "30"], env: ["TBD_WORKTREE_ID=W", "TBD_TERMINAL_ID=T"])
+        #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .markers(worktreeID: "W", terminalID: "T"))
+    }
+
+    /// argv starts at the padded boundary for every amount of padding, so an
+    /// empty `argv[0]` is read in place and `env[0]` stays the first entry.
+    @Test("an empty argv[0] is read in place for each amount of path padding",
+          arguments: pathsNeedingEachPadding)
+    func anEmptyArgvZeroIsReadInPlace(exec: String, padding: Int) throws {
+        let raw = Self.bytes(exec: exec, argv: ["", "30"], env: ["TBD_WORKTREE_ID=W", "PATH=/bin"])
+
+        let layout = try #require(ProcArgsLayout(procArgs: raw))
+        let argumentLengths = layout.argumentRanges.map(\.count)
+        #expect(layout.argumentsStart == 4 + exec.utf8.count + 1 + padding)
+        #expect(argumentLengths == [0, 2])
+        #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .markers(worktreeID: "W", terminalID: nil))
+    }
+
+    /// A byte that is not NUL anywhere in the path's padding means the buffer
+    /// is not the kernel's layout, so nothing in it is evidence. The last two
+    /// offsets fail against a reader that skips NULs and walks on from the
+    /// first byte that is not one: that reader still finds `env[0]`.
+    @Test("a byte in the path's padding that is not NUL is hidden", arguments: 0..<5)
+    func aByteInThePaddingIsHidden(offset: Int) {
+        var raw = Self.bytes(exec: "/bin/sleep", argv: ["x"], env: ["TBD_WORKTREE_ID=W", "PATH=/bin"])
+        raw[4 + "/bin/sleep".utf8.count + 1 + offset] = UInt8(ascii: "x")
+        #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .hidden)
+    }
+
+    @Test func aBufferThatEndsBeforeArgvDoesIsHidden() {
+        let whole = Self.bytes(exec: "/bin/sleep", argv: ["sleep", "30"], env: ["TBD_WORKTREE_ID=W"])
+        // Inside the path's padding, bytes 15 to 19.
+        #expect(ProcessEnvironmentReader.parse(procArgs: Array(whole.prefix(17))) == .hidden)
+        // Inside the last argument, before its terminator.
+        #expect(ProcessEnvironmentReader.parse(procArgs: Array(whole.prefix(27))) == .hidden)
+    }
+
+    @Test func aNegativeArgcIsHidden() {
+        let raw = Self.bytes(argc: -1, env: ["TBD_WORKTREE_ID=W"])
+        #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .hidden)
+    }
+
+    /// A process can be started with no arguments at all, and its environment
+    /// then starts at the padded boundary.
+    @Test func anArgcOfZeroReadsTheEnvironmentFromTheBoundary() throws {
+        let raw = Self.bytes(exec: "/bin/sleep", argv: [], env: ["TBD_WORKTREE_ID=W", "TBD_TERMINAL_ID=T"])
+
+        let layout = try #require(ProcArgsLayout(procArgs: raw))
+        #expect(layout.argumentRanges.isEmpty)
+        #expect(layout.environmentStart == layout.argumentsStart)
+        #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .markers(worktreeID: "W", terminalID: "T"))
+    }
+
+    /// Fails against a reader that skips every NUL after the path: it takes
+    /// both empty arguments for padding and steps over both markers as the
+    /// last two arguments.
+    @Test func twoEmptyLeadingArgumentsAreBothArguments() {
+        let raw = Self.bytes(argv: ["", "", "30"], env: ["TBD_WORKTREE_ID=W", "TBD_TERMINAL_ID=T"])
+        #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .markers(worktreeID: "W", terminalID: "T"))
+    }
+
+    // MARK: - The real kernel
 
     @Test func aFailedCallIsHidden() {
         #expect(ProcessEnvironmentReader.markers(pid: Int32.max) == .hidden)

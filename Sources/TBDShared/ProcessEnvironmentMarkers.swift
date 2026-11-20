@@ -26,12 +26,21 @@ public enum ProcessEnvironmentMarkers: Sendable, Equatable {
 /// **Environments hold secrets, so the parser reads bytes and keeps nothing
 /// else.** It never builds a `String` for any entry other than the two marker
 /// keys' values, never retains the buffer past `parse`, and never logs. A
-/// caller cannot ask it for anything it does not need.
+/// caller cannot ask it for anything it does not need. `ProcArgsLayout`, which
+/// it reads the buffer's layout through, builds no `String` at all.
 ///
-/// Layout of the buffer (the same one `docs/research/2026-10-30-herdr/procenv_probe.py`
-/// parses): a native-endian `Int32` argc, the executable path and its NUL
-/// terminator, NUL padding, `argc` NUL-terminated argv strings, then the
-/// environment as NUL-terminated `KEY=value` strings.
+/// The buffer is a native-endian `Int32` argc, the executable path and its NUL
+/// terminator padded with NULs to an 8-byte boundary, `argc` NUL-terminated
+/// argv strings starting at that boundary, then the environment as
+/// NUL-terminated `KEY=value` strings. `ProcArgsLayout` finds where the
+/// environment starts, stepping over argv without reading it. Because argv
+/// starts at the boundary, an empty `argv[0]` is an argument like any other:
+/// a NUL told from the padding by its offset, not skipped with it.
+///
+/// `docs/research/2026-10-30-herdr/procenv_probe.py` reads the same buffer, but
+/// it skips every NUL after the path, so for a process with an empty `argv[0]`
+/// it takes `env[0]` for an argument. It records what was measured; it is not a
+/// reference for the layout.
 public enum ProcessEnvironmentReader {
     public static let worktreeKey = "TBD_WORKTREE_ID"
     public static let terminalKey = "TBD_TERMINAL_ID"
@@ -67,29 +76,19 @@ public enum ProcessEnvironmentReader {
     /// Extract the two markers from a `KERN_PROCARGS2` buffer.
     ///
     /// Only an entry whose key is exactly one of the two names counts; the
-    /// first occurrence wins; an empty value counts as absent. A buffer too
-    /// short to hold argc, one that ends before argv does, and one with zero
-    /// environment entries are all `.hidden` — a live process always has at
+    /// first occurrence wins; an empty value counts as absent. A buffer
+    /// `ProcArgsLayout` cannot read is `.hidden`: one too short to hold argc,
+    /// one claiming a negative argc, one whose path padding is not all NULs,
+    /// and one that ends before argv does. An argc of zero is read, with the
+    /// environment starting at the padded boundary. A buffer with zero
+    /// environment entries is `.hidden` too — a live process always has at
     /// least `PATH`-like entries, so none means the kernel withheld them.
+    ///
+    /// argv is stepped over by offset and never inspected.
     public static func parse(procArgs raw: [UInt8]) -> ProcessEnvironmentMarkers {
-        guard raw.count >= 4 else { return .hidden }
-        let argc = raw.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
-        guard argc >= 0 else { return .hidden }
+        guard let layout = ProcArgsLayout(procArgs: raw) else { return .hidden }
 
-        var pos = 4
-        // Executable path.
-        guard let execEnd = nextNul(in: raw, from: pos) else { return .hidden }
-        pos = execEnd
-        // The padding after the path cannot be told from an empty argv[0], so
-        // an empty argv[0] is skipped along with it; argv content is never
-        // inspected, only stepped over.
-        while pos < raw.count, raw[pos] == 0 { pos += 1 }
-
-        for _ in 0..<Int(argc) {
-            guard let end = nextNul(in: raw, from: pos) else { return .hidden }
-            pos = end + 1
-        }
-
+        var pos = layout.environmentStart
         var entries = 0
         var worktree: String?
         var terminal: String?
