@@ -90,12 +90,13 @@ extension WorktreeLifecycle {
     /// **It is also where the resume gate is asked for every new row.** A spawn
     /// that names a session — a resume, a restored archived tab, a fork of a
     /// session, or a fresh session whose id was just minted — is refused with
-    /// `TmuxResumeRefusal` before anything starts while a live tmux row TBD
-    /// deleted carried that session and its tmux server may still be running
-    /// it (`TmuxResumeGate`). A fresh id has no mark, so it costs one read.
-    /// Callers that write anything for the session before they get here — a
-    /// spawn record, a session title, a revive's restore plan, a new worktree
-    /// — ask the same gate first, so this answer is the backstop for a mark
+    /// `TmuxResumeRefusal` before anything starts while a tmux row carries that
+    /// session, or a live tmux row TBD deleted carried it, and that row's tmux
+    /// server may still be running it (`TmuxResumeGate`). A fresh id is in
+    /// neither record, so it costs the gate's two reads. Callers that write
+    /// anything for the session before they get here — a spawn record, a
+    /// session title, a revive's restore plan, a new worktree — ask the same
+    /// gate first, so this answer is the backstop for a tmux row or a mark
     /// written in between.
     ///
     /// - Parameters:

@@ -166,9 +166,10 @@ extension WorktreeLifecycle {
     }
 
     /// The resume gate (`TmuxResumeGate`) over this lifecycle's records and
-    /// probe: the refusal when one of `sessionIDs` is carried by an unparked
-    /// tmux row, or was carried by a live tmux row TBD deleted, and that row's
-    /// tmux server may still be running it; nil otherwise.
+    /// probe: the refusal when one of `sessionIDs` is carried by a tmux row
+    /// whose session may still run, or was carried by a live tmux row TBD
+    /// deleted, and that row's tmux server may still be running it; nil
+    /// otherwise.
     func tmuxResumeRefusal(resuming sessionIDs: [String]) async throws -> TmuxResumeRefusal? {
         try await TmuxResumeGate(
             history: db.terminalHistory, terminals: db.terminals, probe: leftoverTmuxProbe
@@ -180,30 +181,36 @@ extension WorktreeLifecycle {
 /// asks first: may that session still be running in a tmux server an earlier
 /// build started?
 ///
-/// Two records name such a session. An unparked tmux row carries it, in its
-/// worktree's tmux server: the row's tab shows that the session is still on
-/// tmux, but the History pane's session list offers the same session id, and
-/// resuming it there starts it beside the tmux agent. And TBD deletes a live
-/// tmux row without running tmux (`WorktreeLifecycle.closeLeftoverTmuxRow`):
-/// closing its tab, archiving its worktree, reconcile's archive of a worktree
-/// whose checkout is gone. The session the row carried may keep running in
-/// that server, and the row's Closed Terminals entry records the server
+/// Two records name such a session. A tmux row carries it, in its worktree's
+/// tmux server, while the row is unparked: the row's tab shows that the
+/// session is still on tmux, but the History pane's session list offers the
+/// same session id, and resuming it there starts it beside the tmux agent. A
+/// parked tmux row carries it too while its park is in flight
+/// (`pendingSessionIncarnationID` set): an earlier build's tmux hibernate
+/// recorded the park and signalled the agent, and left the row so when its
+/// respawn failed, with the agent perhaps still running. And TBD deletes a
+/// live tmux row without running tmux
+/// (`WorktreeLifecycle.closeLeftoverTmuxRow`): closing its tab, archiving its
+/// worktree, reconcile's archive of a worktree whose checkout is gone. The
+/// session the row carried may keep running in that server, and the row's
+/// Closed Terminals entry records the server
 /// (`TerminalHistoryEntry.liveOnTmuxServer`). A start of the same session id
 /// anywhere else would put a second agent on it while the first still runs: a
 /// revive that relaunches the worktree's archived tabs, a History pane
-/// resume, a Closed Terminals reopen, a fresh-branch revive, a wake of another
-/// tab on that session. So each asks this first, keyed by the session ids it
-/// would start, and is refused until the server is gone. A parked tmux row is
-/// no reason to ask: its session ended when it was parked.
+/// resume, a Closed Terminals reopen, a fresh-branch revive, a wake of
+/// another tab on that session. So each asks this first, keyed by the session
+/// ids it would start, and is refused until the server is gone. A parked tmux
+/// row with no park in flight is no reason to ask: its session ended when it
+/// was parked (`WorktreeLifecycle.sessionHasEnded`).
 ///
 /// Keyed by session id rather than by row or worktree, because the paths
 /// that resume a session reach it by id from different records — the
 /// archived tabs, the History pane's session list, Closed Terminals — and the
 /// tmux row or its mark may sit in any worktree. The lookup is one read of
-/// each of two partial indexes, the unparked tmux rows' and the marked
-/// entries', across every worktree; the probe is asked only about a server
-/// they name, so a session neither names costs a start those two reads and
-/// nothing else. A refusal writes nothing.
+/// each of two partial indexes, the tmux rows' whose session may still run
+/// and the marked entries', across every worktree; the probe is asked only
+/// about a server they name, so a session neither names costs a start those
+/// two reads and nothing else. A refusal writes nothing.
 ///
 /// A transition measure, like the probe it asks: on 2027-01-15 parking on
 /// sight replaces it. See
@@ -214,9 +221,9 @@ struct TmuxResumeGate: Sendable {
     let terminals: TerminalStore
     let probe: LeftoverTmuxServerProbe
 
-    /// The refusal naming the first server, in name order, that an unparked
-    /// tmux row or a mark of one of `sessionIDs` names and the probe says may
-    /// still be running; nil when neither names one or every named server is
+    /// The refusal naming the first server, in name order, that a tmux row
+    /// whose session may still run or a mark of one of `sessionIDs` names and
+    /// the probe says may still be running; nil when neither names one or every named server is
     /// gone. Throws when either record cannot be read, so a caller never
     /// starts a session it could not check.
     func refusal(resuming sessionIDs: [String]) async throws -> TmuxResumeRefusal? {
@@ -232,8 +239,9 @@ struct TmuxResumeGate: Sendable {
 }
 
 /// A start the resume gate refused (`TmuxResumeGate`): the session it would
-/// start is carried by an unparked tmux row, or was carried by a live tmux row
-/// TBD deleted, and that row's tmux server may still be running it. Thrown
+/// start is carried by a tmux row whose session may still run, or was carried
+/// by a live tmux row TBD deleted, and that row's tmux server may still be
+/// running it. Thrown
 /// before the caller writes anything, so every record is as it was.
 struct TmuxResumeRefusal: Error, Equatable, LocalizedError, CustomStringConvertible {
     /// The tmux server, as `tmux -L` takes it.

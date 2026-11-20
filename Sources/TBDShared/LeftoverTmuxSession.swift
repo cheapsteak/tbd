@@ -72,7 +72,7 @@ public enum LeftoverTmuxSession {
             + " Then run `tbd terminal migrate \(terminalID.uuidString)` to move it to the pty holder."
     }
 
-    /// The refusal for any start of a session an unparked tmux row carries, or
+    /// The refusal for any start of a session a tmux row carries, or
     /// a live tmux row carried when TBD closed its tab, while that row's tmux
     /// server may still be running it: a revive, a History or Closed Terminals
     /// resume, a wake. Starting it

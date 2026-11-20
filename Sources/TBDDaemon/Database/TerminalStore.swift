@@ -801,17 +801,21 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// The tmux servers of the unparked tmux rows naming one of `sessionIDs`,
-    /// in any worktree, each once and in name order: the servers those
-    /// sessions may still be running in. A row's server is its worktree's. A
-    /// parked row is left out, because its session ended when it was parked,
-    /// and so is a row of a worktree with no tmux server of its own, which a
-    /// remote lane is. Empty when no such row exists, which is one read of the
-    /// partial index `idx_terminal_live_tmux_session`.
+    /// The tmux servers of the tmux rows naming one of `sessionIDs` whose
+    /// session may still run, in any worktree, each once and in name order. A
+    /// row's server is its worktree's. A tmux row's session may still run
+    /// while the row is unparked, and while a park is in flight
+    /// (`pendingSessionIncarnationID` set), which is how an earlier build left
+    /// a hibernate whose respawn failed: the agent was signalled but may not
+    /// have exited. So only a parked row with no park in flight is left out
+    /// (`WorktreeLifecycle.sessionHasEnded`), and so is a row of a worktree
+    /// with no tmux server of its own, which a remote lane is. Empty when no
+    /// such row exists, which is one read of the partial index
+    /// `idx_terminal_live_tmux_session`.
     ///
     /// The transport and park terms repeat the index's own condition word for
-    /// word, literal included, because SQLite uses a partial index only for a
-    /// query whose condition contains that of the index.
+    /// word, literal and parentheses included, because SQLite uses a partial
+    /// index only for a query whose condition contains that of the index.
     public func liveTmuxServers(sessionIDs: [String]) async throws -> [String] {
         guard !sessionIDs.isEmpty else { return [] }
         return try await writer.read { db in
@@ -819,7 +823,7 @@ public struct TerminalStore: Sendable {
                 SELECT DISTINCT worktree.tmuxServer FROM terminal
                 JOIN worktree ON worktree.id = terminal.worktreeID
                 WHERE terminal.transport IS NOT 'holder'
-                AND terminal.hibernatedAt IS NULL AND terminal.suspendedAt IS NULL
+                AND ((terminal.hibernatedAt IS NULL AND terminal.suspendedAt IS NULL) OR terminal.pendingSessionIncarnationID IS NOT NULL)
                 AND terminal.claudeSessionID IN (\(databaseQuestionMarks(count: sessionIDs.count)))
                 AND worktree.tmuxServer != ''
                 ORDER BY worktree.tmuxServer

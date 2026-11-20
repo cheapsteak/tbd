@@ -218,18 +218,23 @@ space. Nothing in TBD names the session after those.
 `terminal.delete`'s activity rails apply to holder rows only: closing a tmux
 row ends no process, so there is no turn in flight to protect.
 
-**Resuming a session a tmux row carries.** A session an unparked tmux row
-carries, or a deleted live tmux row carried, may still be running in that row's
-server, and starting it on the pty holder would put a second agent on the same
-session id. The open row's tab says its session is still on tmux, but the
-History pane lists the same session, and its Resume reaches the session by id,
-not through the row. So every start of an existing session looks its id up
-first, across every worktree (`TmuxResumeGate`), in two places: the unparked
-tmux rows, whose server is their worktree's, and the marked Closed Terminals
-entries. A parked tmux row is no reason to ask, since its session ended when it
-was parked. A session neither names starts without more: one read of each of two
-indexes, each holding only the rows it can match, which is all a wake of a
-parked holder row pays. For each server they name, the start asks the probe.
+**Resuming a session a tmux row carries.** A session a tmux row carries, or a
+deleted live tmux row carried, may still be running in that row's server, and
+starting it on the pty holder would put a second agent on the same session id.
+The open row's tab says its session is still on tmux, but the History pane lists
+the same session, and its Resume reaches the session by id, not through the row.
+So every start of an existing session looks its id up first, across every
+worktree (`TmuxResumeGate`), in two places: the tmux rows whose session may
+still run, whose server is their worktree's, and the marked Closed Terminals
+entries. A tmux row's session may still run while the row is unparked, and
+while a park is in flight (`pendingSessionIncarnationID` set). An earlier
+build's tmux hibernate recorded the park and signalled the agent before it
+respawned the window, and left the park in flight when the respawn failed, so
+the agent may still be running behind such a row. A parked tmux row with no
+park in flight is no reason to ask, since its session ended when it was parked.
+A session neither names starts without more: one read of each of two indexes,
+each holding only the rows it can match, which is all a wake of a parked holder
+row pays. For each server they name, the start asks the probe.
 
 - **Running** – the start refuses with `terminalOnTmux` and the same ending
   advice, `tmux -L <server> kill-server` or a restart, then try again. Nothing
@@ -285,8 +290,8 @@ the hourly orphan maintenance (`Daemon.performOrphanMaintenance`) runs
 live tmux rows, and like the rest of that pass it answers to the GC switch.
 Check Again is `terminal.recreateWindow`, which probes the row's server and
 parks the row once it is gone. A migration probes the row it is asked to move,
-and a start of an existing session the servers its unparked tmux rows and marks
-name.
+and a start of an existing session the servers named by its marks and by the
+tmux rows whose session may still run.
 
 **This probe is a transition measure; on 2027-01-15 it is replaced by parking
 on sight.** No tmux server started before 2026-11-14 should still be running by
@@ -515,15 +520,18 @@ never unlinks it, and nothing TBD runs creates one any more.
   session ids, across worktrees.
 - Each start of an existing session refuses while a server its mark names may
   run, spawns nothing and leaves every record as it was; goes ahead on the
-  holder once the server is gone; and asks no probe for a session with no mark.
-  That holds for a revive in place with and without a preferred session, a
-  fresh-branch revive, `session.resume`, a Closed Terminals reopen,
-  `spawnTerminal` itself and a wake. The RPCs answer `terminalOnTmux` and
-  record `not-eligible`. A revive that skips the agent tabs asks nothing.
+  holder once the server is gone; and asks no probe for a session that neither
+  a mark nor a tmux row names. That holds for a revive in place with and without
+  a preferred session, a fresh-branch revive, `session.resume`, a Closed
+  Terminals reopen, `spawnTerminal` itself and a wake. The RPCs answer
+  `terminalOnTmux` and record `not-eligible`. A revive that skips the agent
+  tabs asks nothing.
 - `session.resume` and `terminal.create` resuming a session refuse the same
   way while an unparked tmux row in any worktree carries the session and that
   worktree's server may run, leaving the tmux row as it was, and go ahead once
-  the server is gone. A parked tmux row on the session is not probed.
+  the server is gone. A row whose transport is NULL counts as one on tmux, and
+  so does a parked tmux row with a park in flight; a parked tmux row with no
+  park in flight is not probed.
 - Archive keeps a live tmux row's tab in the record. Reconcile's archive of a
   vanished checkout followed by a History pane resume, and `terminal.delete`
   followed by `session.resume`, are refused end to end. The probe is injected,

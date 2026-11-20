@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import DaemonTestSupport
 import TestSupport
 import Testing
@@ -13,10 +14,11 @@ import Testing
 /// marked.
 ///
 /// The mark comes from `terminal.delete` of a live tmux row, the close the
-/// History pane's Resume and Closed Terminals then reach by session id. An
-/// unparked tmux row left open names its session the same way, in its
-/// worktree's server; a parked one names none. The probe is injected and
-/// switchable, so no test asks a real socket.
+/// History pane's Resume and Closed Terminals then reach by session id. A tmux
+/// row left open names its session the same way, in its worktree's server,
+/// while it is unparked or its park is in flight; a parked one with no park in
+/// flight names none. The probe is injected and switchable, so no test asks a
+/// real socket.
 @Suite("Resume gate RPCs")
 struct TmuxResumeGateRPCTests {
     /// What the injected probe answers, switchable mid-test.
@@ -133,18 +135,46 @@ struct TmuxResumeGateRPCTests {
         #expect(f.probe.servers == [server], sourceLocation: sourceLocation)
     }
 
-    /// A tmux Claude row on `sessionID` in `worktree`, left open: unparked,
-    /// its tab showing that the session is still on tmux, or parked when
-    /// `parked`.
+    /// How a seeded tmux row stands.
+    enum TmuxRowState {
+        /// Unparked, its tab showing that the session is still on tmux.
+        case unparked
+        /// Parked, with no park in flight: its session ended.
+        case parked
+        /// Parked with the park still in flight (`pendingSessionIncarnationID`
+        /// set), the way an earlier build's tmux hibernate left a row whose
+        /// respawn failed after it had signalled the agent.
+        case parkInFlight
+    }
+
+    /// A tmux Claude row on `sessionID` in `worktree`, left open in `state`.
+    /// With `nullTransport` its transport is NULL, as most rows written before
+    /// the transport column read.
     private func openATmuxRow(
-        _ f: Fixture, in worktree: Worktree, parked: Bool = false
+        _ f: Fixture, in worktree: Worktree, state: TmuxRowState = .unparked,
+        nullTransport: Bool = false
     ) async throws -> Terminal {
         let row = try await f.db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
             label: TerminalLabel.claudeCode, claudeSessionID: Self.sessionID, kind: .claude,
             transport: .tmux)
-        if parked {
+        switch state {
+        case .unparked:
+            break
+        case .parked:
             try await f.db.terminals.setHibernated(id: row.id, sessionID: Self.sessionID, reason: .auto)
+        case .parkInFlight:
+            let live = try #require(try await f.db.terminals.get(id: row.id))
+            _ = try #require(try await f.db.terminals.beginHibernatedShellRespawn(
+                id: row.id, expectedState: TerminalHibernationSnapshot(terminal: live),
+                reason: .auto))
+        }
+        if nullTransport {
+            try await f.db.writerForTests.write { db in
+                try db.execute(
+                    sql: "UPDATE terminal SET transport = NULL WHERE id = ?",
+                    arguments: [row.id.uuidString])
+            }
         }
         return try #require(try await f.db.terminals.get(id: row.id))
     }
@@ -250,13 +280,13 @@ struct TmuxResumeGateRPCTests {
         #expect(try await f.db.terminals.get(id: row.id) == row)
     }
 
-    /// A parked tmux row's session ended when it was parked, so it is no
-    /// reason to ask. The probe answers `.running`: a start that asked it would
-    /// be refused.
+    /// A parked tmux row with no park in flight ended its session when it was
+    /// parked, so it is no reason to ask. The probe answers `.running`: a start
+    /// that asked it would be refused.
     @Test func aParkedTmuxRowOnTheSessionIsNotProbed() async throws {
         let f = try await fixture()
         defer { f.tearDown() }
-        _ = try await openATmuxRow(f, in: f.worktree, parked: true)
+        _ = try await openATmuxRow(f, in: f.worktree, state: .parked)
 
         let resumed = try await f.send(
             RPCMethod.sessionResume,
@@ -268,6 +298,43 @@ struct TmuxResumeGateRPCTests {
 
         #expect(f.probe.servers.isEmpty, "a parked tmux row's server was probed: \(f.probe.servers)")
         #expect(f.holder.launches.count == 2)
+    }
+
+    /// A tmux row parked with its park still in flight may still be running
+    /// its agent, so the gate reads it as it reads an unparked row: probed,
+    /// and refused while the server may run.
+    @Test func sessionResumeWaitsWhileATmuxRowsParkIsInFlight() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let row = try await openATmuxRow(f, in: f.worktree, state: .parkInFlight)
+        #expect(row.isParked)
+        #expect(row.pendingSessionIncarnationID != nil)
+        let params = SessionResumeParams(worktreeID: f.worktree.id, identity: identity)
+
+        let refused = try await f.send(RPCMethod.sessionResume, params)
+        try await expectRefused(refused, f, terminalsBefore: [row], marks: [])
+
+        f.server.state = .absent
+        let resumed = try await f.send(RPCMethod.sessionResume, params)
+        #expect(resumed.success, "error: \(resumed.error ?? "nil")")
+    }
+
+    /// A row whose transport is NULL, as most rows written before the
+    /// transport column read, is on tmux to the gate just as `'tmux'` is.
+    @Test func terminalCreateResumingWaitsWhileATmuxRowWithANullTransportCarriesTheSession() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let row = try await openATmuxRow(f, in: f.worktree, nullTransport: true)
+        let transportIsNull = try await f.db.writerForTests.read { db in
+            try Bool.fetchOne(
+                db, sql: "SELECT transport IS NULL FROM terminal WHERE id = ?",
+                arguments: [row.id.uuidString])
+        }
+        #expect(transportIsNull == true)
+
+        let refused = try await f.send(RPCMethod.terminalCreate, TerminalCreateParams(
+            worktreeID: f.worktree.id, type: .claude, resumeSessionID: Self.sessionID))
+        try await expectRefused(refused, f, terminalsBefore: [row], marks: [])
     }
 
     // MARK: - terminalHistory.revive

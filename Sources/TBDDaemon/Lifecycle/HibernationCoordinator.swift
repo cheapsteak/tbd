@@ -105,7 +105,7 @@ public enum WakeResult: Equatable, Sendable {
     case respawnFailed(reason: String)
     /// The row is on the tmux transport, which TBD no longer starts, reaches
     /// or stops sessions on (`tmuxWakeRefusal`), or its session may still be
-    /// running in tmux because an unparked tmux row carries it too, or a live
+    /// running in tmux because a tmux row carries it too, or a live
     /// tmux row TBD deleted carried it (`TmuxResumeGate`). Nothing was touched
     /// and an `initialPrompt` was not
     /// delivered. `reason` says what to do: a parked tmux row's names
@@ -1084,9 +1084,9 @@ public actor HibernationCoordinator {
     /// before anything else about it is asked (`tmuxWakeRefusal`): a parked
     /// one names `tbd terminal migrate` and stays parked, and a live one says
     /// it is still running in tmux. TBD no longer starts sessions on tmux. A
-    /// holder row whose session a deleted live tmux row also carried is
-    /// refused the same way while that row's tmux server may still be running
-    /// it (`TmuxResumeGate`), and stays parked.
+    /// holder row whose session a tmux row also carries, or a deleted live
+    /// tmux row carried, is refused the same way while that row's tmux server
+    /// may still be running it (`TmuxResumeGate`), and stays parked.
     ///
     /// The in-place profile swap's wake (`wakeHolderAfterInPlaceChange`) does
     /// not ask: it replaces a holder process that was running the session a
@@ -1148,8 +1148,8 @@ public actor HibernationCoordinator {
         if resumePlan.identity.agentKind == .codex, let initialPrompt, !initialPrompt.isEmpty {
             return .respawnFailed(reason: "Codex wake cannot deliver an initial prompt; resume without a prompt, then send it to the session.")
         }
-        // The resume gate (`TmuxResumeGate`), before anything is written: an
-        // unparked tmux row may carry this row's session too, or a live tmux
+        // The resume gate (`TmuxResumeGate`), before anything is written: a
+        // tmux row may carry this row's session too, or a live tmux
         // row TBD deleted may have carried it, and that row's tmux server may
         // still be running it, so waking this row would start a second agent
         // on it. Two indexed reads for a session neither names, which is
