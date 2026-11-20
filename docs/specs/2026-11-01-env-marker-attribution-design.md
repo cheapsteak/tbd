@@ -47,7 +47,18 @@ started by `posix_spawn` with an empty `argv[0]` and the worktree marker as
 that one entry and ends before the terminal marker. An empty argument later in
 argv merges with nothing and moves nothing: measured with `/bin/sh` and an
 empty argument in the middle or at the end, the buffer ends right after argv.
-A whole environment ends with an empty entry; a cut one ends with the buffer.
+
+In every readable buffer measured, an empty entry follows the environment, and
+a cut buffer ends without one. That entry is measured layout, not something
+the kernel promises: it is alignment padding plus the NULs left where the
+process's startup code zeroed some of the strings the kernel adds after the
+environment. The reader ends the environment there, so losing the entry would
+read every environment as hidden, which the sweep treats as neutral, and
+marker-based reclaim would stop without an error.
+`theRealCallReadsThisProcess` in
+`Tests/TBDSharedTests/ProcessEnvironmentMarkersTests.swift` guards it: the test
+process is not a platform binary, and the test fails when its own environment
+reads as hidden.
 
 TBD sets the markers only on a terminal's job, so they reach what that job
 starts and nothing else. The daemon, a holder and a per-repo tmux server were

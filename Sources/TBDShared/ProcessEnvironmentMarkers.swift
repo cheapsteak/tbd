@@ -33,11 +33,20 @@ public enum ProcessEnvironmentMarkers: Sendable, Equatable {
 /// The buffer is a native-endian `Int32` argc, the executable path and its NUL
 /// terminator padded with NULs to an 8-byte boundary, `argc` NUL-terminated
 /// argv strings starting at that boundary, then the environment as
-/// NUL-terminated `KEY=value` strings ended by an empty one, then strings the
-/// kernel adds for the process's own use. `ProcArgsLayout` finds where the
-/// environment starts, stepping over argv without reading it. Because argv
-/// starts at the boundary, an empty `argv[0]` is an argument like any other:
-/// a NUL told from the padding by its offset, not skipped with it.
+/// NUL-terminated `KEY=value` strings, then strings the kernel adds for the
+/// process's own use. `ProcArgsLayout` finds where the environment starts,
+/// stepping over argv without reading it. Because argv starts at the
+/// boundary, an empty `argv[0]` is an argument like any other: a NUL told from
+/// the padding by its offset, not skipped with it.
+///
+/// The empty entry that `parse` ends the environment at is measured layout,
+/// not a kernel promise. Every readable buffer measured has one there, made of
+/// alignment padding and the NULs left where the process's startup code zeroed
+/// some of the strings the kernel adds. Without it every readable environment
+/// would read `.hidden` and marker-based reclaim would stop with no error, so
+/// `theRealCallReadsThisProcess` in `ProcessEnvironmentMarkersTests` guards
+/// it: that test fails when the test process's own environment reads
+/// `.hidden`.
 ///
 /// `docs/research/2026-10-30-herdr/procenv_probe.py` reads the same buffer, but
 /// it skips every NUL after the path, so for a process with an empty `argv[0]`
@@ -86,8 +95,9 @@ public enum ProcessEnvironmentReader {
     /// environment entries is `.hidden` too — a live process always has at
     /// least `PATH`-like entries, so none means the kernel withheld them.
     ///
-    /// An empty entry ends the environment, and a buffer that ends before one
-    /// is `.hidden` as well, whatever entries it holds. That is how the kernel
+    /// An empty entry ends the environment (measured layout, guarded as the
+    /// type's documentation says), and a buffer that ends before one is
+    /// `.hidden` as well, whatever entries it holds. That is how the kernel
     /// withholds a protected process's environment, an Apple platform
     /// binary's among them: it cuts the buffer after argv. It finds argv by
     /// skipping every NUL after the executable path, so an empty `argv[0]`

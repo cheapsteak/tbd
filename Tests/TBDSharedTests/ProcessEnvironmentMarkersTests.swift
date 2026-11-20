@@ -206,9 +206,21 @@ struct ProcessEnvironmentMarkersTests {
         #expect(ProcessEnvironmentReader.procArgs(pid: Int32.max) == nil)
     }
 
+    /// The alarm for a kernel or libSystem change that would silently stop
+    /// marker-based reclaim. The reader ends the environment at the empty
+    /// entry measured after it, and the kernel does not promise that entry:
+    /// it is alignment padding plus the NULs left where startup code zeroed
+    /// some of the strings the kernel adds after the environment. Were it to
+    /// go, every readable environment would read `.hidden`, which the
+    /// orphan-process judge treats as neutral, so nothing else would fail.
+    /// This test process is not a platform binary, and `scripts/test.sh`
+    /// gives it a real environment, so its own environment must read as
+    /// something other than `.hidden`.
     @Test func theRealCallReadsThisProcess() throws {
         let raw = try #require(ProcessEnvironmentReader.procArgs(pid: getpid()))
         #expect(raw.count > 4)
+        let own = ProcessEnvironmentReader.markers(pid: getpid())
+        #expect(own != .hidden)
     }
 
     /// The real kernel's layout, for the reader: `/bin/sleep` started with an
