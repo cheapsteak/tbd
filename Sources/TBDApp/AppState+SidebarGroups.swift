@@ -381,9 +381,10 @@ extension AppState {
     ///
     /// Rows the registry filter of the parent's section hides are dropped,
     /// as roots and from the walk. The section is the repo of the parent's
-    /// top-level ancestor. The saved set is always an input; the selection
-    /// is one only while some repo is filtered, matching
-    /// `invalidateSidebarRegistryFilterForSelection`.
+    /// top-level ancestor. The saved set is always an input. The selection
+    /// is read while some repo is filtered, and a change of it clears the
+    /// memo only for a parent in a filtered repo's section
+    /// (`invalidateSidebarRegistryFilterForSelection`).
     func sidebarRemoteGroups(parentID: UUID) -> SidebarRemoteGroups {
         let snapshot = sidebarRemoteSnapshot
         let unread = unreadByRemoteSession, worktreeUnread = unreadByWorktree

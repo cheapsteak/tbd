@@ -28,6 +28,11 @@ struct SidebarRegistryFilterStorageTests {
         state.sidebarParentRemoteGroupsCache[UUID()] = emptyGroups()
     }
 
+    private static func seedCaches(_ state: AppState, repoIDs: [UUID], parentIDs: [UUID]) {
+        for repoID in repoIDs { state.sidebarRegistryFilterCache[repoID] = SidebarRegistryRemoteFilter.none }
+        for parentID in parentIDs { state.sidebarParentRemoteGroupsCache[parentID] = emptyGroups() }
+    }
+
     private static func cachesAreEmpty(_ state: AppState) -> Bool {
         state.sidebarRegistryFilterCache.isEmpty && state.sidebarParentRemoteGroupsCache.isEmpty
     }
@@ -113,26 +118,55 @@ struct SidebarRegistryFilterStorageTests {
         #expect(Self.cachesAreEmpty(state))
     }
 
-    @Test func selectionClearsTheCachesOnlyWhileARepoIsFiltered() {
+    /// A selection change clears nothing while no repo is filtered, and then
+    /// only what a filtered repo's section shows: that repo's filter, and the
+    /// partition of each parent whose top-level ancestor is in that repo,
+    /// whatever the parent's own repo. An unfiltered repo's filter and the
+    /// partitions in its section survive.
+    @Test func selectionClearsOnlyTheFilteredReposCaches() {
         let suite = TestDefaultsSuite("SidebarRegistryFilterStorageTests")
         defer { suite.tearDown() }
-        let repoID = UUID()
+        let filtered = UUID(), unfiltered = UUID()
+        let director = SidebarGroupFixtures.row("director", repoID: filtered)
+        // Another repo's row nested under the filtered repo's row renders in
+        // the filtered repo's section.
+        let guest = SidebarGroupFixtures.row("guest", repoID: unfiltered, parent: director.id)
+        let lead = SidebarGroupFixtures.row("lead", repoID: unfiltered)
         let state = AppState(userDefaults: suite.defaults)
+        state.worktrees = [filtered: [director], unfiltered: [guest, lead]]
+        let parents = [director.id, guest.id, lead.id]
 
-        Self.seedCaches(state, repoID: repoID)
+        _ = state.sidebarRemoteSnapshot
+        Self.seedCaches(state, repoIDs: [filtered, unfiltered], parentIDs: parents)
         state.selectedWorktreeIDs = [UUID()]
         state.selectedRemoteSession = RemoteSessionSelection(provider: "acme", sessionID: "s1")
-        #expect(!state.sidebarRegistryFilterCache.isEmpty)
-        #expect(!state.sidebarParentRemoteGroupsCache.isEmpty)
+        #expect(state.sidebarRegistryFilterCache.count == 2, "Unfiltered, a selection change cleared a filter")
+        #expect(state.sidebarParentRemoteGroupsCache.count == 3, "Unfiltered, a selection change cleared a partition")
 
-        state.sidebarRegistryRemoteHiddenRepoIDs = [repoID]
-        Self.seedCaches(state, repoID: repoID)
+        state.sidebarRegistryRemoteHiddenRepoIDs = [filtered]
+        _ = state.sidebarRemoteSnapshot
+        Self.seedCaches(state, repoIDs: [filtered, unfiltered], parentIDs: parents)
         state.selectedWorktreeIDs = [UUID()]
-        #expect(Self.cachesAreEmpty(state))
+        #expect(state.sidebarRegistryFilterCache[filtered] == nil)
+        #expect(state.sidebarRegistryFilterCache[unfiltered] != nil, "The unfiltered repo's filter was cleared")
+        #expect(state.sidebarParentRemoteGroupsCache[director.id] == nil)
+        #expect(state.sidebarParentRemoteGroupsCache[guest.id] == nil, "A parent in the filtered section survived")
+        #expect(state.sidebarParentRemoteGroupsCache[lead.id] != nil, "A parent in the unfiltered section was cleared")
 
-        Self.seedCaches(state, repoID: repoID)
+        Self.seedCaches(state, repoIDs: [filtered, unfiltered], parentIDs: parents)
         state.selectedRemoteSession = RemoteSessionSelection(provider: "acme", sessionID: "s2")
-        #expect(Self.cachesAreEmpty(state))
+        #expect(state.sidebarRegistryFilterCache[filtered] == nil)
+        #expect(state.sidebarRegistryFilterCache[unfiltered] != nil, "The unfiltered repo's filter was cleared")
+        #expect(state.sidebarParentRemoteGroupsCache[director.id] == nil)
+        #expect(state.sidebarParentRemoteGroupsCache[guest.id] == nil, "A parent in the filtered section survived")
+        #expect(state.sidebarParentRemoteGroupsCache[lead.id] != nil, "A parent in the unfiltered section was cleared")
+
+        // With no snapshot to name a parent's section, every partition clears.
+        Self.seedCaches(state, repoIDs: [unfiltered], parentIDs: [lead.id])
+        state.sidebarRemoteSnapshotCache = nil
+        state.selectedWorktreeIDs = [UUID()]
+        #expect(state.sidebarParentRemoteGroupsCache.isEmpty)
+        #expect(state.sidebarRegistryFilterCache[unfiltered] != nil, "The unfiltered repo's filter was cleared")
     }
 
     @Test func onlyMatchInputChangesClearTheFilterCache() {

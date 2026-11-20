@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// Storage for the per-repo "hide registry remote sessions" sidebar filter.
 /// Spec: docs/specs/2026-11-19-sidebar-remote-session-filter-design.md.
@@ -38,10 +39,28 @@ extension AppState {
         if kept != sidebarRegistryRemoteHiddenRepoIDs { sidebarRegistryRemoteHiddenRepoIDs = kept }
     }
 
-    /// The selection is a filter input only while some repo is filtered.
+    /// The selection is an input only to what a filtered repo's section
+    /// shows: that repo's filter (`sidebarRegistryRemoteFilter(repoID:)`)
+    /// and the remote partition of each parent in its section
+    /// (`sidebarRemoteGroups(parentID:)`). Every other entry survives a
+    /// selection change.
+    ///
+    /// A parent's section is the repo of its top-level ancestor, read from
+    /// the cached snapshot as `sidebarRemoteGroups(parentID:)` reads it.
+    /// Every change that drops the snapshot drops the parent partitions too,
+    /// so a cached partition was computed over the cached snapshot; without
+    /// one, every partition is cleared.
     func invalidateSidebarRegistryFilterForSelection() {
-        guard !sidebarRegistryRemoteHiddenRepoIDs.isEmpty else { return }
-        sidebarRegistryFilterCache.removeAll()
-        sidebarParentRemoteGroupsCache.removeAll()
+        let filtered = sidebarRegistryRemoteHiddenRepoIDs
+        guard !filtered.isEmpty else { return }
+        for repoID in filtered { sidebarRegistryFilterCache[repoID] = nil }
+        guard let snapshot = sidebarRemoteSnapshotCache else {
+            sidebarParentRemoteGroupsCache.removeAll()
+            return
+        }
+        sidebarParentRemoteGroupsCache = sidebarParentRemoteGroupsCache.filter { entry in
+            guard let repoID = snapshot.ancestorPath(to: entry.key)?.first?.repoID else { return true }
+            return !filtered.contains(repoID)
+        }
     }
 }

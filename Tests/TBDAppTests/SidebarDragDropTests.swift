@@ -573,7 +573,7 @@ struct SidebarDragDropTests {
         #expect(valid == .move)
         // Control: before the archive, the same drop checks out.
         let control = h.controller.confirmedMove(.nest(under: f.b.id), at: (b, onto), carried: [f.c.id])
-        #expect(control == SidebarDropMove(ids: [f.c.id], newParentID: f.b.id, before: nil))
+        #expect(control == SidebarDropOutcome.move(SidebarDropMove(ids: [f.c.id], newParentID: f.b.id, before: nil)))
 
         h.state.worktrees[f.repo.id]?.removeAll { $0.id == f.b.id }
         h.controller.flushPendingRebuild()
@@ -685,10 +685,10 @@ struct SidebarDragDropTests {
         // Both branches of the filter, for the decision the drop below makes.
         let decision = SidebarDropDecision.place(parent: nil, before: b.id)
         let filtered = h.controller.confirmedMove(decision, at: (section, aboveB), carried: [c.id])
-        #expect(filtered == SidebarDropMove(ids: [c.id], newParentID: nil, before: h1.id))
+        #expect(filtered == SidebarDropOutcome.move(SidebarDropMove(ids: [c.id], newParentID: nil, before: h1.id)))
         h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
         let unfiltered = h.controller.confirmedMove(decision, at: (section, aboveB), carried: [c.id])
-        #expect(unfiltered == SidebarDropMove(ids: [c.id], newParentID: nil, before: b.id))
+        #expect(unfiltered == SidebarDropOutcome.move(SidebarDropMove(ids: [c.id], newParentID: nil, before: b.id)))
         h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
         h.controller.flushPendingRebuild()
 
@@ -716,6 +716,61 @@ struct SidebarDragDropTests {
         #expect(sent.worktreeIDs == [c.id])
         #expect(sent.newParentID == nil)
         #expect(sent.beforeWorktreeID == h1.id)
+    }
+
+    /// `x`, an "acme" row the repo's filter hides, then `c` and `b`. `c`
+    /// dropped back into its own gap, above `b`, changes nothing on screen,
+    /// so nothing moves: mapped, it would land above the hidden row and move
+    /// that row below `c`. With the filter off the same decision is sent as
+    /// it is.
+    @Test func dropThatKeepsTheShownOrderMovesNoHiddenRow() throws {
+        let h = OutlineHarness("drag.hiddenUnchanged")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let main = SidebarOutlineControllerTests.row("main", repo, status: .main)
+        let x = SidebarOutlineControllerTests.row("x", repo, order: 0)
+        let hidden = SidebarGroupFixtures.row("hidden", repoID: repo.id, remote: "one", order: 1)
+        let c = SidebarOutlineControllerTests.row("c", repo, order: 2)
+        let b = SidebarOutlineControllerTests.row("b", repo, order: 3)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [main, x, hidden, c, b]]
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        h.mount()
+        let names = [main.id: "main", x.id: "x", hidden.id: "hidden", c.id: "c", b.id: "b"]
+        let section = SidebarNodeID.repoHeader(repo.id)
+        let bNode = SidebarNodeID.worktree(b.id)
+        try #require(!h.shownIDs.contains(.worktree(hidden.id)), h.evidence(names))
+        let aboveB = try Self.childIndex(of: bNode, under: section, in: h)
+
+        // Both branches of the filter, for the decision the drop below makes.
+        let decision = SidebarDropDecision.place(parent: nil, before: b.id)
+        let filtered = h.controller.confirmedMove(decision, at: (section, aboveB), carried: [c.id])
+        #expect(filtered == SidebarDropOutcome.unchanged)
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        let unfiltered = h.controller.confirmedMove(decision, at: (section, aboveB), carried: [c.id])
+        #expect(unfiltered == SidebarDropOutcome.move(SidebarDropMove(ids: [c.id], newParentID: nil, before: b.id)))
+        h.state.toggleSidebarRegistryRemoteFilter(repoID: repo.id)
+        h.controller.flushPendingRebuild()
+
+        // The drop succeeds and asks `AppState` for no move.
+        let asked = FireRecorder<SidebarDropMove>()
+        h.controller.moveWorktreesForTesting = { move in
+            asked.record(move)
+            return nil
+        }
+        let info = try Self.startDrag(pressing: .worktree(c.id), in: h)
+        defer { info.release() }
+        let gap = try Self.childIndex(of: bNode, under: section, in: h)
+        let operation = try Self.validate(info, parent: section, childIndex: gap, depth: 0, in: h)
+        #expect(operation == .move)
+        let accepted = try Self.accept(info, parent: section, childIndex: gap, in: h)
+        #expect(accepted, h.evidence(names))
+        Self.endSession(in: h)
+
+        let moves = asked.values
+        #expect(moves.isEmpty)
+        let order = AppState.topLevelWorktrees(h.state.worktrees[repo.id] ?? []).map { $0.id }
+        #expect(order == [x.id, hidden.id, c.id, b.id], h.evidence(names))
     }
 
     /// A nest is not mapped: dropped onto a row whose only child the filter

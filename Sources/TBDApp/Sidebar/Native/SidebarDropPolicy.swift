@@ -1,4 +1,5 @@
 import AppKit
+import TBDShared
 
 // What a drag in the native sidebar carries, and what a drop proposal means.
 // Pure: everything here reads a `SidebarTree` and nothing else, and answers
@@ -241,7 +242,8 @@ enum SidebarDropPolicy {
     /// The decision itself stays over shown rows: a drop is confirmed by
     /// resolving it again against a fresh tree, where a hidden row has no
     /// node, so only the confirmed move is mapped. A nest is never mapped: a
-    /// nested row goes after every child, hidden ones too.
+    /// nested row goes after every child, hidden ones too. A place that
+    /// `keepsShownOrder` is not mapped either: it moves nothing.
     static func landingBefore(_ before: UUID?, siblings: [UUID], carried: Set<UUID>, hidden: Set<UUID>) -> UUID? {
         guard !hidden.isEmpty else { return before }
         let list = siblings.filter { !carried.contains($0) }
@@ -255,6 +257,24 @@ enum SidebarDropPolicy {
         var start = end
         while start > 0, hidden.contains(list[start - 1]) { start -= 1 }
         return start < list.count ? list[start] : nil
+    }
+
+    /// Whether placing `carried`, in that order, before `before` among
+    /// `siblings` — as `SiblingPlacement.place` does — leaves the shown rows
+    /// in the order they stand: every sibling not in `hidden`, the carried
+    /// rows included. A carried row that is not among `siblings` joins them,
+    /// which changes what shows.
+    ///
+    /// Such a drop changes nothing on screen, so it moves nothing. Mapped by
+    /// `landingBefore`, it would still move rows: a row dropped back into its
+    /// own gap lands above the hidden rows that sit between it and the shown
+    /// row above, and two carried rows a hidden row separates close up
+    /// around it. A hidden row must never move as a side effect of a drop.
+    static func keepsShownOrder(_ before: UUID?, siblings: [UUID], carried: [UUID], hidden: Set<UUID>) -> Bool {
+        let carriedIDs = Set(carried)
+        func isShown(_ id: UUID) -> Bool { carriedIDs.contains(id) || !hidden.contains(id) }
+        let placed = SiblingPlacement.place(group: siblings, carried: carried, before: before)
+        return siblings.filter(isShown) == placed.filter(isShown)
     }
 
     // MARK: The gap a proposal names

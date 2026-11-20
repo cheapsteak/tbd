@@ -305,11 +305,11 @@ struct SidebarRegistryRemoteFilterTests {
     }
 
     @Test func buttonTooltipAndMenuTitleFollowItsState() {
-        let off = SidebarRegistryFilterButton(isOn: false, count: 0, providerNames: ["acme"])
+        let off = SidebarRegistryFilterButton(isOn: false, count: 0, hideableCount: 4, providerNames: ["acme"])
         #expect(off.tooltip == "Hide acme sessions")
         #expect(off.menuTitle == "Hide acme Sessions")
 
-        let on = SidebarRegistryFilterButton(isOn: true, count: 4, providerNames: ["acme"])
+        let on = SidebarRegistryFilterButton(isOn: true, count: 4, hideableCount: 4, providerNames: ["acme"])
         #expect(on.tooltip == "4 acme sessions hidden. Click to show them.")
         #expect(on.menuTitle == "Hide acme Sessions")
     }

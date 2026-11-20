@@ -553,7 +553,8 @@ struct SidebarRowModelFactory {
             providersByName[name].map { RemoteProviderIdentityPresentation.headline($0) } ?? name
         }
         return SidebarRegistryFilterButton(
-            isOn: filter.isOn, count: filter.count, providerNames: Array(Set(names)).sorted())
+            isOn: filter.isOn, count: filter.count, hideableCount: filter.hideableCount,
+            providerNames: Array(Set(names)).sorted())
     }
 
     /// The Scratch section's header.

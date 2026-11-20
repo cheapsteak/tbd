@@ -210,6 +210,11 @@ struct SidebarRegistryFilterButton: Equatable, Sendable {
     var isOn: Bool
     /// What the filter hides now; drawn beside the symbol while on.
     var count: Int
+    /// The largest count the button can show
+    /// (`SidebarRegistryRemoteFilter.hideableCount`, judged without the
+    /// selection). The header keeps room for it while on, so a selection
+    /// that lowers `count` never moves the title.
+    var hideableCount: Int
     /// The registry providers' display names
     /// (`RemoteProviderIdentityPresentation.headline`), sorted and distinct.
     var providerNames: [String]

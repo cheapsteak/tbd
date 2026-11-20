@@ -564,12 +564,52 @@ struct SidebarDropPolicyTests {
     }
 
     /// A carried row is not a sibling the rows land among, so it does not
-    /// split the hidden run around it.
+    /// split the hidden run around it. `y` comes up from below `b`, so the
+    /// drop reorders the shown rows and is mapped.
     @Test func landingBeforeIgnoresCarriedRows() {
-        let (a, h1, x, h2, b) = (UUID(), UUID(), UUID(), UUID(), UUID())
-        let landing = SidebarDropPolicy.landingBefore(
-            b, siblings: [a, h1, x, h2, b], carried: [x], hidden: [h1, h2])
+        let (a, h1, x, h2, b, y) = (UUID(), UUID(), UUID(), UUID(), UUID(), UUID())
+        let siblings = [a, h1, x, h2, b, y]
+        let keeps = SidebarDropPolicy.keepsShownOrder(b, siblings: siblings, carried: [x, y], hidden: [h1, h2])
+        #expect(!keeps)
+        let landing = SidebarDropPolicy.landingBefore(b, siblings: siblings, carried: [x, y], hidden: [h1, h2])
         #expect(landing == h1)
+        let placed = SiblingPlacement.place(group: siblings, carried: [x, y], before: landing)
+        #expect(placed == [a, x, y, h1, h2, b])
+    }
+
+    /// A drop that leaves the shown rows in the order they stand moves
+    /// nothing. Siblings `[x, h, c, b]` with `h` hidden: `c` dropped back
+    /// into its own gap names `b`, and mapped it would land above `h` and
+    /// store `[x, c, h, b]`, moving `h` below `c` though nothing on screen
+    /// changed.
+    @Test func aDropThatKeepsTheShownOrderMovesNoHiddenRow() {
+        let (x, h, c, b) = (UUID(), UUID(), UUID(), UUID())
+        let siblings = [x, h, c, b]
+        let keeps = SidebarDropPolicy.keepsShownOrder(b, siblings: siblings, carried: [c], hidden: [h])
+        #expect(keeps)
+        // What the mapping alone would store, which the check above prevents.
+        let landing = SidebarDropPolicy.landingBefore(b, siblings: siblings, carried: [c], hidden: [h])
+        let mapped = SiblingPlacement.place(group: siblings, carried: [c], before: landing)
+        #expect(mapped == [x, c, h, b])
+
+        // Two carried rows a hidden row separates, dropped where they show:
+        // any place would close them up around it.
+        let y = UUID()
+        let apart = SidebarDropPolicy.keepsShownOrder(b, siblings: [x, c, h, y, b], carried: [c, y], hidden: [h])
+        #expect(apart)
+    }
+
+    /// A drop that reorders the shown rows, or brings a row in from
+    /// elsewhere, still moves.
+    @Test func aDropThatChangesTheShownOrderMoves() {
+        let (x, h, c, b, stranger) = (UUID(), UUID(), UUID(), UUID(), UUID())
+        let siblings = [x, h, c, b]
+        let toTop = SidebarDropPolicy.keepsShownOrder(x, siblings: siblings, carried: [c], hidden: [h])
+        #expect(!toTop)
+        let toEnd = SidebarDropPolicy.keepsShownOrder(nil, siblings: siblings, carried: [c], hidden: [h])
+        #expect(!toEnd)
+        let joining = SidebarDropPolicy.keepsShownOrder(b, siblings: siblings, carried: [stranger], hidden: [h])
+        #expect(!joining)
     }
 
     /// Only the hidden run directly above `before` counts: a shown row ends

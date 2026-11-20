@@ -138,17 +138,21 @@ struct SidebarParentRemoteCacheTests {
         #expect(state.sidebarRemoteGroups(parentID: fixture.parent.id).exitedRoots.map(\.id) == [fixture.worker.id])
     }
 
-    /// The selection is an input to the parent projection only while a repo
-    /// is filtered: the selected worker stays in view under its filtered
-    /// repo, and selecting another row clears the projection and hides it.
-    /// Local rows are selected to move the selection away, because selecting
-    /// a remote lane also clears its unread entry, which clears the cache on
+    /// The selection is an input to a parent projection only while the
+    /// parent's repo is filtered: the selected worker stays in view under its
+    /// filtered repo, and selecting another row clears that projection and
+    /// hides it, while a parent in an unfiltered repo keeps its own. Local
+    /// rows are selected to move the selection away, because selecting a
+    /// remote lane also clears its unread entry, which clears the cache on
     /// its own.
     @Test func selectionInvalidatesTheParentProjectionOnlyWhileFiltered() {
         let fixture = ParentGroupCacheFixture()
         defer { fixture.cleanUp() }
         let state = fixture.state
         let parentID = fixture.parent.id
+        let elsewhereRepo = UUID()
+        let elsewhere = SidebarGroupFixtures.row("elsewhere", repoID: elsewhereRepo)
+        state.worktrees[elsewhereRepo] = [elsewhere]
 
         _ = state.sidebarRemoteGroups(parentID: parentID)
         state.selectedWorktreeIDs = [fixture.other.id]
@@ -161,8 +165,12 @@ struct SidebarParentRemoteCacheTests {
         let selected = state.sidebarRemoteGroups(parentID: parentID).exitedRoots.map(\.id)
         #expect(selected == [fixture.worker.id])
 
+        _ = state.sidebarRemoteGroups(parentID: elsewhere.id)
         state.selectedWorktreeIDs = [fixture.other.id]
-        #expect(state.sidebarParentRemoteGroupsCache.isEmpty)
+        #expect(state.sidebarParentRemoteGroupsCache[parentID] == nil,
+                "A selection change kept the projection of a parent in a filtered repo")
+        #expect(state.sidebarParentRemoteGroupsCache[elsewhere.id] != nil,
+                "A selection change cleared the projection of a parent in an unfiltered repo")
         #expect(state.sidebarRemoteGroups(parentID: parentID).isEmpty)
     }
 

@@ -22,9 +22,11 @@ struct SidebarRegistryFilterHeaderTests {
     /// A repo name that a 220 pt header cuts, button or not.
     static let longTitle = "a repository name long enough to truncate in a narrow sidebar header"
 
-    static func button(isOn: Bool = false, count: Int = 0, providers: [String] = ["acme"])
+    /// `hideable` defaults to `count`: nothing selected keeps a hidden row.
+    static func button(isOn: Bool = false, count: Int = 0, hideable: Int? = nil, providers: [String] = ["acme"])
         -> SidebarRegistryFilterButton {
-        SidebarRegistryFilterButton(isOn: isOn, count: count, providerNames: providers)
+        SidebarRegistryFilterButton(
+            isOn: isOn, count: count, hideableCount: hideable ?? count, providerNames: providers)
     }
 
     static func header(title: String = "tbd", filter: SidebarRegistryFilterButton?, missing: Bool = false)
@@ -128,6 +130,31 @@ struct SidebarRegistryFilterHeaderTests {
                 Self.header(title: "Scratch", filter: Self.button(isOn: true, count: 2)),
                 chevronBeforeTitle: chevronBeforeTitle, style: .scratch, revealed: true)
             #expect(scratch.filterButton.isHidden, "\(label): the Scratch header drew a filter")
+        }
+    }
+
+    /// While on, the button keeps the room of the largest count it can show,
+    /// `hideableCount`, so selecting a hidden row, which lowers the shown
+    /// count from 10 to 9, moves neither a truncated title nor the button.
+    /// Control: a room that followed the count would differ, because "9"
+    /// draws narrower than "10".
+    @Test func aLowerCountMovesNeitherTheTitleNorTheButton() throws {
+        for chevronBeforeTitle in [false, true] {
+            let label = "chevron before title \(chevronBeforeTitle)"
+            let cell = Self.layOut(
+                Self.header(title: Self.longTitle, filter: Self.button(isOn: true, count: 10, hideable: 10)),
+                chevronBeforeTitle: chevronBeforeTitle, width: 220)
+            try #require(SidebarCellKit.truncates(cell.titleField), "\(label): the title fits, so this checks nothing")
+            let title = cell.titleField.frame
+            let filter = cell.filterButton.frame
+
+            cell.configure(Self.header(title: Self.longTitle, filter: Self.button(isOn: true, count: 9, hideable: 10)))
+            cell.layout()
+            #expect(cell.filterButton.title == "9", "\(label)")
+            try #require(cell.filterButton.frame.width < filter.width,
+                         "\(label): 9 draws as wide as 10, so this checks nothing")
+            #expect(cell.titleField.frame == title, "\(label): the title moved when the count dropped")
+            #expect(cell.filterButton.frame.minX == filter.minX, "\(label): the button moved when the count dropped")
         }
     }
 

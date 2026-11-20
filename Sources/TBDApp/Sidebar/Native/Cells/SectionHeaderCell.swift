@@ -14,10 +14,11 @@ import AppKit
 /// square while hidden so nothing beside it slides. The registry filter
 /// (`docs/specs/2026-11-19-sidebar-remote-session-filter-design.md`, "The
 /// button") shows with the `+` while off and always while on, and keeps its
-/// square whenever the repo has one, so a hover never shifts or cuts the
-/// title. The chevron, filter, `+` and Locate… buttons send their actions to
-/// whatever target the controller wires. A repo title can be swapped for the
-/// inline rename editor.
+/// room whenever the repo has one — its square, or while on the width of the
+/// largest count it can show — so neither a hover nor a selection that lowers
+/// the count moves or cuts the title. The chevron, filter, `+` and Locate…
+/// buttons send their actions to whatever target the controller wires. A repo
+/// title can be swapped for the inline rename editor.
 final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenamableCell {
     enum Style: Equatable {
         /// 12 pt semibold, dimmed while the repo is missing.
@@ -185,9 +186,7 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
             filterButton.image = SidebarCellKit.symbol(Self.filterOnSymbol, size: 11)
             filterButton.contentTintColor = .controlAccentColor
             filterButton.imagePosition = .imageLeading
-            filterButton.attributedTitle = NSAttributedString(
-                string: "\(filter.count)",
-                attributes: [.font: SidebarCellKit.filterCountFont, .foregroundColor: NSColor.controlAccentColor])
+            filterButton.attributedTitle = Self.filterCountTitle(filter.count)
         } else {
             filterButton.image = SidebarCellKit.symbol(Self.filterOffSymbol, size: 11)
             filterButton.contentTintColor = .secondaryLabelColor
@@ -199,15 +198,43 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
         filterButton.alphaValue = model?.isMissing == true ? 0.5 : 1
     }
 
-    /// The width the registry filter keeps in the layout whether drawn or
-    /// not: its square while off, widened by the count while on. Measured by
-    /// the cell, never `intrinsicContentSize`. Nil when the repo has no
-    /// button.
-    private var filterWidth: CGFloat? {
+    /// The registry filter's widths: the room it keeps in the layout whether
+    /// drawn or not, and the width it draws at. Off, both are its square. On,
+    /// it draws at its count, and keeps the room of the largest count it can
+    /// show, `hideableCount`: selecting a hidden row lowers the count, and a
+    /// room that followed the count would move a truncated title's cut. Nil
+    /// when the repo has no button.
+    private var filterWidths: (room: CGFloat, drawn: CGFloat)? {
         guard let filter = registryFilter else { return nil }
-        guard filter.isOn else { return Self.filterSide }
-        return max(Self.filterSide, ceil(filterButton.cell?.cellSize.width ?? Self.filterSide) + 4)
+        guard filter.isOn else { return (Self.filterSide, Self.filterSide) }
+        return (room: Self.filterOnWidth(count: max(filter.count, filter.hideableCount)),
+                drawn: Self.filterOnWidth(count: filter.count))
     }
+
+    /// The count drawn beside the filled symbol while on.
+    private static func filterCountTitle(_ count: Int) -> NSAttributedString {
+        NSAttributedString(
+            string: "\(count)",
+            attributes: [.font: SidebarCellKit.filterCountFont, .foregroundColor: NSColor.controlAccentColor])
+    }
+
+    /// The on button's width at `count`, never below its square: measured by
+    /// the cell of `filterMeasure`, never `intrinsicContentSize`. The count
+    /// font's digits are all one width, so a larger count is never narrower.
+    private static func filterOnWidth(count: Int) -> CGFloat {
+        let measure = filterMeasure
+        measure.attributedTitle = filterCountTitle(count)
+        return max(filterSide, ceil(measure.cell?.cellSize.width ?? filterSide) + 4)
+    }
+
+    /// A stand-in configured as `filterButton` is while on.
+    /// `filterOnWidth(count:)` titles it with any count to measure it, so the
+    /// shown button is never retitled to be measured.
+    @MainActor private static let filterMeasure: SidebarHoverButton = {
+        let button = SidebarCellKit.hoverButton(symbol: SectionHeaderCell.filterOnSymbol, size: 11)
+        button.imagePosition = .imageLeading
+        return button
+    }()
 
     // MARK: Rename
 
@@ -255,12 +282,13 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
         let locateSize = locateButton.isHidden ? NSSize.zero : locateButton.intrinsicContentSize
         // Room kept for the hover `+` (a 20 pt square) at the trailing edge.
         let reserved: CGFloat = 20 + spacing
-        // The registry filter's square, kept whether or not it is drawn, so a
-        // long title truncates by it and a hover never moves the title.
-        let filterWidth = self.filterWidth
+        // The registry filter's room, kept whether or not it is drawn, so a
+        // long title truncates by it and neither a hover nor a lower count
+        // moves the title.
+        let filterWidths = self.filterWidths
         var after: CGFloat = 0
         if !chevronBeforeTitle { after += spacing + chevronSide - 3 }
-        if let filterWidth { after += spacing + filterWidth }
+        if let filterWidths { after += spacing + filterWidths.room }
         if !missingField.isHidden { after += spacing + missingSize.width + spacing + locateSize.width }
 
         if chevronBeforeTitle {
@@ -284,11 +312,11 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
         }
         // Directly after the title and chevron, on whichever side the chevron
         // draws: `name ▸ [filter]` or `▸ name [filter]`.
-        if let filterWidth {
+        if let filterWidths {
             x += spacing
             filterButton.frame = NSRect(
-                x: x, y: (midY - Self.filterSide / 2).rounded(), width: filterWidth, height: Self.filterSide)
-            x += filterWidth
+                x: x, y: (midY - Self.filterSide / 2).rounded(), width: filterWidths.drawn, height: Self.filterSide)
+            x += filterWidths.room
         }
         if !missingField.isHidden {
             x += spacing

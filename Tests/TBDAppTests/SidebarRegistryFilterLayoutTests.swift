@@ -32,7 +32,8 @@ struct SidebarRegistryFilterLayoutTests {
         let children = Self.childIDs(tree, of: .repoHeader(repo))
         #expect(children == [.worktree(main.id), .worktree(lane.id), .worktree(worker.id), .remoteSession(loose.id)])
         let button = try #require(Self.header(tree, repo)?.registryFilter)
-        #expect(button == SidebarRegistryFilterButton(isOn: false, count: 0, providerNames: ["acme"]))
+        #expect(button == SidebarRegistryFilterButton(
+            isOn: false, count: 0, hideableCount: 2, providerNames: ["acme"]))
     }
 
     @Test func ungroupedFilterDropsRegistryWorkAndKeepsStoredOrder() {
@@ -201,7 +202,7 @@ struct SidebarRegistryFilterLayoutTests {
         #expect(tree.parent(of: .worktree(inner.id)) == .worktree(outer.id))
         #expect(tree.parent(of: .worktree(outer.id)) == .worktree(lane.id))
         #expect(Self.header(tree, repo)?.registryFilter == SidebarRegistryFilterButton(
-            isOn: true, count: 0, providerNames: ["acme"]),
+            isOn: true, count: 0, hideableCount: 2, providerNames: ["acme"]),
             "Selecting a hidden row keeps the button; only the count drops")
 
         state.selectedWorktreeIDs = [lane.id]
@@ -267,11 +268,11 @@ struct SidebarRegistryFilterLayoutTests {
         let registry = Self.row("registry", repo: repo, remote: "registry", order: 2)
         state.worktrees = [repo: [main, lane, cloud, registry]]
         let off = try #require(Self.header(Self.build(state), repo)?.registryFilter)
-        #expect(off == SidebarRegistryFilterButton(isOn: false, count: 0, providerNames: ["acme"]))
+        #expect(off == SidebarRegistryFilterButton(isOn: false, count: 0, hideableCount: 1, providerNames: ["acme"]))
 
         state.toggleSidebarRegistryRemoteFilter(repoID: repo)
         let on = try #require(Self.header(Self.build(state), repo)?.registryFilter)
-        #expect(on == SidebarRegistryFilterButton(isOn: true, count: 1, providerNames: ["acme"]))
+        #expect(on == SidebarRegistryFilterButton(isOn: true, count: 1, hideableCount: 1, providerNames: ["acme"]))
 
         // Nothing left to hide: the button goes, the setting stays on.
         state.worktrees = [repo: [main, lane, cloud]]
@@ -285,12 +286,12 @@ struct SidebarRegistryFilterLayoutTests {
         let back = Self.build(state)
         #expect(!back.contains(.worktree(arrival.id)))
         #expect(Self.header(back, repo)?.registryFilter
-                == SidebarRegistryFilterButton(isOn: true, count: 1, providerNames: ["acme"]))
+                == SidebarRegistryFilterButton(isOn: true, count: 1, hideableCount: 1, providerNames: ["acme"]))
 
         // A folded repo's header still carries the button.
         state.repos[0].expanded = false
         #expect(Self.header(Self.build(state), repo)?.registryFilter
-                == SidebarRegistryFilterButton(isOn: true, count: 1, providerNames: ["acme"]))
+                == SidebarRegistryFilterButton(isOn: true, count: 1, hideableCount: 1, providerNames: ["acme"]))
     }
 
     // MARK: Unchanged surfaces
@@ -313,7 +314,7 @@ struct SidebarRegistryFilterLayoutTests {
         #expect(tree.parent(of: .worktree(kept.id)) == .repoHeader(other))
         #expect(tree.parent(of: .remoteSession(unmatched.id)) == .providerHeader("acme"))
         #expect(Self.header(tree, other)?.registryFilter
-                == SidebarRegistryFilterButton(isOn: false, count: 0, providerNames: ["acme"]))
+                == SidebarRegistryFilterButton(isOn: false, count: 0, hideableCount: 1, providerNames: ["acme"]))
     }
 
     // MARK: Fixtures

@@ -669,8 +669,9 @@ final class AppState {
     /// Parent partitions share the snapshot and survive unrelated row renders.
     @ObservationIgnored var sidebarParentRemoteGroupsCache: [UUID: SidebarRemoteGroups] = [:]
     /// Per-repo registry filter, filled by `sidebarRegistryRemoteFilter(repoID:)`
-    /// and cleared when `worktrees`, the match inputs of `remoteSessions`, the
-    /// saved set, or (while a repo is filtered) the selection changes.
+    /// and cleared when `worktrees`, the match inputs of `remoteSessions` or
+    /// the saved set change. A selection change clears only the filtered
+    /// repos' entries.
     @ObservationIgnored var sidebarRegistryFilterCache: [UUID: SidebarRegistryRemoteFilter] = [:]
     @ObservationIgnored var sidebarHibernationCache: [SidebarGroupID.Owner: SidebarHibernationPartition] = [:]
 
