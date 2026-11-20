@@ -99,6 +99,9 @@ struct SectionHeaderModel: Equatable {
     var isMissing: Bool
     /// `selectedRepoID` or `selectedScratchSection` names this section.
     var isSelected: Bool
+    /// The registry filter button; nil when the repo has nothing it would
+    /// hide – `SidebarRegistryRemoteFilter.showsButton`.
+    var registryFilter: SidebarRegistryFilterButton? = nil
 }
 
 /// One remote session row.

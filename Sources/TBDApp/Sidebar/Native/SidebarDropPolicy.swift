@@ -1,4 +1,5 @@
 import AppKit
+import TBDShared
 
 // What a drag in the native sidebar carries, and what a drop proposal means.
 // Pure: everything here reads a `SidebarTree` and nothing else, and answers
@@ -222,6 +223,83 @@ enum SidebarDropPolicy {
         let answer: Retarget = (parentID, childIndex)
         let unchanged = proposal.parent == answer.parent && proposal.childIndex == answer.childIndex
         return (.place(parent: lineage.owner, before: before), unchanged ? nil : answer)
+    }
+
+    // MARK: Hidden siblings
+
+    /// Maps a `.place` decided among shown rows onto the full sibling list,
+    /// for a section whose registry filter hides some of its rows
+    /// (docs/specs/2026-11-19-sidebar-remote-session-filter-design.md, "Drag
+    /// to reorder").
+    ///
+    /// A sibling shows in the gap when it is carried, or when `hidden` does
+    /// not name it and it is among `gapRows`: the worktree rows the gap's own
+    /// group shows. With workflow groups on, a gap shows one group's rows —
+    /// Remote, Exited, Hibernated or the inline rows — so a sibling filed
+    /// under another group is no more on screen there than a hidden one.
+    /// `gapRows` nil means every sibling `hidden` does not name shows.
+    ///
+    /// `before` — the first shown, uncarried row after the gap, nil for the
+    /// end of the group — moves up past the run of siblings directly above
+    /// it in `siblings` that do not show in the gap, so the rows land
+    /// directly after the shown row above the gap, and every hidden row
+    /// keeps its place relative to the others. At the end of a group that
+    /// is the slot directly after the group's last shown row, before
+    /// whatever sibling follows it: a hidden row, a row of another group, or
+    /// the end of the list. The identity when `hidden` is empty, when every
+    /// sibling directly above `before` shows, and when `before` is not in
+    /// `siblings`.
+    ///
+    /// The result is `before`, nil, or a sibling the walk passed over, one
+    /// that does not show in the gap. So a sibling that must never be named
+    /// as `before`, such as a creating placeholder, belongs in `siblings`
+    /// only where it shows in the gap, and there it stops the walk.
+    ///
+    /// The decision itself stays over shown rows: a drop is confirmed by
+    /// resolving it again against a fresh tree, where a hidden row has no
+    /// node, so only the confirmed move is mapped. A nest is never mapped: a
+    /// nested row goes after every child, hidden ones too. A place that
+    /// `keepsShownOrder` is not mapped either: it moves nothing.
+    static func landingBefore(_ before: UUID?, siblings: [UUID], carried: Set<UUID>, hidden: Set<UUID>,
+                              gapRows: Set<UUID>? = nil) -> UUID? {
+        guard !hidden.isEmpty else { return before }
+        let isShown = shownInGap(carried: carried, hidden: hidden, gapRows: gapRows)
+        let list = siblings.filter { !carried.contains($0) }
+        let end: Int
+        if let before {
+            guard let index = list.firstIndex(of: before) else { return before }
+            end = index
+        } else {
+            end = list.count
+        }
+        var start = end
+        while start > 0, !isShown(list[start - 1]) { start -= 1 }
+        return start < list.count ? list[start] : nil
+    }
+
+    /// Whether placing `carried`, in that order, before `before` among
+    /// `siblings` — as `SiblingPlacement.place` does — leaves the rows the
+    /// gap shows in the order they stand: the carried rows, and every
+    /// sibling among `gapRows` that `hidden` does not name (see
+    /// `landingBefore`). A carried row that is not among `siblings` joins
+    /// them, which changes what shows.
+    ///
+    /// Such a drop changes nothing on screen, so it moves nothing. Mapped by
+    /// `landingBefore`, it would still move rows: a row dropped back into its
+    /// own gap lands above the hidden rows that sit between it and the shown
+    /// row above, and two carried rows a hidden row separates close up
+    /// around it. A hidden row must never move as a side effect of a drop.
+    static func keepsShownOrder(_ before: UUID?, siblings: [UUID], carried: [UUID], hidden: Set<UUID>,
+                                gapRows: Set<UUID>? = nil) -> Bool {
+        let isShown = shownInGap(carried: Set(carried), hidden: hidden, gapRows: gapRows)
+        let placed = SiblingPlacement.place(group: siblings, carried: carried, before: before)
+        return siblings.filter(isShown) == placed.filter(isShown)
+    }
+
+    /// Whether a sibling shows in the drop gap, as `landingBefore` defines it.
+    private static func shownInGap(carried: Set<UUID>, hidden: Set<UUID>,
+                                   gapRows: Set<UUID>?) -> (UUID) -> Bool {
+        return { id in carried.contains(id) || (!hidden.contains(id) && (gapRows?.contains(id) ?? true)) }
     }
 
     // MARK: The gap a proposal names

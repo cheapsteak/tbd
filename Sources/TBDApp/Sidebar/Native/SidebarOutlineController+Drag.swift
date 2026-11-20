@@ -14,6 +14,17 @@ struct SidebarDropMove: Equatable {
     let before: UUID?
 }
 
+/// What a drop that checks out does.
+enum SidebarDropOutcome: Equatable {
+    /// `moveWorktrees` moves the rows.
+    case move(SidebarDropMove)
+    /// Nothing moves: in a section whose registry filter hides some of the
+    /// rows' siblings, the drop leaves the shown rows in the order they stand
+    /// (`SidebarDropPolicy.keepsShownOrder`), and any move it sent would
+    /// shift a hidden row.
+    case unchanged
+}
+
 /// Drag and drop in the native sidebar (spec "Drag and drop"): which rows a
 /// drag carries, what a drop proposal means, the feedback drawn for it, and
 /// the move a drop makes.
@@ -32,7 +43,9 @@ struct SidebarDropMove: Equatable {
 /// - **Destination.** `validateDrop` asks the policy, retargets only when its
 ///   answer differs from the proposal, and draws the nest highlight or the
 ///   insertion line. `acceptDrop` checks the decision against a fresh build
-///   of `AppState` and hands it to `moveWorktrees`. The drop never sets
+///   of `AppState`, maps a place past the rows a repo's registry filter
+///   hides, and hands it to `moveWorktrees`, unless it leaves the shown rows
+///   there in the order they stand. The drop never sets
 ///   `animatesToDestination`: the rows are not in place until the hold ends.
 extension SidebarOutlineController {
     // MARK: Setup
@@ -148,7 +161,9 @@ extension SidebarOutlineController {
     /// The drop: the decision `validateDrop` showed, checked against
     /// `AppState` as it stands now, goes to `moveWorktrees`. A nest becomes
     /// `newParentID: id, before: nil`; a place maps field for field. A move
-    /// `moveWorktrees` refuses fails the drop.
+    /// `moveWorktrees` refuses fails the drop. A drop that leaves the shown
+    /// rows of a filtered section in the order they stand sends nothing and
+    /// succeeds (`SidebarDropOutcome.unchanged`).
     ///
     /// AppKit hands over the position `validateDrop` last showed, retargets
     /// included, so the pointer is not read again: the gap's depth is pinned
@@ -164,10 +179,15 @@ extension SidebarOutlineController {
             carried: carried, proposedParent: proposal.parent, childIndex: proposal.childIndex,
             pointerDepth: pinnedDepth, index: dropIndex)
         if case .reject = shown.decision { return false }
-        guard let move = confirmedMove(shown.decision, at: shown.retarget ?? proposal, carried: carried) else {
+        guard let outcome = confirmedMove(shown.decision, at: shown.retarget ?? proposal, carried: carried) else {
             dragLogger.info(
                 "Native sidebar drop of \(carried.count, privacy: .public) row(s) rejected: the rows or the destination changed during the drag")
             return false
+        }
+        guard case .move(let move) = outcome else {
+            dragLogger.debug(
+                "Native sidebar drop of \(carried.count, privacy: .public) row(s) leaves the shown order as it is: nothing moved")
+            return true
         }
         let moveID: UUID?
         if let moveWorktreesForTesting {
@@ -185,8 +205,8 @@ extension SidebarOutlineController {
         return true
     }
 
-    /// The move `decision` makes, checked against a fresh build of
-    /// `AppState`; nil when the drop must not go ahead.
+    /// What `decision` does, checked against a fresh build of `AppState`;
+    /// nil when the drop must not go ahead.
     ///
     /// A drag holds the shown structure, so a row the daemon archived during
     /// the drag is still in the shown tree. The decision's destination is
@@ -195,8 +215,15 @@ extension SidebarOutlineController {
     /// ahead only when the answer there is the same decision. A carried row
     /// or a destination that left, or a destination that no longer takes the
     /// rows, rejects it, and nothing moves.
+    ///
+    /// A confirmed place is then mapped past the rows the section's registry
+    /// filter hides (`placement(before:parent:position:carried:in:)`), so the
+    /// rows land directly after the shown row above the gap, or nothing moves
+    /// when the place leaves the shown rows in the order they stand. The mapping
+    /// comes after the check because the fresh tree has no node for a hidden
+    /// row to anchor to.
     func confirmedMove(_ decision: SidebarDropDecision, at position: SidebarDropPolicy.Retarget,
-                       carried: [UUID]) -> SidebarDropMove? {
+                       carried: [UUID]) -> SidebarDropOutcome? {
         let current = SidebarDropIndex(tree: currentTree())
         guard let anchor = Self.anchor(of: decision, at: position, in: current) else { return nil }
         let answer = SidebarDropPolicy.resolve(
@@ -205,12 +232,79 @@ extension SidebarOutlineController {
         guard answer.decision == decision, let ordered = Self.treeOrder(carried, in: current) else { return nil }
         switch decision {
         case .nest(let parent):
-            return SidebarDropMove(ids: ordered, newParentID: parent, before: nil)
+            return .move(SidebarDropMove(ids: ordered, newParentID: parent, before: nil))
         case .place(let parent, let before):
-            return SidebarDropMove(ids: ordered, newParentID: parent, before: before)
+            return placement(before: before, parent: parent, position: position, carried: ordered, in: current)
         case .reject:
             return nil
         }
+    }
+
+    /// The place of `carried` before `before` among `parent`'s children (nil:
+    /// the top level of the section's repo). When the section's registry
+    /// filter hides any row, it is `.unchanged` if the place leaves the rows
+    /// the gap shows in the order they stand
+    /// (`SidebarDropPolicy.keepsShownOrder`), and otherwise `before` mapped
+    /// onto the full sibling list (`SidebarDropPolicy.landingBefore`). It is
+    /// `before` itself in a section that is no repo's, or whose filter hides
+    /// nothing, so a section the filter leaves alone stores exactly what it
+    /// did, workflow groups on or off.
+    ///
+    /// The section is the repo whose header `position`'s parent sits under,
+    /// which is the filter that decided what the gap shows. The rows the gap
+    /// shows are the worktree rows under `position`'s parent in the fresh
+    /// tree: with workflow groups on, that parent is one group's node, and
+    /// the siblings filed under the other groups do not show in the gap.
+    ///
+    /// A creating placeholder stays among the siblings only when the gap
+    /// shows it, and is left out otherwise: hidden by the filter (a hidden
+    /// row has no node in the fresh tree), or filed under another group.
+    /// The mapping lands at the end, before `before` (never a placeholder:
+    /// the decision skips them), or before a sibling it walked past, one the
+    /// gap does not show. So it never names a placeholder, a row the daemon
+    /// has not heard of and `AppState.moveWorktrees` refuses. A placeholder
+    /// the gap shows stops the walk, so the mapping never moves the rows
+    /// above it.
+    private func placement(before: UUID?, parent: UUID?, position: SidebarDropPolicy.Retarget,
+                           carried: [UUID], in index: SidebarDropIndex) -> SidebarDropOutcome {
+        let unmapped = SidebarDropOutcome.move(SidebarDropMove(ids: carried, newParentID: parent, before: before))
+        guard let gapParent = position.parent, let gapEntry = index.entry(gapParent),
+              let repoID = Self.sectionRepoID(of: gapParent, in: index) else { return unmapped }
+        let hidden = appState.sidebarRegistryRemoteFilter(repoID: repoID).hiddenWorktreeIDs
+        guard !hidden.isEmpty else { return unmapped }
+        let rows: [Worktree]
+        if let parent {
+            rows = appState.children(of: parent)
+        } else {
+            rows = AppState.topLevelWorktrees(appState.worktrees[repoID] ?? [])
+        }
+        var gapRows: Set<UUID> = []
+        for child in gapEntry.node.children {
+            if case .worktree(let uuid) = child.id { gapRows.insert(uuid) }
+        }
+        let pending = appState.pendingWorktreeIDs
+        let siblings = rows.map { $0.id }.filter { !pending.contains($0) || gapRows.contains($0) }
+        if SidebarDropPolicy.keepsShownOrder(before, siblings: siblings, carried: carried, hidden: hidden,
+                                             gapRows: gapRows) {
+            return .unchanged
+        }
+        let landing = SidebarDropPolicy.landingBefore(before, siblings: siblings, carried: Set(carried),
+                                                      hidden: hidden, gapRows: gapRows)
+        return .move(SidebarDropMove(ids: carried, newParentID: parent, before: landing))
+    }
+
+    /// The repo whose section holds `start`: the root its chain of parents
+    /// ends at, when that root is a repo header. Nil for the Scratch and
+    /// provider sections, and when the chain leaves the tree.
+    private static func sectionRepoID(of start: SidebarNodeID?, in index: SidebarDropIndex) -> UUID? {
+        var next = start
+        var root: SidebarNodeID?
+        while let id = next {
+            root = id
+            next = index.entry(id)?.parent
+        }
+        guard case .repoHeader(let repoID)? = root else { return nil }
+        return repoID
     }
 
     /// The proposal that names `decision`'s destination in `index`'s tree:

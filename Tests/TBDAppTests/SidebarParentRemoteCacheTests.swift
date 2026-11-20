@@ -6,7 +6,7 @@ import TBDShared
 import TestSupport
 
 enum ParentGroupCacheInput: CaseIterable {
-    case worktrees, scratch, sessions, providers, worktreeUnread, remoteUnread
+    case worktrees, scratch, sessions, providers, worktreeUnread, remoteUnread, registryFilter
 }
 
 @MainActor
@@ -56,6 +56,9 @@ struct ParentGroupCacheFixture {
         case .remoteUnread:
             let key = RemoteSessionSelection(provider: "acme", sessionID: "worker")
             state.unreadByRemoteSession[key] = UnreadSummary(type: .attentionNeeded, mostRecentAt: Date())
+        case .registryFilter:
+            // The worker is an "acme" registry row, so the filter hides it.
+            state.toggleSidebarRegistryRemoteFilter(repoID: parent.repoID!)
         }
     }
 
@@ -67,6 +70,7 @@ struct ParentGroupCacheFixture {
         case .providers: groups.summary.counts == [.unknown: 1] && groups.exitedRoots.isEmpty
         case .worktreeUnread, .remoteUnread:
             groups.summary.attention == .attentionNeeded && groups.exitedSummary.attention == .attentionNeeded
+        case .registryFilter: groups.isEmpty
         }
     }
 }
@@ -132,6 +136,42 @@ struct SidebarParentRemoteCacheTests {
         state.terminals[fixture.parent.id] = []
         #expect(state.sidebarParentRemoteGroupsCache.count == 1)
         #expect(state.sidebarRemoteGroups(parentID: fixture.parent.id).exitedRoots.map(\.id) == [fixture.worker.id])
+    }
+
+    /// The selection is an input to a parent projection only while the
+    /// parent's repo is filtered: the selected worker stays in view under its
+    /// filtered repo, and selecting another row clears that projection and
+    /// hides it, while a parent in an unfiltered repo keeps its own. Local
+    /// rows are selected to move the selection away, because selecting a
+    /// remote lane also clears its unread entry, which clears the cache on
+    /// its own.
+    @Test func selectionInvalidatesTheParentProjectionOnlyWhileFiltered() {
+        let fixture = ParentGroupCacheFixture()
+        defer { fixture.cleanUp() }
+        let state = fixture.state
+        let parentID = fixture.parent.id
+        let elsewhereRepo = UUID()
+        let elsewhere = SidebarGroupFixtures.row("elsewhere", repoID: elsewhereRepo)
+        state.worktrees[elsewhereRepo] = [elsewhere]
+
+        _ = state.sidebarRemoteGroups(parentID: parentID)
+        state.selectedWorktreeIDs = [fixture.other.id]
+        #expect(state.sidebarParentRemoteGroupsCache[parentID] != nil,
+                "Unfiltered, a selection change keeps the projection")
+
+        state.toggleSidebarRegistryRemoteFilter(repoID: fixture.parent.repoID!)
+        #expect(state.sidebarRemoteGroups(parentID: parentID).isEmpty)
+        state.selectedWorktreeIDs = [fixture.worker.id]
+        let selected = state.sidebarRemoteGroups(parentID: parentID).exitedRoots.map(\.id)
+        #expect(selected == [fixture.worker.id])
+
+        _ = state.sidebarRemoteGroups(parentID: elsewhere.id)
+        state.selectedWorktreeIDs = [fixture.other.id]
+        #expect(state.sidebarParentRemoteGroupsCache[parentID] == nil,
+                "A selection change kept the projection of a parent in a filtered repo")
+        #expect(state.sidebarParentRemoteGroupsCache[elsewhere.id] != nil,
+                "A selection change cleared the projection of a parent in an unfiltered repo")
+        #expect(state.sidebarRemoteGroups(parentID: parentID).isEmpty)
     }
 
     /// Report comparable cold/warm work at the renderer's depth bound. Timings

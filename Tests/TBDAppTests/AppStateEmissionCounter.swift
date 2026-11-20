@@ -139,6 +139,7 @@ final class AppStateEmissionTracker {
         _ = state.pendingTabRenameID
         _ = state.repoFilter
         _ = state.expandedSidebarGroups
+        _ = state.sidebarRegistryRemoteHiddenRepoIDs
         _ = state.sidebarSelectionGeneration
         _ = state.pendingWorktreeIDs
         _ = state.switchingAccountTerminals
@@ -277,6 +278,7 @@ final class AppStateEmissionTracker {
         "pendingTabRenameID",
         "repoFilter",
         "expandedSidebarGroups",
+        "sidebarRegistryRemoteHiddenRepoIDs",
         "sidebarSelectionGeneration",
         "pendingWorktreeIDs",
         "switchingAccountTerminals",

@@ -54,8 +54,9 @@ extension AppState {
     /// Remove a repository.
     func removeRepo(repoID: UUID, force: Bool = false) async {
         do {
-            try await daemonClient.removeRepo(repoID: repoID, force: force)
+            try await repoRemover(repoID, force)
             repos.removeAll { $0.id == repoID }
+            sidebarRegistryRemoteHiddenRepoIDs.remove(repoID)
             let removed = worktrees.removeValue(forKey: repoID) ?? []
             for worktree in removed {
                 forgetDevServerState(worktreeID: worktree.id)

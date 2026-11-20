@@ -134,6 +134,8 @@ extension SidebarOutlineController {
             cell.leadingInset = SidebarNativeMetrics.headerContentInset
             cell.chevronButton.target = self
             cell.chevronButton.action = #selector(chevronClicked(_:))
+            cell.filterButton.target = self
+            cell.filterButton.action = #selector(registryFilterClicked(_:))
             cell.locateButton.target = self
             cell.locateButton.action = #selector(locateClicked(_:))
             cell.plusButton.target = self

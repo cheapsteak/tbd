@@ -25,6 +25,10 @@ enum SidebarCellKit {
     static let sectionTitleFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
     /// A group header's title.
     static let groupTitleFont = NSFont.systemFont(ofSize: 12, weight: .medium)
+    /// The count beside a repo header's registry filter while it is on. Its
+    /// digits are all one width, so the room the header keeps for the
+    /// largest count it can show fits every lower count.
+    static let filterCountFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
 
     // MARK: Views
 
@@ -163,6 +167,8 @@ enum SidebarHoverPart: Equatable {
     case plus
     /// A worktree row's gutter pin.
     case pin
+    /// A repo header's registry filter button.
+    case registryFilter
     /// A worktree row's leading PR glyph or PR-unknown mark.
     case leadingGlyph
     /// The Add Repository row's `+` and label, one button.

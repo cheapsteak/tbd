@@ -96,8 +96,13 @@ struct SidebarRemoteGroups {
                   snapshot: Snapshot(worktrees: allWorktrees, sessions: inventory, providers: providers), unread: unread)
     }
 
+    /// - Parameter hidden: rows a repo's registry filter hides
+    ///   (`SidebarRegistryRemoteFilter.hiddenWorktreeIDs`): skipped as roots
+    ///   and left out of each root's descendant walk, so they neither render
+    ///   nor count in a summary nor keep an exited root out of Exited.
     init(roots: [Worktree], remainder: [RemoteSessionInfo], snapshot: Snapshot,
-         unread: [RemoteSessionSelection: UnreadSummary], worktreeUnread: [UUID: UnreadSummary] = [:]) {
+         unread: [RemoteSessionSelection: UnreadSummary], worktreeUnread: [UUID: UnreadSummary] = [:],
+         hidden: Set<UUID> = []) {
         let children = snapshot.children, mirror = snapshot.mirror, freshProviders = snapshot.freshProviders
         var local: [Worktree] = [], active: [Worktree] = [], exited: [Worktree] = []
         var activeSessions: [RemoteSessionInfo] = [], endedSessions: [RemoteSessionInfo] = []
@@ -129,7 +134,7 @@ struct SidebarRemoteGroups {
             result.attention = candidates.max { $0.severity < $1.severity }
         }
 
-        for root in roots {
+        for root in roots where !hidden.contains(root.id) {
             guard !root.location.isLocal else { local.append(root); continue }
             var stack: [(Worktree, Int)] = [(root, 0)]
             var visited: Set<UUID> = []
@@ -153,7 +158,9 @@ struct SidebarRemoteGroups {
                 } else {
                     entirelyExited = false
                 }
-                for child in children[row.id] ?? [] { stack.append((child, depth + 1)) }
+                for child in children[row.id] ?? [] where !hidden.contains(child.id) {
+                    stack.append((child, depth + 1))
+                }
             }
             allIDs.formUnion(visited)
             let rowAttention = visited.compactMap { worktreeUnread[$0]?.type }
