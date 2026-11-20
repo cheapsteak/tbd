@@ -324,6 +324,16 @@ record every close writes. A marked entry sits outside the newest-50 cap on a
 worktree's Closed Terminals, since pruning it would drop the mark while the
 session may still be running.
 
+The guarantee covers what this build closes: every tmux row it deletes whose
+session may still run in its worktree's server leaves a mark. A tab an older
+build failed to kill at archive is not marked. That archive killed each tab's
+tmux window, but left the window untouched when it could not confirm the pane
+was the tab's own, and could leave the agent running when the kill failed and
+the pane's pid could not be read to signal it. Such a session may still run with
+no mark and no open row naming it, so a revive starts it beside the tmux agent.
+It takes a failed kill, so it is rare, and a revive without the gate starts the
+same second agent: the gate neither adds the case nor removes it.
+
 **When it runs.** Reconcile probes once per server name per pass, wherever it
 runs: at daemon startup, on demand (`tbd cleanup`, a repo add), and on a timer —
 the hourly orphan maintenance (`Daemon.performOrphanMaintenance`) runs

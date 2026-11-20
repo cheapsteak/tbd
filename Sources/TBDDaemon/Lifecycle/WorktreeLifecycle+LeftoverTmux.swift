@@ -240,6 +240,17 @@ extension WorktreeLifecycle {
 /// tab, a carryover and a fresh-branch revive of a Claude conversation start
 /// with, writes a new session id and never a second agent on this one.
 ///
+/// The guarantee covers what this build closes: every tmux row it deletes
+/// whose session may still run in its worktree's server leaves a mark. A tab
+/// an older build failed to kill at archive is not marked. That archive
+/// killed each tab's tmux window, but left the window untouched when it could
+/// not confirm the pane was the tab's own, and could leave the agent running
+/// when the kill failed and the pane's pid could not be read to signal it.
+/// Such a session may still run with no mark and no open row naming it, and a
+/// revive starts it beside the tmux agent. It takes a failed kill, so it is
+/// rare, and a revive without this gate starts the same second agent: the
+/// gate neither adds the case nor removes it.
+///
 /// Keyed by session id rather than by row or worktree, because the paths
 /// that resume a session reach it by id from different records — the
 /// archived tabs, the History pane's session list, Closed Terminals — and the
