@@ -84,16 +84,15 @@ The bottom folder: code that several daemon folders share and that uses no other
 
 ### Lifecycle/
 - `WorktreeLifecycle.swift` (+`Create`/`Archive`/`Reconcile`/`Adopt`/`Forget`/`PreSession`/`Recovery`/`LeftoverTmux`) — worktree create/archive/revive/adopt/reconcile orchestration; `+Forget` untracks without deleting from disk, `+PreSession` runs pre-session hook terminals, `+Recovery` resolves rows stuck in `.creating` on restart, `+LeftoverTmux` parks a live tmux row once its tmux server is gone
-- `LeftoverTmuxServerProbe.swift` — whether a tmux row's server is still running, read from one `AF_UNIX` connect to its socket (no tmux binary); asked by reconcile, Check Again and the transport migration, never on a timer. A transition measure, replaced by parking on sight on 2027-01-15
+- `LeftoverTmuxServerProbe.swift` — whether a tmux row's server is still running, read from one `AF_UNIX` connect to its socket (no tmux binary); asked by reconcile (at startup, on demand, and hourly for scratch worktrees' rows while GC is on), Check Again and the transport migration. A transition measure, replaced by parking on sight on 2027-01-15
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
-- `TmuxManager+WorktreeServerLock.swift` — `withWorktreeServerLock`: locks a worktree's current tmux server and re-reads its row after waiting, retrying if the server changed
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
 - `HibernationCoordinator.swift` (+`Holder`) — parks Claude sessions on the pty holder and wakes them there (it refuses to park a live tmux row, and a session parked on tmux refuses to wake, naming `tbd terminal migrate`): manual hibernate, the idle sweep, park-on-merge, and the park the profile swap composes
 - `HibernationGate.swift` / `HibernationSafetyChecks.swift` — idle-sweep and park-on-merge eligibility; the transcript-tail check every park but the profile swap's honours
 - `PluginDirWriter.swift` — writes the TBD Claude Code plugin to Application Support: skills always, the session mod's `hooks/` and `types/` only while a session-mod flag is on; called after the database opens and on each flag change
 - `ComposerDraftParkGate.swift` — the park decision the session mod answers (proceed or skip, per policy)
 - `SkillFileWriter.swift` — writes the failsafe copy of the skill body
-- `RetiredRuntimeFiles.swift` — at daemon startup, removes files under `~/tbd/runtime` that no current build writes (a statusline tee script, its capture files, a lease-credential directory), matched by exact name or shape; skipped in mock mode
+- `RetiredRuntimeFiles.swift` — at daemon startup, removes files under `~/tbd/runtime` that no current build writes (a statusline tee script, its capture files, a lease-credential directory, a staged continuation packet), matched by exact name or shape; skipped in mock mode
 - `RetiredLaunchAgent.swift` — at daemon startup, off the socket-bind path, boots out (`launchctl bootout gui/<uid>/com.nightwatch-tick`) and deletes `~/Library/LaunchAgents/com.nightwatch-tick.plist`, the job Nightwatch's removed scheduler installed, only when its label and `…/skills/nightwatch/scripts/tick-cron.sh` program match and that script is gone; `launchctl` runs through the `LaunchctlRunning` seam; skipped in mock mode
 - `ArchivedWorktreeBackfill.swift` — repairs archived worktree rows with missing branches
 - `RepoHealthValidator.swift` — flips repos with stale paths to `.missing`
@@ -125,7 +124,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `EnvOverrideResolver.swift` — merges free-form env overrides across scopes (global → repo → profile) with precedence
 
 ### Process/
-- `AgentReaper.swift` — reaps the orphaned children of dead pty holders, by each session's recorded child pid (`sweepHolderChildren`), and escalates a hung-up child to SIGKILL for window teardown (`escalateAfterHangup`)
+- `AgentReaper.swift` — reaps the orphaned children of dead pty holders, by each session's recorded child pid (`sweepHolderChildren`)
 - `ProcessSignaller.swift` — injectable protocol wrapping OS process operations (signals, liveness checks)
 - `BoundedProcessRunner.swift` — `runBoundedProcess`: runs a subprocess under a deadline that a dedicated watchdog thread enforces; git, tmux, GC and remote-provider subprocesses run through it
 - `PipeDataAccumulator.swift` — thread-safe pipe reader that drains without waiting for EOF, so a grandchild holding the write end leaks nothing
@@ -139,7 +138,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 
 ### Git/ Tmux/ SSH/ Keychain/ AskUserQuestion/
 - `Git/GitManager.swift` — all git operations
-- `Tmux/TmuxManager.swift` — per-repo tmux server names and the window kill that tears a tmux row down; TBD opens no tmux window
+- `Tmux/TmuxManager.swift` — per-repo tmux server names; TBD opens no tmux window and closes a tmux row without running tmux
 - `SSH/SSHAgentResolver.swift` — `~/.ssh/tbd-agent.sock` symlink maintenance
 - `Keychain/ModelProfileKeychain.swift` — stores apiKey profile secrets (0600 token files)
 - `AskUserQuestion/PendingPromptStore.swift` — in-memory store of open Claude Code dialogs: AskUserQuestion captures from the pre-tool hook, and the prompts the session mod reports open for answering from the transcript

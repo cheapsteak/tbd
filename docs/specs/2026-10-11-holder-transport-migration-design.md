@@ -131,8 +131,10 @@ no tmux binary for either. The server is gone only when both say so.
   - **Which processes are tmux** – a process is tmux when its kernel command
     name (`p_comm`, from the same `sysctl(KERN_PROC_ALL)` read that lists the
     table) or the last component of its executable path (`proc_pidpath`) is
-    `tmux`, or is the name of the binary saved through the tmux path fallback
-    (`TmuxExecutableResolver`), which accepts any name. The kernel cuts a
+    `tmux`, or is the name of the binary saved in `tmux-executable-path` under
+    the TBD home, which can be any name; the probe reads that file itself, and
+    a saved link counts under both its own name and the name it resolves to.
+    A missing, unreadable or blank file adds no name. The kernel cuts a
     command name to 16 bytes (`MAXCOMLEN`), so the saved name is cut the same
     way before it is compared, and the two are compared as bytes: a cut can
     split a character, and the kernel keeps the split bytes as they are. The
@@ -190,6 +192,25 @@ migration — refuses with the same advice and the `terminalOnTmux` error code
 (`LeftoverTmuxSession`). The app derives the notice from the row it already
 holds — `transport == .tmux` and not parked — and the server name from the
 worktree's `tmuxServer`, so no model field is added.
+
+**Closing.** Closing a tmux row's tab deletes the row and runs no tmux
+command, and so do archiving or forgetting its worktree, deleting or archiving
+a scratch space, and reconcile's archive of a worktree gone from git. Each is
+recorded as dispatched. What else happens depends on whether the row was
+parked:
+
+- **Live** – the session keeps running in its server. The daemon logs a notice
+  naming the server and `tmux -L <server> kill-server`, and the notice in the
+  app says that closing the tab leaves the session running in tmux. The row
+  gets no Closed Terminals entry, and its session directory is left for
+  `OrphanGC`: the session may still be running, and an entry naming it would
+  let revive start a second agent on the same session id beside it.
+- **Parked** – the session ended when the row was parked, so its Closed
+  Terminals entry, on the paths that keep history, carries the screen the park
+  stored.
+
+`terminal.delete`'s activity rails apply to holder rows only: closing a tmux
+row ends no process, so there is no turn in flight to protect.
 
 **When it runs.** Reconcile probes once per server name per pass, wherever it
 runs: at daemon startup, on demand (`tbd cleanup`, a repo add), and on a timer —
@@ -412,7 +433,12 @@ never unlinks it, and nothing TBD runs creates one any more.
   of a live tmux row, and a wake of a parked one, refuse with `terminalOnTmux`,
   and the actuation record calls each wake or park refusal `not-eligible`.
 - The app shows the notice for a live tmux row and not for a parked one or a
-  holder row.
+  holder row, and the notice says that closing the tab leaves the session
+  running in tmux.
+- Closing a tmux row's tab, archiving its worktree, reconcile's archive and a
+  pre-session hook tab's close run no tmux command and delete the row. A live
+  row gets no Closed Terminals entry; a parked row's entry carries its stored
+  screen.
 
 ## Rejected alternatives
 

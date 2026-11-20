@@ -104,17 +104,17 @@ GRDB `DatabaseMigrator`, numbered sequentially. Never modify an existing migrati
 
 ## Tmux Architecture
 
-Every session opens on the pty holder (`TerminalSpawnTransport.decide`); a daemon with no `TBDHolder` beside it refuses the spawn. TBD does not drive tmux: it cannot show a tmux session, send to one or park one, and it ends one only by killing its window when the row is torn down. A row still recorded as `tmux` is one of two kinds:
+Every session opens on the pty holder (`TerminalSpawnTransport.decide`); a daemon with no `TBDHolder` beside it refuses the spawn. TBD does not drive tmux: it cannot show a tmux session, send to one, park one or end one. A row still recorded as `tmux` is one of two kinds:
 
 - **Parked** – its wake refuses and names `tbd terminal migrate`, which rewrites the row onto the holder; the next wake resumes it there.
-- **Live** – judged by its tmux server's socket (`LeftoverTmuxServerProbe`: one `AF_UNIX` connect, no tmux binary). Startup reconcile, the app's Check Again (`terminal.recreateWindow`) and `tbd terminal migrate` each probe; nothing probes on a timer. Once the server is gone the row is parked with its session kept (a row with nothing to resume is deleted), and a migrate goes on to wake it on the holder. While the server may still be running, the row stays live, the app shows `LeftoverTmuxSessionNotice` in place of a terminal with the `tmux -L <server> kill-server` command that ends it, and a migrate refuses with `terminalOnTmux`.
+- **Live** – judged by its tmux server's socket (`LeftoverTmuxServerProbe`: one `AF_UNIX` connect, no tmux binary). Reconcile (at startup, on demand, and hourly for scratch worktrees' rows while GC is on), the app's Check Again (`terminal.recreateWindow`) and `tbd terminal migrate` each probe. Once the server is gone the row is parked with its session kept (a row with nothing to resume is deleted), and a migrate goes on to wake it on the holder. While the server may still be running, the row stays live, the app shows `LeftoverTmuxSessionNotice` in place of a terminal with the `tmux -L <server> kill-server` command that ends it, and a migrate refuses with `terminalOnTmux`.
 
 The probe is a transition measure, replaced by parking on sight on 2027-01-15. The rule and its rejected alternatives: `docs/specs/2026-10-11-holder-transport-migration-design.md`, "A live row whose tmux server outlived the update".
 
 What TBD still does with tmux:
 
 - Server names use the djb2 hash of the repo path (`TmuxManager.serverName`), deterministic and surviving DB recreation; the probe and the notice both name the server this way.
-- Tearing a tmux row down — closing its tab, archiving or forgetting its worktree, or reconcile's archive of a worktree gone from git — kills its window (`WorktreeLifecycle.captureThenKillWindow`, `tearDownWindow`).
+- Closing a tmux row's tab — or archiving or forgetting its worktree, deleting or archiving a scratch space, or reconcile's archive of a worktree gone from git — deletes the row and runs no tmux command (`WorktreeLifecycle.closeLeftoverTmuxRow`). A live row's session keeps running in its server, and the row gets no Closed Terminals entry, because revive could otherwise start a second agent on the same session; a parked row's entry carries the screen the park stored.
 
 How TBD used to serve tmux sessions, and why it never used control mode: `docs/tmux-integration.md`, kept as the design record.
 
