@@ -67,7 +67,7 @@ struct RemoteAttachGeneration: Equatable {
 final class AppState {
     /// Reference to the global appearance settings, wired by `TBDAppMain`
     /// after both root-owned objects are constructed. Used by
-    /// `mainAreaTerminalSize()` to compute initial tmux pane dimensions
+    /// `mainAreaTerminalSize()` to compute initial terminal dimensions
     /// from the user's current font, before any `TBDTerminalView` exists.
     /// Plain (non-weak) optional — `AppState` and `AppearanceSettings` share
     /// the app's lifetime, so this reference cannot outlive its target.
@@ -4911,11 +4911,12 @@ final class AppState {
     }
 
     /// UserDefaults key for the WIP terminal-auto-resize feature. Off by
-    /// default — the feature broadcasts main-area pixel size to the daemon
-    /// and resizes every tracked tmux window on app resize / terminal
-    /// create. See `mainAreaTerminalSize()` and `scheduleMainAreaSizeBroadcast()`
-    /// for the two enforcement points. Settings UI toggle lives in the
-    /// "Experimental" section of the General settings tab.
+    /// default — the feature opens new terminals at the main area's size and
+    /// broadcasts that size to the daemon on app resize, which resizes every
+    /// holder session no pane is showing. See `mainAreaTerminalSize()` and
+    /// `scheduleMainAreaSizeBroadcast()` for the two enforcement points.
+    /// Settings UI toggle lives in the "Experimental" section of the Terminal
+    /// settings tab.
     static let terminalAutoResizeKey = "enableTerminalAutoResize"
 
     /// UserDefaults key for the experimental Metal terminal renderer. When on,
@@ -5304,7 +5305,7 @@ final class AppState {
     }
 
     /// Debounced RPC: tell the daemon the main area resized so it can resize
-    /// every tracked tmux window. Coalesces rapid resize events into a single
+    /// every holder session. Coalesces rapid resize events into a single
     /// RPC ~300ms after the user stops dragging the window edge.
     private func scheduleMainAreaSizeBroadcast() {
         // Belt-and-suspenders: `mainAreaTerminalSize()` already returns
