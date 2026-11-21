@@ -36,24 +36,6 @@ struct DeepLinkToastTests {
         )
     }
 
-    /// Poll `cond` on the main actor until true or deadline. Returns success.
-    ///
-    /// The deadline is the shared saturated-pass budget rather than a literal —
-    /// it is a hang guard on a main-queue delivery, and in the fast parallel
-    /// pass a single scheduling hop can cost tens of seconds
-    /// (`Tests/CLAUDE.md`, "Population is the scheduler").
-    private func waitUntil(
-        deadline: Duration = TestDeadlines.saturatedPass, _ cond: @MainActor () -> Bool
-    ) async -> Bool {
-        let clock = ContinuousClock()
-        let start = clock.now
-        while !cond() {
-            if clock.now - start > deadline { return false }
-            try? await Task.sleep(for: .milliseconds(2))
-        }
-        return true
-    }
-
     // MARK: - showToast / dismissToast basics
 
     @Test func showToast_publishesToast() async {
@@ -168,8 +150,13 @@ struct DeepLinkToastTests {
 
             state.navigateToWorktree(UUID())
 
-            let looking = await waitUntil { state.activeToast?.style == .progress }
-            #expect(looking)
+            // A hang guard on a main-queue delivery, so the saturated-pass
+            // budget (`Tests/CLAUDE.md`, "Population is the scheduler").
+            let looking = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+                await MainActor.run { state.activeToast?.style == .progress }
+            }
+            #expect(looking != .timedOut, "the lookup's progress toast never showed")
+            guard looking == .satisfied else { return }
             #expect(state.activeToast?.message == "Looking for worktree…")
         }
     }
@@ -304,8 +291,10 @@ struct DeepLinkToastTests {
             return [wt]
         }
         state.navigateToWorktree(id)
-        let inFlight = await waitUntil { gate.isHolding }
-        #expect(inFlight)
+        let inFlight = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { gate.isHolding }
+        }
+        #expect(inFlight != .timedOut, "the archived lookup never reached its gate")
         #expect(state.activeToast?.style == .progress)
         return repoID
     }
@@ -394,6 +383,101 @@ struct DeepLinkToastTests {
         }
     }
 
+    /// A row the user selects in the sidebar is a later navigation than the
+    /// link, so it supersedes the lookup: the lookup's progress toast goes at
+    /// once, and its late answer is dropped. The row is selected through the
+    /// outline's own selection handler, as a click selects it.
+    @Test func archivedLookupInFlight_isSupersededByALaterSidebarSelection() async throws {
+        let h = OutlineHarness("DeepLinkToast.sidebarSelection")
+        defer { h.tearDown() }
+        let state = h.state
+        state.toastTickDuration = .milliseconds(5)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let active = SidebarGroupFixtures.row("active", repoID: repo.id)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [active]]
+        h.mount()
+        let gate = LookupGate()
+        let archivedRepoID = await startHeldArchivedLookup(state, gate: gate)
+        let activeRow = h.row(.worktree(active.id))
+        try #require(activeRow >= 0)
+
+        h.outline.selectRowIndexes(IndexSet(integer: activeRow), byExtendingSelection: false)
+        #expect(state.selectedWorktreeIDs == [active.id])
+        #expect(state.activeToast == nil)
+
+        gate.release()
+        await state.archivedLookupTask?.value
+
+        #expect(state.selectedWorktreeIDs == [active.id])
+        #expect(state.selectedRepoID == nil)
+        #expect(state.highlightedArchivedWorktreeID == nil)
+        #expect(state.archivedWorktrees[archivedRepoID] == nil)
+        #expect(state.activeToast == nil)
+    }
+
+    /// A create that finishes while the lookup is in flight swaps its
+    /// placeholder for the real row and selects it. The app made that change,
+    /// not the user, so it supersedes nothing: the lookup still lands. The
+    /// create starts before the link is followed, so only its swap falls
+    /// inside the lookup.
+    @Test func archivedLookupInFlight_landsAfterACreatesPlaceholderSwap() async {
+        await withState { state in
+            let createRepoID = UUID()
+            var draft = makeArchived(id: UUID(), repoID: createRepoID)
+            draft.status = .active
+            let created = draft
+            let createGate = LookupGate()
+            state.worktreeCreator = { @MainActor _ in
+                await createGate.hold()
+                return created
+            }
+            state.createWorktree(repoID: createRepoID)
+            let creating = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+                await MainActor.run { createGate.isHolding }
+            }
+            #expect(creating != .timedOut, "the create never reached its gate")
+
+            let lookupGate = LookupGate()
+            let archivedRepoID = await startHeldArchivedLookup(state, gate: lookupGate)
+
+            createGate.release()
+            let swapped = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable [createdID = created.id] in
+                await MainActor.run { state.selectedWorktreeIDs == [createdID] }
+            }
+            #expect(swapped != .timedOut, "the create never swapped its placeholder")
+            // The swap left the lookup's progress toast up.
+            #expect(state.activeToast?.style == .progress)
+
+            lookupGate.release()
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedRepoID == archivedRepoID)
+            #expect(state.highlightedArchivedWorktreeID != nil)
+            #expect(state.activeToast?.style != .progress)
+        }
+    }
+
+    @Test func archivedLookupInFlight_isSupersededByALaterRemoteSessionSelection() async {
+        await withState { state in
+            let gate = LookupGate()
+            let repoID = await startHeldArchivedLookup(state, gate: gate)
+            let expected = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(state.activeToast == nil)
+
+            gate.release()
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedRemoteSession == expected)
+            #expect(state.selectedRepoID == nil)
+            #expect(state.highlightedArchivedWorktreeID == nil)
+            #expect(state.archivedWorktrees[repoID] == nil)
+            #expect(state.activeToast == nil)
+        }
+    }
+
     /// A click held for the remote mirror has not navigated, so the lookup
     /// keeps its navigation. The lookup lands a link followed before the
     /// click, so the click, the later action, stays held through it and is
@@ -454,9 +538,9 @@ struct DeepLinkToastTests {
     }
 }
 
-/// Holds an archived lookup open until the test lets it resolve. A main-actor
-/// class because the lookup override is an escaping closure: it parks its
-/// continuation here, not in a captured local `var`.
+/// Holds an archived lookup, or a create, open until the test lets it
+/// resolve. A main-actor class because the stub is an escaping closure: it
+/// parks its continuation here, not in a captured local `var`.
 @MainActor
 private final class LookupGate {
     private(set) var isHolding = false

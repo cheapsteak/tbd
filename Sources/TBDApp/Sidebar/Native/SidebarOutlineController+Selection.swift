@@ -179,6 +179,11 @@ extension SidebarOutlineController {
                 guard let item = self.items.existing(id) else { return false }
                 return self.outline.row(forItem: item) >= 0
             })
+        // The user changed the selection, so it is their navigation
+        // (`AppState.userDidNavigate`). The selection's `didSet` cannot say
+        // so: it also runs for the app's own changes, and records nothing
+        // for a deselection.
+        appState.userDidNavigate()
         writeSelection(ids)
         // Read back after the `didSet` has routed it.
         markSelectionShown()

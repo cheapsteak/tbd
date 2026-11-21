@@ -1024,12 +1024,16 @@ extension AppState {
     /// the one rendering that terminal (live transcript or terminal pane);
     /// silently falls back to current selection when no tab matches.
     ///
-    /// Supersedes an archived lookup still in flight
-    /// (`supersedeArchivedLookup`), so the lookup's late resolution cannot
-    /// replace this selection with the archive view.
+    /// A navigation the user made (`userDidNavigate`): it supersedes an
+    /// archived lookup still in flight, so the lookup's late resolution
+    /// cannot replace this selection with the archive view, and drops a held
+    /// banner click, even when `id` is selected already and the selection's
+    /// `didSet` records it as no navigation (see `recordNavigation`). A drain
+    /// answering a click with its lane clears the click before it calls this,
+    /// so its answer is unaffected.
     @MainActor
     func navigateToActiveWorktree(_ id: UUID, terminalID: UUID? = nil) {
-        supersedeArchivedLookup()
+        userDidNavigate()
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = [id]
         // Expand the containing repo so the row is part of the rendered list
@@ -1079,8 +1083,8 @@ extension AppState {
         // hover-cancelled) and navigate to A. Stamp a fresh token now and
         // drop any resolution that isn't the newest request. Mirrors the
         // `revivingArchived[id] == nil` re-entrancy guard used for revive.
-        // Any other navigation drops it too, by clearing the token
-        // (`supersedeArchivedLookup`).
+        // Any other navigation the user makes drops it too, by clearing the
+        // token (`userDidNavigate`).
         let myRequestID: UUID
         if let requestID {
             myRequestID = requestID
@@ -1140,6 +1144,8 @@ extension AppState {
         // This lands a link followed before any banner click still held, so
         // that click is the later action and stays held, though selecting the
         // repo records a navigation (`recordNavigation` drops a held click).
+        // Its progress toast was replaced by the notice already, so the drop
+        // takes nothing down, and the click is put back below.
         let heldClick = pendingRemoteSessionLink
         selectedWorktreeIDs = []
         selectedRepoID = repoID
@@ -1169,10 +1175,11 @@ extension AppState {
     /// (`navigateToArchivedWorktree`), so its late resolution cannot replace a
     /// newer navigation's selection with the archive view, or its toast with
     /// the archive notice. A newer archived lookup supersedes by stamping its
-    /// own token; every other navigation that answers a click or link calls
-    /// this before it changes the selection or shows a toast
-    /// (`navigateToActiveWorktree`, `navigateToRemoteSession`). A click that
-    /// is only held does not, because nothing has navigated yet.
+    /// own token; every navigation the user makes calls this through
+    /// `userDidNavigate` before it changes the selection or shows a toast
+    /// (`recordNavigation` lists them). A selection the app changes on its
+    /// own does not, and neither does a click that is only held, because the
+    /// user has not navigated.
     ///
     /// Clearing `deepLinkRequestID` drops the lookup's resolution. Its
     /// "Looking for worktree…" progress toast is dismissed too: a dropped
@@ -1198,8 +1205,9 @@ extension AppState {
         // The later click wins, so a held remote-session click is dropped,
         // whether it is held for the initial load or for a remote load that
         // has not yet succeeded. Otherwise that load would replay it over
-        // this navigation.
-        pendingRemoteSessionLink = nil
+        // this navigation. A lookup still in flight for an earlier link is
+        // superseded too.
+        userDidNavigate()
         // Cold-start guard: a tbd:// click can arrive between AppState.init()
         // and the daemon RPC populating `worktrees`. If we fall through to
         // archived lookup now we'll miss real active worktrees. Buffer
@@ -1231,7 +1239,12 @@ extension AppState {
     }
 
     /// Select a repo to show its archived worktrees in the content pane.
+    ///
+    /// A navigation the user made (`userDidNavigate`), even on the header of
+    /// the repo already selected. The selection's `didSet` cannot say so: it
+    /// supersedes nothing (`recordNavigation`).
     func selectRepo(id: UUID) {
+        userDidNavigate()
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = id
@@ -1263,10 +1276,10 @@ extension AppState {
     /// `selectRepo(id:)`; no `NavigationEntry`/back-forward integration for v1
     /// (documented scope cut — the Scratch section header has no natural UUID
     /// identity for the navigation history's worktree/repo entries to key
-    /// off). With no history entry, it drops a held banner click itself, as
-    /// `recordNavigation` does for the navigations that make one.
+    /// off). A navigation the user made (`userDidNavigate`): it drops a held
+    /// banner click and supersedes an archived lookup.
     func selectScratchSection() {
-        pendingRemoteSessionLink = nil
+        userDidNavigate()
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = nil
@@ -1857,10 +1870,15 @@ extension AppState {
         startArchive(archiveShortcutRoute())
     }
 
-    /// Select a worktree by its index in the sidebar order.
+    /// Select a worktree by its index in the sidebar order (⌘1–9).
+    ///
+    /// A navigation the user made (`userDidNavigate`), even on the worktree
+    /// already selected. The selection's `didSet` cannot say so: it
+    /// supersedes nothing (`recordNavigation`).
     func selectWorktreeByIndex(_ index: Int) {
         let ordered = allWorktreesOrdered
         guard index >= 0, index < ordered.count else { return }
+        userDidNavigate()
         selectedWorktreeIDs = [ordered[index].id]
     }
 

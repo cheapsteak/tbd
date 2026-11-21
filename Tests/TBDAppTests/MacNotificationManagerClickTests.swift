@@ -10,8 +10,19 @@ import TestSupport
 private func makeIsolatedAppState() -> (AppState, TestDefaultsSuite) {
     let suite = TestDefaultsSuite("com.tbd.tests.notificationclick")
     let defaults = suite.defaults
-    let state = AppState(userDefaults: defaults)
+    let state = AppState(userDefaults: defaults, daemonClient: unreachableDaemonClient())
     return (state, suite)
+}
+
+/// A client for a daemon that cannot exist: its sockets sit in a scratch
+/// directory nobody creates (`fencedScratchRoot`), so every RPC a test
+/// reaches fails at once, fenced run or not, instead of reaching the live
+/// daemon. The reconnect's preference and foreground pushes, the list loads
+/// of a real `refreshAll()` and the archived refresh `selectRepo` starts all
+/// go through it.
+private func unreachableDaemonClient() -> DaemonClient {
+    let root = fencedScratchRoot(prefix: "noclick")
+    return DaemonClient(socketPath: "\(root)/absent.sock", vendSocketPath: "\(root)/absent-vend.sock")
 }
 
 @MainActor
@@ -480,7 +491,7 @@ private func selectLocalWorktree(in appState: AppState) -> UUID {
     let expected = RemoteSessionSelection(provider: "acme", sessionID: "s1")
     #expect(appState.pendingRemoteSessionLink == expected)
     #expect(appState.selectedRemoteSession == nil)
-    #expect(appState.activeToast == nil)
+    #expect(showsHeldClickToast(appState))
 
     // What `connectAndLoadInitialState` does: the lists load, then the first
     // remote refresh fills the mirror but replays nothing, because the load
@@ -558,7 +569,7 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     appState.drainPendingRemoteSessionLink()
 
     #expect(appState.pendingRemoteSessionLink == expected)
-    #expect(appState.activeToast == nil)
+    #expect(showsHeldClickToast(appState))
     #expect(appState.selectedRemoteSession == nil)
 
     // Its next run: the saved selection is not restored over the held click,
@@ -585,14 +596,17 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     appState.isInitialStateLoaded = true
     appState.drainPendingRemoteSessionLink()
     #expect(appState.pendingRemoteSessionLink == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
-    #expect(appState.activeToast == nil)
+    #expect(showsHeldClickToast(appState))
+    let earlierToastID = appState.activeToast?.id
 
-    // A click after that launch is held too, in place of the earlier one.
+    // A click after that launch is held too, in place of the earlier one,
+    // and its own progress toast replaces the earlier one's.
     clickPostedRemoteBanner(appState, sessionID: "s2")
     let later = RemoteSessionSelection(provider: "acme", sessionID: "s2")
     #expect(appState.pendingRemoteSessionLink == later)
     #expect(appState.selectedRemoteSession == nil)
-    #expect(appState.activeToast == nil)
+    #expect(showsHeldClickToast(appState))
+    #expect(appState.activeToast?.id != earlierToastID)
 
     // The reconnect loads the lists, and its remote load replays the later
     // click.
@@ -724,7 +738,7 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     let worktreeID = UUID()
     first.recordNavigation(.worktrees([worktreeID]))
 
-    let appState = AppState(userDefaults: suite.defaults)
+    let appState = AppState(userDefaults: suite.defaults, daemonClient: unreachableDaemonClient())
     appState.isInitialStateLoaded = true
     markListsLoaded(appState)
     let repoID = UUID()
@@ -773,6 +787,95 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
 
     #expect(appState.selectedRemoteSession == held)
     #expect(appState.pendingRemoteSessionLink == nil)
+}
+
+// A user who picks again what is already selected leaves the selection as it
+// was, which the selection's `didSet` records as no navigation. It is still a
+// later action than the click, so the click is dropped.
+
+@MainActor
+@Test func heldRemoteClick_isDroppedByAJumpMenuJumpToTheSelectedWorktree() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let selectedID = holdRemoteClick(in: appState, dates: TestDateSource())
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    JumpMenuController.select(selectedID, in: appState)
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [selectedID])
+    #expect(appState.selectedRemoteSession == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_isDroppedByNavigatingToTheSelectedWorktree() async {
+    // As a pinned-dock tap on the selected worktree's terminal does.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let selectedID = holdRemoteClick(in: appState, dates: TestDateSource())
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    appState.navigateToActiveWorktree(selectedID)
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [selectedID])
+    #expect(appState.selectedRemoteSession == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_isDroppedByClickingTheSelectedRepoHeader() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    let repoID = UUID()
+    appState.repos = [Repo(id: repoID, path: "/tmp/x", displayName: "x", expanded: false)]
+    appState.selectRepo(id: repoID)
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    appState.selectRepo(id: repoID)
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedRepoID == repoID)
+    #expect(appState.selectedRemoteSession == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_isDroppedByTheShortcutForTheSelectedWorktree() async {
+    // ⌘1 on the worktree already selected.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    let repoID = UUID()
+    let worktree = Worktree(repoID: repoID, name: "x", displayName: "X",
+                            branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x")
+    appState.repos = [Repo(id: repoID, path: "/tmp/x", displayName: "x", expanded: true)]
+    appState.worktrees = [repoID: [worktree]]
+    appState.selectedWorktreeIDs = [worktree.id]
+    let selectedID = worktree.id
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(appState.allWorktreesOrdered.map { $0.id } == [selectedID])
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    appState.selectWorktreeByIndex(0)
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [selectedID])
+    #expect(appState.selectedRemoteSession == nil)
 }
 
 /// Counts the remote fetches a `refreshRemote()` makes. A class, because
@@ -829,7 +932,7 @@ private final class RemoteFetchCount {
     #expect(appState.remoteMirrorLoaded)
     #expect(appState.pendingRemoteSessionLink == held)
     #expect(appState.selectedRemoteSession == nil)
-    #expect(appState.activeToast == nil)
+    #expect(showsHeldClickToast(appState))
 
     // The same tick's poll cycle.
     await appState.refreshAll()
@@ -915,6 +1018,132 @@ private func holdRemoteClick(in appState: AppState, dates: TestDateSource) -> UU
     return selectedID
 }
 
+/// The error toast that replaces a held click's progress toast when it expires.
+private let heldClickExpiredMessage = "Couldn't open the remote session: TBD couldn't load in time."
+
+/// Whether the toast on screen is the progress toast the held click's hold
+/// showed, by its ID as well as its look.
+@MainActor
+private func showsHeldClickToast(_ appState: AppState) -> Bool {
+    guard let toast = appState.activeToast, appState.pendingRemoteSessionLink != nil else { return false }
+    return toast.style == .progress && toast.message == "Opening the remote session…"
+        && toast.id == appState.pendingRemoteSessionLinkToastID
+}
+
+@MainActor
+@Test func heldRemoteClick_showsAProgressToast_thatItsAnswerDismisses() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    _ = holdRemoteClick(in: appState, dates: TestDateSource())
+    #expect(showsHeldClickToast(appState))
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+    #expect(appState.activeToast == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_answeredNotFound_replacesItsProgressToast() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    _ = holdRemoteClick(in: appState, dates: TestDateSource())
+    #expect(showsHeldClickToast(appState))
+
+    stubRemoteLoad(appState, sessions: [])
+    await appState.refreshRemote()
+
+    #expect(appState.activeToast?.style == .error)
+    #expect(appState.activeToast?.message == "Remote session not found — it may have ended.")
+}
+
+@MainActor
+@Test func heldRemoteClick_droppedByALaterNavigation_dismissesItsProgressToast() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    _ = holdRemoteClick(in: appState, dates: TestDateSource())
+    let otherID = addLocalWorktree(to: appState)
+    #expect(showsHeldClickToast(appState))
+
+    appState.selectedWorktreeIDs = [otherID]
+
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_droppedByALaterNavigation_leavesAToastThatReplacedItsOwn() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    _ = holdRemoteClick(in: appState, dates: TestDateSource())
+    let otherID = addLocalWorktree(to: appState)
+    appState.showTransientToast("Something else happened", style: .notice)
+
+    appState.selectedWorktreeIDs = [otherID]
+
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast?.message == "Something else happened")
+}
+
+@MainActor
+@Test func pollTick_expiresAHeldClickWhileTheDaemonCannotBeReached() async {
+    // A launch that never connected: no list loads, so no drain or retry
+    // runs, and the poll tick returns before its cycle. Only the tick's
+    // first step checks the click's age.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let dates = TestDateSource()
+    appState.now = dates.provider
+    appState.isInitialStateLoaded = true
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(!appState.isConnected)
+    #expect(showsHeldClickToast(appState))
+
+    dates.advance(by: AppState.heldRemoteSessionLinkLifetime - 1)
+    appState.pollTickDidFire()
+    #expect(appState.pendingRemoteSessionLink != nil)
+    #expect(showsHeldClickToast(appState))
+
+    dates.advance(by: 2)
+    appState.pollTickDidFire()
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast?.style == .error)
+    #expect(appState.activeToast?.message == heldClickExpiredMessage)
+}
+
+@MainActor
+@Test func heldRemoteClick_expiry_leavesAToastThatReplacedItsProgressToast() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let dates = TestDateSource()
+    _ = holdRemoteClick(in: appState, dates: dates)
+    appState.showTransientToast("Something else happened", style: .notice)
+
+    dates.advance(by: AppState.heldRemoteSessionLinkLifetime + 1)
+    appState.pollTickDidFire()
+
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast?.message == "Something else happened")
+}
+
+@MainActor
+@Test func heldRemoteClick_expiry_showsItsErrorWhenNoToastIsUp() async {
+    // Its progress toast was replaced, and the replacement has gone.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let dates = TestDateSource()
+    _ = holdRemoteClick(in: appState, dates: dates)
+    appState.dismissToast()
+
+    dates.advance(by: AppState.heldRemoteSessionLinkLifetime + 1)
+    appState.pollTickDidFire()
+
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast?.style == .error)
+    #expect(appState.activeToast?.message == heldClickExpiredMessage)
+}
+
 @MainActor
 @Test func heldRemoteClick_pastItsLifetime_isDroppedUnansweredByTheLoad() async {
     let (appState, suite) = makeIsolatedAppState()
@@ -930,7 +1159,9 @@ private func holdRemoteClick(in appState: AppState, dates: TestDateSource) -> UU
     #expect(appState.pendingRemoteSessionLink == nil)
     #expect(appState.selectedWorktreeIDs == [selectedID])
     #expect(appState.selectedRemoteSession == nil)
-    #expect(appState.activeToast == nil)
+    // The user saw the progress toast, so they are told the click failed.
+    #expect(appState.activeToast?.style == .error)
+    #expect(appState.activeToast?.message == heldClickExpiredMessage)
 }
 
 @MainActor
@@ -970,6 +1201,7 @@ private func holdRemoteClick(in appState: AppState, dates: TestDateSource) -> UU
 
     #expect(fetches.value == 0)
     #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast?.message == heldClickExpiredMessage)
 }
 
 @MainActor
@@ -992,6 +1224,8 @@ private func holdRemoteClick(in appState: AppState, dates: TestDateSource) -> UU
 
     clickPostedRemoteBanner(appState, sessionID: "b")
     #expect(appState.pendingRemoteSessionLink == nil)
+    // The answer replaced the held click, so its progress toast is gone too.
+    #expect(appState.activeToast == nil)
 
     stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "a"), remoteSession(sessionID: "b")])
     await appState.refreshRemote()

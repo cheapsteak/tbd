@@ -528,6 +528,67 @@ struct DockTableControllerTests {
         #expect(clip.bounds.minY < 0.5, "A click in the dock scrolled the outline to \(clip.bounds.minY)")
     }
 
+    /// A click on the dock row already selected changes no selection, so
+    /// the selection's `didSet` records no navigation. It is one all the
+    /// same, so it drops a banner click held from before it.
+    @Test func clickOnTheSelectedDockRowDropsAHeldBannerClick() throws {
+        let h = DockHarness("selectedRowClick")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let pin = Self.pinned("pin", repo, order: 0, pinOrder: 0)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [pin]]
+        h.state.selectedWorktreeIDs = [pin.id]
+        h.mount()
+        try #require(h.row(.worktree(pin.id)) >= 0)
+        h.state.isInitialStateLoaded = true
+        h.state.reposLoaded = true
+        h.state.worktreesLoaded = true
+        // The remote list has not loaded, so the click is held.
+        h.state.navigateToRemoteSession(provider: "acme", sessionID: "s1")
+        try #require(h.state.pendingRemoteSessionLink != nil)
+
+        h.dock.handleClick(row: h.row(.worktree(pin.id)))
+
+        #expect(h.state.pendingRemoteSessionLink == nil)
+        #expect(h.state.selectedWorktreeIDs == [pin.id])
+    }
+
+    /// A row the user selects in the dock is a later navigation than a link
+    /// whose archived lookup has not resolved, so the dock's selection
+    /// handler supersedes the lookup, and its answer is dropped. The
+    /// selection's `didSet` supersedes nothing, so only the handler can.
+    @Test func selectionInTheDockSupersedesAnArchivedLookup() async throws {
+        let h = DockHarness("supersedesLookup")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let a = Self.pinned("a", repo, order: 0, pinOrder: 0)
+        let b = Self.pinned("b", repo, order: 1, pinOrder: 1)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [a, b]]
+        h.state.selectedWorktreeIDs = [a.id]
+        h.mount()
+        let rowB = h.row(.worktree(b.id))
+        try #require(rowB >= 0)
+        h.state.isInitialStateLoaded = true
+        h.state.reposLoaded = true
+        h.state.worktreesLoaded = true
+        let archivedRepoID = UUID()
+        let archived = SidebarGroupFixtures.row("gone", repoID: archivedRepoID, status: .archived)
+        h.state.archivedLookupOverride = { _ in [archived] }
+
+        // One main-actor turn, so the lookup's task cannot start between them.
+        h.state.navigateToWorktree(archived.id)
+        h.table.selectRowIndexes(IndexSet(integer: rowB), byExtendingSelection: false)
+        await h.state.archivedLookupTask?.value
+
+        #expect(h.state.selectedWorktreeIDs == [b.id])
+        #expect(h.state.selectedRepoID == nil)
+        #expect(h.state.highlightedArchivedWorktreeID == nil)
+        #expect(h.state.archivedWorktrees[archivedRepoID] == nil)
+        #expect(h.state.activeToast == nil)
+    }
+
     // MARK: Pasteboard types
 
     @Test func dockRejectsSidebarPayload() throws {

@@ -902,6 +902,31 @@ struct SidebarOutlineControllerTests {
         #expect(h.shownIDs.contains(.remoteSession(done.id)), "The opened group shows its rows")
     }
 
+    /// A click on the row already selected changes no selection, so the
+    /// selection's `didSet` records no navigation. It is one all the same,
+    /// so it drops a banner click held from before it.
+    @Test func clickOnTheSelectedRowDropsAHeldBannerClick() throws {
+        let h = OutlineHarness("selectedRowClick")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let row = Self.row("work", repo)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [row]]
+        h.state.selectedWorktreeIDs = [row.id]
+        h.mount()
+        h.state.isInitialStateLoaded = true
+        h.state.reposLoaded = true
+        h.state.worktreesLoaded = true
+        // The remote list has not loaded, so the click is held.
+        h.state.navigateToRemoteSession(provider: "acme", sessionID: "s1")
+        try #require(h.state.pendingRemoteSessionLink != nil)
+
+        h.controller.handleClick(row: h.row(.worktree(row.id)))
+
+        #expect(h.state.pendingRemoteSessionLink == nil)
+        #expect(h.state.selectedWorktreeIDs == [row.id])
+    }
+
     @Test func chevronClickPersistsRepoExpanded() async throws {
         let h = OutlineHarness("chevron")
         defer { h.tearDown() }

@@ -242,6 +242,16 @@ extension AppState {
     /// held longer than `heldRemoteSessionLinkLifetime`. A click answered at
     /// once replaces a held one too.
     ///
+    /// While a click waits, TBD comes forward and a progress toast says the
+    /// session is being opened, as "Looking for worktree…" does for an
+    /// archived worktree's link. The toast carries an ID of its own
+    /// (`pendingRemoteSessionLinkToastID`), so only this hold takes it down:
+    /// the answer replaces it with the not-found toast or dismisses it, a
+    /// later action or click that drops the click dismisses it
+    /// (`dropHeldRemoteSessionLink`), and expiry replaces it with an error
+    /// toast (`dropExpiredRemoteSessionLink`). A toast that has replaced it
+    /// since is left alone.
+    ///
     /// The rule holds after a failed launch too. A launch that could not
     /// connect, or whose remote load failed, still sets
     /// `isInitialStateLoaded`, so a click that arrives after it is held as
@@ -250,26 +260,33 @@ extension AppState {
     /// `navigateToWorktree` clears a held click, so the later click wins.
     ///
     /// An answered click is newer than any archived lookup still in flight,
-    /// so each of the three outcomes first supersedes it
-    /// (`supersedeArchivedLookup`): the lookup's late resolution then cannot
-    /// replace the session's selection or the not-found toast with the
-    /// archive view. A held click supersedes nothing, since nothing has
-    /// navigated yet; its replay does.
+    /// so each of the three outcomes first supersedes it (`userDidNavigate`):
+    /// the lookup's late resolution then cannot replace the session's
+    /// selection or the not-found toast with the archive view. A held click
+    /// supersedes nothing, since nothing has navigated yet; its replay does.
     @MainActor
     func navigateToRemoteSession(provider: String, sessionID: String) {
         let link = RemoteSessionSelection(provider: provider, sessionID: sessionID)
         if !remoteSessionLinkCanBeAnswered(link) {
             pendingRemoteSessionLink = link
             pendingRemoteSessionLinkHeldAt = now()
+            // Foreground so the progress toast is seen, as an answer does,
+            // but only while the app's run loop runs: under unit tests it
+            // does not.
+            if NSApplication.shared.isRunning {
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+            let toastID = UUID()
+            pendingRemoteSessionLinkToastID = toastID
+            showToast(Toast(id: toastID, message: "Opening the remote session…", style: .progress))
             pendingDeepLinkID = nil
             pendingDeepLinkTerminalID = nil
             return
         }
         // This click is answered now, so it replaces any older one still
-        // held; the lane branch can re-select the selection already there,
-        // which `recordNavigation` does not count as a navigation.
-        pendingRemoteSessionLink = nil
-        supersedeArchivedLookup()
+        // held, and supersedes an archived lookup in flight, even when the
+        // answer is the not-found toast, which navigates nowhere.
+        userDidNavigate()
 
         if let lane = activeLane(for: link) {
             navigateToActiveWorktree(lane.id)
@@ -317,7 +334,9 @@ extension AppState {
     /// Replay the banner click `navigateToRemoteSession` held, once it can be
     /// answered (`remoteSessionLinkCanBeAnswered`). Until then this does
     /// nothing and the click stays held, unless it has expired
-    /// (`dropExpiredRemoteSessionLink`), when it is dropped unanswered.
+    /// (`dropExpiredRemoteSessionLink`), when it is dropped unanswered with
+    /// an error toast. Taking the click dismisses its progress toast, and the
+    /// replay's answer puts up its own toast, if it has one.
     ///
     /// Called at the end of `connectAndLoadInitialState()`, at the end of
     /// every `refreshAll()`, and by every `refreshRemote()` that gets the
@@ -331,23 +350,49 @@ extension AppState {
     func drainPendingRemoteSessionLink() {
         guard let pending = pendingRemoteSessionLink, !dropExpiredRemoteSessionLink(),
               remoteSessionLinkCanBeAnswered(pending) else { return }
-        pendingRemoteSessionLink = nil
+        dropHeldRemoteSessionLink()
         navigateToRemoteSession(provider: pending.provider, sessionID: pending.sessionID)
+    }
+
+    /// Drop the held banner click, if any, so no later load replays it, and
+    /// dismiss the progress toast its hold showed if that toast is still the
+    /// one on screen; a toast that has replaced it is left alone. Every user
+    /// navigation that comes after the click calls this through
+    /// `userDidNavigate`, and every selection change through
+    /// `recordNavigation`, which lists them; the drain that takes the click
+    /// to answer it and its expiry call it directly.
+    @MainActor
+    func dropHeldRemoteSessionLink() {
+        guard pendingRemoteSessionLink != nil else { return }
+        pendingRemoteSessionLink = nil
+        if let toastID = pendingRemoteSessionLinkToastID, activeToast?.id == toastID {
+            dismissToast()
+        }
     }
 
     /// How long a banner click stays held. It covers the daemon starting up at
     /// launch; a click older than that no longer matches what the user is doing.
     static let heldRemoteSessionLinkLifetime: TimeInterval = 60
 
-    /// Drop a held click older than `heldRemoteSessionLinkLifetime`, unanswered
-    /// and with nothing shown, since a toast that late would confuse as much
-    /// as the replay. Returns whether it dropped one. Checked only when a drain
-    /// or a retry runs; nothing times the click.
+    /// Drop a held click older than `heldRemoteSessionLinkLifetime`,
+    /// unanswered, and put an error toast in place of its progress toast: the
+    /// user saw the session being opened, so they are told it was not. The
+    /// error shows only while that progress toast is still up or no toast is,
+    /// never over a toast that has replaced it. Its wording holds whatever
+    /// kept the click held: the lists, the remote list, or no daemon at all.
+    /// Returns whether it dropped one. Checked by every poll tick, connected
+    /// or not (`pollTickDidFire`), and by every drain and retry; nothing else
+    /// times the click.
     @MainActor
+    @discardableResult
     func dropExpiredRemoteSessionLink() -> Bool {
         guard let pending = pendingRemoteSessionLink, let heldAt = pendingRemoteSessionLinkHeldAt,
               now().timeIntervalSince(heldAt) > Self.heldRemoteSessionLinkLifetime else { return false }
-        pendingRemoteSessionLink = nil
+        let replacesNoOtherToast = activeToast == nil || activeToast?.id == pendingRemoteSessionLinkToastID
+        dropHeldRemoteSessionLink()
+        if replacesNoOtherToast {
+            showErrorToast("Couldn't open the remote session: TBD couldn't load in time.")
+        }
         remoteLogger.info(
             "Dropping an expired banner click for \(pending.provider, privacy: .public)/\(pending.sessionID, privacy: .public)")
         return true
@@ -367,6 +412,18 @@ extension AppState {
         guard pendingRemoteSessionLink != nil, !remoteMirrorLoaded else { return }
         if dropExpiredRemoteSessionLink() { return }
         await refreshRemote()
+    }
+
+    /// The first step of every poll tick, before the tick tries to connect
+    /// and outside its cycle's in-flight guard, so it runs every tick whatever
+    /// the connection state: it expires a held banner click
+    /// (`dropExpiredRemoteSessionLink`). The drain and the retry check expiry
+    /// too, but only a connected tick whose cycle is not still in flight
+    /// reaches them, so while the daemon cannot be reached, or a refresh
+    /// hangs, this is what takes the click's progress toast down.
+    @MainActor
+    func pollTickDidFire() {
+        dropExpiredRemoteSessionLink()
     }
 
     // MARK: - Rename push (docs/remote-provider-contract.md § `rename`)

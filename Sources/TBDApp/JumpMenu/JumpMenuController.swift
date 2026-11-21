@@ -144,8 +144,18 @@ final class JumpMenuController {
             close()
             return
         }
-        appState.selectedWorktreeIDs = [row.id]
+        Self.select(row.id, in: appState)
         close()
+    }
+
+    /// Selects the worktree a submitted row names. The jump is a navigation
+    /// the user made, which the selection's `didSet` cannot say, so it says
+    /// so here (`AppState.userDidNavigate`), even for the worktree already
+    /// selected: it drops a held banner click and supersedes an archived
+    /// lookup in flight.
+    static func select(_ worktreeID: UUID, in appState: AppState) {
+        appState.userDidNavigate()
+        appState.selectedWorktreeIDs = [worktreeID]
     }
 
     /// Anchor the panel ~80pt below the top of the key TBD window,

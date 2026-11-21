@@ -591,8 +591,8 @@ final class AppState {
     /// `navigateToArchivedWorktree(_:requestID:)` when called without one); a
     /// lookup that resolves after a newer deep link superseded it is dropped.
     /// Guards out-of-order RPC resolution (deep link A then B, A resolves
-    /// late). Any other navigation supersedes a lookup by clearing it
-    /// (`supersedeArchivedLookup`).
+    /// late). Any other navigation the user makes supersedes a lookup by
+    /// clearing it (`userDidNavigate`, through `supersedeArchivedLookup`).
     @ObservationIgnored var deepLinkRequestID: UUID?
 
     /// The task running the archived lookup `navigateToWorktree` started
@@ -709,17 +709,28 @@ final class AppState {
     /// has selected its session, `restoreSavedSelection` does not restore the
     /// saved selection over it. Holds one click; a later one, of either kind,
     /// replaces it (`navigateToRemoteSession`, `navigateToWorktree`), and any
-    /// later navigation the user makes drops it, so the load cannot replay it
-    /// over that navigation (`recordNavigation`, which lists the exceptions).
+    /// later navigation the user makes (`userDidNavigate`) or selection change
+    /// the app makes (`recordNavigation`, which lists the callers and the
+    /// exceptions) drops it, so the load cannot replay it over that change.
     ///
-    /// A click held longer than `heldRemoteSessionLinkLifetime` is dropped
-    /// unanswered by the next drain or retry, so a load that succeeds much
-    /// later cannot move the selection or bring TBD forward.
+    /// While a click is held, a progress toast says so
+    /// (`pendingRemoteSessionLinkToastID`). Every drop goes through
+    /// `dropHeldRemoteSessionLink`, which takes that toast down with the
+    /// click. A click held longer than `heldRemoteSessionLinkLifetime` is
+    /// dropped unanswered by the next poll tick, drain or retry, with an
+    /// error toast in place of its progress toast, so a load that succeeds
+    /// much later cannot move the selection or bring TBD forward.
     @ObservationIgnored var pendingRemoteSessionLink: RemoteSessionSelection?
 
     /// When `navigateToRemoteSession` held `pendingRemoteSessionLink`, read
     /// from `now`. Meaningful only while a click is held.
     @ObservationIgnored var pendingRemoteSessionLinkHeldAt: Date?
+
+    /// The ID of the progress toast `navigateToRemoteSession` showed when it
+    /// held `pendingRemoteSessionLink`, so dropping the click dismisses that
+    /// toast and never one that has replaced it
+    /// (`dropHeldRemoteSessionLink`). Meaningful only while a click is held.
+    @ObservationIgnored var pendingRemoteSessionLinkToastID: UUID?
 
     /// Profile IDs with an "Open login session" spawn currently in flight.
     /// Guards rapid repeat clicks: the first click spawns, subsequent clicks
@@ -4183,6 +4194,9 @@ final class AppState {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // First, and whatever the connection state: while the daemon
+                // cannot be reached, nothing else expires a held banner click.
+                self.pollTickDidFire()
                 // Whether this tick connected through `startDaemonAndConnect`,
                 // whose `connectAndLoadInitialState` sends a claim sweep of its
                 // own. This tick's sweep then stays out, so one tick never
