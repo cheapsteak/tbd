@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import TBDShared
 import Testing
@@ -669,7 +670,8 @@ struct PhoneSessionsPublisherTests {
             db: h.db,
             lifecycle: WorktreeLifecycle(
                 db: h.db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-                subscriptions: h.subscriptions),
+                subscriptions: h.subscriptions,
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: h.subscriptions,

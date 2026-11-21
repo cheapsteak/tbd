@@ -102,4 +102,14 @@ struct LeftoverTmuxSessionNoticeTests {
         #expect(notice.contains("tmux -L tbd-acme kill-server"))
         #expect(notice.contains(LeftoverTmuxSession.checkAgainTitle))
     }
+
+    /// Closing a tab still running in tmux deletes its row and runs no tmux
+    /// command, so the notice has to say the session outlives the close, or
+    /// a person reads the close as the way to end it.
+    @Test("the notice says closing the tab leaves the session running in tmux")
+    func noticeSaysClosingLeavesTheSessionRunning() {
+        let notice = LeftoverTmuxSession.notice(server: "tbd-acme")
+        #expect(notice.contains(LeftoverTmuxSession.closingLeavesItRunning))
+        #expect(LeftoverTmuxSession.closingLeavesItRunning.contains("running in tmux"))
+    }
 }

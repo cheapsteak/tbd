@@ -69,7 +69,8 @@ struct ContinueInCodexRPCTests {
             db: db,
             git: GitManager(),
             tmux: tmux,
-            hooks: HookResolver())
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,

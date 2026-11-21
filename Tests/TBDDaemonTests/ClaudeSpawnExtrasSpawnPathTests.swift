@@ -275,7 +275,8 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager("lifecycle"),
             preSessionPollInterval: 0.05,
-            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning)
+            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,

@@ -49,7 +49,8 @@ import Testing
     /// their tabs without starting a process.
     private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         return lifecycle

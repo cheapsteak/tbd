@@ -87,7 +87,18 @@ struct LeftoverTmuxServerSighting: Sendable, Equatable {
 /// environment, usually without `TMUX_TMPDIR`, from `/`. A server started under
 /// a `TMUX_TMPDIR` this daemon does not have is listening somewhere no
 /// candidate names. The process table does not depend on either.
-struct LeftoverTmuxServerProbe: Sendable {
+///
+/// **Tests never get this probe by default.** `WorktreeLifecycle` and
+/// `HibernationCoordinator` take one at construction and fall back to
+/// `production()` only when none is passed. A test that reached it would read
+/// the machine's process table, where a tmux process whose argv cannot be read
+/// counts as running. So every construction under `Tests/` names its probe,
+/// `.absent` from `DaemonTestSupport` when the suite does not exercise it, and
+/// `scripts/lint-test-leftover-tmux-probe.py` holds them to that; only the
+/// probe's own suite and the tier-3 reconcile test call `production()`. The
+/// type is public so those initializers can take it; its members are
+/// internal.
+public struct LeftoverTmuxServerProbe: Sendable {
     /// The state of the tmux server with this name (`tmux -L <name>`).
     let state: @Sendable (_ server: String) async -> LeftoverTmuxServerState
 
@@ -266,7 +277,7 @@ struct LeftoverTmuxServerProbe: Sendable {
         return tmuxProcesses(
             in: table,
             uid: uid,
-            names: tmuxExecutableNames(savedPath: TmuxExecutableResolver().savedPath),
+            names: tmuxExecutableNames(savedPath: savedTmuxExecutablePath()),
             executablePath: { ProcessLiveness.executablePath(pid: $0) },
             procArgs: { ProcessEnvironmentReader.procArgs(pid: $0) })
     }
@@ -298,10 +309,25 @@ struct LeftoverTmuxServerProbe: Sendable {
         return processes
     }
 
-    /// The names a tmux binary runs under: `tmux`, which is what the daemon's
-    /// `PATH` lookup finds, and the last component of the path saved through
-    /// `TmuxExecutableResolver`'s fallback, which accepts a binary of any
-    /// name, both as saved and with its symlinks resolved.
+    /// The tmux path saved in `tmux-executable-path` under the TBD home
+    /// (`TBDConstants.tmuxExecutablePathFile`), trimmed of surrounding
+    /// whitespace, or nil when the file is missing, unreadable or blank.
+    ///
+    /// The probe reads the file itself, because a server an earlier build
+    /// started may run from the binary that file names. The read goes when
+    /// the probe does. `file` is a seam for tests.
+    static func savedTmuxExecutablePath(
+        file: URL = TBDConstants.tmuxExecutablePathFile
+    ) -> String? {
+        guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        let path = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
+    }
+
+    /// The names a tmux binary runs under: `tmux`, which is what a `PATH`
+    /// lookup finds, and the last component of the saved path
+    /// (`savedTmuxExecutablePath`), which can name a binary of any name, both
+    /// as saved and with its symlinks resolved.
     static func tmuxExecutableNames(savedPath: String?) -> Set<String> {
         var names: Set<String> = ["tmux"]
         if let savedPath {

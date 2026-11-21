@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import TestSupport
 import Testing
@@ -74,7 +75,8 @@ struct DeliveryVerificationWiringTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: tmux,
             startTime: Date(),
             actuationLog: log)

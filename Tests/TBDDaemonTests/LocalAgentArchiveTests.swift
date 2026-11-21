@@ -26,7 +26,8 @@ struct LocalAgentArchiveTests {
             codexHomeEnsurer: {
                 if failPreparation { throw CocoaError(.fileNoSuchFile) }
                 return home.appendingPathComponent("codex")
-            })
+            },
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         return lifecycle
     }
@@ -420,7 +421,8 @@ struct LocalAgentArchiveTests {
                 preparations.append(["prepare"])
                 if preparations.snapshot().count > 2 { throw CocoaError(.fileNoSuchFile) }
                 return "/usr/bin/true"
-            }, codexHomeEnsurer: { throw CocoaError(.fileNoSuchFile) })
+            }, codexHomeEnsurer: { throw CocoaError(.fileNoSuchFile) },
+            leftoverTmuxProbe: .absent)
         lc.holderRegistry = makeHolderRegistryDouble(launch: holder)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
@@ -456,7 +458,8 @@ struct LocalAgentArchiveTests {
         var lc = WorktreeLifecycle(db: db, git: GitManager(),
             tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             modelProfileResolver: ModelProfileResolver(profiles: db.modelProfiles, repos: db.repos, config: db.config),
-            configDirManager: makeIsolatedConfigDirManager(tag: "archive-profiles"))
+            configDirManager: makeIsolatedConfigDirManager(tag: "archive-profiles"),
+            leftoverTmuxProbe: .absent)
         lc.holderRegistry = makeHolderRegistryDouble(launch: holder)
         let tabs = [
             ArchivedAgentTab(identity: .init(agentKind: .claude, sessionID: "first"), ordinal: 0,

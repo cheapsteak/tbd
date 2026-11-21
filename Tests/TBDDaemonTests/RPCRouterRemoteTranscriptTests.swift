@@ -45,7 +45,8 @@ struct RPCRouterRemoteTranscriptTests: ~Copyable {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-                subscriptions: subs),
+                subscriptions: subs,
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
@@ -71,7 +72,8 @@ struct RPCRouterRemoteTranscriptTests: ~Copyable {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-                subscriptions: subs),
+                subscriptions: subs,
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), subscriptions: subs,
             remoteManager: manager, actuationLog: makeTestActuationLog())
         let response = await call(r, params)

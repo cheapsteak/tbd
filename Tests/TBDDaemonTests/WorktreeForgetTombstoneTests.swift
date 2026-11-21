@@ -27,7 +27,9 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        // A fixed answer, so reconcile never asks this machine's tmux servers.
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     return lifecycle

@@ -1,17 +1,9 @@
 import Foundation
 
 /// Where a post-resume session-id recapture looks for the Claude process whose
-/// session file it must read.
-///
-/// One case per transport, because the two address the same process
-/// differently and neither address is meaningful to the other: a tmux session
-/// is reached through its pane (the pid is `#{pane_pid}`, resolved on demand),
-/// a holder-backed one through the pid the holder recorded when it forked the
-/// job. A holder row's pane id is the empty string by construction, so a
-/// recapture that carried only a pane would poll a coordinate that can never
-/// resolve.
+/// session file it must read: the pid the holder recorded when it forked the
+/// job.
 public enum SessionRecaptureTarget: Sendable, Equatable {
-    case tmuxPane(server: String, paneID: String)
     case holderChild(pid: Int32)
 }
 

@@ -741,6 +741,12 @@ extension RPCRouter {
                 preferredSessionID: params.preferredSessionID,
                 preferredSession: params.preferredSession
             )
+        } catch let refusal as TmuxResumeRefusal {
+            // The resume gate refused before the revive wrote anything: a
+            // declined act, answered with `terminalOnTmux` and the command
+            // that ends the server.
+            await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
+            return refusal.coded.response
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error
@@ -819,6 +825,11 @@ extension RPCRouter {
                     }
                 }
             }
+        } catch let refusal as TmuxResumeRefusal {
+            // As in `handleWorktreeRevive`: refused before the new worktree
+            // existed.
+            await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
+            return refusal.coded.response
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error

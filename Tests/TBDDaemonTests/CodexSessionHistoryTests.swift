@@ -61,7 +61,7 @@ struct CodexSessionHistoryTests {
         // Resuming a session opens a tab, which runs on the holder: the spawn
         // double stands in for it, so no process is started.
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: tmux, actuationLog: makeTestActuationLog())
         router.holderRegistry = registry

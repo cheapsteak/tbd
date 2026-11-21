@@ -76,6 +76,9 @@ struct ForkSwapTransportGateTests {
         let recorder: TmuxArgvRecorder
         let launch: FakeHolderLaunch
         let probe: RecaptureProbe
+        /// The resume gate's probe (`TmuxResumeGate`), which answers `.running`
+        /// for every server and records what it was asked.
+        let tmuxProbe: RecordingLeftoverTmuxProbe
         let environment: [String: String]
         let worktree: Worktree
         let source: Terminal
@@ -122,9 +125,15 @@ struct ForkSwapTransportGateTests {
         let db = try TBDDatabase(inMemory: true)
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "fork-swap-gate")
+        // A fixed probe, so no test asks the real process table or a socket.
+        // It answers `.running`: the source tab is a live tmux row on the
+        // session the fork reads, so a start that asked the resume gate about
+        // that session would be refused.
+        let tmuxProbe = RecordingLeftoverTmuxProbe { _ in .running }
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: configDirManager)
+            configDirManager: configDirManager,
+            leftoverTmuxProbe: tmuxProbe.probe)
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,
@@ -150,6 +159,7 @@ struct ForkSwapTransportGateTests {
         // A live holder, so the no-reader rail is what these rows reach;
         // the ended-session path has tests of its own.
         await router.hibernationCoordinator.setHolderProcessIsLive { _ in true }
+        await router.hibernationCoordinator.setLeftoverTmuxProbe(tmuxProbe.probe)
         let probe = RecaptureProbe()
         router.sessionRecaptureFactory = { db, tmux in
             probe.scheduler(db: db, tmux: tmux)
@@ -189,8 +199,8 @@ struct ForkSwapTransportGateTests {
 
         return Fixture(
             db: db, router: router, recorder: recorder, launch: launch, probe: probe,
-            environment: environment, worktree: worktree, source: source,
-            home: home, worktreePath: worktreePath)
+            tmuxProbe: tmuxProbe, environment: environment, worktree: worktree,
+            source: source, home: home, worktreePath: worktreePath)
     }
 
     /// The forked row, which is the one row in the worktree that is not the
@@ -232,6 +242,31 @@ struct ForkSwapTransportGateTests {
 
         // The source tab is untouched — a fork copies, it does not move.
         #expect(try await fixture.db.terminals.get(id: fixture.source.id) != nil)
+    }
+
+    /// The source is a live tmux tab, and its server may still run it: the
+    /// probe answers `.running`. A fork starts `--fork-session`, a new session
+    /// id and never a second agent on the source's, so it asks no resume gate
+    /// and lands, leaving the tmux tab as it was.
+    @Test("a fork of a live tmux tab goes ahead while its tmux server may run")
+    func aForkOfALiveTmuxTabAsksNoResumeGate() async throws {
+        let fixture = try await Self.makeFixture(.spawnDouble)
+        defer { fixture.tearDown() }
+        #expect(fixture.source.transport != .holder)
+        #expect(!fixture.source.isParked)
+
+        let response = try await fixture.fork()
+        #expect(response.success, "\(response.error ?? "")")
+
+        let forked = try await forkedRow(in: fixture)
+        #expect(forked.transport == .holder)
+        let command = try #require(fixture.launch.launch(for: forked.id)?.commandLine)
+        #expect(command.contains("--fork-session"), "\(command)")
+        #expect(fixture.tmuxProbe.servers.isEmpty,
+                "the fork asked the resume gate: \(fixture.tmuxProbe.servers)")
+        let source = try #require(try await fixture.db.terminals.get(id: fixture.source.id))
+        #expect(source.transport != .holder)
+        #expect(!source.isParked)
     }
 
     // MARK: - Nothing to spawn with

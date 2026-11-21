@@ -68,43 +68,6 @@ public enum PaneOwnership: Sendable, Equatable {
     }
 }
 
-/// Serializes tmux resource ownership transitions per server.
-///
-/// A tmux window becomes externally visible before the database row that owns
-/// it can commit. Reconciliation has the inverse multi-system transaction: it
-/// snapshots database ownership before killing an untracked tmux resource.
-/// Both operations use this coordinator so neither can observe the other's
-/// half-finished state. Different servers remain independent.
-actor TmuxServerResourceCoordinator {
-    private var lockedServers: Set<String> = []
-    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
-
-    func withLock<Result: Sendable>(
-        server: String,
-        operation: @Sendable () async throws -> Result
-    ) async rethrows -> Result {
-        if lockedServers.contains(server) {
-            await withCheckedContinuation { continuation in
-                waiters[server, default: []].append(continuation)
-            }
-        } else {
-            lockedServers.insert(server)
-        }
-        defer { release(server: server) }
-        return try await operation()
-    }
-
-    private func release(server: String) {
-        if var queued = waiters[server], !queued.isEmpty {
-            let next = queued.removeFirst()
-            waiters[server] = queued.isEmpty ? nil : queued
-            next.resume()
-        } else {
-            lockedServers.remove(server)
-        }
-    }
-}
-
 public struct TmuxManager: Sendable {
     /// Hard ceiling on any single tmux subprocess. tmux control operations
     /// (respawn-window, new-session, kill-window, capture-pane, …) normally
@@ -132,9 +95,6 @@ public struct TmuxManager: Sendable {
     /// `tmuxPath()`'s own default expression already does.
     let tmuxPathOverride: String?
     private let counter: Counter
-    /// Shared by every value-copy of this manager (lifecycle, router, and
-    /// hibernation coordinator) so all daemon paths use one lock domain.
-    private let resourceCoordinator: TmuxServerResourceCoordinator
     /// Optional test hook that records every dryRun command invocation. When set,
     /// dry-run paths still no-op, but the recorder receives the argv that would
     /// have been passed to tmux. Used by spawn / swap integration tests to assert
@@ -160,24 +120,6 @@ public struct TmuxManager: Sendable {
     /// poll always see Claude leave at once — untestable for the branch where
     /// claude is still running after the poll.
     public let dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)?
-    /// Optional test hook consulted by `createWindow` in dryRun mode: return a
-    /// non-nil error for a server name to simulate window creation failing
-    /// (tmux refused the new-window, server wedged, …). Without it, dryRun
-    /// createWindow always succeeds, which makes the wake path's
-    /// recreate-failure branch (`WakeResult.respawnFailed`) untestable.
-    public let dryRunCreateWindowError: (@Sendable (String) -> Error?)?
-    /// Optional test hook consulted by `respawnWindow` in dryRun mode: return a
-    /// non-nil error for a window ID to simulate the respawn failing. Without
-    /// it, dryRun respawnWindow always succeeds, which makes the wake path's
-    /// respawn-failure branch (`WakeResult.respawnFailed`) untestable.
-    public let dryRunRespawnWindowError: (@Sendable (String) -> Error?)?
-    /// Optional test hook consulted by `killWindow` in dryRun mode: return a
-    /// non-nil error for a `(server, windowID)` pair to simulate the kill
-    /// failing (server wedged, window already reaped by someone else, …).
-    /// Without it, dryRun killWindow always succeeds, which makes the close
-    /// paths' transport-failure branch — the one the actuation record
-    /// classifies as `transport-failed` rather than `dispatched` — untestable.
-    public let dryRunKillWindowError: (@Sendable (String, String) -> Error?)?
     /// Optional test hook consulted by `paneSendTarget` in dryRun mode:
     /// `(server, paneID)` → what the pane answers. Without it, dryRun reports
     /// `.live(terminalID: nil)` — alive, carrying no identity — which is the
@@ -265,20 +207,16 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPanePID: (@Sendable (String, String) throws -> String)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunEnsureServerWindowID: (@Sendable (String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout, tmuxPathOverride: String? = nil) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPanePID: (@Sendable (String, String) throws -> String)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunEnsureServerWindowID: (@Sendable (String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout, tmuxPathOverride: String? = nil) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.tmuxPathOverride = tmuxPathOverride
         self.counter = Counter()
-        self.resourceCoordinator = TmuxServerResourceCoordinator()
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
         self.dryRunListWindows = dryRunListWindows
         self.dryRunCapturePane = dryRunCapturePane
         self.dryRunPaneCurrentCommand = dryRunPaneCurrentCommand
-        self.dryRunCreateWindowError = dryRunCreateWindowError
-        self.dryRunRespawnWindowError = dryRunRespawnWindowError
-        self.dryRunKillWindowError = dryRunKillWindowError
         self.dryRunPaneSendTarget = dryRunPaneSendTarget
         self.dryRunPanePID = dryRunPanePID
         self.dryRunPaneWindowID = dryRunPaneWindowID
@@ -290,15 +228,6 @@ public struct TmuxManager: Sendable {
         self.dryRunWindowPresence = dryRunWindowPresence
         self.realModeServerPresenceOverride = realModeServerPresenceOverride
         self.realModeWindowPresenceOverride = realModeWindowPresenceOverride
-    }
-
-    /// Runs one ownership transition while exclusively holding `server`.
-    /// Release is structural, including thrown and cancelled operations.
-    func withServerResourceLock<Result: Sendable>(
-        server: String,
-        operation: @Sendable () async throws -> Result
-    ) async rethrows -> Result {
-        try await resourceCoordinator.withLock(server: server, operation: operation)
     }
 
     // MARK: - Static Command Builders
@@ -1120,7 +1049,6 @@ public struct TmuxManager: Sendable {
         if dryRun {
             let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows, remainOnExit: remainOnExit)
             dryRunRecorder?(args)
-            if let error = dryRunCreateWindowError?(server) { throw error }
             let n = counter.next()
             result = (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
         } else {
@@ -1177,9 +1105,6 @@ public struct TmuxManager: Sendable {
         )
         if dryRun {
             dryRunRecorder?(args)
-            if let error = dryRunRespawnWindowError?(windowID) {
-                throw error
-            }
             await stampTerminalID(
                 server: server, target: windowID, env: env, sensitiveEnv: sensitiveEnv)
             return
@@ -1204,7 +1129,6 @@ public struct TmuxManager: Sendable {
         let args = Self.killWindowCommand(server: server, windowID: windowID)
         if dryRun {
             dryRunRecorder?(args)
-            if let error = dryRunKillWindowError?(server, windowID) { throw error }
             return
         }
         try await runTmux(args)

@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import GRDB
 import TestSupport
@@ -296,7 +297,8 @@ struct QueuedPromptDeliveryTests {
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             modelProfileResolver: ModelProfileResolver(
                 profiles: db.modelProfiles, repos: db.repos, config: db.config),
-            configDirManager: isolatedConfigDirManager())
+            configDirManager: isolatedConfigDirManager(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         if attachCoordinator { lifecycle.pendingPromptCoordinator = coordinator }
         return SpawnFixture(
@@ -359,7 +361,8 @@ struct QueuedPromptDeliveryTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                configDirManager: isolatedConfigDirManager()),
+                configDirManager: isolatedConfigDirManager(),
+                leftoverTmuxProbe: .absent),
             tmux: tmux,
             startTime: Date(),
             configDirManager: isolatedConfigDirManager(),

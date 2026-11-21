@@ -28,6 +28,11 @@ public enum LeftoverTmuxSession {
             + "other tmux tabs, or restart the Mac, which ends it too."
     }
 
+    /// What closing the tab does to the session: nothing. Closing deletes the
+    /// row and runs no tmux command, so the session keeps running in tmux.
+    public static let closingLeavesItRunning =
+        "Closing this tab leaves the session running in tmux."
+
     /// The label of the app's button that asks the daemon to look again.
     public static let checkAgainTitle = "Check Again"
 
@@ -41,6 +46,7 @@ public enum LeftoverTmuxSession {
     /// (`nothingToKeepRefusal`).
     public static func notice(server: String) -> String {
         "This session is still running in tmux, which this version of TBD can no longer show. "
+            + closingLeavesItRunning + " "
             + endingAdvice(server: server)
             + " Then choose \(checkAgainTitle). Once tmux has stopped, a tab with a conversation "
             + "is parked, and \(TransportMigrationVocabulary.menuTitle) brings it back on the "
@@ -64,5 +70,23 @@ public enum LeftoverTmuxSession {
             + "can no longer show, send to or stop. "
             + endingAdvice(server: server)
             + " Then run `tbd terminal migrate \(terminalID.uuidString)` to move it to the pty holder."
+    }
+
+    /// The refusal for any start of a session that may still be running in a
+    /// tmux server: one a tmux row carries, or a live tmux row carried when
+    /// TBD closed its tab, while that row's tmux server may still be running
+    /// it — a revive, a History or Closed Terminals resume, a wake — and any
+    /// session a revive of an archived worktree resumes while the worktree's
+    /// own tmux server may still be running. Starting it on the pty holder
+    /// could put a second agent on the same session id, so the start waits
+    /// until the server is gone. Worded for every one of those actions, and
+    /// for a session that may or may not have run in that server, so it ends
+    /// by asking for the same action again.
+    public static func resumeRefusal(server: String) -> String {
+        "This conversation may still be running in tmux, in a server an earlier version of "
+            + "TBD started, so starting it here could put a second agent on the same "
+            + "conversation. "
+            + endingAdvice(server: server)
+            + " Then try again."
     }
 }

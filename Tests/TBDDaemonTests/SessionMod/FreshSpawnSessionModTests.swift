@@ -214,7 +214,8 @@ struct FreshSpawnSessionModTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager,
-            sessionsDir: sessionsDir)
+            sessionsDir: sessionsDir,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),

@@ -14,7 +14,8 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     var lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -41,7 +42,8 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     var lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -65,7 +67,8 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     var lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -84,7 +87,8 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     var lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -121,7 +125,8 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     var lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -170,7 +175,8 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let git = GitManager()
     var lifecycle = WorktreeLifecycle(
-        db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -212,7 +218,8 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let git = GitManager()
     var lifecycle = WorktreeLifecycle(
-        db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -240,7 +247,8 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let git = GitManager()
     var lifecycle = WorktreeLifecycle(
-        db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -270,7 +278,8 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let git = GitManager()
     var lifecycle = WorktreeLifecycle(
-        db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -322,7 +331,8 @@ import Testing
     // The holder spawn double records the command line of every spawn.
     let holder = FakeHolderLaunch()
     var lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -361,7 +371,8 @@ import Testing
     // The holder spawn double records the command line of every spawn.
     let holder = FakeHolderLaunch()
     var lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)

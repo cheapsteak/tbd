@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import GRDB
 import Testing
@@ -117,7 +118,8 @@ struct ClaudeCloudFlagSchemaTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
@@ -151,7 +153,8 @@ struct ClaudeCloudFlagSchemaTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: ActuationLog(
@@ -171,7 +174,8 @@ struct ClaudeCloudFlagSchemaTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: ActuationLog(

@@ -140,7 +140,8 @@ struct RunningShellTransportMoveTests {
             db: db, tmux: tmux,
             configDirManager: makeIsolatedConfigDirManager(tag: "running-shell-move"),
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog(tag: "running-shell-move"))
+            actuationLog: makeTestActuationLog(tag: "running-shell-move"),
+            leftoverTmuxProbe: .absent)
         // The registry is wired in every arm but the one that asserts its
         // absence: its `environment` is what the launch's own shell invocation
         // is resolved from, and it must never be the developer's.

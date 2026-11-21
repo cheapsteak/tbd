@@ -141,24 +141,22 @@ extension RPCRouter {
 
         let terminal: Terminal
         do {
-            terminal = try await tmux.withWorktreeServerLock(
-                db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-            ) { currentWorktree in
-                try await lifecycle.spawnTerminal(
-                    id: plannedTerminalID,
-                    worktreeID: currentWorktree.id,
-                    workingDirectory: currentWorktree.path,
-                    command: command,
-                    env: codexEnv,
-                    sensitiveEnv: sensitiveEnv,
-                    cols: TmuxManager.defaultCols,
-                    rows: TmuxManager.defaultRows,
-                    label: TerminalLabel.codex,
-                    claudeSessionID: nil,
-                    profileID: nil,
-                    kind: .codex,
-                    transport: transport)
-            }
+            let currentWorktree = try await WorktreeLifecycle.worktreeForSpawn(
+                db: db, id: worktree.id, allowedStatuses: [worktree.status])
+            terminal = try await lifecycle.spawnTerminal(
+                id: plannedTerminalID,
+                worktreeID: currentWorktree.id,
+                workingDirectory: currentWorktree.path,
+                command: command,
+                env: codexEnv,
+                sensitiveEnv: sensitiveEnv,
+                cols: TmuxManager.defaultCols,
+                rows: TmuxManager.defaultRows,
+                label: TerminalLabel.codex,
+                claudeSessionID: nil,
+                profileID: nil,
+                kind: .codex,
+                transport: transport)
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error

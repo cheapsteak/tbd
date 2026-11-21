@@ -651,13 +651,10 @@ struct PreSessionHookTests {
             transport: .holder, holderPID: 1_000_001, childPID: 1_000_002)
         let spawn = PreSessionSpawn(
             terminalID: terminal.id, tmuxServer: fx.worktree.tmuxServer,
-            windowID: "", paneID: "",
             markerPath: markerPath, hookPath: "/dev/null",
             transport: .holder, holderPID: 1_000_001, childPID: 1_000_002
         )
-        let outcome = await lifecycle.waitForPreSessionCompletion(
-            preSession: spawn, tmuxServer: fx.worktree.tmuxServer
-        )
+        let outcome = await lifecycle.waitForPreSessionCompletion(preSession: spawn)
         #expect(outcome == .completed(exitCode: 0),
                 "a marker written in the same iteration must beat .paneKilled")
         #expect(!FileManager.default.fileExists(atPath: markerPath))
@@ -677,12 +674,9 @@ struct PreSessionHookTests {
         let lifecycle = makeLifecycle(db: db, timeout: 0)
         let spawn = PreSessionSpawn(
             terminalID: UUID(), tmuxServer: "test-server",
-            windowID: "@mock-0", paneID: "%mock-0",
-            markerPath: markerPath, hookPath: "/dev/null"
+            markerPath: markerPath, hookPath: "/dev/null", transport: .tmux
         )
-        let outcome = await lifecycle.waitForPreSessionCompletion(
-            preSession: spawn, tmuxServer: "tbd-test"
-        )
+        let outcome = await lifecycle.waitForPreSessionCompletion(preSession: spawn)
         #expect(outcome == .completed(exitCode: 0),
                 "a marker present at the deadline must beat .timedOut")
         #expect(!FileManager.default.fileExists(atPath: markerPath))

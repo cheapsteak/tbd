@@ -43,7 +43,8 @@ struct RPCRouterPhoneSessionActionsTests {
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-            subscriptions: subs)
+            subscriptions: subs,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
@@ -542,7 +543,8 @@ struct RPCRouterPhoneSessionActionsTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-                subscriptions: subs),
+                subscriptions: subs,
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,

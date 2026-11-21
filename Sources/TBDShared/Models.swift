@@ -730,10 +730,9 @@ public struct ClaudeSpawnExtras: Codable, Sendable, Equatable {
 /// the Codex features turned off for it, and its dedicated Codex home.
 ///
 /// Recorded on the terminal row at spawn, because every later relaunch of
-/// Codex in that same tab — recreating a dead window, or restoring Codex after
-/// a failed continue-in-Claude — has nothing else to read them from, and a
-/// relaunch without them would quietly start the tab on the default model with
-/// those features back on, or on the shared home without its guard.
+/// Codex in that same tab has nothing else to read them from, and a relaunch
+/// without them would quietly start the tab on the default model with those
+/// features back on, or on the shared home without its guard.
 public struct CodexLaunchOptions: Codable, Sendable, Equatable {
     /// Passed to Codex as `-c model="<id>"`. Nil when the tab took the `tbd`
     /// Codex profile's model.
@@ -2463,12 +2462,21 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     /// reopen from Closed Terminals starts with the same values. Absent in
     /// JSON and rows written before the column, which read as nil.
     public var claudeSpawnExtras: ClaudeSpawnExtras?
+    /// The tmux server the closed terminal's session may still be running in:
+    /// set when TBD deleted a live tmux row without running tmux, so the
+    /// session it carried kept running there. Every resume of
+    /// `claudeSessionID` is refused while that server may still be running
+    /// (docs/specs/2026-10-11-holder-transport-migration-design.md, "Resuming
+    /// a session a tmux row carries"). Nil on every other entry, and on
+    /// JSON and rows written before the column.
+    public var liveOnTmuxServer: String?
 
     public init(id: UUID, worktreeID: UUID, label: String? = nil,
                 kind: TerminalKind? = nil, closedAt: Date = Date(),
                 claudeSessionID: String? = nil, lineCount: Int = 0,
                 serverName: String? = nil, exitCode: Int32? = nil,
-                claudeSpawnExtras: ClaudeSpawnExtras? = nil) {
+                claudeSpawnExtras: ClaudeSpawnExtras? = nil,
+                liveOnTmuxServer: String? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.label = label
@@ -2479,6 +2487,7 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         self.serverName = serverName
         self.exitCode = exitCode
         self.claudeSpawnExtras = claudeSpawnExtras
+        self.liveOnTmuxServer = liveOnTmuxServer
     }
 }
 

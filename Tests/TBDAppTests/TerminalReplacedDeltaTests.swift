@@ -4,8 +4,8 @@ import Testing
 import TBDShared
 
 @MainActor
-@Suite("Continue in Claude replacement delta")
-struct ContinueInClaudeReplacementDeltaTests {
+@Suite("Terminal replacement delta")
+struct TerminalReplacedDeltaTests {
     @Test("replaces the cached row without moving the selected tab or layout")
     func preservesTabIdentity() {
         let state = AppState()

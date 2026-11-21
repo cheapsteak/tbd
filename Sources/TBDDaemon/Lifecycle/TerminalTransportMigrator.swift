@@ -59,8 +59,10 @@ enum TransportMigrationOutcome: Sendable, Equatable {
 /// row, same tab, same label and pin, same Claude session id and transcript.
 ///
 /// TBD no longer drives tmux, so nothing here reaches a tmux server. A parked
-/// row is only rewritten. A live row moves only once a socket probe has found
-/// its tmux server gone (`LeftoverTmuxServerProbe`): a session with a
+/// row is only rewritten, once its session has ended: a row parked with its
+/// park still in flight may still be running its agent, so it moves only once
+/// a socket probe has found its tmux server gone. A live row moves only then
+/// too (`LeftoverTmuxServerProbe`): a session with a
 /// conversation to resume is parked with its identity kept, rewritten and
 /// woken on the holder — the park, rewrite and wake the in-place profile swap
 /// also composes, with a different column rewritten — and a shell gets a fresh
@@ -152,7 +154,7 @@ actor TerminalTransportMigrator {
 
     /// The refusal for a request that would start, restart or replace the
     /// process behind a row still on the tmux transport: a wake, a window
-    /// recreate, an in-place profile swap, Continue in Claude.
+    /// recreate, an in-place profile swap.
     ///
     /// TBD opens sessions only on the pty holder, so none of those can run on
     /// such a row; migrating it is the way forward, and this says how. It names
@@ -192,11 +194,21 @@ actor TerminalTransportMigrator {
 
     /// Move one session to the pty holder.
     ///
-    /// The order is the contract, and two steps of it are pinned by tests: a
-    /// live row's tmux server is probed before anything else is decided about
-    /// it, so a session still running in tmux is refused whatever else is
-    /// true of it; and the holder-unspawnable refusal comes **before** any
-    /// park, so a refusal can never leave a parked row behind.
+    /// The order is the contract, and two steps of it are pinned by tests: the
+    /// tmux server of a row whose session may still run is probed before
+    /// anything else is decided about it, so a session still running in tmux
+    /// is refused whatever else is true of it; and the holder-unspawnable
+    /// refusal comes **before** any park, so a refusal can never leave a
+    /// parked row behind.
+    ///
+    /// A session may still run while its row is unparked, and while the row
+    /// is parked with its park in flight (`pendingSessionIncarnationID` set,
+    /// `WorktreeLifecycle.sessionHasEnded`): an earlier build's tmux hibernate
+    /// signalled the agent and left the row so when its respawn failed. Such a
+    /// row is refused while its server may run, as a live row is, because the
+    /// rewrite takes it out of the resume gate's reach and its next wake would
+    /// start the session on the holder beside the tmux agent. Once the server
+    /// is gone it moves as any parked row does.
     func migrate(terminalID: UUID) async -> TransportMigrationOutcome {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .skipped(reason: Self.notFoundSkip)
@@ -206,6 +218,10 @@ actor TerminalTransportMigrator {
         }
         guard terminal.isParked else {
             return await migrateLiveRow(terminal)
+        }
+        if !WorktreeLifecycle.sessionHasEnded(terminal, teardownStoppedIt: false),
+           let refusal = await refusalWhileTheServerMayRun(terminal) {
+            return refusal
         }
 
         switch TransportMigrationEligibility.decide(terminal) {
@@ -257,14 +273,8 @@ actor TerminalTransportMigrator {
     /// would refuse a move that interrupts nothing.
     private func migrateLiveRow(_ terminal: Terminal) async -> TransportMigrationOutcome {
         let terminalID = terminal.id
-        guard let sighting = await operations.tmuxServerSighting(terminal) else {
-            logger.warning("transport migration: refusing \(terminalID, privacy: .public) — its worktree could not be read to name its tmux server")
-            return .refused(reason: Self.worktreeUnreadableRefusal)
-        }
-        guard sighting.state == .absent else {
-            logger.info("transport migration: refusing \(terminalID, privacy: .public) — its tmux server \(sighting.server, privacy: .public) may still be running")
-            return .refused(reason: LeftoverTmuxSession.stillRunningRefusal(
-                terminalID: terminalID, server: sighting.server))
+        if let refusal = await refusalWhileTheServerMayRun(terminal) {
+            return refusal
         }
 
         guard terminal.recoveryResumePlan != nil else {
@@ -341,6 +351,24 @@ actor TerminalTransportMigrator {
         // too, so a client still reading `tmux` learns where it went.
         logger.warning("transport migration: terminal \(terminalID, privacy: .public) is recorded on the pty holder but was not resumed: \(failure, privacy: .public)")
         return .movedNotResumed(reason: failure)
+    }
+
+    /// The refusal for a row whose session may still be running in its tmux
+    /// server, or nil once the probe has found that server gone. A worktree
+    /// that cannot be read names no server, so nothing is known and the row is
+    /// refused too.
+    private func refusalWhileTheServerMayRun(_ terminal: Terminal) async -> TransportMigrationOutcome? {
+        let terminalID = terminal.id
+        guard let sighting = await operations.tmuxServerSighting(terminal) else {
+            logger.warning("transport migration: refusing \(terminalID, privacy: .public) — its worktree could not be read to name its tmux server")
+            return .refused(reason: Self.worktreeUnreadableRefusal)
+        }
+        guard sighting.state == .absent else {
+            logger.info("transport migration: refusing \(terminalID, privacy: .public) — its tmux server \(sighting.server, privacy: .public) may still be running")
+            return .refused(reason: LeftoverTmuxSession.stillRunningRefusal(
+                terminalID: terminalID, server: sighting.server))
+        }
+        return nil
     }
 
     // MARK: - The fleet

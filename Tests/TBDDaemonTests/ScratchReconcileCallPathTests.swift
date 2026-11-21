@@ -27,9 +27,9 @@ struct ScratchReconcileCallPathTests {
         let db = try TBDDatabase(inMemory: true)
         let server = "scratch-shared"
         let probe = RecordingLeftoverTmuxProbe(answer: { _ in .absent })
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = probe.probe
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: probe.probe)
         let scratch = try await db.worktrees.createScratch(
             name: "scratch-stale", displayName: "Scratch Stale",
             path: "/tmp/scratch-stale", tmuxServer: server)

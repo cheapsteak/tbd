@@ -6,7 +6,7 @@ import os
 /// that no current build writes. The daemon removes them at startup so copies
 /// left by an older build don't accumulate; no other sweep matches them.
 ///
-/// Three kinds, each matched exactly:
+/// Four kinds, each matched exactly:
 ///
 /// - `statusline-tee.sh` — a shared statusline tee script.
 /// - `statusline-capture-<key>.json` — one session's capture from that script,
@@ -16,6 +16,10 @@ import os
 ///   other shape is left alone, so nothing else in the directory can match.
 /// - `nightwatch-leases/` — a directory of lease credential files, removed
 ///   with its contents.
+/// - `continue-in-claude-packet-<terminal>-<request>.txt` — a continuation
+///   packet Continue in Claude staged for a launching shell to read.
+///   `<terminal>` and `<request>` are UUIDs; a name of any other shape is left
+///   alone.
 ///
 /// Idempotent and non-fatal: an absent directory or file is no change, and a
 /// removal that fails is logged and skipped without stopping the others.
@@ -26,6 +30,8 @@ struct RetiredRuntimeFiles {
     static let leaseCredentialDirectoryName = "nightwatch-leases"
     static let capturePrefix = "statusline-capture-"
     static let captureSuffix = ".json"
+    static let packetPrefix = "continue-in-claude-packet-"
+    static let packetSuffix = ".txt"
 
     let runtimeDir: URL
 
@@ -43,6 +49,7 @@ struct RetiredRuntimeFiles {
         var names = [Self.teeScriptName, Self.leaseCredentialDirectoryName]
         if let entries = try? fm.contentsOfDirectory(atPath: runtimeDir.path) {
             names += entries.filter(Self.isStatuslineCapture).sorted()
+            names += entries.filter(Self.isContinuationPacket).sorted()
         }
 
         var removed = 0
@@ -81,6 +88,17 @@ struct RetiredRuntimeFiles {
         default:
             return false
         }
+    }
+
+    /// Whether `name` is a continuation packet:
+    /// `continue-in-claude-packet-<terminal>-<request>.txt`, both UUIDs.
+    static func isContinuationPacket(_ name: String) -> Bool {
+        guard name.hasPrefix(packetPrefix), name.hasSuffix(packetSuffix) else { return false }
+        let middle = Array(name.dropFirst(packetPrefix.count).dropLast(packetSuffix.count))
+        let uuidLength = 36
+        guard middle.count == uuidLength * 2 + 1, middle[uuidLength] == "-" else { return false }
+        return UUID(uuidString: String(middle[..<uuidLength])) != nil
+            && UUID(uuidString: String(middle[(uuidLength + 1)...])) != nil
     }
 
     /// A key is sanitized exactly when sanitizing it changes nothing — one

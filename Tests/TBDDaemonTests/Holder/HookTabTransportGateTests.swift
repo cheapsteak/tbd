@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import TestSupport
 import Testing
@@ -92,9 +93,9 @@ struct HookTabTransportGateTests {
         #expect(spawn.transport == .holder)
         #expect(spawn.holderPID == started.handle.holderPID)
         #expect(spawn.childPID == started.handle.childPID)
-        #expect(spawn.windowID.isEmpty)
         let row = try #require(try await fx.db.terminals.get(id: spawn.terminalID))
         #expect(row.transport == .holder)
+        #expect(row.tmuxWindowID.isEmpty)
         #expect(row.label == TerminalLabel.preSession)
         #expect(
             !recorder.snapshot().contains { $0.contains("new-window") || $0.contains("new-session") },
@@ -175,8 +176,6 @@ struct HookTabTransportGateTests {
         PreSessionSpawn(
             terminalID: terminalID,
             tmuxServer: "tbd-test",
-            windowID: "",
-            paneID: "",
             markerPath: WorktreeLifecycle.preSessionMarkerPath(worktreeID: worktreeID),
             hookPath: "/dev/null",
             transport: .holder,
@@ -208,8 +207,7 @@ struct HookTabTransportGateTests {
 
         let outcome = await lifecycle.waitForPreSessionCompletion(
             preSession: holderSpawnDescriptor(
-                terminalID: terminal.id, worktreeID: fx.worktree.id, childPID: 9001),
-            tmuxServer: "tbd-test")
+                terminalID: terminal.id, worktreeID: fx.worktree.id, childPID: 9001))
 
         #expect(outcome == .paneKilled)
     }
@@ -233,8 +231,7 @@ struct HookTabTransportGateTests {
         // No row is ever created for this terminal id.
         let outcome = await lifecycle.waitForPreSessionCompletion(
             preSession: holderSpawnDescriptor(
-                terminalID: UUID(), worktreeID: fx.worktree.id, childPID: 9002),
-            tmuxServer: "tbd-test")
+                terminalID: UUID(), worktreeID: fx.worktree.id, childPID: 9002))
 
         #expect(outcome == .paneKilled)
     }
@@ -258,8 +255,7 @@ struct HookTabTransportGateTests {
 
         let outcome = await lifecycle.waitForPreSessionCompletion(
             preSession: holderSpawnDescriptor(
-                terminalID: UUID(), worktreeID: fx.worktree.id, childPID: 9003),
-            tmuxServer: "tbd-test")
+                terminalID: UUID(), worktreeID: fx.worktree.id, childPID: 9003))
 
         #expect(outcome == .completed(exitCode: 0))
         #expect(!FileManager.default.fileExists(
@@ -295,8 +291,7 @@ struct HookTabTransportGateTests {
 
         let outcome = await lifecycle.waitForPreSessionCompletion(
             preSession: holderSpawnDescriptor(
-                terminalID: terminal.id, worktreeID: fx.worktree.id, childPID: nil),
-            tmuxServer: "tbd-test")
+                terminalID: terminal.id, worktreeID: fx.worktree.id, childPID: nil))
 
         #expect(outcome == .timedOut)
     }
@@ -325,8 +320,7 @@ struct HookTabTransportGateTests {
 
         let outcome = await lifecycle.waitForPreSessionCompletion(
             preSession: holderSpawnDescriptor(
-                terminalID: UUID(), worktreeID: fx.worktree.id, childPID: 9004),
-            tmuxServer: "tbd-test")
+                terminalID: UUID(), worktreeID: fx.worktree.id, childPID: 9004))
 
         #expect(outcome == .timedOut, "a database error was read as a closed holder tab")
     }
@@ -398,6 +392,19 @@ struct HookTabTransportGateTests {
         }
     }
 
+    /// The descriptor a hook tab's spawn would have returned for `terminal`.
+    private static func hookDescriptor(of terminal: Terminal) -> PreSessionSpawn {
+        PreSessionSpawn(
+            terminalID: terminal.id,
+            tmuxServer: "tbd-test",
+            markerPath: "/dev/null",
+            hookPath: "/dev/null",
+            transport: terminal.transport,
+            holderPID: terminal.holderPID,
+            childPID: terminal.childPID,
+            childStartedAt: terminal.holderChildStartedAt)
+    }
+
     /// A lifecycle whose dry-run tmux both records its argv and answers
     /// `capture-pane` with real text — `capturePaneScrollback` returns the
     /// closure's value in dry run and records no argv, so the counter is the
@@ -418,7 +425,8 @@ struct HookTabTransportGateTests {
                     captureCalls.increment()
                     return "hook output\n"
                 }),
-            hooks: HookResolver())
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
     }
 
     /// A holder hook tab is torn down through the holder, never through tmux.
@@ -448,8 +456,7 @@ struct HookTabTransportGateTests {
             worktreeID: fx.worktree.id, tabIDs: [terminal.id])
 
         await lifecycle.closeHookTerminal(
-            worktree: fx.worktree, tmuxServer: "tbd-test",
-            terminalID: terminal.id, windowID: "", paneID: "")
+            worktree: fx.worktree, preSession: Self.hookDescriptor(of: terminal))
 
         #expect(
             captureCalls.count == 0,
@@ -510,8 +517,7 @@ struct HookTabTransportGateTests {
             worktreeID: fx.worktree.id, tabIDs: [terminal.id])
 
         await lifecycle.closeHookTerminal(
-            worktree: fx.worktree, tmuxServer: "tbd-test",
-            terminalID: terminal.id, windowID: "", paneID: "")
+            worktree: fx.worktree, preSession: Self.hookDescriptor(of: terminal))
 
         #expect(signaller.killed.isEmpty, "a recycled pid was force-killed by the hook teardown")
         #expect(signaller.terminated.isEmpty, "a recycled pid was signalled by the hook teardown")
@@ -555,19 +561,19 @@ struct HookTabTransportGateTests {
             holderChildStartedAt: Self.jobStartedAt)
 
         await lifecycle.closeHookTerminal(
-            worktree: fx.worktree, tmuxServer: "tbd-test",
-            terminalID: terminal.id, windowID: "", paneID: "")
+            worktree: fx.worktree, preSession: Self.hookDescriptor(of: terminal))
 
         #expect(signaller.killed == [Self.jobPID])
         #expect(captureCalls.count == 0)
         #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
     }
 
-    /// The tmux arm, unchanged, so a teardown that took the holder branch for
-    /// everybody could not pass: a tmux hook tab is still captured and its
-    /// window still killed.
-    @Test("closing a tmux hook tab still captures and kills its window")
-    func tmuxHookTabTeardownIsUnchanged() async throws {
+    /// A hook tab an earlier build left on tmux is closed without running a
+    /// tmux command: nothing is captured, nothing is killed, and — a shell
+    /// with no session to resume and no screen to keep — no Closed Terminals
+    /// entry is written. The row, tab and order cleanup still runs.
+    @Test("closing a tmux hook tab runs no tmux command")
+    func tmuxHookTabTeardownRunsNoTmux() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let fx = try await makeWorktreeFixture(status: .active)
@@ -580,19 +586,18 @@ struct HookTabTransportGateTests {
         let terminal = try await fx.db.terminals.create(
             worktreeID: fx.worktree.id, tmuxWindowID: "@hook", tmuxPaneID: "%hook",
             label: TerminalLabel.preSession, kind: .shell)
+        try await fx.db.worktrees.setTabOrder(
+            worktreeID: fx.worktree.id, tabIDs: [terminal.id])
 
         await lifecycle.closeHookTerminal(
-            worktree: fx.worktree, tmuxServer: "tbd-test",
-            terminalID: terminal.id, windowID: "@hook", paneID: "%hook")
+            worktree: fx.worktree, preSession: Self.hookDescriptor(of: terminal))
 
-        #expect(captureCalls.count == 1)
-        #expect(recorder.snapshot().contains {
-            $0.contains("kill-window") && $0.contains("@hook")
-        })
+        #expect(captureCalls.count == 0)
+        #expect(recorder.snapshot().isEmpty,
+                "closing a tmux hook tab ran a tmux command: \(recorder.snapshot())")
         #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
-        #expect(
-            try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).count == 1,
-            "a tmux hook tab's scrollback was not preserved for Closed Terminals")
+        #expect(try await fx.db.worktrees.getTabOrder(worktreeID: fx.worktree.id).isEmpty)
+        #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)
     }
 }
 }

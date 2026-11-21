@@ -142,7 +142,8 @@ struct WorktreeArchiveDeletionQueueTests {
         let observed = ObservedRemoval()
         var lifecycle = WorktreeLifecycle(
             db: harness.db, git: impatient,
-            tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+            tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         // The registry the harness spawned the worktree's tabs through, so the
         // archive tears them down where they were opened.
         lifecycle.holderRegistry = harness.lifecycle.holderRegistry
@@ -306,7 +307,8 @@ struct ArchiveHarness {
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
-            subscriptions: subscriptions
+            subscriptions: subscriptions,
+            leftoverTmuxProbe: .absent
         )
         lifecycle.onWorktreeRemoved = onWorktreeRemoved
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())

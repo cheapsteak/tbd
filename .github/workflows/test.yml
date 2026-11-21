@@ -201,6 +201,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: /usr/bin/python3 scripts/lint-daemon-layers.py
 
+      # Every test construction of a WorktreeLifecycle or a
+      # HibernationCoordinator names its leftover-tmux probe, so no suite reads
+      # this runner's process table through the production one. Build-free
+      # Python under macOS's 3.9, about 2 s; its self-test runs in
+      # `script-harnesses`.
+      - name: Check that tests name their leftover-tmux probe
+        if: ${{ !cancelled() }}
+        run: /usr/bin/python3 scripts/lint-test-leftover-tmux-probe.py
+
       # The harness for the Swift suite gate (the `changes` job below), and the
       # one check that keeps its skip honest: a drift check that gathers every
       # script the `test` job can reach — the two wrappers, what the job names,
@@ -404,6 +413,12 @@ jobs:
       - name: Test the daemon layer check
         if: ${{ !cancelled() }}
         run: bash scripts/lint-daemon-layers.test.sh
+
+      # The fixtures for the leftover-tmux probe check that the `lint` job
+      # runs: Swift snippets that are scanned, never compiled.
+      - name: Self-test scripts/lint-test-leftover-tmux-probe.py
+        if: ${{ !cancelled() }}
+        run: python3 scripts/lint-test-leftover-tmux-probe.py --self-test
 
   # The flake bot's four Linux harnesses, one matrix leg each. They are the
   # same shape as the harnesses in `script-harnesses`: pure Python and bash

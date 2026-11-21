@@ -18,9 +18,6 @@ public final class RPCRouter: Sendable {
     public let composerDrafts = ComposerDraftRegistry()
     public let prManager: PRStatusManager
     public let hibernationCoordinator: HibernationCoordinator
-    /// Exact-token SessionStart rendezvous for Codex-to-Claude replacement
-    /// and its Codex rollback/recovery process.
-    let continueInClaudeReadiness = ContinueInClaudeReadinessCoordinator()
     /// Append-only record of every state-changing actuation this router
     /// performs. Shared with the daemon-internal rails (see `Daemon.swift`) so
     /// the whole daemon writes one file. Handlers append a request row before
@@ -588,7 +585,10 @@ public final class RPCRouter: Sendable {
             sessionsDir: sessionsDir,
             sessionTitles: lifecycle.sessionTitles,
             actuationLog: actuationLog, programStatus: resolvedProgramStatus,
-            codexExecutableResolver: codexExecutableResolver, codexHomeEnsurer: codexHomeEnsurer
+            codexExecutableResolver: codexExecutableResolver, codexHomeEnsurer: codexHomeEnsurer,
+            // One probe for the router: the wake gate asks the same one
+            // reconcile and the lifecycle's resume gate ask.
+            leftoverTmuxProbe: lifecycle.leftoverTmuxProbe
         )
         self.usageFetcher = usageFetcher
         // Captures the `db` / `prManager` parameters rather than `self`, so the
@@ -810,9 +810,6 @@ public final class RPCRouter: Sendable {
                 return try await handleServerSummary()
             case RPCMethod.terminalContinueInCodex:
                 return try await handleTerminalContinueInCodex(request.paramsData, actor: request.actor)
-            case RPCMethod.terminalContinueInClaude:
-                return try await handleTerminalContinueInClaude(
-                    request.paramsData, actor: request.actor)
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:

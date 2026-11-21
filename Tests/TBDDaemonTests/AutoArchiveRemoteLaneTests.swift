@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import TestSupport
 import Testing
@@ -181,7 +182,8 @@ struct AutoArchiveRemoteLaneTests {
             db: fixture.db,
             lifecycle: WorktreeLifecycle(
                 db: fixture.db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver(), subscriptions: fixture.subscriptions),
+                hooks: HookResolver(), subscriptions: fixture.subscriptions,
+                leftoverTmuxProbe: .absent),
             subscriptions: fixture.subscriptions,
             actuationLog: ActuationLog(path: fixture.logPath))
 

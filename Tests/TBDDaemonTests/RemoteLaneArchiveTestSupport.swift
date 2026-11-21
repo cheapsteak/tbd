@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import TestSupport
 import Testing
@@ -81,7 +82,8 @@ struct RemoteLaneFixture {
         let tmux = TmuxManager(dryRun: true)
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            subscriptions: subscriptions)
+            subscriptions: subscriptions,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = holderRegistry
         let router = RPCRouter(
             db: db,
@@ -107,7 +109,8 @@ struct RemoteLaneFixture {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver(), subscriptions: subscriptions),
+                hooks: HookResolver(), subscriptions: subscriptions,
+                leftoverTmuxProbe: .absent),
             subscriptions: subscriptions,
             actuationLog: actuationLog,
             remoteManager: manager)

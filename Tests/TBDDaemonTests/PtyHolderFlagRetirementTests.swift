@@ -68,7 +68,8 @@ import Testing
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let response = await router.handle(RPCRequest(
             method: "config.setPtyHolderEnabled", params: #"{"enabled":false}"#))

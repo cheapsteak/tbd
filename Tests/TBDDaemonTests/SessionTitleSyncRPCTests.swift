@@ -22,7 +22,8 @@ struct SessionTitleSyncRPCTests {
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,

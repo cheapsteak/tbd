@@ -431,6 +431,114 @@ struct WorktreeReviveFreshTests {
                 == ["A": extrasA, "B": extrasB])
     }
 
+    /// A Claude conversation is carried onto the fresh branch with
+    /// `--fork-session`: a new session id, never a second agent on the
+    /// source. So the revive asks no resume gate (`TmuxResumeGate`) and goes
+    /// ahead while an unparked tmux row in another worktree and a mark both
+    /// name the source session, and the probe says their servers may run.
+    @Test func freshReviveOfAClaudeConversationATmuxRowCarriesAsksNoResumeGate() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
+        var lifecycle = makeReviveFreshLifecycle(db: db, holder: holder)
+        let probe = RecordingLeftoverTmuxProbe { _ in .running }
+        lifecycle.leftoverTmuxProbe = probe.probe
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedSource(
+            db: db, repo: repo, tempDir: tempDir, sessions: ["A"],
+            archivedHeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        try writeSourceTranscript(sessionID: "A")
+        let other = try await db.worktrees.create(
+            repoID: repo.id, name: "acme-other", branch: "tbd/acme-other",
+            path: tempDir.appendingPathComponent("acme-other").path,
+            tmuxServer: "tbd-acme-other")
+        let created = try await db.terminals.create(
+            worktreeID: other.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "A", kind: .claude,
+            transport: .tmux)
+        let tmuxRow = try #require(try await db.terminals.get(id: created.id))
+        try await db.terminalHistory.recordLiveTmuxClose(
+            terminal: Terminal(
+                worktreeID: archived.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+                claudeSessionID: "A", kind: .claude),
+            server: archived.tmuxServer)
+        #expect(try await db.terminals.liveTmuxServers(sessionIDs: ["A"]) == ["tbd-acme-other"])
+        #expect(try await db.terminalHistory.liveOnTmuxServers(sessionIDs: ["A"])
+            == [archived.tmuxServer])
+
+        let outcome = try await lifecycle.reviveConversationOnFreshBranch(
+            archivedWorktreeID: archived.id,
+            sessionID: "A",
+            date: operationDate
+        )
+        guard case .ready = outcome.completion else {
+            Issue.record("expected the fresh revive to complete synchronously")
+            return
+        }
+
+        let claude = try #require(
+            try await db.terminals.list(worktreeID: outcome.result.worktree.id)
+                .first { $0.kind == .claude })
+        #expect(claude.transport == .holder)
+        let command = try #require(launchedCommand(holder, containing: "claude "))
+        #expect(command.contains("--resume A"), "\(command)")
+        #expect(command.contains("--fork-session"), "\(command)")
+        #expect(probe.servers.isEmpty, "the fork asked the resume gate: \(probe.servers)")
+        #expect(try await db.terminals.get(id: tmuxRow.id) == tmuxRow)
+    }
+
+    /// An archived worktree that no tmux row and no mark names, as an archive
+    /// that marked nothing leaves it, with a probe that says its own tmux
+    /// server may run. A fresh-branch revive of a Codex thread resumes the
+    /// thread, so it asks about that server and is refused before any new
+    /// worktree exists. A Claude conversation is carried over with
+    /// `--fork-session`, so its revive asks nothing and goes ahead.
+    @Test func freshReviveAsksAboutTheArchivedWorktreesServerForACodexThreadOnly() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
+        var configured = makeReviveFreshLifecycle(db: db, holder: holder)
+        let probe = RecordingLeftoverTmuxProbe { _ in .running }
+        configured.leftoverTmuxProbe = probe.probe
+        let lifecycle = configured
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedSource(
+            db: db, repo: repo, tempDir: tempDir, sessions: ["A"],
+            archivedHeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        try writeSourceTranscript(sessionID: "A")
+        let codex = AgentSessionIdentity(agentKind: .codex, sessionID: "acme-thread")
+        try await db.localAgentSessions.upsert(LocalAgentSession(
+            worktreeID: archived.id, identity: codex,
+            firstObservedAt: operationDate, lastObservedAt: operationDate))
+        #expect(try await db.terminals.liveTmuxServers(sessionIDs: ["A", "acme-thread"]).isEmpty)
+        #expect(try await db.terminalHistory.liveOnTmuxServers(sessionIDs: ["A", "acme-thread"]).isEmpty)
+        let worktreesBefore = try await db.worktrees.list(repoID: repo.id).map(\.id)
+
+        await #expect(throws: TmuxResumeRefusal(server: archived.tmuxServer)) {
+            _ = try await lifecycle.reviveConversationOnFreshBranch(
+                archivedWorktreeID: archived.id, sessionID: codex.sessionID, identity: codex,
+                date: operationDate)
+        }
+        #expect(try await db.worktrees.list(repoID: repo.id).map(\.id) == worktreesBefore)
+        #expect(probe.servers == [archived.tmuxServer])
+
+        let outcome = try await lifecycle.reviveConversationOnFreshBranch(
+            archivedWorktreeID: archived.id, sessionID: "A", date: operationDate)
+        guard case .ready = outcome.completion else {
+            Issue.record("expected the fresh revive to complete synchronously")
+            return
+        }
+        let command = try #require(launchedCommand(holder, containing: "claude "))
+        #expect(command.contains("--fork-session"), "\(command)")
+        #expect(probe.servers == [archived.tmuxServer], "the fork asked the resume gate")
+    }
+
     @Test func fetchFailureCreatesFromLocalBaseAndReturnsStaleWarning() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
@@ -1000,13 +1108,15 @@ struct WorktreeReviveFreshTests {
 
     /// Every spawn goes through the holder spawn double `holder`, whose
     /// `launches` record what each tab was asked to run. Pass the same
-    /// registry to any router built over this lifecycle.
+    /// registry to any router built over this lifecycle. `leftoverTmuxProbe`
+    /// answers every tmux server as gone unless a test passes its own.
     private func makeReviveFreshLifecycle(
         db: TBDDatabase,
         holder: FakeHolderLaunch = FakeHolderLaunch(),
         subscriptions: StateSubscriptionManager? = nil,
         modelProfileResolver: ModelProfileResolver? = nil,
-        configDirManager: ClaudeProfileConfigDirManager? = nil
+        configDirManager: ClaudeProfileConfigDirManager? = nil,
+        leftoverTmuxProbe: LeftoverTmuxServerProbe = .absent
     ) -> WorktreeLifecycle {
         let claudeHome = TBDConstants.configDir
             .appendingPathComponent("claude-home", isDirectory: true)
@@ -1028,7 +1138,8 @@ struct WorktreeReviveFreshTests {
             // and the hook ends only when a test writes its marker.
             processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
             codexExecutableResolver: { "/usr/bin/true" },
-            codexHomeEnsurer: { TBDConstants.configDir.appendingPathComponent("codex") }
+            codexHomeEnsurer: { TBDConstants.configDir.appendingPathComponent("codex") },
+            leftoverTmuxProbe: leftoverTmuxProbe
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         return lifecycle

@@ -1,6 +1,8 @@
 # Continue in Claude from Codex
 
-**Status:** approved design
+**Status:** retired. TBD has no Continue in Claude action: no `tbd terminal
+continue-in-claude` command and no `terminal.continueInClaude` RPC. The rest of
+this document remains as the design record.
 **Date:** 2026-09-16
 **Authorship:** OpenAI Codex drafted this specification from the human-approved product decision and the repository's existing replacement machinery.
 

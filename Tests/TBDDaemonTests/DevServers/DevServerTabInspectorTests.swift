@@ -53,6 +53,15 @@ struct DevServerTabInspectorTests {
                 "#{pane_id}|#{pane_dead}|#{pane_dead_status}|#{pane_pid}"])
     }
 
+    /// A server tab still on tmux reads unknown, so a start refuses rather
+    /// than open a second tab beside a command that may still run there.
+    @Test func aTmuxTabIsUnknown() async {
+        var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "@3", tmuxPaneID: "%3", transport: .tmux)
+        terminal.serverName = "web"
+        #expect(await holderInspector().status(of: terminal, tmuxServer: "tbd-acme")
+            == .unknown(reason: ProductionDevServerTabInspector.tmuxTabReason))
+    }
+
     @Test func aHolderExitCodeComesFromTheRegistry() async {
         let registry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),

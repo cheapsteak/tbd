@@ -118,19 +118,6 @@ import Testing
         #expect(try await db.scheduledResumes.pending().isEmpty)
     }
 
-    @Test func rescheduleMovesFireAtAndBadge() async throws {
-        let resume = makeResume()
-        _ = try await db.scheduledResumes.insertPending(resume)
-        let newFireAt = resume.fireAt.addingTimeInterval(120)
-        let rescheduled = try await db.scheduledResumes.reschedule(id: resume.id, fireAt: newFireAt, attemptCount: 3)
-        #expect(rescheduled)
-        let row = try await db.scheduledResumes.get(id: resume.id)
-        #expect(abs(row!.fireAt.timeIntervalSince(newFireAt)) < 0.01)
-        #expect(row?.attemptCount == 3)
-        let terminal = try await db.terminals.get(id: terminalID)
-        #expect(abs(terminal!.pendingResumeAt!.timeIntervalSince(newFireAt)) < 0.01)
-    }
-
     /// Parking cancels the scheduled auto-resume atomically with the park
     /// write: `TerminalStore.setHibernated` is the choke point EVERY park site
     /// flows through (performHibernate, the reconcile recovery park, the
@@ -303,27 +290,5 @@ import Testing
         #expect(forTerminal2?.id == resume2.id)
         let forUnknown = try await db.scheduledResumes.pending(terminalID: UUID())
         #expect(forUnknown == nil)
-    }
-
-    @Test func rescheduleReturnsFailsForNonPendingAndMissingRows() async throws {
-        let resume = makeResume()
-        _ = try await db.scheduledResumes.insertPending(resume)
-
-        // Cancel the pending row, making it non-pending
-        _ = try await db.scheduledResumes.cancelPending(terminalID: terminalID)
-        let row = try await db.scheduledResumes.get(id: resume.id)
-        #expect(row?.status == .cancelled)
-
-        // Reschedule on the now-cancelled row should return false and not touch the mirror
-        let rescheduled = try await db.scheduledResumes.reschedule(
-            id: resume.id, fireAt: Date(), attemptCount: 5)
-        #expect(rescheduled == false)
-        let terminal = try await db.terminals.get(id: terminalID)
-        #expect(terminal?.pendingResumeAt == nil)
-
-        // Reschedule on a non-existent row should return false
-        let rescheduleUnknown = try await db.scheduledResumes.reschedule(
-            id: UUID(), fireAt: Date(), attemptCount: 1)
-        #expect(rescheduleUnknown == false)
     }
 }

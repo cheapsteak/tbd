@@ -1,4 +1,5 @@
 import Clocks
+import DaemonTestSupport
 import Foundation
 import Testing
 @testable import TBDDaemonLib
@@ -138,7 +139,8 @@ struct SendHarness {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: tmux,
             recordedAppIdentity: recordedAppIdentity,
             processSignaller: processSignaller,

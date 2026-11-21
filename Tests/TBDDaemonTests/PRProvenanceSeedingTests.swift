@@ -161,7 +161,8 @@ struct PRProvenanceSeedingTests {
                 db: db,
                 lifecycle: WorktreeLifecycle(
                     db: db, git: GitManager(),
-                    tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                    tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                    leftoverTmuxProbe: .absent),
                 tmux: TmuxManager(dryRun: true),
                 startTime: Date(),
                 prManager: PRStatusManager(ghRunner: { _, _ in nil }),

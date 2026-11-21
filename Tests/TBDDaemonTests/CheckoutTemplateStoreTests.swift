@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Darwin
 import Foundation
 import Testing
@@ -460,7 +461,8 @@ struct CheckoutTemplateStoreTests {
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-            checkoutTemplates: store)
+            checkoutTemplates: store,
+            leftoverTmuxProbe: .absent)
 
         let outcome = try await lifecycle.addFreshWorktree(
             repo: repo, worktreePath: f.worktreePath("off"), branch: "tbd/off", baseBranch: "main")
@@ -477,7 +479,8 @@ struct CheckoutTemplateStoreTests {
         let repo = try await db.repos.create(path: f.repo.path, displayName: "acme", defaultBranch: "main")
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-            checkoutTemplates: CheckoutTemplateStore(reposDir: f.reposDir))
+            checkoutTemplates: CheckoutTemplateStore(reposDir: f.reposDir),
+            leftoverTmuxProbe: .absent)
 
         let outcome = try await lifecycle.addFreshWorktree(
             repo: repo, worktreePath: f.worktreePath("on"), branch: "tbd/on", baseBranch: "main")

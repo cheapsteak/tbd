@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import Testing
 @testable import TBDDaemonLib
@@ -79,7 +80,8 @@ struct SessionExitStampHandlerTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                subscriptions: subscriptions),
+                subscriptions: subscriptions,
+                leftoverTmuxProbe: .absent),
             tmux: tmux,
             subscriptions: subscriptions,
             actuationLog: ActuationLog(path: Self.scratchLogPath()))

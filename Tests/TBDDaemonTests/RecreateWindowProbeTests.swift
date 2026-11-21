@@ -71,9 +71,9 @@ struct RecreateWindowProbeTests {
     private func router(
         _ db: TBDDatabase, tmux: TmuxManager, server: LeftoverTmuxServerState
     ) -> RPCRouter {
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in server }
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in server })
         return RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -221,12 +221,12 @@ struct RecreateWindowProbeTests {
         let terminal = try #require(try await db.terminals.get(id: seeded.id))
         let before = RowFingerprint(terminal)
 
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in
-            Issue.record("a parked row must not be probed")
-            return .running
-        }
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in
+                Issue.record("a parked row must not be probed")
+                return .running
+            })
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux,
             configDirManager: isolatedConfigDirManager(),

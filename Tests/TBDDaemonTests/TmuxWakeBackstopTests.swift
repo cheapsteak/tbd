@@ -62,7 +62,8 @@ struct TmuxWakeBackstopTests {
             db: db, tmux: tmux,
             configDirManager: makeIsolatedConfigDirManager(tag: "tmux-backstop"),
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog(tag: "tmux-backstop"))
+            actuationLog: makeTestActuationLog(tag: "tmux-backstop"),
+            leftoverTmuxProbe: .absent)
         let holder = FakeHolderLaunch()
         await coordinator.setHolderRegistry(makeHolderRegistryDouble(launch: holder))
         return Fixture(
@@ -109,7 +110,8 @@ struct TmuxWakeBackstopTests {
         let tmux = TmuxManager(dryRun: true)
         let registry = makeHolderRegistryDouble(launch: f.holder)
         var lifecycle = WorktreeLifecycle(
-            db: f.db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            db: f.db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: f.db, lifecycle: lifecycle, tmux: tmux,

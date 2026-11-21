@@ -242,8 +242,8 @@ actor CodexTranscriptActivityTracker {
     // A 64 KiB read is the fairness and I/O quantum: each active transcript
     // gets one bounded step before another path can consume the shared budget.
     private static let readChunkSize = 64 * 1024
-    // Continue in Claude's preflight reads inside an RPC. One MiB bounds all
-    // transcript work per request without imposing a historical horizon.
+    // A read runs inside an RPC. One MiB bounds all transcript work per
+    // request without imposing a historical horizon.
     static let transcriptReadByteLimit: UInt64 = 1024 * 1024
     static let incrementalReadByteLimit = transcriptReadByteLimit
     static let requestReadByteLimit = incrementalReadByteLimit

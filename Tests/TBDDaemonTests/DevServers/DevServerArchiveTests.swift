@@ -28,7 +28,7 @@ struct DevServerArchiveTests {
     private static func makeFixture() async throws -> Fixture {
         let db = try TBDDatabase(inMemory: true)
         let tmux = TmuxManager(dryRun: true)
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
         let tmp = FileManager.default.temporaryDirectory
         let pathA = tmp.appendingPathComponent("tbd-srvarc-a-\(UUID().uuidString)").path
         let pathB = tmp.appendingPathComponent("tbd-srvarc-b-\(UUID().uuidString)").path

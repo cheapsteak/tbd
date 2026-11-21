@@ -25,7 +25,7 @@ struct CompletionInventoryServiceTests {
     private func request(terminalID: UUID = UUID(), childPID: Int32? = 4242) ->
         CompletionInventoryService.Request {
         CompletionInventoryService.Request(
-            terminalID: terminalID, childPID: childPID, panePID: nil,
+            terminalID: terminalID, childPID: childPID,
             configDir: "/cfg", worktreePath: "/wt", environment: [:])
     }
 
@@ -52,27 +52,28 @@ struct CompletionInventoryServiceTests {
 
     @Test func itPinsTheRunningBinaryFromTheChildPID() {
         let pinned = CompletionInventoryService.pinnedExecutable(
-            childPID: 4242, panePID: 99,
+            childPID: 4242,
             executablePathForPID: { pid in pid == 4242 ? "/versions/a/claude" : "/versions/b/claude" },
             fallback: { "/resolved/claude" })
         #expect(pinned == "/versions/a/claude")
     }
 
-    @Test func itFallsBackToThePanePIDThenToTheResolver() {
+    @Test func itFallsBackToTheResolver() {
+        // No recorded child pid.
         #expect(CompletionInventoryService.pinnedExecutable(
-            childPID: nil, panePID: 99,
-            executablePathForPID: { pid in pid == 99 ? "/versions/b/claude" : nil },
-            fallback: { "/resolved/claude" }) == "/versions/b/claude")
+            childPID: nil,
+            executablePathForPID: { _ in "/versions/b/claude" },
+            fallback: { "/resolved/claude" }) == "/resolved/claude")
 
-        // Neither pid resolves — a shell that has not yet exec'd, or a versioned
-        // file that is gone. Silent fallback, no marker.
+        // The pid does not resolve — a versioned file that is gone. Silent
+        // fallback, no marker.
         #expect(CompletionInventoryService.pinnedExecutable(
-            childPID: 4242, panePID: 99,
+            childPID: 4242,
             executablePathForPID: { _ in nil },
             fallback: { "/resolved/claude" }) == "/resolved/claude")
 
         #expect(CompletionInventoryService.pinnedExecutable(
-            childPID: nil, panePID: nil,
+            childPID: nil,
             executablePathForPID: { _ in nil },
             fallback: { nil }) == nil)
     }
@@ -81,24 +82,19 @@ struct CompletionInventoryServiceTests {
     /// presents as the login shell until it `exec`s the agent. Pinning the shell
     /// would run `zsh` with the probe's flags, fail, and drop every request to
     /// the uncached scan for as long as the window lasts — so a shell is skipped
-    /// and the next candidate is tried.
+    /// and the resolver answers.
     @Test func itSkipsAPIDThatIsStillAShell() {
-        #expect(CompletionInventoryService.pinnedExecutable(
-            childPID: 4242, panePID: 99,
-            executablePathForPID: { pid in pid == 4242 ? "/bin/zsh" : "/versions/x/claude" },
-            fallback: { "/resolved/claude" }) == "/versions/x/claude")
-
-        // Both pids still shells: nothing running is worth asking, so the
-        // resolver answers.
-        #expect(CompletionInventoryService.pinnedExecutable(
-            childPID: 4242, panePID: 99,
-            executablePathForPID: { pid in pid == 4242 ? "/bin/zsh" : "/opt/homebrew/bin/fish" },
-            fallback: { "/resolved/claude" }) == "/resolved/claude")
+        for shell in ["/bin/zsh", "/opt/homebrew/bin/fish"] {
+            #expect(CompletionInventoryService.pinnedExecutable(
+                childPID: 4242,
+                executablePathForPID: { _ in shell },
+                fallback: { "/resolved/claude" }) == "/resolved/claude")
+        }
 
         // The gate is "not a shell", never "is named claude": a renamed binary
         // or a stub script is a legitimate thing for a session to be running.
         #expect(CompletionInventoryService.pinnedExecutable(
-            childPID: 4242, panePID: nil,
+            childPID: 4242,
             executablePathForPID: { _ in "/opt/tbd/claude-stub.py" },
             fallback: { "/resolved/claude" }) == "/opt/tbd/claude-stub.py")
     }
@@ -187,7 +183,7 @@ struct CompletionInventoryServiceTests {
         })
         _ = await service.inventory(for: request())
         _ = await service.inventory(for: CompletionInventoryService.Request(
-            terminalID: UUID(), childPID: 4242, panePID: nil,
+            terminalID: UUID(), childPID: 4242,
             configDir: "/other-cfg", worktreePath: "/wt", environment: [:]))
         #expect(await calls.value == 2)
     }
@@ -201,7 +197,7 @@ struct CompletionInventoryServiceTests {
         })
         _ = await service.inventory(for: request())
         _ = await service.inventory(for: CompletionInventoryService.Request(
-            terminalID: UUID(), childPID: 4242, panePID: nil,
+            terminalID: UUID(), childPID: 4242,
             configDir: "/cfg", worktreePath: "/other-wt", environment: [:]))
         #expect(await calls.value == 2)
     }

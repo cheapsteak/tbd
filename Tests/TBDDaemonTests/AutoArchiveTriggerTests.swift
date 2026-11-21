@@ -45,7 +45,8 @@ actor FiredBox {
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
-            subscriptions: subs
+            subscriptions: subs,
+            leftoverTmuxProbe: .absent
         )
         let coord = AutoArchiveOnMergeCoordinator(
             db: db, lifecycle: lifecycle, subscriptions: subs,

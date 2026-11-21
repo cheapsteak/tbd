@@ -17,8 +17,8 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 ///
 /// A per-holder receive timeout bounds one probe; a serial phase over N rows
 /// costs N times that bound, and this arm runs inside
-/// `performStartupReconciliation` — before the socket is bound, holding a tmux
-/// server resource lock. That is the failure `HolderRegistry.adoptAllBudget`
+/// `performStartupReconciliation`, before the socket is bound. That is the
+/// failure `HolderRegistry.adoptAllBudget`
 /// exists to prevent, and this is the same mechanism applied at the same place
 /// in startup: a timer flips one flag, the loop reads it before each probe, and
 /// a pass that runs out keeps every row it has not reached. Keeping is free —
@@ -217,7 +217,7 @@ extension WorktreeLifecycle {
     /// park is an independent decision about a target it has already resolved,
     /// unlike an RPC archive where the caller asked for one worktree-level
     /// thing. The shared teardown helpers it calls
-    /// (`captureThenKillWindow`, `disposeHolder`) stay silent so the RPC
+    /// (`disposeHolder`, `closeLeftoverTmuxRow`) stay silent so the RPC
     /// paths that also reach them are not double-counted.
     ///
     /// `actuationLog` is a required parameter rather than a defaulted one: a
@@ -287,87 +287,101 @@ extension WorktreeLifecycle {
         )
         let dbPaths = Set(dbWorktrees.map(\.path)).union(creatingPaths)
 
-        // Mark missing worktrees as archived — also capture each terminal's
-        // scrollback into Closed Terminals history, then kill its tmux window.
-        // The checkout is gone but the tmux server may still be live; capture
-        // is best-effort (a dead window/pane just logs and skips). The archived
-        // row and its history rows survive, so the output stays readable.
+        // Mark missing worktrees as archived, ending each terminal's session
+        // and writing its Closed Terminals entry first, as
+        // `beginArchiveWorktree` does. The archived row and its history rows
+        // survive, so the output stays readable. Each worktree is read again
+        // first, so one whose status changed since the list above is left
+        // for the next sweep.
         for wt in dbWorktrees where !gitPaths.contains(wt.path) {
-            try await tmux.withWorktreeServerLock(
-                db: db, worktreeID: wt.id, allowedStatuses: [wt.status]
-            ) { current in
-                // Dev servers TBD started in its tabs stop first, as in
-                // `beginArchiveWorktree`, while those tabs' processes are
-                // alive to be signalled. Tab process groups only: a server
-                // known only through a running file is left running. A
-                // failure is logged and the reconcile continues.
-                await stopDevServersForArchive(worktree: current)
-                let terminals = try await db.terminals.list(worktreeID: current.id)
-                var recordedEveryKill = true
-                var sessions = SessionTeardownTally()
-                for terminal in terminals {
-                    var row = ActuationRow(
-                        actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
-                    row.target = .local(worktree: current.id, terminal: terminal.id)
-                    guard let actuationID = try? await actuationLog.appendRequest(row) else {
-                        recordedEveryKill = false
+            guard let current = try await db.worktrees.getLocal(id: wt.id),
+                  current.status == wt.status else { continue }
+            // Dev servers TBD started in its tabs stop first, as in
+            // `beginArchiveWorktree`, while those tabs' processes are
+            // alive to be signalled. Tab process groups only: a server
+            // known only through a running file is left running. A
+            // failure is logged and the reconcile continues.
+            await stopDevServersForArchive(worktree: current)
+            let terminals = try await db.terminals.list(worktreeID: current.id)
+            var recordedEveryTeardown = true
+            var markedEveryLiveTmuxRow = true
+            var sessions = SessionTeardownTally()
+            for terminal in terminals {
+                var row = ActuationRow(
+                    actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
+                row.target = .local(worktree: current.id, terminal: terminal.id)
+                guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                    recordedEveryTeardown = false
+                    continue
+                }
+                // Each transport's teardown, as in `beginArchiveWorktree`. A
+                // holder row's Closed Terminals entry is written before the
+                // disposal releases the reader it is read from; a tmux row
+                // runs no tmux command (`closeLeftoverTmuxRow`).
+                let stopped: Bool
+                switch terminal.transport {
+                case .holder:
+                    await Self.recordHolderClosedTerminal(
+                        terminal, registry: holderRegistry,
+                        resolver: holderScreenResolver, history: db.terminalHistory)
+                    if let failure = await disposeHolder(for: terminal) {
+                        logger.warning(
+                            "reconcile: auto-archive left a holder running: \(failure, privacy: .public)")
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID, result: .transportFailed, error: failure)
+                        sessions.record(terminal, teardownStoppedIt: false)
                         continue
                     }
-                    // A holder row takes the holder teardown, as in
-                    // `beginArchiveWorktree`: its tmux coordinates are empty,
-                    // so `captureThenKillWindow` would capture and kill
-                    // nothing while the holder and its job outlive the rows
-                    // deleted below. Its Closed Terminals entry is written
-                    // before the disposal releases the reader it is read from.
-                    let stopped: Bool
-                    if terminal.transport == .holder {
-                        await Self.recordHolderClosedTerminal(
-                            terminal, registry: holderRegistry,
-                            resolver: holderScreenResolver, history: db.terminalHistory)
-                        if let failure = await disposeHolder(for: terminal) {
-                            logger.warning(
-                                "reconcile: auto-archive left a holder running: \(failure, privacy: .public)")
-                            await actuationLog.appendOutcome(
-                                confirms: actuationID, result: .transportFailed, error: failure)
-                            sessions.record(terminal, teardownStoppedIt: false)
-                            continue
-                        }
-                        stopped = true
-                    } else {
-                        stopped = await captureThenKillWindow(
-                            terminal: terminal, server: current.tmuxServer)
+                    stopped = true
+                case .tmux:
+                    do {
+                        try await Self.closeLeftoverTmuxRow(
+                            terminal, server: current.tmuxServer, history: db.terminalHistory)
+                    } catch {
+                        await actuationLog.appendOutcome(
+                            confirms: actuationID, result: .transportFailed,
+                            error: String(describing: error))
+                        markedEveryLiveTmuxRow = false
+                        continue
                     }
-                    sessions.record(terminal, teardownStoppedIt: stopped)
-                    await actuationLog.appendOutcome(
-                        confirms: actuationID, result: .dispatched)
+                    stopped = false
                 }
-                // A kill that could not be recorded did not happen, so the
-                // rows still pointing at those windows must survive too.
-                guard recordedEveryKill else {
-                    logger.warning("reconcile: leaving \(current.id, privacy: .public) for the next sweep — the actuation record is unwritable, so its windows were not killed")
-                    return
-                }
-                // Only now, as in `beginArchiveWorktree`: every session counted
-                // as ended here has had its teardown, and an early return
-                // above leaves the directories with the rows for the next
-                // sweep.
-                removeSessionDirectories(for: sessions)
-                try await db.terminals.deleteForWorktree(worktreeID: current.id)
-                await sessionTitles.forget(worktreeID: current.id)
-                try await db.tabs.deleteForWorktree(worktreeID: current.id)
-                for terminal in terminals {
-                    await pendingQuestions.clear(terminalID: terminal.id)
-                    await subscriptions?.broadcastPendingPrompts(
-                        terminalID: terminal.id, from: pendingQuestions)
-                    ClaudeHookOverlay.removePerSessionOverlay(
-                        sessionKey: terminal.id.uuidString)
-                }
-                // After the rows are gone, as in `beginArchiveWorktree`.
-                await detachDevServerOutputsForArchive(worktreeID: current.id)
-                let removedPanelTabIDs = try await db.worktrees.archive(id: current.id)
-                subscriptions?.broadcastPanelSurfacesRemoved(
-                    worktreeID: current.id, tabIDs: removedPanelTabIDs)
+                sessions.record(terminal, teardownStoppedIt: stopped)
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .dispatched)
             }
+            // A teardown that could not be recorded did not happen, so the
+            // rows still recording those sessions must survive too.
+            guard recordedEveryTeardown else {
+                logger.warning("reconcile: leaving \(current.id, privacy: .public) for the next sweep — the actuation record is unwritable, so its sessions were not ended")
+                continue
+            }
+            // A live tmux row whose Closed Terminals entry could not be marked
+            // is the only record that its session may still be running, so
+            // its rows survive the same way, and the next sweep marks it.
+            guard markedEveryLiveTmuxRow else {
+                logger.warning("reconcile: leaving \(current.id, privacy: .public) for the next sweep — a tmux row's Closed Terminals entry could not be marked with its server, so its row is kept to guard its session")
+                continue
+            }
+            // Only now, as in `beginArchiveWorktree`: every session counted
+            // as ended here has had its teardown, and the `continue` above
+            // leaves the directories with the rows for the next sweep.
+            removeSessionDirectories(for: sessions)
+            try await db.terminals.deleteForWorktree(worktreeID: current.id)
+            await sessionTitles.forget(worktreeID: current.id)
+            try await db.tabs.deleteForWorktree(worktreeID: current.id)
+            for terminal in terminals {
+                await pendingQuestions.clear(terminalID: terminal.id)
+                await subscriptions?.broadcastPendingPrompts(
+                    terminalID: terminal.id, from: pendingQuestions)
+                ClaudeHookOverlay.removePerSessionOverlay(
+                    sessionKey: terminal.id.uuidString)
+            }
+            // After the rows are gone, as in `beginArchiveWorktree`.
+            await detachDevServerOutputsForArchive(worktreeID: current.id)
+            let removedPanelTabIDs = try await db.worktrees.archive(id: current.id)
+            subscriptions?.broadcastPanelSurfacesRemoved(
+                worktreeID: current.id, tabIDs: removedPanelTabIDs)
         }
 
         // Report unmanaged worktrees (skip the main repo worktree).
@@ -478,8 +492,7 @@ extension WorktreeLifecycle {
         // pass reading a spent budget. `defer` cannot await, so the throw is
         // caught and rethrown instead.
         do {
-            try await reconcileTerminalsWhileLockedPerServer(
-                in: worktrees, actuationLog: actuationLog)
+            try await sweepTerminals(in: worktrees, actuationLog: actuationLog)
         } catch {
             await holderProbeBudget.end()
             throw error
@@ -487,34 +500,14 @@ extension WorktreeLifecycle {
         await holderProbeBudget.end()
     }
 
-    /// The per-server half of `reconcileTerminals`, split out only so its
-    /// caller can bracket it with the pass's probe budget.
-    private func reconcileTerminalsWhileLockedPerServer(
-        in worktrees: [LocalWorktree], actuationLog: ActuationLog
-    ) async throws {
-        let grouped = Dictionary(grouping: worktrees, by: \.tmuxServer)
-        for server in grouped.keys.sorted() {
-            let candidates = grouped[server] ?? []
-            try await tmux.withServerResourceLock(server: server) {
-                var currentWorktrees: [LocalWorktree] = []
-                for candidate in candidates {
-                    guard let current = try await db.worktrees.getLocal(id: candidate.id),
-                          current.tmuxServer == server else { continue }
-                    currentWorktrees.append(current)
-                }
-                try await reconcileTerminalsWhileLocked(
-                    in: currentWorktrees, actuationLog: actuationLog)
-            }
-        }
-    }
-
-    /// The sweep, while the caller holds the server resource lock, which
-    /// serializes it against a spawn committing terminal rows for the same
-    /// worktrees.
+    /// The sweep itself, split out only so `reconcileTerminals` can bracket it
+    /// with the pass's probe budget.
     ///
-    /// Neither arm's ground truth depends on the lock: a holder row's is its
-    /// own rendezvous, and a tmux row's is a socket TBD no longer serves.
-    private func reconcileTerminalsWhileLocked(
+    /// Neither arm's ground truth is held still by anything this pass takes:
+    /// a holder row's is its own rendezvous, and a tmux row's is a socket TBD
+    /// does not serve. Every write it makes is a compare-and-set against the
+    /// row it read.
+    private func sweepTerminals(
         in worktrees: [LocalWorktree], actuationLog: ActuationLog
     ) async throws {
         // The tmux server each worktree row stores, probed once per name and
@@ -528,16 +521,16 @@ extension WorktreeLifecycle {
             // reach, and the row is already exactly what this pass would
             // produce.
             for terminal in terminals where !terminal.isParked {
-                // A nonparked Codex row with a pending incarnation is the
-                // durable handoff for Continue-in-Claude rollback. Startup
-                // recovery cannot launch Codex until the hook socket is live,
-                // so this earlier ownership sweep must preserve the row even
-                // when its recorded window is missing or reassigned. The
-                // continuation reconciler rotates the token and establishes
-                // process ownership after bind.
+                // A nonparked Codex row with a pending incarnation is an
+                // unfinished Continue in Claude fence, which nothing in the
+                // daemon finishes. The row still holds its Codex
+                // source identity. The recovery park below would carry the
+                // fence onto a parked row, where it reads as a park still in
+                // flight, so the row is kept as it is and logged instead;
+                // closing its tab clears it.
                 if terminal.kind == .codex,
                    terminal.pendingSessionIncarnationID != nil {
-                    logger.info("reconcile: preserving pending Codex recovery terminal \(terminal.id, privacy: .public) for post-bind continuation recovery")
+                    logger.warning("reconcile: keeping Codex terminal \(terminal.id, privacy: .public) as it is — an earlier build left a Continue in Claude replacement unfinished on it; close the tab to clear it")
                     continue
                 }
                 // **Two transports, one outcome.** Each arm establishes the

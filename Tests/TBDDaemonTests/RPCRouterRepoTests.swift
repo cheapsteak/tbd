@@ -217,7 +217,7 @@ extension RPCRouterTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         router.orphanGC = OrphanGC(
             db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] }, scratchpadBase: base)
@@ -258,7 +258,7 @@ extension RPCRouterTests {
         try await db.config.setGCEnabled(false)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         router.orphanGC = OrphanGC(
             db: db, git: GitManager(), broadcast: { _ in }, lsofProvider: { [] }, scratchpadBase: base)

@@ -3,10 +3,10 @@ import TBDShared
 
 /// Names the process each live agent tab runs from, for `AgentBackgroundController`.
 ///
-/// A root is the top of the tab's own tree: the job a holder forked for a holder
-/// tab, the pane's process for a tmux tab. Never the holder and never the tmux
-/// server, which carry the terminal's input and output. Parked tabs name no
-/// process and are skipped.
+/// A root is the top of the tab's own tree: the job a holder forked. Never the
+/// holder, which carries the terminal's input and output. Parked tabs name no
+/// process and are skipped, and so are tabs still on the tmux transport, which
+/// TBD runs no tmux command to read.
 struct AgentBackgroundRoots: Sendable {
     let database: TBDDatabase
     let tmux: TmuxManager
@@ -20,14 +20,10 @@ struct AgentBackgroundRoots: Sendable {
             // same reading `isClaudeTab` gives it everywhere else.
             guard terminal.isCodexTerminal || terminal.isClaudeTab, !terminal.isParked
             else { continue }
-            let root: pid_t?
-            switch terminal.transport {
-            case .holder:
-                root = holderJob(of: terminal)
-            default:
-                root = await panePID(of: terminal)
+            guard terminal.transport == .holder else { continue }
+            if let root = holderJob(of: terminal), root > 1, !roots.contains(root) {
+                roots.append(root)
             }
-            if let root, root > 1, !roots.contains(root) { roots.append(root) }
         }
         return roots
     }
@@ -46,12 +42,5 @@ struct AgentBackgroundRoots: Sendable {
         let anchor = HolderChildIdentity.anchor(of: terminal)
         guard abs(started.timeIntervalSince(anchor)) <= HolderChildIdentity.startWindow else { return nil }
         return job
-    }
-
-    private func panePID(of terminal: Terminal) async -> pid_t? {
-        guard let worktree = (try? await database.worktrees.getLocal(id: terminal.worktreeID)) ?? nil,
-              let text = try? await tmux.panePID(server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
-        else { return nil }
-        return pid_t(text)
     }
 }

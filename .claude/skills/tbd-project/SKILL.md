@@ -47,7 +47,7 @@ JSON over Unix socket. `RPCRequest` has `method: String` and `params: String` (r
 
 ### Tmux Integration
 
-Every session opens on the pty holder, and TBD cannot show, send to or park a tmux session. A row still recorded as `tmux` is parked once its tmux server is gone; while the server may still be running, the app shows a notice with the `tmux -L <server> kill-server` command that ends it. Details: the "Tmux Architecture" section of `references/architecture.md`; the old viewer's design record is `docs/tmux-integration.md`.
+Every session opens on the pty holder, and TBD cannot show, send to, park or end a tmux session. A row still recorded as `tmux` is parked once its tmux server is gone; while the server may still be running, the app shows a notice with the `tmux -L <server> kill-server` command that ends it. Closing a tmux row's tab deletes the row and runs no tmux command. Details: the "Tmux Architecture" section of `references/architecture.md`; the old viewer's design record is `docs/tmux-integration.md`.
 
 ### Git Operations
 

@@ -21,7 +21,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -71,7 +72,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
 
     await #expect(throws: WorktreeLifecycleError.self) {
@@ -88,7 +90,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)

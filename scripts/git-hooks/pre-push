@@ -85,6 +85,17 @@ else
   echo "[pre-push] This branch predates scripts/lint-daemon-layers.py; skipping the daemon layer check."
 fi
 
+# Every test construction of a WorktreeLifecycle or a HibernationCoordinator
+# names its leftover-tmux probe, so no suite reads this machine's process
+# table. About 2 s, build-free, and guarded like the layer check above for a
+# branch from before it.
+if [ -f scripts/lint-test-leftover-tmux-probe.py ]; then
+  echo "[pre-push] Checking that tests name their leftover-tmux probe..."
+  python3 scripts/lint-test-leftover-tmux-probe.py
+else
+  echo "[pre-push] This branch predates scripts/lint-test-leftover-tmux-probe.py; skipping the probe check."
+fi
+
 if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
   echo "[pre-push] TBD_SKIP_PREPUSH_TESTS=1 — skipping the guarded test pass."
   exit 0

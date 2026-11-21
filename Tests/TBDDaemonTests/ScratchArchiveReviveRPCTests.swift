@@ -20,7 +20,8 @@ private func makeRouter(db: TBDDatabase) -> (router: RPCRouter, deltas: Broadcas
     }
     let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     var lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: .absent)
     lifecycle.holderRegistry = registry
     let router = RPCRouter(
         db: db,
@@ -286,6 +287,35 @@ struct WorktreeArchiveScratchRoutingRPCTests {
             params: WorktreeArchiveParams(worktreeID: wt.id))).success)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
         #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).isEmpty)
+    }
+
+    /// A scratch archive whose live tmux row's mark cannot be written fails
+    /// before any session is ended or row deleted: the space stays active,
+    /// every row stays, the tmux row among them to guard its session, and
+    /// nothing is recorded.
+    @Test func archiveWhoseTmuxMarkCannotBeWrittenFailsAndKeepsEveryRow() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let (router, _) = makeRouter(db: db)
+        let wt = try await makeScratch(router, name: "wt-archive-unmarkable")
+        let tmuxRow = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-acme-scratch",
+            kind: .claude, transport: .tmux)
+        let rowsBefore = Set(try await db.terminals.list(worktreeID: wt.id).map(\.id))
+        try await db.failTerminalHistoryWritesForTests()
+
+        let archive = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: wt.id)))
+
+        #expect(!archive.success)
+        #expect(archive.error?.contains("Terminal \(tmuxRow.id) was not closed") == true,
+                "error: \(archive.error ?? "nil")")
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .active)
+        #expect(Set(try await db.terminals.list(worktreeID: wt.id).map(\.id)) == rowsBefore)
+        #expect(rowsBefore.contains(tmuxRow.id))
+        #expect(try await db.terminalHistory.list(worktreeID: wt.id).isEmpty)
     }
 
     /// `--force` is accepted and changes nothing on this path. What it governs

@@ -56,6 +56,24 @@ struct TerminalSpawnTransport: Sendable {
 }
 
 extension WorktreeLifecycle {
+    /// The worktree a spawn is about to open a terminal in, read again just
+    /// before the spawn, so a worktree archived, deleted or moved to another
+    /// status since the caller looked is refused rather than given a new
+    /// session. Throws `WorktreeLifecycleError.worktreeNotFound` when the row
+    /// is gone or its status is not one of `allowedStatuses`.
+    ///
+    /// Static and handed the database, because the router's spawn paths call
+    /// it with their own database as the lifecycle's do with theirs.
+    static func worktreeForSpawn(
+        db: TBDDatabase, id: UUID, allowedStatuses: Set<WorktreeStatus>
+    ) async throws -> LocalWorktree {
+        guard let current = try await db.worktrees.getLocal(id: id),
+              allowedStatuses.contains(current.status) else {
+            throw WorktreeLifecycleError.worktreeNotFound(id)
+        }
+        return current
+    }
+
     /// **The one place a terminal is spawned and its row written.**
     ///
     /// Every spawn path — the primary terminal at worktree creation, the setup
@@ -68,6 +86,20 @@ extension WorktreeLifecycle {
     /// thing to get wrong: the holder launch composition, the row that records
     /// the transport and the pids, the stamp `ProcessIdentityCheck` later
     /// compares, and the cleanup for a spawn whose row could not be written.
+    ///
+    /// **It is also where the resume gate is asked for every new row.** A spawn
+    /// that names a session it does not fork — a resume, a restored archived
+    /// tab, or a fresh session whose id was just minted — is refused with
+    /// `TmuxResumeRefusal` before anything starts while a tmux row carries that
+    /// session, or a live tmux row TBD deleted carried it, and that row's tmux
+    /// server may still be running it (`TmuxResumeGate`). A fresh id is in
+    /// neither record, so it costs the gate's two reads. A spawn that forks
+    /// the session it names (`forksSession`) is not asked: it starts a new
+    /// session id and never a second agent on that one. Callers that write
+    /// anything for the session before they get here — a spawn record, a
+    /// session title, a revive's restore plan, a new worktree — ask the same
+    /// gate first, so this answer is the backstop for a tmux row or a mark
+    /// written in between.
     ///
     /// - Parameters:
     ///   - env: inlined as `export K='v';` in front of the command, so it lands
@@ -94,6 +126,12 @@ extension WorktreeLifecycle {
     ///     with, nil for every other spawn and for a Codex spawn with none.
     ///     Written in the same insert, so every later relaunch of Codex in this
     ///     tab can reapply them.
+    ///   - forksSession: true when `command` starts Claude with
+    ///     `--fork-session` from `claudeSessionID`, or is the fork tab of a
+    ///     profile switch, which forks the session or starts a fresh one. Such
+    ///     a spawn writes a new session id and runs no second agent on the one
+    ///     it names, so the resume gate is not asked. False for every other
+    ///     spawn, a Codex resume included: Codex has no fork.
     func spawnTerminal(
         id: UUID,
         worktreeID: UUID,
@@ -111,8 +149,13 @@ extension WorktreeLifecycle {
         serverName: String? = nil,
         sessionIncarnationID: UUID? = nil,
         claudeSpawnExtras: ClaudeSpawnExtras? = nil,
-        codexLaunchOptions: CodexLaunchOptions? = nil
+        codexLaunchOptions: CodexLaunchOptions? = nil,
+        forksSession: Bool = false
     ) async throws -> Terminal {
+        if !forksSession, let claudeSessionID,
+           let refusal = try await tmuxResumeRefusal(resuming: [claudeSessionID]) {
+            throw refusal
+        }
         let registry = transport.registry
         let holderHandle = try await registry.spawn(
             terminalID: id,

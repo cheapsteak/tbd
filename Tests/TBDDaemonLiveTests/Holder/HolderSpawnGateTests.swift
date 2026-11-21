@@ -443,12 +443,11 @@ struct HolderSpawnGateTests {
     // MARK: - Fork-session swap
 
     /// A `.fork` swap lands on a real holder, and its session recapture
-    /// addresses the holder's CHILD rather than a pane.
+    /// addresses the holder's CHILD.
     ///
-    /// The target assertion is the load-bearing half. A holder row's pane id is
-    /// the empty string by construction, so a fork that kept scheduling
-    /// `.tmuxPane` would poll a coordinate that can never resolve — and would
-    /// write whatever it happened to find onto the row.
+    /// The target assertion is the load-bearing half: the pid it names is the
+    /// one the holder recorded for the job it forked, so the recapture reads
+    /// that job's session and no other.
     @Test func forkSwapSpawnsOntoTheHolderAndRecapturesItsChild() async throws {
         let recapture = RecaptureProbe()
         let fixture = try await GateFixture.make(recapture: recapture)
@@ -485,7 +484,6 @@ struct HolderSpawnGateTests {
                 deadline: TestDeadlines.saturatedPass))
         }
         #expect(recapture.targets == [.holderChild(pid: childPID)])
-        #expect(recapture.panes.isEmpty, "a holder fork scheduled a pane recapture")
 
         // The source tab is untouched — a fork copies, it does not move.
         #expect(try await fixture.db.terminals.get(id: source.id) != nil)
@@ -508,11 +506,10 @@ struct HolderSpawnGateTests {
         #expect(holderPID != childPID)
         #expect(holderProcessIsAlive(holderPID))
         #expect(holderProcessIsAlive(childPID))
-        #expect(spawn.windowID.isEmpty)
-        #expect(spawn.paneID.isEmpty)
-
         let row = try #require(try await fixture.db.terminals.get(id: spawn.terminalID))
         #expect(row.transport == .holder)
+        #expect(row.tmuxWindowID.isEmpty)
+        #expect(row.tmuxPaneID.isEmpty)
         #expect(row.label == TerminalLabel.preSession)
 
         let issued = fixture.tmuxCommands()
@@ -732,15 +729,6 @@ private final class RecaptureProbe: @unchecked Sendable {
         lock.withLock { recorded }
     }
 
-    /// The panes recapture was scheduled against, in order — the tmux targets
-    /// only, so an assertion about panes keeps meaning what it always did.
-    var panes: [String] {
-        targets.compactMap {
-            if case .tmuxPane(_, let paneID) = $0 { return paneID }
-            return nil
-        }
-    }
-
     func scheduler(db: TBDDatabase, tmux: TmuxManager) -> SessionRecaptureScheduler {
         SessionRecaptureScheduler(
             db: db,
@@ -931,7 +919,8 @@ private final class GateFixture {
             // that turnaround off the production half-second, and the timeout is
             // a hang bound rather than a budget anything is expected to use.
             preSessionTimeout: 30,
-            preSessionPollInterval: 0.05)
+            preSessionPollInterval: 0.05,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),

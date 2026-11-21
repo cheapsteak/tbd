@@ -67,7 +67,8 @@ struct ActuationLogSpawnWiringTests {
             db: db,
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -265,7 +266,8 @@ struct ActuationLogSpawnWiringTests {
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)),
             signaller: signaller,
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: ActuationLog(path: logPath))
+            actuationLog: ActuationLog(path: logPath),
+            leftoverTmuxProbe: .absent)
         await coordinator.setHolderRegistry(makeHolderRegistryDouble(launch: FakeHolderLaunch()))
         await coordinator.setHolderProcessIsLive { _ in false }
         return coordinator

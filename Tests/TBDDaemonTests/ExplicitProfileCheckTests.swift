@@ -311,7 +311,8 @@ struct ExplicitProfileRPCTests {
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             modelProfileResolver: resolver,
             configDirManager: configDirManager,
-            preSessionPollInterval: 0.05)
+            preSessionPollInterval: 0.05,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,

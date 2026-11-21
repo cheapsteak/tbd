@@ -90,7 +90,8 @@ struct DevServerRPCTests {
         let db = try TBDDatabase(inMemory: true, terminalHistoryDir: home + "/terminal-history")
         let configDirManager = makeIsolatedConfigDirManager(tag: "dev-server-rpc")
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), configDirManager: configDirManager)
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), configDirManager: configDirManager,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),

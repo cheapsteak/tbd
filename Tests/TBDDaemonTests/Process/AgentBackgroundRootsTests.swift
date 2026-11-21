@@ -57,4 +57,26 @@ struct AgentBackgroundRootsTests {
         #expect(Set(resolved) == [claude, codex, legacy])
         #expect(resolved.count == 3)
     }
+
+    /// A live Claude tab still on tmux names no root: TBD runs no tmux command
+    /// to read its pane's process.
+    @Test("a live tab still on tmux is not a root")
+    func tmuxTabIsNotARoot() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "acme-wt", branch: "main",
+            path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
+        let fake = FakeProcessPriority()
+        let claude = try await addHolderTab(db, fake, worktree: worktree, index: 1, kind: .claude)
+        _ = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
+            kind: .claude, transport: .tmux)
+
+        let roots = AgentBackgroundRoots(
+            database: db, tmux: TmuxManager(dryRun: true), priority: fake)
+
+        #expect(await roots.resolve() == [claude])
+    }
 }

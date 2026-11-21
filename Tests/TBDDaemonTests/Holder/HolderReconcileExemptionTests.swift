@@ -8,9 +8,9 @@ import Testing
 /// The tmux arm of the reconcile sweep, and the rows it must not judge on
 /// tmux's evidence.
 ///
-/// `reconcileTerminalsWhileLocked` asks whether the worktree's tmux server is
-/// still running (`LeftoverTmuxServerProbe`) and, once it is gone, parks the
-/// resumable rows and deletes the rest. A holder-backed session does not run
+/// Reconcile's terminal sweep (`sweepTerminals`) asks whether the worktree's
+/// tmux server is still running (`LeftoverTmuxServerProbe`) and, once it is
+/// gone, parks the resumable rows and deletes the rest. A holder-backed session does not run
 /// in tmux at all — its `tmuxWindowID` is `""`, and the repo's tmux server may
 /// never have been started — so that probe can only ever answer "gone".
 /// Without the transport fork the sweep destroys a live holder session on the
@@ -42,9 +42,9 @@ struct HolderReconcileExemptionTests {
     /// it keeps the fixture from depending on what the machine's tmux
     /// directory holds.
     private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         return lifecycle
     }
 

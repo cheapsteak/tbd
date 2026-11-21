@@ -215,8 +215,6 @@ extension WorktreeLifecycle {
             let spawn = PreSessionSpawn(
                 terminalID: preSessionTerminal.id,
                 tmuxServer: worktree.tmuxServer,
-                windowID: preSessionTerminal.tmuxWindowID,
-                paneID: preSessionTerminal.tmuxPaneID,
                 markerPath: Self.preSessionMarkerPath(worktreeID: worktree.id),
                 // Informational only in phase 3; best-effort re-resolve.
                 hookPath: hooks.resolve(
@@ -228,10 +226,9 @@ extension WorktreeLifecycle {
                     )
                 ) ?? "",
                 // Carried from the row: a resumed wait must probe the hook tab
-                // in the terms its own transport has. A holder-backed tab has
-                // no tmux window, so a descriptor that claimed `.tmux` would
-                // ask a server that was never started and read the answer as a
-                // closed pane.
+                // in the terms its own transport has. A holder-backed tab's
+                // job is checked by its pid, which a descriptor that claimed
+                // `.tmux` would never ask about.
                 transport: preSessionTerminal.transport,
                 holderPID: preSessionTerminal.holderPID,
                 childPID: preSessionTerminal.childPID,

@@ -3,42 +3,16 @@ import TBDShared
 
 extension RPCRouter {
 
-    /// The message for a wake aimed at an unparked row whose pane disagrees.
-    /// Shared by `terminal.wake` and `terminal.resume` so the two verbs cannot
-    /// describe the same state differently. Always names
+    /// The message for a wake aimed at an unparked row whose holder's job has
+    /// exited. Shared by `terminal.wake` and `terminal.resume` so the two verbs
+    /// cannot describe the same state differently. Always names
     /// `tbd terminal conversation`, which still reads a dead session's messages
     /// — context can be rebuilt before the terminal is closed.
-    ///
-    /// An empty `paneID` is a holder-backed row rather than a nameless pane:
-    /// those carry `tmuxPaneID == ""` by construction, and the classification
-    /// that produced this result asked the process table, not tmux. Naming "its
-    /// tmux pane ()" there would send a reader looking for a coordinate that
-    /// was never supposed to exist.
-    static func unparkedWakeMessage(
-        paneID: String, detail: UnparkedPaneDisagreement
-    ) -> String {
-        let subject = paneID.isEmpty
-            ? "its holder-backed session"
-            : "its tmux pane (\(paneID))"
-        let cause: String
-        switch detail {
-        case .paneMissing:
-            cause = "\(subject) is gone"
-        case .processExited:
-            cause = paneID.isEmpty
-                ? "\(subject) has exited"
-                : "\(subject) is still there but its process has exited"
-        case .paneBelongsToAnotherTerminal(let actual):
-            cause = paneID.isEmpty
-                ? "\(subject) now belongs to a different terminal (\(actual))"
-                : "its pane coordinate (\(paneID)) now points at a different terminal (\(actual))"
-        }
-        return """
-            TBD's row says this terminal is awake, but \(cause) — so nothing was woken and any \
-            prompt was NOT delivered. Its conversation is still readable with `tbd terminal \
-            conversation <id>`, so context can be rebuilt before closing it.
-            """
-    }
+    static let unparkedWakeMessage = """
+        TBD's row says this terminal is awake, but its holder-backed session has exited — so \
+        nothing was woken and any prompt was NOT delivered. Its conversation is still readable \
+        with `tbd terminal conversation <id>`, so context can be rebuilt before closing it.
+        """
 
     /// `terminal.hibernate` — manually hibernate one Claude terminal (end its
     /// process, keep its row resumable). Honors the running/permission rails. It
@@ -137,13 +111,13 @@ extension RPCRouter {
             return try RPCResponse(result: payload)
         }
         switch result {
-        case .sessionGone(let paneID, let detail):
-            // NOT a benign no-op: the row claims awake but its pane disagrees,
-            // so there was nothing live to deliver `prompt` to. An error (not
-            // `woken: false`) is what lets an autonomous caller tell this apart
-            // from "already awake and healthy".
+        case .sessionGone:
+            // NOT a benign no-op: the row claims awake but its session has
+            // exited, so there was nothing live to deliver `prompt` to. An
+            // error (not `woken: false`) is what lets an autonomous caller tell
+            // this apart from "already awake and healthy".
             return RPCResponse(
-                error: RPCRouter.unparkedWakeMessage(paneID: paneID, detail: detail),
+                error: RPCRouter.unparkedWakeMessage,
                 code: RPCErrorCode.terminalSessionGone.rawValue)
         case .notFound:
             return RPCResponse(error: "Terminal not found")

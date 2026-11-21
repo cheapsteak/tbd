@@ -6,7 +6,7 @@ import TBDShared
 // A row exists for acts that touch a session's **process, pty, or lifecycle**.
 //
 //  - IN: spawning or disposing of a session, parking or waking one, and
-//    sending payload into one — local (tmux) or remote (provider).
+//    sending payload into one — local (holder) or remote (provider).
 //  - OUT: DB-only settings *about* a session (`setKeepWarm`, `setPin`,
 //    renames, config writes, worktree/notes/repo mutations). Nothing there
 //    reaches a process, so nothing there is an actuation.
@@ -17,8 +17,8 @@ import TBDShared
 //
 // Two layers write, and only two: the **RPC handler** for anything a caller
 // asked for, and a **rail's own entry point** for anything the daemon started
-// by itself. The shared lifecycle internals in between — `captureThenKillWindow`,
-// `tearDownWindow`, `performHibernate`, `closeScratchTerminals` — stay
+// by itself. The shared lifecycle internals in between — `disposeHolder`,
+// `closeLeftoverTmuxRow`, `performHibernate`, `closeScratchTerminals` — stay
 // silent, because both `worktree.archive` and the boot-time reconcile sweep
 // reach them and a row down there would double-count every archive. Reconcile
 // is an entry point in its own right (boot is what invoked it), so its rows are
@@ -90,7 +90,6 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// Parks a session, rewrites its transport and wakes it on the pty holder.
     case terminalMigrateTransport
     case terminalContinueInCodex
-    case terminalContinueInClaude
     case terminalHistoryRevive
     /// Creates a worktree and spawns its primary terminals. The row names the
     /// worktree, not a terminal: those are minted inside the lifecycle phase.
@@ -165,7 +164,6 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalSwapProfile: return RPCMethod.terminalSwapProfile
         case .terminalMigrateTransport: return RPCMethod.terminalMigrateTransport
         case .terminalContinueInCodex: return RPCMethod.terminalContinueInCodex
-        case .terminalContinueInClaude: return RPCMethod.terminalContinueInClaude
         case .terminalHistoryRevive: return RPCMethod.terminalHistoryRevive
         case .worktreeCreate: return RPCMethod.worktreeCreate
         case .scratchCreate: return RPCMethod.scratchCreate
@@ -194,7 +192,6 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
              .terminalMigrateTransport,
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
-             .terminalContinueInClaude,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
              .worktreeRerunPreSession, .remoteCreate, .remoteUnarchive, .serverStart: return .spawn
         case .terminalDelete, .worktreeArchive, .worktreeForget, .repoRemove,

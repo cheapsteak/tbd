@@ -263,7 +263,8 @@ struct HolderTmuxAssumptionGateTests {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             signaller: signaller, sessionsDir: sessionsDir, sessionTitles: sessionTitles,
-            actuationLog: makeTestActuationLog())
+            actuationLog: makeTestActuationLog(),
+            leftoverTmuxProbe: .absent)
         await coordinator.setHolderRegistry(registry)
         // A live holder, so the no-reader rail is what these rows reach;
         // the ended-session path has tests of its own.
@@ -314,9 +315,9 @@ struct HolderTmuxAssumptionGateTests {
         _ db: TBDDatabase, tmux: TmuxManager,
         probe: LeftoverTmuxServerProbe = LeftoverTmuxServerProbe { _ in .absent }
     ) -> RPCRouter {
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = probe
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            leftoverTmuxProbe: probe)
         return RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -971,10 +972,9 @@ struct HolderTmuxAssumptionGateTests {
     /// An UNPARKED holder row is CLASSIFIED rather than refused for its
     /// transport, and the classification comes from the PROCESS TABLE rather
     /// than from a tmux pane: this row's recorded job is gone, so the answer is
-    /// `.sessionGone` with an empty pane id, which is what `unparkedWakeMessage`
-    /// phrases as "its holder-backed session". Nothing is mutated and no tmux
-    /// command is issued — a tmux classification of the same row would have
-    /// probed the empty pane id.
+    /// `.sessionGone`, which `unparkedWakeMessage` phrases as "its
+    /// holder-backed session". Nothing is mutated and no tmux command is
+    /// issued.
     @Test("a wake of an unparked holder row is classified, not refused for its transport")
     func wakeOfAnUnparkedHolderRowIsClassified() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -992,7 +992,7 @@ struct HolderTmuxAssumptionGateTests {
         // about a fixture pid.
         let result = await coordinator(db, tmux: tmux, signaller: deadChildSignaller())
             .wake(terminalID: terminal.id)
-        #expect(result == .sessionGone(paneID: "", detail: .processExited))
+        #expect(result == .sessionGone)
 
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
@@ -1894,39 +1894,12 @@ struct HolderTmuxAssumptionGateTests {
         #expect(running.contains("--force"))
     }
 
-    @Test("the close rails still refuse a busy tmux row whose window is alive")
-    func closeRailsStillRefuseBusyTmuxRow() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        // The dry-run default reports every window ALIVE, which is the tmux
-        // state this leg is about.
-        let tmux = TmuxManager(dryRun: true)
-        let (wt, dir) = try await seedWorktree(db)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let terminal = try await seedClaudeTerminal(
-            db, worktreeID: wt.id, transport: .tmux)
-        try await db.terminals.setActivityState(
-            id: terminal.id, activityState: .working, source: .derived)
-
-        let router = router(db, tmux: tmux)
-        // Wired in and listing nothing, so an inverted transport comparison
-        // would consult a registry that has never heard of this row rather than
-        // a nil that would make the holder branch unreachable either way.
-        router.holderRegistry = holderRegistry(listing: [])
-        let response = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalDelete,
-            params: TerminalDeleteParams(terminalID: terminal.id, respectActivityRails: true)))
-
-        #expect(!response.success)
-        #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
-        #expect(try await db.terminals.get(id: terminal.id) != nil)
-    }
-
     /// The leg that would redden if the transport comparison were inverted.
-    /// Its window is dead and its registry has recorded nothing, so the tmux
-    /// branch answers "not running" (close) while the holder branch would
-    /// answer "running" (refuse) — the two legs disagree here and nowhere else.
-    @Test("the close rails still release a busy tmux row whose window is dead")
-    func closeRailsReleaseBusyTmuxRowWithDeadWindow() async throws {
+    /// Its registry has recorded nothing, so the holder branch would answer
+    /// "running" and refuse; a tmux row is not asked at all, because closing
+    /// it runs no tmux command and ends no process.
+    @Test("the close rails do not hold a busy tmux row, and run no tmux command")
+    func closeRailsReleaseBusyTmuxRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -1945,10 +1918,12 @@ struct HolderTmuxAssumptionGateTests {
 
         #expect(response.success, "error: \(response.error ?? "nil")")
         #expect(try await db.terminals.get(id: terminal.id) == nil)
+        #expect(recorded.snapshot().isEmpty,
+                "the rails asked tmux about a tmux row: \(recorded.snapshot())")
     }
 
-    @Test("delete still kills an identical tmux row's window")
-    func deleteStillKillsTmuxWindow() async throws {
+    @Test("delete removes an identical tmux row without running tmux")
+    func deleteLeavesTmuxRowSessionToTmux() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -1969,9 +1944,8 @@ struct HolderTmuxAssumptionGateTests {
 
         #expect(response.success, "error: \(response.error ?? "nil")")
         #expect(try await db.terminals.get(id: terminal.id) == nil)
-        let argv = recorded.snapshot()
-        #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
-                "the tmux leg must still kill its own window: \(argv)")
+        #expect(recorded.snapshot().isEmpty,
+                "closing a tmux row ran a tmux command: \(recorded.snapshot())")
     }
 
     // MARK: - Gate 10: the one mechanic that is routed rather than refused
@@ -2761,7 +2735,8 @@ struct HolderTmuxAssumptionGateTests {
         _ db: TBDDatabase, tmux: TmuxManager, registry: HolderRegistry?
     ) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         return lifecycle
     }
@@ -2792,8 +2767,8 @@ struct HolderTmuxAssumptionGateTests {
                 "archive reached tmux for a holder row: \(recorded.snapshot())")
     }
 
-    @Test("archiving a worktree still captures and kills an identical tmux row")
-    func archiveStillKillsTmuxWindow() async throws {
+    @Test("archiving a worktree removes an identical tmux row without running tmux")
+    func archiveLeavesTmuxRowSessionToTmux() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -2810,9 +2785,10 @@ struct HolderTmuxAssumptionGateTests {
             .beginArchiveWorktree(worktreeID: wt.id, discardUncommittedChanges: true)
 
         #expect(try await db.terminals.get(id: terminal.id) == nil)
-        let argv = recorded.snapshot()
-        #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
-                "the tmux leg must still kill its own window: \(argv)")
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .archived,
+                "a tmux row must not stop the archive")
+        #expect(recorded.snapshot().isEmpty,
+                "archive ran a tmux command for a tmux row: \(recorded.snapshot())")
     }
 
     // MARK: - Closed Terminals history on holder dispose
@@ -2956,8 +2932,8 @@ struct HolderTmuxAssumptionGateTests {
                 "forget reached tmux for a holder row: \(recorded.snapshot())")
     }
 
-    @Test("forgetting a worktree still kills an identical tmux row's window")
-    func forgetStillKillsTmuxWindow() async throws {
+    @Test("forgetting a worktree removes an identical tmux row without running tmux")
+    func forgetLeavesTmuxRowSessionToTmux() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -2971,9 +2947,8 @@ struct HolderTmuxAssumptionGateTests {
             .forgetWorktree(worktreeID: wt.id)
 
         #expect(try await db.terminals.get(id: terminal.id) == nil)
-        let argv = recorded.snapshot()
-        #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
-                "the tmux leg must still kill its own window: \(argv)")
+        #expect(recorded.snapshot().isEmpty,
+                "forget ran a tmux command for a tmux row: \(recorded.snapshot())")
     }
 
     // MARK: - Gate 7: the auto-resume rail, which types without a user gesture
@@ -3384,7 +3359,8 @@ struct HolderTmuxAssumptionGateTests {
             now: dates.provider,
             exitPollInterval: .milliseconds(1),
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: ActuationLog(path: logPath))
+            actuationLog: ActuationLog(path: logPath),
+            leftoverTmuxProbe: .absent)
         await coordinator.setHolderRegistry(registry)
         // A live holder, so the no-reader rail is what these rows reach;
         // the ended-session path has tests of its own.

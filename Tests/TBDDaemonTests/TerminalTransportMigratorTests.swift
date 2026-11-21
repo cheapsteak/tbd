@@ -94,9 +94,9 @@ struct TerminalTransportMigratorTests {
         /// A lifecycle over this fixture's database whose socket probe is
         /// `probe`, so no socket is asked.
         func lifecycle(probe: RecordingLeftoverTmuxProbe) -> WorktreeLifecycle {
-            var lifecycle = WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-            lifecycle.leftoverTmuxProbe = probe.probe
+            let lifecycle = WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                leftoverTmuxProbe: probe.probe)
             return lifecycle
         }
 
@@ -225,7 +225,8 @@ struct TerminalTransportMigratorTests {
             db: db, tmux: TmuxManager(dryRun: true),
             configDirManager: makeIsolatedConfigDirManager(tag: "transport-migration"),
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog(tag: "transport-migration"))
+            actuationLog: makeTestActuationLog(tag: "transport-migration"),
+            leftoverTmuxProbe: .absent)
         let registry: HolderRegistry
         if let holderLaunch {
             registry = makeHolderRegistryDouble(launch: holderLaunch)
@@ -246,10 +247,14 @@ struct TerminalTransportMigratorTests {
 
     /// A tmux-backed Claude row. `parked` is the difference the two migration
     /// paths turn on: a parked row is only rewritten, a live one is judged by
-    /// its tmux server first.
+    /// its tmux server first. `parkInFlight` parks it with the park still in
+    /// flight (`pendingSessionIncarnationID` set), the way an earlier build's
+    /// tmux hibernate left a row whose respawn failed after it had signalled
+    /// the agent; such a row is judged by its tmux server first too.
     private static func tmuxRow(
         _ fixture: Fixture,
         parked: Bool = false,
+        parkInFlight: Bool = false,
         activityState: TerminalActivityState = .idle,
         kind: TerminalKind? = .claude,
         label: String = TerminalLabel.claudeCode,
@@ -277,6 +282,12 @@ struct TerminalTransportMigratorTests {
         if parked, let claudeSessionID {
             try await fixture.db.terminals.setHibernated(
                 id: created.id, sessionID: claudeSessionID, reason: parkReason)
+        }
+        if parkInFlight {
+            let live = try #require(try await fixture.db.terminals.get(id: created.id))
+            _ = try #require(try await fixture.db.terminals.beginHibernatedShellRespawn(
+                id: created.id, expectedState: TerminalHibernationSnapshot(terminal: live),
+                reason: parkReason))
         }
         return try #require(try await fixture.db.terminals.get(id: created.id))
     }
@@ -450,6 +461,51 @@ struct TerminalTransportMigratorTests {
         #expect(after.transport == .holder)
         #expect(after.claudeSessionID == Self.sessionID)
         #expect(after.holderPID == launch.handle.holderPID)
+    }
+
+    /// A row parked with its park still in flight may still be running its
+    /// agent, so it is judged as a live row is: its server is probed first,
+    /// and while the probe says it may run the move is refused with the
+    /// command that ends it and the row is untouched. Rewritten, the row would
+    /// leave the resume gate's reach, and its next wake would start the
+    /// session on the holder beside the tmux agent.
+    @Test("a row whose park is in flight is refused while its server may run")
+    func aRowWhoseParkIsInFlightIsRefusedWhileItsServerMayRun() async throws {
+        let holder = FakeHolderLaunch()
+        let fixture = try await Self.makeFixture(holderLaunch: holder)
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, parkInFlight: true)
+        #expect(row.isParked)
+        #expect(row.pendingSessionIncarnationID != nil)
+        let probe = RecordingLeftoverTmuxProbe(answer: { _ in .running })
+
+        let outcome = await fixture.productionMigrator(probe: probe).migrate(terminalID: row.id)
+
+        #expect(outcome == .refused(reason: LeftoverTmuxSession.stillRunningRefusal(
+            terminalID: row.id, server: Self.server)))
+        #expect(probe.servers == [Self.server])
+        #expect(holder.launches.isEmpty, "a refused move launched something")
+        #expect(try await fixture.db.terminals.get(id: row.id) == row)
+    }
+
+    /// Once the probe has found its server gone, a row whose park is in
+    /// flight moves as any parked row does: rewritten, with nothing spawned.
+    @Test("a row whose park is in flight is rewritten once its server is gone")
+    func aRowWhoseParkIsInFlightIsRewrittenOnceItsServerIsGone() async throws {
+        let holder = FakeHolderLaunch()
+        let fixture = try await Self.makeFixture(holderLaunch: holder)
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, parkInFlight: true)
+        let probe = RecordingLeftoverTmuxProbe(answer: { _ in .absent })
+
+        let outcome = await fixture.productionMigrator(probe: probe).migrate(terminalID: row.id)
+
+        #expect(outcome == .migrated)
+        #expect(probe.servers == [Self.server])
+        #expect(holder.launches.isEmpty, "the move launched something")
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(after.transport == .holder)
+        #expect(after.isParked, "the rewrite woke a parked row")
     }
 
     // MARK: - A live row whose tmux server may still run

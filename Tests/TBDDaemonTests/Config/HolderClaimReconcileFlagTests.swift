@@ -33,7 +33,7 @@ struct HolderClaimReconcileFlagTests {
         let tmux = TmuxManager(dryRun: true)
         return RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
     }
 

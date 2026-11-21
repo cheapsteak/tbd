@@ -20,6 +20,9 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
     var exitCode: Int32?
     /// JSON-encoded `ClaudeSpawnExtras` copied from the closing terminal row.
     var claudeSpawnExtras: String?
+    /// The tmux server a deleted live tmux row's session may still run in
+    /// (`TerminalHistoryEntry.liveOnTmuxServer`).
+    var liveOnTmuxServer: String?
 
     init(from entry: TerminalHistoryEntry) {
         self.id = entry.id.uuidString
@@ -32,6 +35,7 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
         self.serverName = entry.serverName
         self.exitCode = entry.exitCode
         self.claudeSpawnExtras = ClaudeSpawnExtrasColumn.encode(entry.claudeSpawnExtras)
+        self.liveOnTmuxServer = entry.liveOnTmuxServer
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -56,24 +60,29 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
             serverName: serverName,
             exitCode: exitCode,
             claudeSpawnExtras: ClaudeSpawnExtrasColumn.decode(
-                claudeSpawnExtras, table: Self.databaseTableName, rowID: id)
+                claudeSpawnExtras, table: Self.databaseTableName, rowID: id),
+            liveOnTmuxServer: liveOnTmuxServer
         )
     }
 }
 
 /// Read-only closed-terminal history: at close time the daemon captures the
-/// pane's scrollback so the user can view it later.
+/// terminal's screen and scrollback so the user can view it later.
 ///
 /// Captured TEXT is file-backed at
 /// `~/tbd/terminal-history/<worktreeID>/<terminalID>.txt`
 /// (`TBDConstants.terminalHistoryPath`); the DB row keeps display metadata.
-/// Empty/whitespace-only captures store nothing (no file, no row) on the
-/// tmux path (`captureOnClose`); the holder path (`recordOnClose`) writes the
-/// row without a file instead. Entries for a dev server's saved last output
-/// carry `serverName` and `exitCode` (`recordServerExit`).
+/// A close with no capture, or an empty or whitespace-only one, writes the
+/// row without a file (`recordOnClose`). Entries for a dev server's saved last
+/// output carry `serverName` and `exitCode` (`recordServerExit`). The entry of
+/// a live tmux row TBD deleted carries the tmux server its session may still
+/// run in (`recordLiveTmuxClose`).
 public struct TerminalHistoryStore: Sendable {
     // ponytail: hard cap of the newest 50 captures per worktree; make it a
-    // config knob only if someone actually asks for more retention.
+    // config knob only if someone actually asks for more retention. An entry
+    // marked `liveOnTmuxServer` is outside the cap: the mark is what keeps a
+    // resume of its session from starting a second agent, so it stays until
+    // the worktree's history is deleted.
     static let maxEntriesPerWorktree = 50
 
     let writer: any DatabaseWriter
@@ -101,45 +110,47 @@ public struct TerminalHistoryStore: Sendable {
 
     // MARK: - Capture
 
-    /// Best-effort capture at terminal close. Runs `capture`, then stores the
-    /// text (file + metadata row) and prunes the worktree to the newest
-    /// `maxEntriesPerWorktree` records. NEVER throws — any failure is logged
-    /// and the close proceeds unchanged. Empty/whitespace-only captures store
-    /// nothing.
-    public func captureOnClose(terminal: Terminal, capture: () async throws -> String) async {
-        let text: String
-        do {
-            text = try await capture()
-        } catch {
-            logger.warning("scrollback capture failed for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return
-        }
-        await store(terminal: terminal, text: text, closedAt: Date())
-    }
-
-    /// Holder-transport close: writes an entry whether or not there is a
-    /// capture. NEVER throws.
+    /// Terminal close: writes an entry whether or not there is a capture, then
+    /// prunes the worktree to the newest `maxEntriesPerWorktree` records.
+    /// NEVER throws — any failure is logged and the close proceeds unchanged.
     ///
-    /// Unlike `captureOnClose`, a missing or blank capture still writes the
-    /// metadata row (no content file, `lineCount` 0). A holder's screen can be
-    /// unreadable at close for a reason that says nothing about the session —
-    /// a viewer holds the pty, so the daemon's copy is frozen — and the entry
-    /// is still what lets a Claude session be revived by its session id.
+    /// A missing or blank capture still writes the metadata row (no content
+    /// file, `lineCount` 0). A holder's screen can be unreadable at close for a
+    /// reason that says nothing about the session — a viewer holds the pty, so
+    /// the daemon's copy is frozen — and the entry is still what lets a Claude
+    /// session be revived by its session id.
     /// Revive already handles a missing file (the shell path skips the `cat`),
     /// and the viewer reads a missing file as empty.
     ///
     /// A capture-less close of a terminal that already has an entry leaves
     /// that entry alone. A second close of one terminal is a retried teardown
-    /// (the rows survived a failed delete or an unrecorded reconcile kill), and
-    /// by then the first close has disposed the holder, so the retry can only
-    /// answer "no capture": overwriting would throw away the first close's
-    /// capture, as the tmux path never does when its capture fails. The check
-    /// and the insert are one transaction, and a capture-less close touches no
-    /// file, so it cannot remove a capture a concurrent close is writing.
+    /// (the rows survived a failed delete or an unrecorded reconcile teardown),
+    /// and by then the first close has disposed the holder, so the retry can
+    /// only answer "no capture": overwriting would throw away the first
+    /// close's capture. The check and the insert are one transaction, and a
+    /// capture-less close touches no file, so it cannot remove a capture a
+    /// concurrent close is writing.
     public func recordOnClose(terminal: Terminal, capture: String?) async {
         await persist(
             terminal: terminal, text: Self.nonBlank(capture), closedAt: Date(),
             keepingExistingEntryWithoutText: true)
+    }
+
+    /// Close of a live tmux row, which TBD deletes without running tmux, so
+    /// the session it carried may keep running in `server`. Writes the entry
+    /// as a capture-less `recordOnClose` does, marked with `server`, and marks
+    /// the terminal's existing entry when it already has one. The mark is what
+    /// every resume of the entry's session id asks about before it starts that
+    /// session on the pty holder (`TmuxResumeGate`).
+    ///
+    /// Throws when the entry cannot be written, unlike every other close
+    /// here: once the row is deleted the mark is the only record that the
+    /// session may still be running, so a caller that cannot write it keeps
+    /// the row (`WorktreeLifecycle.closeLeftoverTmuxRow`).
+    public func recordLiveTmuxClose(terminal: Terminal, server: String) async throws {
+        try await write(
+            terminal: terminal, text: nil, closedAt: Date(),
+            keepingExistingEntryWithoutText: true, liveOnTmuxServer: server)
     }
 
     /// Store seam (internal so tests can control `closedAt` for deterministic
@@ -150,7 +161,7 @@ public struct TerminalHistoryStore: Sendable {
     }
 
     /// `text` unless it is empty or whitespace-only — the one statement of
-    /// what counts as "no capture" for both close paths. Scans only up to the
+    /// what counts as "no capture" for every close path. Scans only up to the
     /// first visible character rather than trimming a copy of the capture.
     private static func nonBlank(_ text: String?) -> String? {
         guard let text, text.unicodeScalars.contains(where: {
@@ -159,75 +170,98 @@ public struct TerminalHistoryStore: Sendable {
         return text
     }
 
-    /// Writes the content file (when there is text — callers pass it through
-    /// `nonBlank`), the metadata row, and prunes. Without text it writes the
-    /// row alone, and with `keepingExistingEntryWithoutText` only when the
-    /// terminal has no entry yet.
+    /// `write`, best-effort: a failure is logged and the close proceeds.
     private func persist(
         terminal: Terminal, text: String?, closedAt: Date,
         keepingExistingEntryWithoutText: Bool = false
     ) async {
+        do {
+            try await write(
+                terminal: terminal, text: text, closedAt: closedAt,
+                keepingExistingEntryWithoutText: keepingExistingEntryWithoutText)
+        } catch {
+            logger.warning("failed to store closed-terminal history for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Writes the content file (when there is text — callers pass it through
+    /// `nonBlank`), the metadata row, and prunes. Without text it writes the
+    /// row alone, and with `keepingExistingEntryWithoutText` only when the
+    /// terminal has no entry yet; a kept entry still takes `liveOnTmuxServer`.
+    /// A re-save never clears a mark the entry already has.
+    private func write(
+        terminal: Terminal, text: String?, closedAt: Date,
+        keepingExistingEntryWithoutText: Bool = false,
+        liveOnTmuxServer: String? = nil
+    ) async throws {
         let path = contentPath(worktreeID: terminal.worktreeID, terminalID: terminal.id)
         let keepExisting = keepingExistingEntryWithoutText && text == nil
-        do {
-            if let text {
-                try FileManager.default.createDirectory(
-                    atPath: (path as NSString).deletingLastPathComponent,
-                    withIntermediateDirectories: true
-                )
-                try text.write(toFile: path, atomically: true, encoding: .utf8)
-            }
-
-            let entry = TerminalHistoryEntry(
-                id: terminal.id,
-                worktreeID: terminal.worktreeID,
-                label: terminal.label,
-                kind: terminal.kind,
-                closedAt: closedAt,
-                claudeSessionID: terminal.claudeSessionID,
-                lineCount: text.map {
-                    $0.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
-                } ?? 0,
-                // A Claude tab's values only. A failed pre-session hook's
-                // shell row keeps the create's values while its tab lives,
-                // and a reopen of a shell entry has no use for them.
-                claudeSpawnExtras: terminal.isClaudeTab ? terminal.claudeSpawnExtras : nil
+        if let text {
+            try FileManager.default.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true
             )
-            let record = TerminalHistoryRecord(from: entry)
-            let worktreeID = terminal.worktreeID
-            let pruned = try await writer.write { db -> [String] in
-                if keepExisting,
-                   try TerminalHistoryRecord.exists(db, key: record.id) {
-                    return []
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+
+        let entry = TerminalHistoryEntry(
+            id: terminal.id,
+            worktreeID: terminal.worktreeID,
+            label: terminal.label,
+            kind: terminal.kind,
+            closedAt: closedAt,
+            claudeSessionID: terminal.claudeSessionID,
+            lineCount: text.map {
+                $0.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
+            } ?? 0,
+            // A Claude tab's values only. A failed pre-session hook's
+            // shell row keeps the create's values while its tab lives,
+            // and a reopen of a shell entry has no use for them.
+            claudeSpawnExtras: terminal.isClaudeTab ? terminal.claudeSpawnExtras : nil,
+            liveOnTmuxServer: liveOnTmuxServer
+        )
+        let record = TerminalHistoryRecord(from: entry)
+        let worktreeID = terminal.worktreeID
+        let pruned = try await writer.write { db -> [String] in
+            if keepExisting,
+               try TerminalHistoryRecord.exists(db, key: record.id) {
+                if let liveOnTmuxServer {
+                    try db.execute(
+                        sql: "UPDATE terminal_history SET liveOnTmuxServer = ? WHERE id = ?",
+                        arguments: [liveOnTmuxServer, record.id])
                 }
-                // A re-save (a later close of the same tab) carries no server
-                // fields — they are stamped only by `recordServerExit`. Keep
-                // the stored ones, or closing an exited server's tab would
-                // silently clear its saved last output.
-                var saved = record
-                if saved.serverName == nil,
-                   let existing = try TerminalHistoryRecord.fetchOne(db, key: saved.id) {
+                return []
+            }
+            // A re-save (a later close of the same tab) carries no server
+            // fields — they are stamped only by `recordServerExit`. Keep
+            // the stored ones, or closing an exited server's tab would
+            // silently clear its saved last output. Its tmux mark is kept
+            // the same way.
+            var saved = record
+            if let existing = try TerminalHistoryRecord.fetchOne(db, key: saved.id) {
+                if saved.serverName == nil {
                     saved.serverName = existing.serverName
                     saved.exitCode = existing.exitCode
                 }
-                try saved.save(db)
-                // Prune to the newest N; rowid breaks closedAt ties (insertion order).
-                let stale = try String.fetchAll(db, sql: """
-                    SELECT id FROM terminal_history WHERE worktreeID = ?
-                    ORDER BY closedAt DESC, rowid DESC LIMIT -1 OFFSET ?
-                    """, arguments: [worktreeID.uuidString, Self.maxEntriesPerWorktree])
-                if !stale.isEmpty {
-                    try TerminalHistoryRecord.filter(keys: stale).deleteAll(db)
-                }
-                return stale
+                saved.liveOnTmuxServer = saved.liveOnTmuxServer ?? existing.liveOnTmuxServer
             }
-            for staleID in pruned {
-                guard let staleUUID = UUID(uuidString: staleID) else { continue }
-                let stalePath = contentPath(worktreeID: worktreeID, terminalID: staleUUID)
-                try? FileManager.default.removeItem(atPath: stalePath)
+            try saved.save(db)
+            // Prune to the newest N unmarked entries; rowid breaks
+            // closedAt ties (insertion order).
+            let stale = try String.fetchAll(db, sql: """
+                SELECT id FROM terminal_history
+                WHERE worktreeID = ? AND liveOnTmuxServer IS NULL
+                ORDER BY closedAt DESC, rowid DESC LIMIT -1 OFFSET ?
+                """, arguments: [worktreeID.uuidString, Self.maxEntriesPerWorktree])
+            if !stale.isEmpty {
+                try TerminalHistoryRecord.filter(keys: stale).deleteAll(db)
             }
-        } catch {
-            logger.warning("failed to store closed-terminal history for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return stale
+        }
+        for staleID in pruned {
+            guard let staleUUID = UUID(uuidString: staleID) else { continue }
+            let stalePath = contentPath(worktreeID: worktreeID, terminalID: staleUUID)
+            try? FileManager.default.removeItem(atPath: stalePath)
         }
     }
 
@@ -331,6 +365,22 @@ public struct TerminalHistoryStore: Sendable {
     }
 
     // MARK: - Queries
+
+    /// The tmux servers the marked entries of `sessionIDs` name, in any
+    /// worktree, each once and in name order: the servers those sessions may
+    /// still be running in (`recordLiveTmuxClose`). Empty when none of them is
+    /// marked, which is one read of the marked entries' index.
+    public func liveOnTmuxServers(sessionIDs: [String]) async throws -> [String] {
+        guard !sessionIDs.isEmpty else { return [] }
+        return try await writer.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT DISTINCT liveOnTmuxServer FROM terminal_history
+                WHERE liveOnTmuxServer IS NOT NULL
+                AND claudeSessionID IN (\(databaseQuestionMarks(count: sessionIDs.count)))
+                ORDER BY liveOnTmuxServer
+                """, arguments: StatementArguments(sessionIDs))
+        }
+    }
 
     /// List capture metadata for a worktree, newest first.
     public func list(worktreeID: UUID) async throws -> [TerminalHistoryEntry] {

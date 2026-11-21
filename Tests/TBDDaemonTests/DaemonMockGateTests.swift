@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
@@ -21,7 +22,8 @@ struct DaemonMockGateTests {
             db: db,
             git: git,
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
 
         // Seed a repo whose path definitely does not exist.
@@ -51,13 +53,13 @@ struct DaemonMockGateTests {
         db: TBDDatabase, state: LeftoverTmuxServerState,
         pendingQuestions: PendingPromptStore = PendingPromptStore()
     ) -> WorktreeLifecycle {
-        var lifecycle = WorktreeLifecycle(
+        let lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
-            pendingQuestions: pendingQuestions)
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in state }
+            pendingQuestions: pendingQuestions,
+            leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in state })
         return lifecycle
     }
 
@@ -138,10 +140,10 @@ struct DaemonMockGateTests {
                 == ["toolu_running"])
     }
 
-    @Test("mock OFF: startup preserves pending Codex recovery for post-bind handoff")
+    @Test("mock OFF: startup keeps a Codex row an earlier build's Continue in Claude left fenced")
     func mockOffPreservesPendingCodexRecoveryBeforeOrdinaryDisposal() async throws {
         let db = try TBDDatabase(inMemory: true)
-        // The server is gone, so only the pending-recovery guard keeps the row.
+        // The server is gone, so only the fence guard keeps the row.
         let lifecycle = makeLifecycle(db: db, state: .absent)
         let scratch = try await db.worktrees.createScratch(
             name: "scratch-pending-recovery",
@@ -155,11 +157,13 @@ struct DaemonMockGateTests {
             label: TerminalLabel.codex,
             claudeSessionID: "source-thread",
             kind: .codex)
+        // The fence an earlier build's Continue in Claude left on the row.
         let pendingToken = UUID()
-        _ = try #require(try await db.terminals.beginContinueInClaude(
-            id: terminal.id,
-            expectedState: TerminalContinueInClaudeSnapshot(terminal: terminal),
-            pendingIncarnationID: pendingToken))
+        try await db.writerForTests.write { db in
+            try db.execute(
+                sql: "UPDATE terminal SET pendingSessionIncarnationID = ? WHERE id = ?",
+                arguments: [pendingToken.uuidString, terminal.id.uuidString])
+        }
 
         await Daemon().performStartupReconciliation(
             mockMode: nil,
@@ -184,7 +188,8 @@ struct DaemonMockGateTests {
             db: db,
             git: git,
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
 
         let stalePath = "/tmp/tbd-mock-gate-nonexistent-\(UUID().uuidString)"

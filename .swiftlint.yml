@@ -527,18 +527,6 @@ custom_rules:
       # (display / transport / snapshot). Adding a file here draws High-severity review
       # scrutiny — see CLAUDE.md "No TUI screen-scraping".
       - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                     # defines the capture API
-      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"  # terminal.output returns text verbatim; terminal.delete snapshots scrollback into terminal-history
-      # Closed-terminal history: closeHookTerminal snapshots the dying pane's
-      # scrollback verbatim into ~/tbd/terminal-history for later READ-ONLY
-      # display (archival capture-for-display, the sanctioned use). The text is
-      # never parsed, matched, or used to infer agent/TUI state — exactly NOT
-      # the state-inference scraping the rule bans.
-      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"
-      # Same sanctioned archival-capture use: captureThenKillWindow snapshots a
-      # live terminal's scrollback verbatim into terminal-history before the
-      # archive/reconcile-auto-archive paths kill its window (the archived row +
-      # history survive). Never parsed for agent/TUI state.
-      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\.swift"
     regex: 'capturePane\w*\s*\(|capture-pane'
     match_kinds:
       - identifier
@@ -565,19 +553,13 @@ custom_rules:
       # misses actually took: a primitive called from a file that had never
       # actuated before.
       - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                          # defines the primitives; the implementation, not a caller
-      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers; each writes its own row before acting
       - "Sources/TBDDaemon/Server/RPCRouter\\+DevServerHandlers\\.swift"      # server.start / server.stop; one worktree-named row per call, written before any spawn, respawn or tab close
-      - "Sources/TBDDaemon/Server/RPCRouter\\+ContinueInClaudeHandlers\\.swift" # terminal.continueInClaude; one row covers destination + rollback/recovery
       # The shared lifecycle internals and phases. They stay deliberately
       # silent — `worktree.archive` and the reconcile sweep both reach them, and
       # a row down here would double-count every teardown — so their acts are
       # covered by the handler or rail row written one layer up.
-      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\.swift"               # captureThenKillWindow / tearDownWindow themselves
-      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Archive\\.swift"     # archive teardown; covered by worktree.archive / auto-archive-on-merge
-      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Forget\\.swift"      # forget teardown; covered by worktree.forget
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Create\\.swift"      # primary-terminal spawn; covered by worktree.create / scratch.create / revive
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+SpawnTerminal\\.swift" # the one spawn-and-record step every spawn path calls; covered by the caller's row: terminal.create / terminal.continueInCodex / worktree.create / scratch.create / revive
-      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"  # hook-terminal spawn and close; covered by worktree.rerunPreSession / create
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Reconcile\\.swift"   # the reconcile rail; one row per act at its own entry point
     # Call sites only, which decides the odd-looking piece of this regex:
     # `(?<!func )` skips DECLARATIONS. TmuxManager's `public func killWindow`
@@ -594,7 +576,7 @@ custom_rules:
     # swap's forced step goes through `HolderRegistry.abandon`, whose `killJob`
     # sends a raw `kill(` SIGKILL to the job's process group and pid. Neither
     # is matched here; both are covered by the manual audit.
-    regex: '(?<!func )\b(?:captureThenKillWindow|killWindow|killServer|respawnWindow|createWindow|pasteText|sendKeys|sendKey|setHibernated)\s*\('
+    regex: '(?<!func )\b(?:killWindow|killServer|respawnWindow|createWindow|pasteText|sendKeys|sendKey|setHibernated)\s*\('
     # Code only. Several doc comments name these primitives while explaining the
     # boundary (`ClaudeSpawnCommandBuilder` points at `createWindow(sensitiveEnv:)`),
     # and firing on the prose that documents the rule is how a rule gets disabled.

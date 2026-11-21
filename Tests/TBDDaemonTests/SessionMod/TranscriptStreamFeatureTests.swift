@@ -69,7 +69,8 @@ private final class PluginSyncRecorder: @unchecked Sendable {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         // The other features ship on; off, the list is streaming alone.
         try await db.config.setEverySessionModFeatureOff()

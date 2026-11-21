@@ -13,8 +13,7 @@ struct CreateProfileChoice: Equatable {
 /// The keyword `caller`, matched without regard to case, means the profile the
 /// calling tab runs on. It is checked before any name, so a profile actually
 /// named `caller` is reachable only by its UUID. Anything else goes through the
-/// shared `resolveProfile` lookup that `swap-profile` and `continue-in-claude`
-/// use.
+/// shared `resolveProfile` lookup that `swap-profile` uses.
 ///
 /// The CLI resolves the keyword itself and sends the caller row's `profileID`
 /// as an ordinary explicit ID, so the RPC carries IDs only and the daemon

@@ -159,27 +159,6 @@ public struct ScheduledResumeStore: Sendable {
         }
     }
 
-    /// Push a pending row's fire time and bump attemptCount.
-    /// - Returns: true if the row was pending and rescheduled, false if row not found or not pending.
-    @discardableResult
-    public func reschedule(id: UUID, fireAt: Date, attemptCount: Int) async throws -> Bool {
-        try await writer.write { db in
-            guard var record = try ScheduledResumeRecord.fetchOne(db, key: id.uuidString) else {
-                return false
-            }
-            guard record.status == ScheduledResumeStatus.pending.rawValue else {
-                return false
-            }
-            record.fireAt = fireAt
-            record.attemptCount = attemptCount
-            try record.update(db)
-            try db.execute(
-                sql: "UPDATE terminal SET pendingResumeAt = ? WHERE id = ?",
-                arguments: [fireAt, record.terminalID])
-            return true
-        }
-    }
-
     /// Cancel the terminal's pending row, if any. Returns true when one existed.
     @discardableResult
     public func cancelPending(terminalID: UUID) async throws -> Bool {

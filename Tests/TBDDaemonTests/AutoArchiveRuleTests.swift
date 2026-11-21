@@ -18,7 +18,8 @@ import TestSupport
             db: db,
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
     }
 
@@ -78,7 +79,8 @@ import TestSupport
                 db: db,
                 git: GitManager(),
                 tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()
+                hooks: HookResolver(),
+                leftoverTmuxProbe: .absent
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
@@ -119,7 +121,8 @@ import TestSupport
                 db: db,
                 git: GitManager(),
                 tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()
+                hooks: HookResolver(),
+                leftoverTmuxProbe: .absent
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
@@ -163,7 +166,8 @@ import TestSupport
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -195,7 +199,8 @@ import TestSupport
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)

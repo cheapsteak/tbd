@@ -4,8 +4,8 @@ import TBDShared
 enum DevServerTabStatus: Sendable, Equatable {
     /// The command is still the tab's live process. `expectedStart` anchors
     /// the pid against reuse: a holder job always carries the start time its
-    /// row recorded. nil means the pid was read first-hand from a live tmux
-    /// pane, so a stop re-reads the tab and takes the start time at the kill.
+    /// row recorded. nil means no recorded start time anchors it, so a stop
+    /// re-reads the tab and takes the start time at the kill.
     case running(pid: Int32, expectedStart: Date?)
     /// The tab's process is alive but no recorded start time ties the pid
     /// to it: a holder job whose row recorded none for that pid, adopted by
@@ -14,15 +14,16 @@ enum DevServerTabStatus: Sendable, Equatable {
     /// and reports so, and closing the tab ends the job.
     case runningUnverifiable(pid: Int32)
     /// The command ended; `code` is nil when the transport could not say.
-    /// `pid` is the process that ended, when the transport still reports it
-    /// (a tmux dead pane); it tells a respawned tab's runs apart.
+    /// `pid` is the process that ended, when the transport still reports it;
+    /// it tells a respawned tab's runs apart.
     case exited(code: Int32?, pid: Int32? = nil)
     /// The tab's window or session no longer exists.
     case gone
-    /// The transport could not be asked — a tmux query that timed out or
-    /// failed without saying the pane is gone. The command may still be
-    /// running: the server reads *Unknown*, a start refuses rather than
-    /// open a second tab, and a stop refuses rather than report success.
+    /// The transport could not be asked — a process that could not be read,
+    /// or a tab still on the tmux transport, which TBD runs no tmux command
+    /// to read. The command may still be running: the server reads
+    /// *Unknown*, a start refuses rather than open a second tab, and a stop
+    /// refuses rather than report success.
     case unknown(reason: String)
 
     var isUnknown: Bool {
@@ -48,7 +49,8 @@ protocol DevServerTabInspecting: Sendable {
     func status(of terminal: Terminal, tmuxServer: String) async -> DevServerTabStatus
 }
 
-/// tmux: `#{pane_dead}` / `#{pane_dead_status}`. Holder: the registry's last
+/// A tab still on the tmux transport is unknown: TBD runs no tmux command, and
+/// its server may still run the command. Holder: the registry's last
 /// known child status, else the liveness of the registry's adopted child (or,
 /// for a session it has not adopted, the row's recorded child pid). A pid the
 /// row recorded a start time for counts as alive only while the kernel's start
@@ -58,6 +60,10 @@ protocol DevServerTabInspecting: Sendable {
 /// server's saved last output (docs/specs/2026-10-11-dev-servers-design.md,
 /// "Exited servers keep their last output").
 struct ProductionDevServerTabInspector: DevServerTabInspecting {
+    /// Why a tab still on the tmux transport reads unknown.
+    static let tmuxTabReason =
+        "the tab is still on the tmux transport, which TBD does not read; closing the tab leaves it running there"
+
     let tmux: TmuxManager
     let holderRegistry: HolderRegistry?
     let signaller: any ProcessSignaller
@@ -67,12 +73,7 @@ struct ProductionDevServerTabInspector: DevServerTabInspecting {
     func status(of terminal: Terminal, tmuxServer: String) async -> DevServerTabStatus {
         switch terminal.transport {
         case .tmux:
-            switch await tmux.paneExitState(server: tmuxServer, paneID: terminal.tmuxPaneID) {
-            case .running(let pid): return .running(pid: pid, expectedStart: nil)
-            case .dead(let status, let pid): return .exited(code: status, pid: pid)
-            case .gone: return .gone
-            case .unknown(let reason): return .unknown(reason: reason)
-            }
+            return .unknown(reason: Self.tmuxTabReason)
         case .holder:
             if let status = await holderRegistry?.lastKnownStatus(for: terminal.id) {
                 switch status {

@@ -184,7 +184,8 @@ struct ModelProfileRPCTests {
                 hooks: HookResolver(
                     globalHooksDir: home.appendingPathComponent("hooks/default").path),
                 configDirManager: manager,
-                sessionsDir: sessionsDir
+                sessionsDir: sessionsDir,
+                leftoverTmuxProbe: .absent
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),

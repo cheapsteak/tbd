@@ -133,7 +133,8 @@ struct PRPollReconcileTests {
             let lifecycle = WorktreeLifecycle(
                 db: db, git: GitManager(),
                 tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-                subscriptions: subscriptions)
+                subscriptions: subscriptions,
+                leftoverTmuxProbe: .absent)
             router = RPCRouter(
                 db: db,
                 lifecycle: lifecycle,
@@ -161,7 +162,8 @@ struct PRPollReconcileTests {
                     db: db, tmux: TmuxManager(dryRun: true), subscriptions: subscriptions,
                     configDirManager: makeIsolatedConfigDirManager(tag: "prpoll"),
                     sessionTitles: ClaudeSessionTitleStore(),
-                    actuationLog: makeTestActuationLog())
+                    actuationLog: makeTestActuationLog(),
+                    leftoverTmuxProbe: .absent)
                 dispatcher = MergedTransitionDispatcher(
                     archive: AutoArchiveOnMergeCoordinator(
                         db: db, lifecycle: lifecycle, subscriptions: subscriptions,

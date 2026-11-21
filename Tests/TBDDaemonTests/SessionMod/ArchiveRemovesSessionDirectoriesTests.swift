@@ -12,7 +12,9 @@ import TBDKernel
 /// and the scratch archive. The mod writes the box one last time on
 /// `session.end`, so a removal ahead of the exit would be undone by that
 /// write. A parked session has no process, so its directory goes at once. A
-/// session the teardown left running keeps its directory for `OrphanGC`.
+/// session the teardown left running keeps its directory for `OrphanGC`, and
+/// a live row an earlier build left on tmux is one: closing it runs no tmux
+/// command, so its session may still be running there.
 ///
 /// tmux runs in dry-run mode, and every directory lives under an injected
 /// scratch `sessionsDir`.
@@ -21,7 +23,6 @@ struct ArchiveRemovesSessionDirectoriesTests {
 
     // MARK: - Fixture
 
-    private struct TeardownFixtureError: Error {}
 
     private struct Fixture {
         let home: URL
@@ -40,7 +41,8 @@ struct ArchiveRemovesSessionDirectoriesTests {
             var lifecycle = WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
                 configDirManager: makeIsolatedConfigDirManager(tag: "archmod"),
-                sessionsDir: sessionsDir)
+                sessionsDir: sessionsDir,
+                leftoverTmuxProbe: .absent)
             lifecycle.holderRegistry = registry
             return lifecycle
         }
@@ -52,6 +54,15 @@ struct ArchiveRemovesSessionDirectoriesTests {
                 worktreeID: worktreeID ?? worktree.id,
                 tmuxWindowID: "@\(pane.dropFirst())", tmuxPaneID: pane,
                 label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: .claude)
+        }
+
+        /// A tmux row an earlier build parked: its session ended at the park.
+        func parkedTmuxClaude(
+            _ sessionID: String, in worktreeID: UUID? = nil, pane: String = "%1"
+        ) async throws -> Terminal {
+            let terminal = try await tmuxClaude(sessionID, in: worktreeID, pane: pane)
+            try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
+            return try #require(try await db.terminals.get(id: terminal.id))
         }
 
         /// A holder row as a live session's looks. `childPID: 0` is the one
@@ -139,19 +150,6 @@ struct ArchiveRemovesSessionDirectoriesTests {
             .appendingPathComponent(SessionModFiles.composerDraftFileName).path)
     }
 
-    /// A pane answer that names a different terminal for `strangerPane` and no
-    /// terminal for every other pane, so one dry-run tmux can refuse one
-    /// window and permit the rest.
-    private static func strangerAt(
-        _ strangerPane: String
-    ) -> @Sendable (String, String) throws -> PaneSendTarget {
-        { _, paneID in
-            paneID == strangerPane
-                ? .live(terminalID: UUID().uuidString)
-                : .live(terminalID: nil)
-        }
-    }
-
     /// A holder registry whose rendezvous paths come from an explicit, short
     /// environment, so nothing reaches the real `~/tbd`.
     private static func holderRegistry(listing terminals: [Terminal]) -> HolderRegistry {
@@ -205,82 +203,37 @@ struct ArchiveRemovesSessionDirectoriesTests {
         #expect(tally.removableSessionIDs == ["sess-alone"])
     }
 
-    /// A failed kill of a pane whose process could not be read may have left
-    /// that process running, so the teardown reports it unstopped; a pane
-    /// whose process was read is reaped, and a kill that went through settles
-    /// it. A pid of 0 is what a tmux that cannot answer reports.
-    @Test func captureThenKillWindowReportsAPaneItMayHaveLeftRunning() async throws {
-        let fixture = try await Self.makeFixture()
-        defer { fixture.tearDown() }
-        let terminal = try await fixture.tmuxClaude("sess-kill", pane: "%1")
-        // Neither pid reaches the kernel: the fake signaller answers for both.
-        let signaller = FakeProcessSignaller()
-        signaller.behaviors[4242] = .init(aliveInitially: false)
-        signaller.behaviors[0] = .init(aliveInitially: false)
-        let cases: [(killFails: Bool, panePID: String?, stopped: Bool)] = [
-            (killFails: true, panePID: nil, stopped: false),
-            (killFails: true, panePID: "0", stopped: false),
-            (killFails: true, panePID: "4242", stopped: true),
-            (killFails: false, panePID: nil, stopped: true),
-        ]
-        for (killFails, panePID, stopped) in cases {
-            let tmux = TmuxManager(
-                dryRun: true,
-                dryRunKillWindowError: { _, _ in killFails ? TeardownFixtureError() as Error : nil },
-                dryRunPaneSendTarget: { _, _ in .live(terminalID: terminal.id.uuidString) },
-                dryRunPanePID: { _, _ in
-                    guard let panePID else { throw TeardownFixtureError() }
-                    return panePID
-                })
-            let lifecycle = WorktreeLifecycle(
-                db: fixture.db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                configDirManager: makeIsolatedConfigDirManager(tag: "archkill"),
-                processSignaller: signaller,
-                reaperGraceAttempts: 1, reaperPollInterval: .milliseconds(1),
-                sessionsDir: fixture.sessionsDir)
-
-            let result = await lifecycle.captureThenKillWindow(
-                terminal: terminal, server: fixture.worktree.tmuxServer)
-
-            #expect(result == stopped,
-                    "kill fails: \(killFails), pane pid: \(panePID ?? "unreadable")")
-        }
-    }
-
     // MARK: - Explicit archive
 
-    /// Two rows naming one session, one of them in a window archive refuses
-    /// to touch: the session may still be running there, so its directory
-    /// stays although the other row's window was killed.
+    /// Two rows naming one session, one of them a live tmux row archive leaves
+    /// running: the session may still be running there, so its directory stays
+    /// although the other row's holder was disposed of.
     @Test func archiveKeepsADirectoryWhileAnyRowNamingItsSessionMayRun() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
-        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: Self.strangerAt("%3"))
-        _ = try await fixture.tmuxClaude("sess-shared", pane: "%4")
+        let holder = try await fixture.liveHolderClaude("sess-shared")
         _ = try await fixture.tmuxClaude("sess-shared", pane: "%3")
         try fixture.seed("sess-shared")
+        let registry = Self.holderRegistry(listing: [holder])
+        _ = await registry.adoptAll()
 
-        _ = try await fixture.lifecycle(tmux: tmux).beginArchiveWorktree(worktreeID: fixture.worktree.id)
+        _ = try await fixture.lifecycle(registry: registry)
+            .beginArchiveWorktree(worktreeID: fixture.worktree.id)
 
         #expect(fixture.hasDraft("sess-shared"),
                 "a directory went while a row naming its session was left running")
     }
 
-    /// A parked session has no process, so its directory goes even when the
+    /// A parked session has no process, so its directory goes although the
     /// teardown itself stopped nothing: a parked holder row names no job to
-    /// kill, and a parked tmux row's window may sit at a coordinate a stranger
-    /// now owns, which archive refuses to touch.
+    /// kill, and a parked tmux row runs no tmux command.
     @Test func archivingAParkedSessionRemovesItsDirectory() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
         let recorded = RecordedTmuxArgs()
-        let tmux = TmuxManager(
-            dryRun: true, dryRunRecorder: { recorded.append($0) },
-            dryRunPaneSendTarget: Self.strangerAt("%3"))
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
 
-        let parkedTmux = try await fixture.tmuxClaude("sess-parked-tmux", pane: "%3")
-        try await fixture.db.terminals.setHibernated(
-            id: parkedTmux.id, sessionID: "sess-parked-tmux")
+        _ = try await fixture.parkedTmuxClaude("sess-parked-tmux", pane: "%3")
         let parkedHolder = try await fixture.parkedHolderClaude("sess-parked-holder")
         #expect(parkedHolder.childPID == nil)
         try fixture.seed("sess-parked-tmux")
@@ -290,8 +243,8 @@ struct ArchiveRemovesSessionDirectoriesTests {
         _ = try await fixture.lifecycle(tmux: tmux, registry: registry)
             .beginArchiveWorktree(worktreeID: fixture.worktree.id)
 
-        #expect(!recorded.snapshot().contains { $0.contains("kill-window") },
-                "the stranger's window must stay untouched: \(recorded.snapshot())")
+        #expect(recorded.snapshot().isEmpty,
+                "archive ran a tmux command: \(recorded.snapshot())")
         #expect(!fixture.hasDirectory("sess-parked-tmux"))
         #expect(!fixture.hasDirectory("sess-parked-holder"))
         #expect(try await fixture.db.worktrees.get(id: fixture.worktree.id)?.status == .archived)
@@ -320,26 +273,24 @@ struct ArchiveRemovesSessionDirectoriesTests {
 
     /// A session the teardown left running keeps its directory: the mod is
     /// still writing to it, and `OrphanGC` reclaims it once nothing names it.
-    /// A holder with no registry to dispose of it, and a tmux window whose pane
-    /// archive could not prove its own, are the two ways that happens.
+    /// A holder with no registry to dispose of it, and a live tmux row, whose
+    /// close runs no tmux command, are the two ways that happens.
     @Test func archiveKeepsTheDirectoryOfASessionItLeftRunning() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
-        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: Self.strangerAt("%3"))
         _ = try await fixture.liveHolderClaude("sess-undisposed")
-        _ = try await fixture.tmuxClaude("sess-refused", pane: "%3")
-        _ = try await fixture.tmuxClaude("sess-killed", pane: "%4")
-        for sessionID in ["sess-undisposed", "sess-refused", "sess-killed"] {
+        _ = try await fixture.tmuxClaude("sess-tmux", pane: "%3")
+        for sessionID in ["sess-undisposed", "sess-tmux"] {
             try fixture.seed(sessionID)
         }
 
-        _ = try await fixture.lifecycle(tmux: tmux, registry: nil)
+        _ = try await fixture.lifecycle(registry: nil)
             .beginArchiveWorktree(worktreeID: fixture.worktree.id)
 
         #expect(fixture.hasDraft("sess-undisposed"))
-        #expect(fixture.hasDraft("sess-refused"))
-        #expect(!fixture.hasDirectory("sess-killed"),
-                "the window archive did kill must still lose its directory")
+        #expect(fixture.hasDraft("sess-tmux"))
+        #expect(try await fixture.db.worktrees.get(id: fixture.worktree.id)?.status == .archived,
+                "a session left running must not stop the archive")
     }
 
     /// The directories of sessions outside the archived worktree survive:
@@ -352,8 +303,8 @@ struct ArchiveRemovesSessionDirectoriesTests {
             branch: "tbd/sibling",
             path: fixture.home.appendingPathComponent("sibling", isDirectory: true).path,
             tmuxServer: "tbd-archmod")
-        _ = try await fixture.tmuxClaude("sess-archived")
-        _ = try await fixture.tmuxClaude("sess-sibling", in: sibling.id, pane: "%2")
+        _ = try await fixture.parkedTmuxClaude("sess-archived")
+        _ = try await fixture.parkedTmuxClaude("sess-sibling", in: sibling.id, pane: "%2")
         for sessionID in ["sess-archived", "sess-sibling", "sess-unnamed"] {
             try fixture.seed(sessionID)
         }
@@ -384,7 +335,8 @@ struct ArchiveRemovesSessionDirectoriesTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "archrev"),
-            sessionsDir: sessionsDir)
+            sessionsDir: sessionsDir,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -413,7 +365,7 @@ struct ArchiveRemovesSessionDirectoriesTests {
     // MARK: - Reconcile's archive of a vanished checkout
 
     /// An actuation log whose every write naming `terminalID` fails, so that
-    /// one terminal's kill cannot be recorded while the others' can.
+    /// one terminal's teardown cannot be recorded while the others' can.
     private static func actuationLog(
         failingWritesNaming terminalID: UUID, path: String
     ) -> ActuationLog {
@@ -431,11 +383,12 @@ struct ArchiveRemovesSessionDirectoriesTests {
             fsync: { descriptor in Foundation.fsync(descriptor) }))
     }
 
-    /// Reconcile leaves a worktree whose kills it could not all record for
-    /// the next sweep, rows and all — so the directories stay too, even the
-    /// one whose window it did kill. The next sweep archives the worktree and
-    /// removes them.
-    @Test func reconcileArchiveRemovesDirectoriesOnlyAfterEveryKill() async throws {
+    /// Reconcile leaves a worktree whose teardowns it could not all record
+    /// for the next sweep, rows and all — so the directories stay too, even
+    /// the one whose teardown it did record. The next sweep archives the
+    /// worktree and removes them. Both rows are parked, so each session has
+    /// ended and only the record decides.
+    @Test func reconcileArchiveRemovesDirectoriesOnlyAfterEveryTeardown() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let (home, sessionsDir) = try Self.makeHome("archrec")
@@ -443,15 +396,15 @@ struct ArchiveRemovesSessionDirectoriesTests {
         let db = try TBDDatabase(
             inMemory: true,
             terminalHistoryDir: home.appendingPathComponent("history", isDirectory: true).path)
-        var lifecycle = WorktreeLifecycle(
+        let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "archrec"),
-            sessionsDir: sessionsDir)
-        // The worktree the first sweep leaves active reaches the leftover-tmux
-        // arm too. A server that may still be running keeps that arm off its
-        // rows, so the only thing this test changes between sweeps is whether
-        // every kill could be recorded.
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .running }
+            sessionsDir: sessionsDir,
+            // The worktree the first sweep leaves active reaches the leftover-tmux
+            // arm too. A server that may still be running keeps that arm off its
+            // rows, so the only thing this test changes between sweeps is whether
+            // every teardown could be recorded.
+            leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in .running })
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         // A row whose path git does not list: the vanished checkout reconcile
@@ -459,12 +412,14 @@ struct ArchiveRemovesSessionDirectoriesTests {
         let wt = try await db.worktrees.create(
             repoID: repo.id, name: "gone", branch: "gone-branch",
             path: tempDir.appendingPathComponent("vanished").path, tmuxServer: "tbd-archrec")
-        _ = try await db.terminals.create(
+        let recorded = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-recorded", kind: .claude)
+        try await db.terminals.setHibernated(id: recorded.id, sessionID: "sess-recorded")
         let unrecorded = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-unrecorded", kind: .claude)
+        try await db.terminals.setHibernated(id: unrecorded.id, sessionID: "sess-unrecorded")
         try Self.seedSessionDirectory(sessionsDir, sessionID: "sess-recorded")
         try Self.seedSessionDirectory(sessionsDir, sessionID: "sess-unrecorded")
 
@@ -475,9 +430,9 @@ struct ArchiveRemovesSessionDirectoriesTests {
                 path: home.appendingPathComponent("actuations.jsonl").path))
 
         #expect(try await db.worktrees.get(id: wt.id)?.status == .active,
-                "the fixture never made one kill unrecordable")
+                "the fixture never made one teardown unrecordable")
         #expect(Self.hasDraft(sessionsDir, sessionID: "sess-recorded"),
-                "a directory went before reconcile knew every kill was recorded")
+                "a directory went before reconcile knew every teardown was recorded")
         #expect(Self.hasDraft(sessionsDir, sessionID: "sess-unrecorded"))
 
         try await lifecycle.reconcile(
@@ -492,18 +447,9 @@ struct ArchiveRemovesSessionDirectoriesTests {
 
     // MARK: - Scratch archive
 
-    /// Whether the directory existed at the moment the reaper escalated.
-    private final class Observation: @unchecked Sendable {
-        private let lock = NSLock()
-        private var seen: [Bool] = []
-        func record(_ value: Bool) { lock.withLock { seen.append(value) } }
-        var values: [Bool] { lock.withLock { seen } }
-    }
-
-    /// The scratch archive kills a tmux window through the lifecycle's
-    /// kill-and-reap, so the pane's exit is confirmed — here a wedged one,
-    /// escalated to SIGTERM — before its directory goes. A parked session's
-    /// directory goes as well; a refused window's stays.
+    /// The scratch archive ends each session its own way: a parked session's
+    /// directory goes, whichever transport its row is on, and a live tmux
+    /// row's stays, because closing it runs no tmux command.
     @Test func scratchArchiveRemovesDirectories() async throws {
         let (home, sessionsDir) = try Self.makeHome("archscr")
         defer { try? FileManager.default.removeItem(at: home) }
@@ -516,27 +462,14 @@ struct ArchiveRemovesSessionDirectoriesTests {
             name: "scratch", displayName: "scratch", path: scratchPath.path,
             tmuxServer: "tbd-archscr")
 
-        // pid 4242 never reaches the kernel: the fake signaller answers for it.
-        let wedgedPID: Int32 = 4242
-        let signaller = FakeProcessSignaller()
-        signaller.behaviors[wedgedPID] = .init(aliveInitially: true, aliveAfterTerminate: false)
-        let liveDirectory = sessionsDir.appendingPathComponent("sess-live", isDirectory: true)
-        let observation = Observation()
-        signaller.onTerminate = { _ in
-            observation.record(FileManager.default.fileExists(atPath: liveDirectory.path))
-        }
         let recorded = RecordedTmuxArgs()
-        let tmux = TmuxManager(
-            dryRun: true, dryRunRecorder: { recorded.append($0) },
-            dryRunPaneSendTarget: Self.strangerAt("%3"),
-            dryRunPanePID: { _, paneID in paneID == "%1" ? "\(wedgedPID)" : "0" })
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
         let configDirManager = makeIsolatedConfigDirManager(tag: "archscr")
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager,
-            processSignaller: signaller,
-            reaperGraceAttempts: 1, reaperPollInterval: .milliseconds(1),
-            sessionsDir: sessionsDir)
+            sessionsDir: sessionsDir,
+            leftoverTmuxProbe: .absent)
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager, sessionsDir: sessionsDir,
@@ -544,16 +477,17 @@ struct ArchiveRemovesSessionDirectoriesTests {
 
         _ = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: TerminalLabel.claudeCode, claudeSessionID: "sess-live", kind: .claude)
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-live-tmux", kind: .claude)
+        let parkedTmux = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-parked-tmux", kind: .claude)
+        try await db.terminals.setHibernated(id: parkedTmux.id, sessionID: "sess-parked-tmux")
         let parked = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-parked", kind: .claude,
             transport: .holder)
         try await db.terminals.setHibernated(id: parked.id, sessionID: "sess-parked")
-        _ = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@3", tmuxPaneID: "%3",
-            label: TerminalLabel.claudeCode, claudeSessionID: "sess-refused", kind: .claude)
-        for sessionID in ["sess-live", "sess-parked", "sess-refused"] {
+        for sessionID in ["sess-live-tmux", "sess-parked-tmux", "sess-parked"] {
             try Self.seedSessionDirectory(sessionsDir, sessionID: sessionID)
         }
 
@@ -562,14 +496,12 @@ struct ArchiveRemovesSessionDirectoriesTests {
 
         #expect(response.success, "scratch.archive failed: \(response.error ?? "")")
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
-        #expect(recorded.snapshot().contains { $0.contains("kill-window") && $0.contains("@1") })
-        #expect(signaller.terminated == [wedgedPID],
-                "the scratch kill did not reap the wedged pane")
-        #expect(observation.values == [true],
-                "the directory must still exist while the pane is being reaped")
-        #expect(!FileManager.default.fileExists(atPath: liveDirectory.path))
+        #expect(recorded.snapshot().isEmpty,
+                "scratch.archive ran a tmux command: \(recorded.snapshot())")
+        #expect(Self.hasDraft(sessionsDir, sessionID: "sess-live-tmux"))
+        #expect(!FileManager.default.fileExists(
+            atPath: sessionsDir.appendingPathComponent("sess-parked-tmux").path))
         #expect(!FileManager.default.fileExists(
             atPath: sessionsDir.appendingPathComponent("sess-parked").path))
-        #expect(Self.hasDraft(sessionsDir, sessionID: "sess-refused"))
     }
 }

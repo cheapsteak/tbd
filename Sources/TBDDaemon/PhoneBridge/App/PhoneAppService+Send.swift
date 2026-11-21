@@ -330,7 +330,7 @@ extension PhoneAppService {
         // terminal ids, pane ids, worktree names and registered provider
         // names TBD keeps, and no provider's words.
         case .profileMissing, .terminalBusy, .terminalHasComposerDraft,
-             .terminalSessionGone, .terminalWrongProvider, .terminalOnTmux,
+             .terminalSessionGone, .terminalOnTmux,
              .remoteLaneArchiveGuarded, .worktreeArchiveUncommitted:
             return .text
 
