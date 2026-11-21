@@ -2172,6 +2172,54 @@ struct ModelProfileSpawnTests {
         #expect(resp.error?.contains("require a profile") == true)
     }
 
+    /// A login tab is left to the person: the daemon neither reads its screen
+    /// nor types into it. The badge-flip test below is the positive leg — the
+    /// same spawn does arm the identity watcher.
+    ///
+    /// Every way the router has to read a holder session's screen or type into
+    /// its pty — the screen resolver and the injection courier — records into
+    /// `touches`, and so do its process probes.
+    @Test("login session: the screen is never read and nothing is typed into it")
+    func loginSessionTypesNothing() async throws {
+        let fixture = makeLoginFixture()
+        defer { Task { await cleanup(fixture.db) } }
+        let touches = HolderTouchRecorder()
+        touches.install(on: fixture.router)
+        let (_, wt) = try await seedRepoAndWorktree(fixture.db)
+        let profile = try await seedOAuthProfile(fixture.db, name: "Manual")
+
+        let resp = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .claude,
+                overrideProfileID: profile.id, loginSession: true
+            )
+        ))
+        #expect(resp.success, "\(resp.error ?? "")")
+        let term = try resp.decodeResult(Terminal.self)
+        #expect(term.label == TerminalLabel.login)
+        #expect(fixture.holder.launches.map(\.terminalID) == [term.id])
+
+        // Anything armed by the spawn has had the whole window to act on the
+        // session. Three seconds is sized against a pump of the shape this
+        // guards against — a first read after a 2 s settle, then a 1 s poll —
+        // which would read and type inside it. Wall time rather than a virtual
+        // clock because nothing on the spawn path sleeps for a test to advance
+        // past: a clock-driven window would only cover a pump that happened to
+        // sleep on the same clock.
+        //
+        // `pollUntilTrue` bounds the window by reading `ContinuousClock`, so
+        // it lasts three seconds of wall time however late each poll sleep
+        // resumes under load. A cancelled wait still read the condition
+        // fresh, so only `.satisfied` means the session was touched.
+        let touched = await pollUntilTrue(timeout: .seconds(3), pollInterval: .milliseconds(50)) {
+            !touches.events.isEmpty
+        }
+        #expect(touched != .satisfied,
+                "the login session's screen was read or typed into: \(touches.events)")
+        #expect(touches.events.isEmpty)
+    }
+
     /// The identity watcher is what a login tab still arms: once the profile's
     /// isolated `.claude.json` gains an `oauthAccount`, the daemon broadcasts
     /// `.modelProfilesChanged` so the Settings badge flips to "Logged in as …".

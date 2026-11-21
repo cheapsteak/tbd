@@ -193,3 +193,101 @@ func makeHolderRegistryDouble(
         spawner: nil,
         spawnFabricator: launch)
 }
+
+/// Records every way a router can reach a holder session's process or screen,
+/// for a test that asserts a path reaches none of them.
+///
+/// `install(on:)` wires each seam the router owns, and each records into
+/// `events` instead of acting:
+///
+///   - **Screen reads** – `holderScreenResolver`, whose reader census and
+///     daemon-store lookups are what every screen read of a session asks.
+///   - **Input** – `holderInjectionCourier`, through which the daemon types
+///     into a session: the viewer lookup, the sidecar frame and the direct
+///     write.
+///   - **Processes** – `holderChildSignaller` and `holderProcessIsLive`. The
+///     signaller's identity reads (`commandLine`, `stat`, `startTime`) are
+///     `ps` subprocesses in production.
+///
+/// The router's `processSignaller` and `processTableReader` are initializer
+/// parameters, so a fixture passes `signaller` and `processTableReader` when it
+/// builds the router. Spawns are the holder spawn double's to record
+/// (`FakeHolderLaunch.launches`), on whichever registry the fixture wires.
+final class HolderTouchRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    /// Every touch, in order.
+    var events: [String] { lock.withLock { recorded } }
+
+    func note(_ event: String) { lock.withLock { recorded.append(event) } }
+
+    var processTableReader: @Sendable () -> ProcessTableSnapshot? {
+        { [self] in
+            note("process-table read")
+            return nil
+        }
+    }
+
+    var signaller: any ProcessSignaller { RecordingSignaller(recorder: self) }
+
+    func install(on router: RPCRouter) {
+        // Each seam is typed as its initializer or property declares it, so no
+        // call below infers a closure type.
+        let ptyReader: @Sendable (UUID) async -> PtyReaderRole? = { [self] id in
+            note("screen read: reader census for \(id)")
+            return nil
+        }
+        let daemonStore: @Sendable (UUID) async -> HolderDaemonStore? = { [self] id in
+            note("screen read: daemon store for \(id)")
+            return nil
+        }
+        router.holderScreenResolver = HolderScreenResolver(
+            ptyReader: ptyReader, daemonStore: daemonStore, pull: nil)
+
+        let sendFrame: @Sendable (Data) async throws -> Void = { [self] _ in
+            note("input: sidecar frame")
+        }
+        let viewerAttachment: @Sendable (UUID) async -> UInt64? = { [self] id in
+            note("input: viewer lookup for \(id)")
+            return nil
+        }
+        let writeDirectly: @Sendable (UUID, Data) async throws -> Void = { [self] id, _ in
+            note("input: direct write to \(id)")
+        }
+        router.holderInjectionCourier = HolderInjectionCourier(
+            sendFrame: sendFrame, viewerAttachment: viewerAttachment,
+            writeDirectly: writeDirectly)
+
+        let childSignaller: any ProcessSignaller = signaller
+        router.holderChildSignaller = childSignaller
+        let holderProcessIsLive: @Sendable (Int32) -> Bool = { [self] pid in
+            note("holder liveness probe of \(pid)")
+            return false
+        }
+        router.holderProcessIsLive = holderProcessIsLive
+    }
+
+    private struct RecordingSignaller: ProcessSignaller {
+        let recorder: HolderTouchRecorder
+
+        func isAlive(_ pid: Int32) -> Bool {
+            recorder.note("isAlive \(pid)")
+            return false
+        }
+        func terminate(_ pid: Int32) { recorder.note("terminate \(pid)") }
+        func forceKill(_ pid: Int32) { recorder.note("forceKill \(pid)") }
+        func commandLine(_ pid: Int32) -> String? {
+            recorder.note("commandLine \(pid)")
+            return nil
+        }
+        func stat(_ pid: Int32) -> String? {
+            recorder.note("stat \(pid)")
+            return nil
+        }
+        func startTime(_ pid: Int32) -> Date? {
+            recorder.note("startTime \(pid)")
+            return nil
+        }
+    }
+}

@@ -5,8 +5,8 @@ import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 — in-memory database plus real (temp-dir) transcript files, no tmux
-/// server and no subprocess.
+/// Tier 2 — in-memory database plus real (temp-dir) transcript files, no
+/// holder and no subprocess.
 @Suite("session.states RPC")
 struct SessionStatesRPCTests {
 
@@ -19,17 +19,34 @@ struct SessionStatesRPCTests {
         func cleanUp() { try? FileManager.default.removeItem(at: scratch) }
     }
 
-    /// - Parameter now: the router's date seam. Defaulted so every existing
-    ///   case is unchanged; the fallback-stamp case below pins it, which is the
-    ///   only way to tell an injected clock from wall time.
+    /// - Parameters:
+    ///   - now: the router's date seam. Defaulted so every existing case is
+    ///     unchanged; the fallback-stamp case below pins it, which is the only
+    ///     way to tell an injected clock from wall time.
+    ///   - touches: when given, every seam through which the router can reach
+    ///     a holder session's process or screen records into it, and the
+    ///     router's holder registry spawns through `holder`.
     private func makeFixture(
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        touches: HolderTouchRecorder? = nil,
+        holder: FakeHolderLaunch = FakeHolderLaunch()
     ) async throws -> Fixture {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-session-states-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
 
         let db = try TBDDatabase(inMemory: true)
+        // Typed as `RPCRouter.init` takes them, and chosen here rather than
+        // inside the call, so the call infers nothing.
+        let processSignaller: any ProcessSignaller
+        let processTableReader: @Sendable () -> ProcessTableSnapshot?
+        if let touches {
+            processSignaller = touches.signaller
+            processTableReader = touches.processTableReader
+        } else {
+            processSignaller = ProductionProcessSignaller()
+            processTableReader = { ProcessTableSnapshot.read() }
+        }
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -37,7 +54,13 @@ struct SessionStatesRPCTests {
                 leftoverTmuxProbe: .absent),
             startTime: Date(),
             now: now,
-            actuationLog: makeTestActuationLog())
+            processSignaller: processSignaller,
+            actuationLog: makeTestActuationLog(),
+            processTableReader: processTableReader)
+        if let touches {
+            touches.install(on: router)
+            router.holderRegistry = makeHolderRegistryDouble(launch: holder)
+        }
 
         let repo = try await db.repos.create(
             path: scratch.appendingPathComponent("repo").path,
@@ -163,6 +186,38 @@ struct SessionStatesRPCTests {
         #expect(reason?.programStatusBlock == block)
         #expect(report.state.source == .programStatus)
         #expect(report.state.observedAt == reportedAt)
+    }
+
+    /// The cheap-path property, asserted rather than assumed: a pass over a
+    /// live holder Claude row starts no process, reads no screen, types
+    /// nothing, reads no process table and signals nothing. Every way the
+    /// router has to do one of those records into `touches`, so an empty
+    /// record is the proof that the pass costs no subprocess and no screen
+    /// read, which is what lets this method be called on a cadence for every
+    /// agent at once.
+    @Test func performsNoSubprocessOrScreenRead() async throws {
+        let touches = HolderTouchRecorder()
+        let holder = FakeHolderLaunch()
+        let fixture = try await makeFixture(touches: touches, holder: holder)
+        defer { fixture.cleanUp() }
+
+        // Pids above macOS's PID_MAX, so none can name a real process.
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", kind: .claude, transport: .holder,
+            holderPID: 100_001, childPID: 100_002)
+        let path = try writeTranscript(
+            fixture, name: "session.jsonl",
+            lines: [#"{"type":"assistant","message":{"usage":{"input_tokens":1000}}}"#])
+        try await fixture.db.terminals.updateSession(
+            id: terminal.id, sessionID: "sess-1", transcriptPath: path)
+
+        let reports = try await states(fixture)
+
+        #expect(reports.map(\.terminalID) == [terminal.id])
+        #expect(touches.events.isEmpty,
+                "session.states reached a holder session's process or screen: \(touches.events)")
+        #expect(holder.launches.isEmpty)
     }
 
     @Test func theWorktreeFilterNarrowsTheReport() async throws {
