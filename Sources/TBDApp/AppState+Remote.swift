@@ -358,8 +358,9 @@ extension AppState {
     /// dismiss the progress toast its hold showed if that toast is still the
     /// one on screen; a toast that has replaced it is left alone. Every user
     /// navigation that comes after the click calls this through
-    /// `userDidNavigate`, and `recordNavigation` lists them; the drain that
-    /// takes the click to answer it and its expiry call it directly.
+    /// `userDidNavigate`, and every selection change through
+    /// `recordNavigation`, which lists them; the drain that takes the click
+    /// to answer it and its expiry call it directly.
     @MainActor
     func dropHeldRemoteSessionLink() {
         guard pendingRemoteSessionLink != nil else { return }

@@ -148,11 +148,11 @@ final class JumpMenuController {
         close()
     }
 
-    /// Selects the worktree a submitted row names. A jump to the worktree
-    /// already selected leaves the selection as it was, which its `didSet`
-    /// does not count as a navigation, so the jump says it is one here
-    /// (`AppState.userDidNavigate`): it drops a held banner click and
-    /// supersedes an archived lookup in flight.
+    /// Selects the worktree a submitted row names. The jump is a navigation
+    /// the user made, which the selection's `didSet` cannot say, so it says
+    /// so here (`AppState.userDidNavigate`), even for the worktree already
+    /// selected: it drops a held banner click and supersedes an archived
+    /// lookup in flight.
     static func select(_ worktreeID: UUID, in appState: AppState) {
         appState.userDidNavigate()
         appState.selectedWorktreeIDs = [worktreeID]

@@ -147,7 +147,9 @@ extension AppState {
     /// held and any archived lookup still in flight, so it drops the one
     /// (`dropHeldRemoteSessionLink`) and supersedes the other
     /// (`supersedeArchivedLookup`): neither's late answer can then replace
-    /// it. `recordNavigation` lists every caller.
+    /// it. Only the sites of a user's gesture call it, and `recordNavigation`
+    /// lists them. A selection the app changes on its own drops a held click
+    /// (`recordNavigation`) but never supersedes a lookup.
     ///
     /// A click that is only held is no navigation and calls nothing here;
     /// its replay is one, and does.
@@ -162,38 +164,38 @@ extension AppState {
     /// the current head. Truncates any forward history when the user
     /// navigates somewhere new mid-stack.
     ///
-    /// A navigation also says it happened (`userDidNavigate`): it came after
-    /// any held banner click (`pendingRemoteSessionLink`) and any archived
-    /// lookup in flight (`navigateToArchivedWorktree`), and the later action
-    /// wins, so neither the remote load that would answer the click nor the
-    /// lookup's resolution may replace it. That holds when the entry equals
-    /// the current head too: with a click held, a relaunch restores the
-    /// history but not the selection, so selecting the head's worktree is a
-    /// navigation that records nothing new.
+    /// A selection change also drops a held banner click
+    /// (`pendingRemoteSessionLink`), so the remote load that would answer it
+    /// cannot replace the new selection. That holds when the entry equals the
+    /// current head too: with a click held, a relaunch restores the history
+    /// but not the selection, so selecting the head's worktree changes the
+    /// selection and records nothing new. `selectionChanged` is false when
+    /// the worktree selection's `didSet` re-fires with the set unchanged, as
+    /// a `remove` of an id that was not selected does when an unselected
+    /// worktree is archived; that keeps the click.
     ///
-    /// Every navigation that makes a history entry passes here: sidebar and
-    /// dock row clicks, the jump menu, ⌘1–9, `selectRemoteSession`,
-    /// `selectRepo`, `navigateToActiveWorktree`. `selectionChanged` is false
-    /// when the worktree selection's `didSet` re-fires with the set
-    /// unchanged, as a `remove` of an id that was not selected does when an
-    /// unselected worktree is archived; that is no navigation, and keeps the
-    /// click and the lookup.
+    /// It supersedes no archived lookup (`navigateToArchivedWorktree`): the
+    /// selection's `didSet` also runs for the changes the app makes on its
+    /// own, such as a finished create swapping its placeholder for the real
+    /// row, a pruned multi-selection or a restored saved selection. The user
+    /// made none of those, so the link the lookup answers is still the
+    /// latest thing they asked for: those changes drop a held click and leave
+    /// the lookup to land. A navigation the user makes says so where it
+    /// happens (`userDidNavigate`), which drops the click and supersedes the
+    /// lookup, and these are all of them:
     ///
-    /// A user who picks again what is already selected leaves the set
-    /// unchanged too, and the `didSet` cannot tell that from the archive. So
-    /// every other navigation calls `userDidNavigate` where it happens, and
-    /// these are all of them:
-    ///
-    ///  - **Gestures that can pick the current selection again:**
-    ///    `navigateToActiveWorktree` (a pinned-dock tap, among others), the
-    ///    jump menu (`JumpMenuController.select`), ⌘1–9
-    ///    (`selectWorktreeByIndex`), a click on a row in the sidebar outline
-    ///    or the dock (their `handleClick(row:at:)`), and `selectRepo`, whose
-    ///    `didSet` records nothing for the repo already selected.
-    ///  - **Navigations that record no entry:** a deselection in the outline
-    ///    or the dock (where they write the selection), `navigateBack`,
-    ///    `navigateForward`, `selectScratchSection` and
+    ///  - **Sidebar and dock:** every selection change the user makes in the
+    ///    outline or the dock (`outlineViewSelectionDidChange`,
+    ///    `tableViewSelectionDidChange`), and a click on a row there (their
+    ///    `handleClick(row:at:)`), which on the row already selected changes
+    ///    no selection.
+    ///  - **Other gestures that select:** `navigateToActiveWorktree` (a
+    ///    pinned-dock tap, among others), the jump menu
+    ///    (`JumpMenuController.select`), ⌘1–9 (`selectWorktreeByIndex`),
+    ///    `selectRepo`, `selectRemoteSession`, `selectScratchSection` and
     ///    `selectRemoteProvider`.
+    ///  - **History:** `navigateBack` and `navigateForward`, which replay an
+    ///    entry with recording off.
     ///  - **Newer clicks:** `navigateToWorktree`, and a banner click
     ///    `navigateToRemoteSession` answers at once.
     ///
@@ -204,18 +206,13 @@ extension AppState {
     ///
     /// The paths that must keep the click keep it: `restoreSavedSelection`
     /// does nothing while a click is held, the drain clears the click before
-    /// its own replay runs, history entries are replayed with recording off
-    /// (`navigateBack` and `navigateForward` call `userDidNavigate`
-    /// themselves), and an archived lookup that resolves after the click
-    /// puts it back (`performArchivedNavigation`), having cleared its own
-    /// token first so that its landing supersedes nothing. A selection the
-    /// app changes on its own still counts as a navigation: a finished create
-    /// swapping its placeholder for the real row, or a pruned
-    /// multi-selection.
+    /// its own replay runs, history entries are replayed with recording off,
+    /// and an archived lookup that resolves after the click puts it back
+    /// (`performArchivedNavigation`).
     func recordNavigation(_ entry: NavigationEntry, selectionChanged: Bool = true) {
         guard !isNavigating else { return }
         if selectionChanged {
-            userDidNavigate()
+            dropHeldRemoteSessionLink()
         }
         if navigationIndex >= 0 && navigationIndex < navigationEntries.count {
             if navigationEntries[navigationIndex] == entry { return }
@@ -249,9 +246,8 @@ extension AppState {
             return
         }
         navigationIndex = index
-        // A user's navigation, which records no entry, so it drops a held
-        // banner click and supersedes an archived lookup here rather than in
-        // `recordNavigation`.
+        // A user's navigation: it drops a held banner click and supersedes
+        // an archived lookup. The replay below records nothing.
         userDidNavigate()
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
         navigationHistoryDidChange()
@@ -268,7 +264,7 @@ extension AppState {
             return
         }
         navigationIndex = index
-        // As in navigateBack: a user's navigation records no entry here.
+        // As in navigateBack.
         userDidNavigate()
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
         navigationHistoryDidChange()
@@ -433,7 +429,13 @@ extension AppState {
     ///   menu's "Attach" item). `false` (the default, used by a plain row
     ///   click) leaves an already-current session's detach state alone —
     ///   see `showRemoteSessionSurface`.
+    ///
+    /// A navigation the user made (`userDidNavigate`). Its callers are a
+    /// row's context menu, a provider desk row, an answered banner click, and
+    /// the worktree selection's `didSet` for a remote session's id, which
+    /// only the user's own selections write there.
     func selectRemoteSession(provider: String, sessionID: String, reattach: Bool = false) {
+        userDidNavigate()
         let selection = RemoteSessionSelection(provider: provider, sessionID: sessionID)
         activateRemoteSession(selection, reattach: reattach)
         recordNavigation(.remoteSession(selection))
@@ -442,9 +444,8 @@ extension AppState {
     /// Select a provider header without attaching to a session. The desk is a
     /// read-only projection of data already mirrored in AppState.
     ///
-    /// A header click records no history entry, so it drops a held banner
-    /// click and supersedes an archived lookup here (`userDidNavigate`), as
-    /// `recordNavigation` does for the navigations that do.
+    /// A header click is a navigation the user made (`userDidNavigate`): it
+    /// drops a held banner click and supersedes an archived lookup.
     func selectRemoteProvider(_ provider: String) {
         userDidNavigate()
         highlightedArchivedWorktreeID = nil

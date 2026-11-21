@@ -1141,13 +1141,6 @@ extension AppState {
     /// flash-highlight the target. Runs immediately once the lookup resolves.
     @MainActor
     private func performArchivedNavigation(worktreeID: UUID, repoID: UUID, archived: [Worktree]) {
-        // The lookup has resolved, so it is no longer in flight. Its token is
-        // cleared first: selecting the repo below records a navigation, which
-        // supersedes any lookup in flight (`userDidNavigate`), and this
-        // landing must find none, its own included. The archive notice is
-        // already up and carries an ID of its own, so nothing here dismisses
-        // it.
-        deepLinkRequestID = nil
         // This lands a link followed before any banner click still held, so
         // that click is the later action and stays held, though selecting the
         // repo records a navigation (`recordNavigation` drops a held click).
@@ -1184,8 +1177,9 @@ extension AppState {
     /// the archive notice. A newer archived lookup supersedes by stamping its
     /// own token; every navigation the user makes calls this through
     /// `userDidNavigate` before it changes the selection or shows a toast
-    /// (`recordNavigation` lists them). A click that is only held does not,
-    /// because nothing has navigated yet.
+    /// (`recordNavigation` lists them). A selection the app changes on its
+    /// own does not, and neither does a click that is only held, because the
+    /// user has not navigated.
     ///
     /// Clearing `deepLinkRequestID` drops the lookup's resolution. Its
     /// "Looking for worktree…" progress toast is dismissed too: a dropped
@@ -1247,8 +1241,8 @@ extension AppState {
     /// Select a repo to show its archived worktrees in the content pane.
     ///
     /// A navigation the user made (`userDidNavigate`), even on the header of
-    /// the repo already selected, which changes nothing, so its `didSet`
-    /// records no navigation (`recordNavigation`).
+    /// the repo already selected. The selection's `didSet` cannot say so: it
+    /// supersedes nothing (`recordNavigation`).
     func selectRepo(id: UUID) {
         userDidNavigate()
         highlightedArchivedWorktreeID = nil
@@ -1282,9 +1276,8 @@ extension AppState {
     /// `selectRepo(id:)`; no `NavigationEntry`/back-forward integration for v1
     /// (documented scope cut — the Scratch section header has no natural UUID
     /// identity for the navigation history's worktree/repo entries to key
-    /// off). With no history entry, it drops a held banner click and
-    /// supersedes an archived lookup itself (`userDidNavigate`), as
-    /// `recordNavigation` does for the navigations that make one.
+    /// off). A navigation the user made (`userDidNavigate`): it drops a held
+    /// banner click and supersedes an archived lookup.
     func selectScratchSection() {
         userDidNavigate()
         highlightedArchivedWorktreeID = nil
@@ -1880,8 +1873,8 @@ extension AppState {
     /// Select a worktree by its index in the sidebar order (⌘1–9).
     ///
     /// A navigation the user made (`userDidNavigate`), even on the worktree
-    /// already selected, which changes nothing, so its `didSet` records no
-    /// navigation (`recordNavigation`).
+    /// already selected. The selection's `didSet` cannot say so: it
+    /// supersedes nothing (`recordNavigation`).
     func selectWorktreeByIndex(_ index: Int) {
         let ordered = allWorktreesOrdered
         guard index >= 0, index < ordered.count else { return }

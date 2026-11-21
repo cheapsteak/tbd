@@ -568,9 +568,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             selected: selected, current: appState.selectedWorktreeIDs,
             extending: SidebarSelectionBridge.extendsSelection(selectionModifiers()),
             isShown: { shown.contains($0) })
-        // As in the outline: a deselection records no navigation, so it
-        // says here that it is one.
-        if ids.isEmpty { appState.userDidNavigate() }
+        // As in the outline: the user changed the selection, so it is their
+        // navigation, which the selection's `didSet` cannot say.
+        appState.userDidNavigate()
         writeSelection(ids)
         onUserSelection?()
         isApplyingModelSelection = true
@@ -838,9 +838,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     /// A click on a row: on a worktree row's PR glyph it opens the pull
     /// request. Anywhere else the row selects through the table, and the
-    /// click says a navigation happened (`AppState.userDidNavigate`): on the
-    /// row already selected it changes no selection, so its `didSet` records
-    /// no navigation, but it is one (`AppState.recordNavigation`).
+    /// click says a navigation happened (`AppState.userDidNavigate`), which
+    /// matters on the row already selected: that click changes no selection,
+    /// so `tableViewSelectionDidChange` never says it.
     /// - Parameter point: where the click landed, in the table's
     ///   coordinates, when it came from the pointer.
     func handleClick(row index: Int, at point: NSPoint? = nil) {

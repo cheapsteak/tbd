@@ -38,9 +38,10 @@ extension SidebarOutlineController {
         case .scratchPrompt:
             appState.createScratch()
         case .worktree, .remoteSession:
-            // The row selects through the outline. A click on the row already
-            // selected changes no selection, so its `didSet` records no
-            // navigation, but it is one (`AppState.recordNavigation`).
+            // The row selects through the outline, whose selection change
+            // says it is a navigation (`outlineViewSelectionDidChange`). A
+            // click on the row already selected changes no selection, so it
+            // says so here.
             appState.userDidNavigate()
         case .addRepository:
             // The Add Repository row's own buttons run its actions; a click

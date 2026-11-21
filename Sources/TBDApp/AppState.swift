@@ -592,8 +592,7 @@ final class AppState {
     /// lookup that resolves after a newer deep link superseded it is dropped.
     /// Guards out-of-order RPC resolution (deep link A then B, A resolves
     /// late). Any other navigation the user makes supersedes a lookup by
-    /// clearing it (`userDidNavigate`, through `supersedeArchivedLookup`), and
-    /// a lookup clears its own as it lands (`performArchivedNavigation`).
+    /// clearing it (`userDidNavigate`, through `supersedeArchivedLookup`).
     @ObservationIgnored var deepLinkRequestID: UUID?
 
     /// The task running the archived lookup `navigateToWorktree` started
@@ -710,9 +709,9 @@ final class AppState {
     /// has selected its session, `restoreSavedSelection` does not restore the
     /// saved selection over it. Holds one click; a later one, of either kind,
     /// replaces it (`navigateToRemoteSession`, `navigateToWorktree`), and any
-    /// later navigation the user makes drops it, so the load cannot replay it
-    /// over that navigation (`userDidNavigate`; `recordNavigation` lists its
-    /// callers and the exceptions).
+    /// later navigation the user makes (`userDidNavigate`) or selection change
+    /// the app makes (`recordNavigation`, which lists the callers and the
+    /// exceptions) drops it, so the load cannot replay it over that change.
     ///
     /// While a click is held, a progress toast says so
     /// (`pendingRemoteSessionLinkToastID`). Every drop goes through
