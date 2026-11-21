@@ -521,6 +521,13 @@ final class AppState {
     /// (set by a successful `refreshRemote()`, cleared when remote backends are
     /// unavailable), so an empty list at launch is not read as "no providers".
     var remoteProvidersLoaded = false
+    /// Whether a `refreshRemote()` has had the daemon's answer since launch:
+    /// the roster and mirror arrived, or the daemon said the feature is off,
+    /// which also answers (there are no sessions). A failed refresh leaves it
+    /// as it was, and nothing clears it. Unlike `remoteProvidersLoaded`, the
+    /// feature being off counts. `navigateToRemoteSession` holds a banner
+    /// click until it is set (`pendingRemoteSessionLink`).
+    @ObservationIgnored var remoteMirrorLoaded = false
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = [] {
@@ -667,11 +674,20 @@ final class AppState {
     /// outside the AppState extension that consumes it.
     @ObservationIgnored var pendingDeepLinkTerminalID: UUID?
 
-    /// Buffers a remote session's banner click that arrives before the initial
-    /// state load completes, when neither the worktrees nor the remote mirror
-    /// are loaded yet. Drained at the end of `connectAndLoadInitialState()`,
-    /// after `refreshRemote()` has run. Holds one click; a later one, of
-    /// either kind, replaces it (`navigateToRemoteSession`).
+    /// Buffers a remote session's banner click until it can be answered: until
+    /// the initial state load has finished (`isInitialStateLoaded`) and a
+    /// remote load has succeeded (`remoteMirrorLoaded`). Checked any earlier,
+    /// against worktrees or a mirror not yet loaded, it would answer "not
+    /// found" for a session that may exist.
+    ///
+    /// A failed load keeps it. A launch that cannot connect, or whose
+    /// `refreshRemote()` fails, leaves the click held, and the next
+    /// `refreshRemote()` that succeeds replays it
+    /// (`drainPendingRemoteSessionLink`), whether a later
+    /// `connectAndLoadInitialState()` run or any other caller runs it. While
+    /// it is held, `restoreSavedSelection` does not restore the saved
+    /// selection over it. Holds one click; a later one, of either kind,
+    /// replaces it (`navigateToRemoteSession`, `navigateToWorktree`).
     @ObservationIgnored var pendingRemoteSessionLink: RemoteSessionSelection?
 
     /// Profile IDs with an "Open login session" spawn currently in flight.
@@ -4241,6 +4257,9 @@ final class AppState {
             pendingDeepLinkTerminalID = nil
             navigateToWorktree(pendingID, terminalID: pendingTerminalID)
         }
+        // Replays a held banner click only if `refreshRemote()` above got the
+        // daemon's answer. After a failed connect or remote load the click
+        // stays held for the next remote load that succeeds.
         drainPendingRemoteSessionLink()
         if didConnect {
             Task { [weak self] in

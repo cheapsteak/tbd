@@ -1151,15 +1151,18 @@ extension AppState {
     /// `terminalID` — archived worktrees have no live terminals to focus.
     @MainActor
     func navigateToWorktree(_ id: UUID, terminalID: UUID? = nil) {
+        // The later click wins, so a held remote-session click is dropped,
+        // whether it is held for the initial load or for a remote load that
+        // has not yet succeeded. Otherwise that load would replay it over
+        // this navigation.
+        pendingRemoteSessionLink = nil
         // Cold-start guard: a tbd:// click can arrive between AppState.init()
         // and the daemon RPC populating `worktrees`. If we fall through to
         // archived lookup now we'll miss real active worktrees. Buffer
-        // instead and let connectAndLoadInitialState drain at the end. The
-        // later click wins, so a held remote-session click is dropped.
+        // instead and let connectAndLoadInitialState drain at the end.
         if !isInitialStateLoaded {
             pendingDeepLinkID = id
             pendingDeepLinkTerminalID = terminalID
-            pendingRemoteSessionLink = nil
             return
         }
 
