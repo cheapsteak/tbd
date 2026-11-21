@@ -372,16 +372,15 @@ struct HookTabTransportGateTests {
             leftoverTmuxProbe: .absent)
     }
 
-    /// A holder hook tab is torn down through the holder, never through tmux.
+    /// A holder hook tab is torn down through the holder.
     ///
-    /// Both negatives matter. `capture-pane` would read a pane that is the
-    /// empty string, and `kill-window` would address a window id naming
-    /// nothing — while the holder, its job and its rendezvous files outlive the
-    /// row that is their only record. With no registry wired the teardown can
-    /// only report that; the row, tab and order cleanup still has to run, or
-    /// the worktree keeps a tab whose terminal is gone.
-    @Test("closing a holder hook tab issues no capture-pane and no kill-window")
-    func holderHookTabTeardownSkipsTmux() async throws {
+    /// With no registry wired the teardown can only report that the holder,
+    /// its job and its rendezvous files outlive the row that is their only
+    /// record. The row, tab and order cleanup still has to run, or the worktree
+    /// keeps a tab whose terminal is gone, and the Closed Terminals entry is
+    /// still written, without a capture.
+    @Test("closing a holder hook tab with no registry writes its entry and removes its row and tab")
+    func holderHookTabTeardownWithoutARegistry() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let fx = try await makeWorktreeFixture(status: .active)
@@ -417,9 +416,8 @@ struct HookTabTransportGateTests {
     /// The window this closes is real and routine: a hook tab is closed
     /// *because* its hook finished, so its job has usually already exited and
     /// the kernel is free to hand the number out again. The row cleanup still
-    /// has to happen — a tab whose terminal is gone must not survive it — and
-    /// so does the absence of every tmux gesture, so this discriminates against
-    /// both a teardown that kills blind and one that fell into the tmux arm.
+    /// has to happen — a tab whose terminal is gone must not survive it — so
+    /// this discriminates against a teardown that kills blind.
     @Test("closing a holder hook tab never signals a recycled child pid")
     func holderHookTabTeardownSkipsARecycledPID() async throws {
         let (_, cleanup) = isolateTBDHome()
@@ -494,12 +492,12 @@ struct HookTabTransportGateTests {
         #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
     }
 
-    /// A hook tab an earlier build left on tmux is closed without running a
-    /// tmux command: nothing is captured, nothing is killed, and — a shell
-    /// with no session to resume and no screen to keep — no Closed Terminals
-    /// entry is written. The row, tab and order cleanup still runs.
-    @Test("closing a tmux hook tab runs no tmux command")
-    func tmuxHookTabTeardownRunsNoTmux() async throws {
+    /// A hook tab an earlier build left on tmux is closed by its row's
+    /// teardown alone. A shell with no session to resume and no screen to
+    /// keep, it gets no Closed Terminals entry; the row, tab and order cleanup
+    /// still runs.
+    @Test("closing a tmux hook tab removes its row and tab and writes no entry")
+    func tmuxHookTabTeardownRemovesRowAndTab() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let fx = try await makeWorktreeFixture(status: .active)

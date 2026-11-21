@@ -96,8 +96,7 @@ func testScrubInheritedTBDEnv() {
     // it is the one name the scrub judges by VALUE, and setting it in-process
     // would hand every concurrent suite that resolves the ambient Claude config
     // dir a sentinel path. That by-value rule is covered over injected
-    // dictionaries by `SpawnBaseEnvironmentTests` and
-    // `TmuxServerEnvironmentRepairTests`.
+    // dictionaries by `SpawnBaseEnvironmentTests`.
     let names = SpawnBaseEnvironment.enclosingSessionMarkers
         .subtracting(SpawnBaseEnvironment.tmuxPaneMarkers)
         .sorted()

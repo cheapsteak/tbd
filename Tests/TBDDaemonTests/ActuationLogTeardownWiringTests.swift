@@ -545,11 +545,11 @@ struct ActuationLogTeardownWiringTests {
     }
 
     /// A row an earlier build left on tmux is closed like a holder whose
-    /// disposal had nothing to kill: no tmux command runs, and the close reads
-    /// as dispatched whether the row is live or parked.
-    @Test("closing a row left on tmux runs no tmux command and reads as dispatched",
+    /// disposal had nothing to kill: the close reads as dispatched whether the
+    /// row is live or parked.
+    @Test("closing a row left on tmux reads as dispatched",
           arguments: [false, true])
-    func deleteOfATmuxRowIsDispatchedWithoutTmux(parked: Bool) async throws {
+    func deleteOfATmuxRowIsDispatched(parked: Bool) async throws {
         let logPath = try makeLogPath()
         let db = try TBDDatabase(inMemory: true)
         let router = makeRouter(

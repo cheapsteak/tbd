@@ -333,8 +333,11 @@ struct HolderTmuxAssumptionGateTests {
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .holder)
         let before = RowFingerprint(terminal)
+        // Answers that the server is gone, so a holder row that got past the
+        // guard would be parked.
+        let probe = RecordingLeftoverTmuxProbe { _ in .absent }
 
-        let response = await router(db).handle(try RPCRequest(
+        let response = await router(db, probe: probe.probe).handle(try RPCRequest(
             method: RPCMethod.terminalRecreateWindow,
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
@@ -344,8 +347,10 @@ struct HolderTmuxAssumptionGateTests {
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
                 "recreateWindow mutated a holder row it was supposed to refuse")
-        // The strongest half: neither branch below the guard ran. The repark
-        // branch would have killed a window, the respawn branch created one.
+        // The strongest half: nothing below the guard ran. Everything there
+        // starts by asking the probe about the row's tmux server.
+        #expect(probe.servers.isEmpty,
+                "recreateWindow probed a tmux server for a holder row: \(probe.servers)")
     }
 
     /// TBD no longer opens tmux windows, so a tmux SHELL row whose server is
@@ -910,8 +915,7 @@ struct HolderTmuxAssumptionGateTests {
     /// transport, and the classification comes from the PROCESS TABLE rather
     /// than from a tmux pane: this row's recorded job is gone, so the answer is
     /// `.sessionGone`, which `unparkedWakeMessage` phrases as "its
-    /// holder-backed session". Nothing is mutated and no tmux command is
-    /// issued.
+    /// holder-backed session". Nothing is mutated.
     @Test("a wake of an unparked holder row is classified, not refused for its transport")
     func wakeOfAnUnparkedHolderRowIsClassified() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -1777,8 +1781,8 @@ struct HolderTmuxAssumptionGateTests {
     /// The leg that would redden if the transport comparison were inverted.
     /// Its registry has recorded nothing, so the holder branch would answer
     /// "running" and refuse; a tmux row is not asked at all, because closing
-    /// it runs no tmux command and ends no process.
-    @Test("the close rails do not hold a busy tmux row, and run no tmux command")
+    /// it ends no process.
+    @Test("the close rails do not hold a busy tmux row")
     func closeRailsReleaseBusyTmuxRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
@@ -1798,7 +1802,7 @@ struct HolderTmuxAssumptionGateTests {
         #expect(try await db.terminals.get(id: terminal.id) == nil)
     }
 
-    @Test("delete removes an identical tmux row without running tmux")
+    @Test("delete removes an identical tmux row")
     func deleteLeavesTmuxRowSessionToTmux() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
@@ -2313,13 +2317,13 @@ struct HolderTmuxAssumptionGateTests {
         #expect(outcome["modeAgeMilliseconds"] as? Int == 0)
     }
 
-    /// **`--verify` is no longer a transport refusal.** It is refused here for
+    /// **`--verify` is not a transport refusal.** It is refused here for
     /// the reason it is refused on a tmux row with the same config:
     /// `delivery_verification_enabled` is off, which is the shipped default and
     /// what an in-memory database seeds. The refusal names the flag and the RPC
     /// that flips it — never the transport, because a caller told "this
-    /// transport has no delivery observation" would stop asking for one when it
-    /// now works. Nothing is typed, and no tmux command is issued.
+    /// transport has no delivery observation" would stop asking for one that
+    /// works. Nothing is typed.
     @Test("terminal.send --verify refuses a holder row by naming the flag, not the transport")
     func sendVerifyRefusesHolderRowWhileTheFlagIsOff() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -2586,7 +2590,7 @@ struct HolderTmuxAssumptionGateTests {
                 "archive deleted the row without disposing of its holder, so the holder, its child and its rendezvous files are now owned by nothing")
     }
 
-    @Test("archiving a worktree removes an identical tmux row without running tmux")
+    @Test("archiving a worktree removes an identical tmux row")
     func archiveLeavesTmuxRowSessionToTmux() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
@@ -2733,7 +2737,7 @@ struct HolderTmuxAssumptionGateTests {
                 "forget deleted the row without disposing of its holder, so the holder, its child and its rendezvous files are now owned by nothing")
     }
 
-    @Test("forgetting a worktree removes an identical tmux row without running tmux")
+    @Test("forgetting a worktree removes an identical tmux row")
     func forgetLeavesTmuxRowSessionToTmux() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)

@@ -65,7 +65,7 @@ import Testing
     // first (`TmuxResumeGate`). A parked one ended its session when it was
     // parked, and its entry carries the screen the park stored, unmarked.
 
-    @Test func deleteOfALiveTmuxRowWritesAMarkedEntryAndRunsNoTmux() async throws {
+    @Test func deleteOfALiveTmuxRowWritesAMarkedEntryWithoutAScreen() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
         let router = makeRouter(db: fx.db)
@@ -163,7 +163,7 @@ import Testing
 
     // MARK: - Hook-terminal close of a tab left on tmux
 
-    @Test func closeHookTerminalOnTmuxWritesNoEntryAndRunsNoTmux() async throws {
+    @Test func closeHookTerminalOnTmuxRemovesTheRowAndWritesNoEntry() async throws {
         let fx = try await makeFixture(label: TerminalLabel.preSession, kind: .shell, claudeSessionID: nil)
         defer { fx.cleanup() }
         let lifecycle = WorktreeLifecycle(
@@ -250,7 +250,7 @@ import Testing
 
     /// A worktree whose git checkout has vanished is auto-archived by
     /// reconcile; a parked tmux row's stored screen lands in Closed Terminals
-    /// history, and no tmux command runs.
+    /// history.
     @Test func reconcileAutoArchiveRecordsAParkedTmuxRowsStoredScreen() async throws {
         let historyDir = try Self.makeTempDir()
         defer { try? FileManager.default.removeItem(atPath: historyDir) }

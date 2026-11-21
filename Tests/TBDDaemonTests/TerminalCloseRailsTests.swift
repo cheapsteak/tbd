@@ -199,7 +199,7 @@ struct TerminalCloseRailsTests {
     /// The other branch of the transport conditional. A row an earlier build
     /// left on tmux is closed without running a tmux command, so closing it
     /// ends no in-flight turn and the activity rail has nothing to protect.
-    @Test("rails on: a mid-turn tmux row closes without running tmux", arguments: [
+    @Test("rails on: a mid-turn tmux row closes", arguments: [
         TerminalActivityState.working, .waitingForUser
     ])
     func railsOnClosesBusyTmuxRow(state: TerminalActivityState) async throws {
