@@ -31,7 +31,7 @@ Slice IDs are stable handles (`A`, `B`, `C1`…) used in channels and branch nam
 | **D** | Clock-seam migration: control-mode / attach ready-timer (hardest; precondition for H) | B | `Sources/TBDDaemon/Tmux/ControlMode/`, attach-replay orchestration + their tests |
 | **E** | `.flaky(issue:)` quarantine trait + retry-metrics JSON artifact | A | `Tests/TestSupport/` (new file), `.github/workflows/test.yml` (artifact upload) |
 | **F** | Remaining suppression burn-down, mechanical batches | C1–C4, D | Whatever sleep sites remain |
-| **G** | `nightly.yml`: live tmux probes, flake-ledger stress loop, quarantine audit | E | `.github/workflows/nightly.yml` (new), `scripts/` |
+| **G** | `nightly.yml`: flake-ledger stress loop, quarantine audit | E | `.github/workflows/nightly.yml` (new), `scripts/` |
 | **H** | Interleaving harness MVP + seed corpus wired into PR CI | D | `Tests/TBDDaemonTests/` (new harness files) |
 | **I** | Nightly fuzz step wired into the existing nightly workflow | G, H | `.github/workflows/nightly.yml` |
 
