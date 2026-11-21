@@ -281,4 +281,201 @@ struct DeepLinkToastTests {
             #expect(state.activeToast == nil)
         }
     }
+
+    // MARK: - A newer navigation supersedes an archived lookup in flight
+
+    private func remoteSession(_ sessionID: String) -> RemoteSessionInfo {
+        RemoteSessionInfo(
+            provider: "acme", payload: RemoteSessionPayload(id: sessionID, state: .running),
+            gone: false, dismissed: false, lastSeen: Date())
+    }
+
+    /// Follows a deep link to an archived worktree whose lookup `gate` holds
+    /// open, and returns once that lookup is in flight with its progress
+    /// toast up. Returns the archived worktree's repo.
+    private func startHeldArchivedLookup(_ state: AppState, gate: LookupGate) async -> UUID {
+        state.isInitialStateLoaded = true
+        state.reposLoaded = true
+        state.worktreesLoaded = true
+        let repoID = UUID()
+        let id = UUID()
+        state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in
+            await gate.hold()
+            return [wt]
+        }
+        state.navigateToWorktree(id)
+        let inFlight = await waitUntil { gate.isHolding }
+        #expect(inFlight)
+        #expect(state.activeToast?.style == .progress)
+        return repoID
+    }
+
+    /// Control: with nothing newer, the held lookup still lands on the
+    /// archive view once it resolves.
+    @Test func heldArchivedLookup_navigatesWhenNothingSupersedesIt() async {
+        await withState { state in
+            let gate = LookupGate()
+            let repoID = await startHeldArchivedLookup(state, gate: gate)
+
+            gate.release()
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedRepoID == repoID)
+            #expect(state.highlightedArchivedWorktreeID != nil)
+            #expect(state.activeToast?.style != .progress)
+        }
+    }
+
+    @Test func archivedLookupInFlight_doesNotOverrideALaterRemoteBannerClick() async {
+        await withState { state in
+            let gate = LookupGate()
+            let repoID = await startHeldArchivedLookup(state, gate: gate)
+            state.remoteMirrorLoaded = true
+            state.remoteSessions = [remoteSession("s1")]
+            let expected = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+
+            state.macNotificationManager.handleClick(identifier: "remote:acme:s1")
+            #expect(state.selectedRemoteSession == expected)
+            // The click took over, so the lookup's progress toast is gone.
+            #expect(state.activeToast == nil)
+
+            gate.release()
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedRemoteSession == expected)
+            #expect(state.selectedRepoID == nil)
+            #expect(state.highlightedArchivedWorktreeID == nil)
+            #expect(state.archivedWorktrees[repoID] == nil)
+            #expect(state.activeToast == nil)
+        }
+    }
+
+    @Test func archivedLookupInFlight_doesNotReplaceALaterRemoteClicksNotFoundAnswer() async {
+        await withState { state in
+            let gate = LookupGate()
+            let repoID = await startHeldArchivedLookup(state, gate: gate)
+            state.remoteMirrorLoaded = true
+
+            state.macNotificationManager.handleClick(identifier: "remote:acme:missing")
+            #expect(state.activeToast?.message == "Remote session not found — it may have ended.")
+
+            gate.release()
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedRepoID == nil)
+            #expect(state.highlightedArchivedWorktreeID == nil)
+            #expect(state.archivedWorktrees[repoID] == nil)
+            #expect(state.activeToast?.style != .notice)
+        }
+    }
+
+    @Test func archivedLookupInFlight_doesNotOverrideALaterActiveWorktreeLink() async {
+        await withState { state in
+            let gate = LookupGate()
+            let archivedRepoID = await startHeldArchivedLookup(state, gate: gate)
+            let activeRepoID = UUID()
+            let activeID = UUID()
+            var active = makeArchived(id: activeID, repoID: activeRepoID)
+            active.status = .active
+            state.worktrees = [activeRepoID: [active]]
+
+            state.navigateToWorktree(activeID)
+            #expect(state.selectedWorktreeIDs == [activeID])
+            #expect(state.activeToast == nil)
+
+            gate.release()
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedWorktreeIDs == [activeID])
+            #expect(state.selectedRepoID == nil)
+            #expect(state.highlightedArchivedWorktreeID == nil)
+            #expect(state.archivedWorktrees[archivedRepoID] == nil)
+            #expect(state.activeToast == nil)
+        }
+    }
+
+    /// A click held for the remote mirror has not navigated, so the lookup
+    /// keeps its navigation. The lookup lands a link followed before the
+    /// click, so the click, the later action, stays held through it and is
+    /// replayed once the remote list loads.
+    @Test func archivedLookupInFlight_isNotSupersededByAClickThatIsOnlyHeld() async {
+        await withState { state in
+            let gate = LookupGate()
+            let repoID = await startHeldArchivedLookup(state, gate: gate)
+            let held = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+
+            // `remoteMirrorLoaded` is false: the click is held, not answered.
+            state.macNotificationManager.handleClick(identifier: "remote:acme:s1")
+            #expect(state.pendingRemoteSessionLink == held)
+            #expect(state.activeToast?.style == .progress)
+
+            gate.release()
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedRepoID == repoID)
+            #expect(state.pendingRemoteSessionLink == held)
+
+            state.remoteProvidersFetcher = { RemoteProvidersResult(providers: []) }
+            state.remoteSessionsFetcher = { [session = remoteSession("s1")] in
+                RemoteSessionsResult(sessions: [session])
+            }
+            state.retainedTranscriptsFetcher = { [] }
+            await state.refreshRemote()
+
+            #expect(state.selectedRemoteSession == held)
+            #expect(state.selectedRepoID == nil)
+            #expect(state.pendingRemoteSessionLink == nil)
+        }
+    }
+
+    /// The lookup is superseded even when the newer click lands before the
+    /// lookup's task has started: its token is stamped when the link is
+    /// followed, not when the task runs.
+    @Test func archivedLookupNotYetStarted_isSupersededByALaterRemoteBannerClick() async {
+        await withState { state in
+            state.isInitialStateLoaded = true
+            state.reposLoaded = true
+            state.worktreesLoaded = true
+            state.remoteMirrorLoaded = true
+            state.remoteSessions = [remoteSession("s1")]
+            let repoID = UUID()
+            let id = UUID()
+            state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in [wt] }
+
+            // One main-actor turn, so the lookup's task cannot start between them.
+            state.navigateToWorktree(id)
+            state.macNotificationManager.handleClick(identifier: "remote:acme:s1")
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+            #expect(state.selectedRepoID == nil)
+            #expect(state.archivedWorktrees[repoID] == nil)
+        }
+    }
+}
+
+/// Holds an archived lookup open until the test lets it resolve. A main-actor
+/// class because the lookup override is an escaping closure: it parks its
+/// continuation here, not in a captured local `var`.
+@MainActor
+private final class LookupGate {
+    private(set) var isHolding = false
+    private var released = false
+    private var held: CheckedContinuation<Void, Never>?
+
+    /// Called from the lookup; returns once `release()` has been called.
+    func hold() async {
+        guard !released else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            held = continuation
+            isHolding = true
+        }
+    }
+
+    func release() {
+        released = true
+        isHolding = false
+        held?.resume()
+        held = nil
+    }
 }

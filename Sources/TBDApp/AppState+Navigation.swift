@@ -143,11 +143,38 @@ extension AppState {
         navigationIndex = snapshot.index
     }
 
-    /// Record a new navigation entry. No-op while navigating (back/forward in
-    /// progress) or when the entry equals the current head. Truncates any
-    /// forward history when the user navigates somewhere new mid-stack.
-    func recordNavigation(_ entry: NavigationEntry) {
+    /// Record a new navigation entry. Does nothing while navigating
+    /// (back/forward in progress), and records nothing when the entry equals
+    /// the current head. Truncates any forward history when the user
+    /// navigates somewhere new mid-stack.
+    ///
+    /// A navigation also drops a held banner click (`pendingRemoteSessionLink`):
+    /// it came after the click, and the later action wins, so the remote load
+    /// that would answer the click must not replay it over this one. That
+    /// holds when the entry equals the current head too: with a click held,
+    /// a relaunch restores the history but not the selection, so selecting the
+    /// head's worktree is a navigation that records nothing new.
+    ///
+    /// Every navigation that makes a history entry passes here: sidebar and
+    /// dock row clicks, the jump menu, `selectRemoteSession`, `selectRepo`,
+    /// `navigateToActiveWorktree`. `selectionChanged` is false when the
+    /// worktree selection's `didSet` re-fires with the set unchanged, as a
+    /// `remove` of an id that was not selected does when an unselected
+    /// worktree is archived; that is no navigation, and keeps the click.
+    ///
+    /// The paths that must keep the click keep it: `restoreSavedSelection`
+    /// does nothing while a click is held, the drain clears the click before
+    /// its own replay runs, history entries are replayed with recording off
+    /// (`navigateBack` and `navigateForward` drop the click themselves), and
+    /// an archived lookup that resolves after the click puts it back
+    /// (`performArchivedNavigation`). A selection the app changes on its own
+    /// still drops it: a finished create swapping its placeholder for the
+    /// real row, or a pruned multi-selection.
+    func recordNavigation(_ entry: NavigationEntry, selectionChanged: Bool = true) {
         guard !isNavigating else { return }
+        if selectionChanged {
+            pendingRemoteSessionLink = nil
+        }
         if navigationIndex >= 0 && navigationIndex < navigationEntries.count {
             if navigationEntries[navigationIndex] == entry { return }
         }
@@ -180,6 +207,9 @@ extension AppState {
             return
         }
         navigationIndex = index
+        // A user's navigation, which records no entry, so it drops a held
+        // banner click here rather than in `recordNavigation`.
+        pendingRemoteSessionLink = nil
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
         navigationHistoryDidChange()
     }
@@ -195,6 +225,8 @@ extension AppState {
             return
         }
         navigationIndex = index
+        // As in navigateBack: a user's navigation drops a held banner click.
+        pendingRemoteSessionLink = nil
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
         navigationHistoryDidChange()
     }
@@ -366,7 +398,11 @@ extension AppState {
 
     /// Select a provider header without attaching to a session. The desk is a
     /// read-only projection of data already mirrored in AppState.
+    ///
+    /// A header click records no history entry, so it drops a held banner
+    /// click here, as `recordNavigation` does for the navigations that do.
     func selectRemoteProvider(_ provider: String) {
+        pendingRemoteSessionLink = nil
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = nil

@@ -349,7 +349,7 @@ final class AppState {
                 // that leads to a remote session lands on an empty worktree
                 // pane. See `syncRemoteSurfaceToWorktreeSelection`.
                 syncRemoteSurfaceToWorktreeSelection()
-                recordNavigation(.worktrees(selectionOrder))
+                recordNavigation(.worktrees(selectionOrder), selectionChanged: selectedWorktreeIDs != oldValue)
                 // Feed the jump menu's Recent section. Insertion-order LRU,
                 // most-recent-first; capped at 32 to bound memory. Only the
                 // most-recently-added worktree ID is recorded per selection
@@ -521,6 +521,13 @@ final class AppState {
     /// (set by a successful `refreshRemote()`, cleared when remote backends are
     /// unavailable), so an empty list at launch is not read as "no providers".
     var remoteProvidersLoaded = false
+    /// Whether a `refreshRemote()` has had the daemon's answer since launch:
+    /// the roster and mirror arrived, or the daemon said the feature is off,
+    /// which also answers (there are no sessions). A failed refresh leaves it
+    /// as it was, and nothing clears it. Unlike `remoteProvidersLoaded`, the
+    /// feature being off counts. `navigateToRemoteSession` holds a banner
+    /// click until it is set (`pendingRemoteSessionLink`).
+    @ObservationIgnored var remoteMirrorLoaded = false
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = [] {
@@ -580,10 +587,19 @@ final class AppState {
     @ObservationIgnored var toastDismissTask: Task<Void, Never>?
 
     /// Request-generation token for archived deep-link lookups. Stamped fresh
-    /// at the start of every `navigateToArchivedWorktree(_:)`; a lookup that
-    /// resolves after a newer deep link superseded it is dropped. Guards
-    /// out-of-order RPC resolution (deep link A then B, A resolves late).
+    /// for every lookup (by `navigateToWorktree`, or by
+    /// `navigateToArchivedWorktree(_:requestID:)` when called without one); a
+    /// lookup that resolves after a newer deep link superseded it is dropped.
+    /// Guards out-of-order RPC resolution (deep link A then B, A resolves
+    /// late). Any other navigation supersedes a lookup by clearing it
+    /// (`supersedeArchivedLookup`).
     @ObservationIgnored var deepLinkRequestID: UUID?
+
+    /// The task running the archived lookup `navigateToWorktree` started
+    /// last. Nothing in the app reads it; a test awaits it to know that
+    /// lookup has resolved, since a superseded resolution changes nothing a
+    /// test could wait on instead.
+    @ObservationIgnored var archivedLookupTask: Task<Void, Never>?
 
     /// Set briefly when external navigation (notification click, deep link,
     /// jump menu) lands on an active worktree. `SidebarView` observes this
@@ -648,11 +664,21 @@ final class AppState {
     /// exercise the rollback branch) without a live daemon.
     @ObservationIgnored var renameRPCOverride: (@MainActor (UUID, String) async throws -> Void)?
 
-    /// True once `connectAndLoadInitialState()` has finished its initial
-    /// `refreshAll()` and the worktree list is populated. Used by
-    /// `navigateToWorktree(_:)` to detect cold-start clicks that arrive
-    /// before the daemon RPC has returned.
+    /// True once `connectAndLoadInitialState()` has finished, connected or
+    /// not; a connected launch has run its initial `refreshAll()` by then.
+    /// Used by `navigateToWorktree(_:)` to detect cold-start clicks that
+    /// arrive before the daemon RPC has returned.
     var isInitialStateLoaded: Bool = false
+
+    /// Whether `refreshRepos()` has succeeded since launch. A launch that
+    /// could not connect sets `isInitialStateLoaded` without loading any list,
+    /// so a remote banner click checks this, with `worktreesLoaded`, before
+    /// it is answered (`remoteSessionLinkCanBeAnswered`).
+    @ObservationIgnored var reposLoaded = false
+
+    /// Whether an unscoped `refreshWorktrees()` has fetched the worktree list
+    /// since launch. See `reposLoaded`.
+    @ObservationIgnored var worktreesLoaded = false
 
     /// Buffers a deep-link target UUID when `.onOpenURL` fires before the
     /// initial state load completes. Drained at the end of
@@ -667,12 +693,33 @@ final class AppState {
     /// outside the AppState extension that consumes it.
     @ObservationIgnored var pendingDeepLinkTerminalID: UUID?
 
-    /// Buffers a remote session's banner click that arrives before the initial
-    /// state load completes, when neither the worktrees nor the remote mirror
-    /// are loaded yet. Drained at the end of `connectAndLoadInitialState()`,
-    /// after `refreshRemote()` has run. Holds one click; a later one, of
-    /// either kind, replaces it (`navigateToRemoteSession`).
+    /// Buffers a remote session's banner click until it can be answered: until
+    /// the initial state load has finished and the repos, the worktrees and,
+    /// unless the session has an active lane, the remote mirror have each
+    /// loaded (`remoteSessionLinkCanBeAnswered`). Checked any earlier, against
+    /// lists not yet loaded, it would answer "not found" for a session that
+    /// may exist, or miss the lane that stands for it.
+    ///
+    /// A failed load keeps it. A launch that cannot connect, or whose list or
+    /// remote load fails, leaves the click held, and the load that completes
+    /// the set replays it (`drainPendingRemoteSessionLink`), whether a later
+    /// `connectAndLoadInitialState()` run or the poll loads it; the poll
+    /// retries a failed remote load while a click is held
+    /// (`retryRemoteLoadForHeldClick`). While it is held, and once a drain
+    /// has selected its session, `restoreSavedSelection` does not restore the
+    /// saved selection over it. Holds one click; a later one, of either kind,
+    /// replaces it (`navigateToRemoteSession`, `navigateToWorktree`), and any
+    /// later navigation the user makes drops it, so the load cannot replay it
+    /// over that navigation (`recordNavigation`, which lists the exceptions).
+    ///
+    /// A click held longer than `heldRemoteSessionLinkLifetime` is dropped
+    /// unanswered by the next drain or retry, so a load that succeeds much
+    /// later cannot move the selection or bring TBD forward.
     @ObservationIgnored var pendingRemoteSessionLink: RemoteSessionSelection?
+
+    /// When `navigateToRemoteSession` held `pendingRemoteSessionLink`, read
+    /// from `now`. Meaningful only while a click is held.
+    @ObservationIgnored var pendingRemoteSessionLinkHeldAt: Date?
 
     /// Profile IDs with an "Open login session" spawn currently in flight.
     /// Guards rapid repeat clicks: the first click spawns, subsequent clicks
@@ -993,9 +1040,10 @@ final class AppState {
     /// (`ChangesListPoller`). Its host is this state, set in `init`.
     @ObservationIgnored let changesListPoller = ChangesListPoller()
     /// The current time, as `loadChangesSnapshot` stamps a load as it begins
-    /// and finishes and `changesSnapshotNeedsLoad` ages a cached one.
-    /// Injectable so a test can set how old a cached list is and the order
-    /// loads began in.
+    /// and finishes and `changesSnapshotNeedsLoad` ages a cached one, and as
+    /// a held banner click is stamped and aged
+    /// (`pendingRemoteSessionLinkHeldAt`). Injectable so a test can set how
+    /// old a cached list or a held click is and the order loads began in.
     @ObservationIgnored var now: @Sendable () -> Date = { Date() }
     /// How `loadChangesSnapshot` reads a worktree's Changes list, given the
     /// checkout and the default branch its branch diff compares against: git
@@ -3272,14 +3320,20 @@ final class AppState {
     ///
     /// No-op when:
     /// - `pendingDeepLinkID` or `pendingRemoteSessionLink` is set (a held
-    ///   deep link or banner click wins over persisted selection)
+    ///   deep link or banner click wins over persisted selection). After a
+    ///   launch that could not connect, a click held then means no later load
+    ///   restores the saved selection, and if the click expires unanswered
+    ///   nothing is selected.
     /// - the current selection is already non-empty
     /// - there are no valid IDs left after filtering stale ones
     ///
     /// Call this from `connectAndLoadInitialState()` after `refreshAll()` so
     /// the UI reflects the real restored selection.
     func restoreSavedSelection(validWorktreeIDs: [UUID]) {
-        guard selectedWorktreeIDs.isEmpty, pendingDeepLinkID == nil, pendingRemoteSessionLink == nil else { return }
+        // A selected remote session is a selection too: a held banner click
+        // that a `refreshAll()` answered before this runs keeps its answer.
+        guard selectedWorktreeIDs.isEmpty, selectedRemoteSession == nil,
+              pendingDeepLinkID == nil, pendingRemoteSessionLink == nil else { return }
         guard let data = userDefaults.data(forKey: Self.selectionOrderKey),
               let savedStrings = try? JSONDecoder().decode([String].self, from: data) else { return }
         let savedIDs = savedStrings.compactMap { UUID(uuidString: $0) }
@@ -4107,11 +4161,21 @@ final class AppState {
     /// tick's own sweep follows), the spawn preferences and foreground state
     /// go to the daemon, which may be a new one, and the phone status is read
     /// again in a task of its own.
+    ///
+    /// When no remote load has succeeded yet (`remoteMirrorLoaded`), as after
+    /// a launch that never connected, the remote list is loaded here too, so
+    /// a banner click held for it is answered by this tick rather than on the
+    /// next unrelated `.remoteSessionsChanged`. The answer waits for the
+    /// tick's `refreshAll()`, which loads the repos and worktrees it is also
+    /// checked against (`remoteSessionLinkCanBeAnswered`).
     func pollTickDidReconnect() async {
         await holderClaimSweepDidConnect(sweepNow: false)
         pushClaudeSpawnPreferences()
         pushForegroundState()
         refreshPhoneAtConnect()
+        if !remoteMirrorLoaded {
+            await refreshRemote()
+        }
     }
 
     /// Poll daemon for state changes every 2 seconds.
@@ -4175,6 +4239,7 @@ final class AppState {
                     await self.retryDaemonCapabilitiesIfMissing()
                     self.retryPendingPanelTabSyncs()
                     await self.refreshAll()
+                    await self.retryRemoteLoadForHeldClick()
                     if self.subscriptionTask == nil || self.subscriptionTask?.isCancelled == true {
                         self.startSubscription()
                     }
@@ -4241,6 +4306,9 @@ final class AppState {
             pendingDeepLinkTerminalID = nil
             navigateToWorktree(pendingID, terminalID: pendingTerminalID)
         }
+        // Replays a held banner click only if the lists and `refreshRemote()`
+        // above all loaded. After a failed connect or load the click stays
+        // held until a later load completes them.
         drainPendingRemoteSessionLink()
         if didConnect {
             Task { [weak self] in
@@ -4385,10 +4453,16 @@ final class AppState {
     // MARK: - Refresh
 
     /// Refresh all state from the daemon.
+    ///
+    /// Ends by replaying a held remote banner click, which may have been
+    /// waiting for these lists: after a launch that could not connect, the
+    /// poll's reconnect can load the remote mirror before the first list load
+    /// succeeds (`drainPendingRemoteSessionLink`).
     func refreshAll() async {
         await refreshRepos()
         await refreshWorktrees()
         await refreshNotifications()
+        drainPendingRemoteSessionLink()
     }
 
     /// Refresh the repo list. Only updates if data changed.
@@ -4399,6 +4473,7 @@ final class AppState {
                 repos = fetchedRepos
                 updateNavigationFlags()
             }
+            reposLoaded = true
             pruneExpandedSidebarGroups(repoIDs: Set(fetchedRepos.map(\.id)))
             pruneSidebarRegistryRemoteHiddenRepoIDs(repoIDs: Set(fetchedRepos.map(\.id)))
         } catch {
@@ -4542,6 +4617,9 @@ final class AppState {
             // arrows now that they have loaded (no save — nothing changed).
             if listsChanged {
                 updateNavigationFlags()
+            }
+            if repoID == nil {
+                worktreesLoaded = true
             }
 
             // Single RPC — fetch all terminals, group client-side

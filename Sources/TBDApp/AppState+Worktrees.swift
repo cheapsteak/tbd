@@ -1023,8 +1023,13 @@ extension AppState {
     /// `terminalID` is non-nil, also switches the worktree's active tab to
     /// the one rendering that terminal (live transcript or terminal pane);
     /// silently falls back to current selection when no tab matches.
+    ///
+    /// Supersedes an archived lookup still in flight
+    /// (`supersedeArchivedLookup`), so the lookup's late resolution cannot
+    /// replace this selection with the archive view.
     @MainActor
     func navigateToActiveWorktree(_ id: UUID, terminalID: UUID? = nil) {
+        supersedeArchivedLookup()
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = [id]
         // Expand the containing repo so the row is part of the rendered list
@@ -1062,16 +1067,27 @@ extension AppState {
     /// (spec: 2026-07-13-deeplink-archived-toast-design.md).
     /// Lookup failures and unknown UUIDs surface as error toasts (previously
     /// silent).
+    ///
+    /// `requestID` is the token `navigateToWorktree` already stamped into
+    /// `deepLinkRequestID` before starting this lookup's task; nil stamps a
+    /// fresh one here.
     @MainActor
-    func navigateToArchivedWorktree(_ id: UUID) async {
+    func navigateToArchivedWorktree(_ id: UUID, requestID: UUID? = nil) async {
         // Request-generation guard (F1). Two deep links (A then B) can have
         // overlapping lookups that resolve out of order; without this, A's
         // late resolution would replace B's toast (even one the user
         // hover-cancelled) and navigate to A. Stamp a fresh token now and
         // drop any resolution that isn't the newest request. Mirrors the
         // `revivingArchived[id] == nil` re-entrancy guard used for revive.
-        let myRequestID = UUID()
-        deepLinkRequestID = myRequestID
+        // Any other navigation drops it too, by clearing the token
+        // (`supersedeArchivedLookup`).
+        let myRequestID: UUID
+        if let requestID {
+            myRequestID = requestID
+        } else {
+            myRequestID = UUID()
+            deepLinkRequestID = myRequestID
+        }
 
         let archived: [Worktree]
         do {
@@ -1090,11 +1106,11 @@ extension AppState {
             return
         }
 
-        // Out-of-order RPC resolution: a newer deep link superseded this one
-        // while its lookup was in flight. Drop this stale resolution before it
-        // touches any toast/navigation state. (The toastID mechanism already
-        // covers post-toast staleness; this guard only covers the
-        // RPC-resolution window.)
+        // Out-of-order RPC resolution: a newer deep link, or any other newer
+        // navigation, superseded this one while its lookup was in flight.
+        // Drop this stale resolution before it touches any toast/navigation
+        // state. (The toastID mechanism already covers post-toast staleness;
+        // this guard only covers the RPC-resolution window.)
         guard deepLinkRequestID == myRequestID else { return }
 
         guard let wt = archived.first(where: { $0.id == id }) else {
@@ -1121,11 +1137,16 @@ extension AppState {
     /// flash-highlight the target. Runs immediately once the lookup resolves.
     @MainActor
     private func performArchivedNavigation(worktreeID: UUID, repoID: UUID, archived: [Worktree]) {
+        // This lands a link followed before any banner click still held, so
+        // that click is the later action and stays held, though selecting the
+        // repo records a navigation (`recordNavigation` drops a held click).
+        let heldClick = pendingRemoteSessionLink
         selectedWorktreeIDs = []
         selectedRepoID = repoID
         selectedScratchSection = false
         selectedRemoteProvider = nil
         selectedRemoteSession = nil
+        pendingRemoteSessionLink = heldClick
         archivedWorktrees[repoID] = archived.filter { $0.repoID == repoID }
         archivedWorktreesHasMore[repoID] = false
         highlightedArchivedWorktreeID = worktreeID
@@ -1144,6 +1165,29 @@ extension AppState {
         }
     }
 
+    /// Take navigation over from an archived lookup still in flight
+    /// (`navigateToArchivedWorktree`), so its late resolution cannot replace a
+    /// newer navigation's selection with the archive view, or its toast with
+    /// the archive notice. A newer archived lookup supersedes by stamping its
+    /// own token; every other navigation that answers a click or link calls
+    /// this before it changes the selection or shows a toast
+    /// (`navigateToActiveWorktree`, `navigateToRemoteSession`). A click that
+    /// is only held does not, because nothing has navigated yet.
+    ///
+    /// Clearing `deepLinkRequestID` drops the lookup's resolution. Its
+    /// "Looking for worktree…" progress toast is dismissed too: a dropped
+    /// resolution touches no toast, and a progress toast never dismisses
+    /// itself, so it would otherwise stay up for good. That toast carries the
+    /// lookup's request ID as its own (`navigateToWorktree`), so only it is
+    /// dismissed, never another toast that has replaced it.
+    @MainActor
+    func supersedeArchivedLookup() {
+        if let requestID = deepLinkRequestID, activeToast?.id == requestID {
+            dismissToast()
+        }
+        deepLinkRequestID = nil
+    }
+
     /// Public entry point for deep-link navigation. Synchronous fast path
     /// for active worktrees; falls through to the async archived path on a
     /// miss. When `terminalID` is non-nil, the active-worktree path also
@@ -1151,15 +1195,18 @@ extension AppState {
     /// `terminalID` — archived worktrees have no live terminals to focus.
     @MainActor
     func navigateToWorktree(_ id: UUID, terminalID: UUID? = nil) {
+        // The later click wins, so a held remote-session click is dropped,
+        // whether it is held for the initial load or for a remote load that
+        // has not yet succeeded. Otherwise that load would replay it over
+        // this navigation.
+        pendingRemoteSessionLink = nil
         // Cold-start guard: a tbd:// click can arrive between AppState.init()
         // and the daemon RPC populating `worktrees`. If we fall through to
         // archived lookup now we'll miss real active worktrees. Buffer
-        // instead and let connectAndLoadInitialState drain at the end. The
-        // later click wins, so a held remote-session click is dropped.
+        // instead and let connectAndLoadInitialState drain at the end.
         if !isInitialStateLoaded {
             pendingDeepLinkID = id
             pendingDeepLinkTerminalID = terminalID
-            pendingRemoteSessionLink = nil
             return
         }
 
@@ -1172,8 +1219,14 @@ extension AppState {
             if NSApplication.shared.isRunning {
                 NSApplication.shared.activate(ignoringOtherApps: true)
             }
-            showToast(Toast(id: UUID(), message: "Looking for worktree…", style: .progress))
-            Task { await navigateToArchivedWorktree(id) }
+            // Stamped now, not when the task starts, so a navigation that
+            // lands before the task runs still supersedes this lookup. The
+            // progress toast takes the same ID, which is how
+            // `supersedeArchivedLookup` knows the toast is this lookup's.
+            let requestID = UUID()
+            deepLinkRequestID = requestID
+            showToast(Toast(id: requestID, message: "Looking for worktree…", style: .progress))
+            archivedLookupTask = Task { await navigateToArchivedWorktree(id, requestID: requestID) }
         }
     }
 
@@ -1210,8 +1263,10 @@ extension AppState {
     /// `selectRepo(id:)`; no `NavigationEntry`/back-forward integration for v1
     /// (documented scope cut — the Scratch section header has no natural UUID
     /// identity for the navigation history's worktree/repo entries to key
-    /// off).
+    /// off). With no history entry, it drops a held banner click itself, as
+    /// `recordNavigation` does for the navigations that make one.
     func selectScratchSection() {
+        pendingRemoteSessionLink = nil
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = nil
