@@ -20,8 +20,19 @@ import Foundation
 /// thing being serialized.
 ///
 /// No timeout. Every step inside a send carries its own bound, so a lane is held
-/// for a bounded interval and no longer; a timeout here would only add a second,
-/// worse deadline that abandons a half-typed payload.
+/// for a bounded interval and no longer:
+///
+///   - the read of the child's modes the send is composed against,
+///     `HolderInputTiming.sendPathScreenPullBound`;
+///   - the wait for the app's acknowledgment of an injection it was handed,
+///     `HolderInputTiming.injectionAckDeadline`, after which the daemon writes
+///     the bytes itself;
+///   - the daemon's own write to the pty, bounded by its descriptor's write
+///     budget (`HolderReader`), which reports a child that is not reading
+///     rather than waiting on it.
+///
+/// A timeout here would only add a second, worse deadline that abandons a
+/// half-typed payload.
 actor TerminalSendSerializer {
     private var lanes: [UUID: Task<Void, Never>] = [:]
 

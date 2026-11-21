@@ -53,8 +53,7 @@ import TBDShared
 /// belongs to — the holder rendezvous directory derives from `TBD_HOME`, and so
 /// does the socket a `tbd` invocation inside the job reaches for — so a job that
 /// lost them would answer to a different installation than the daemon that
-/// spawned it. All of it must keep flowing to the job exactly as the tmux path
-/// delivers it.
+/// spawned it. All of it must keep flowing to the job unchanged.
 ///
 /// `CLAUDE_CONFIG_DIR` is the one name whose *value* decides, because both
 /// kinds of value share it. TBD injects one per spawn for a profile-bound
@@ -70,12 +69,13 @@ import TBDShared
 ///
 /// **TERM is pinned rather than inherited**, for a related but distinct reason:
 /// it describes the terminal a job draws into, not the program that launched
-/// the daemon. The holder transport pins `xterm-256color`, the value a tmux
-/// pane gets from its server's `default-terminal`: otherwise a daemon restarted
-/// from another terminal emulator hands the
-/// job that emulator's TERM — a terminfo the holder's reader may not implement —
-/// and a daemon the app launched itself has no TERM at all. Two sibling helpers
-/// pin the same value: `TerminalPanelView.makeViewerEnvironment` strips
+/// the daemon. Every holder job gets `xterm-256color`, the terminal type of the
+/// emulators that draw a holder session — the daemon's retained one and the
+/// app's viewer — and the name the libghostty engine gives an `XTGETTCAP` `TN`
+/// query. Inherited instead, a daemon restarted from another terminal emulator
+/// would hand the job that emulator's TERM — a terminfo the holder's reader may
+/// not implement — and a daemon the app launched itself has no TERM at all.
+/// Two sibling helpers pin the same value: `TerminalPanelView.makeViewerEnvironment` strips
 /// `TMUX`/`TMUX_PANE` and pins TERM for the processes the app runs in its own
 /// terminals, and `BoundedProcessClaudeSpawner.invocationEnvironment` pins it
 /// when it runs a child under a pseudo-terminal.
@@ -166,13 +166,13 @@ enum SpawnBaseEnvironment {
         .union(codexSessionMarkers)
         .union(tmuxPaneMarkers)
 
-    /// The terminal type every holder job gets: what a tmux server's
-    /// `default-terminal` gives a pane.
+    /// The terminal type every holder job gets: the one the emulators that
+    /// draw a holder session implement (see the type's documentation).
     private static let pinnedTerm = "xterm-256color"
 
     /// `base` with the enclosing session's markers removed, a TBD-minted
-    /// profile config dir removed, and TERM pinned to what tmux gives a pane;
-    /// everything else passes through untouched.
+    /// profile config dir removed, and TERM pinned to `pinnedTerm`; everything
+    /// else passes through untouched.
     ///
     /// An empty `CLAUDE_CONFIG_DIR` is dropped rather than passed on. Its
     /// readers in this tree — `ClaudeTrustSeeder.ensureTrusted`,
