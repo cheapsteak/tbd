@@ -221,13 +221,19 @@ extension WorktreeLifecycle {
         // (`closeLeftoverTmuxRow`), and a live row's entry is marked with the
         // worktree's server, the record that keeps its session from being
         // resumed beside the one tmux may still run. A mark that cannot be
-        // written throws here, so the archive is refused before it has
-        // changed the worktree, ended a session or deleted a row, and the
-        // open row keeps naming its session to the resume gate. Refusing is
-        // what keeps the row: a row left behind in an archived worktree would
-        // go when its repo is removed, which deletes an archived worktree's
-        // rows with it. Entries written for rows closed before the failing one
-        // stay; a retry keeps them as they are.
+        // written throws here, so the archive is refused with the worktree's
+        // status, its sessions and every row as they were, and the open row
+        // keeps naming its session to the resume gate. Refusing is what keeps
+        // the row: a row left behind in an archived worktree would go when its
+        // repo is removed, which deletes an archived worktree's rows with it.
+        //
+        // What a refused archive leaves is the entries this pass wrote before
+        // the throw: a parked row's, with the screen its park stored, and the
+        // marks of the live rows closed ahead of the failing one. When every
+        // mark is written and the status write below fails, every row's entry
+        // stays the same way. Each names a tab that is still open, and Closed
+        // Terminals lists it beside that tab. A retry writes the same entries
+        // again, one per terminal.
         for terminal in terminals where terminal.transport == .tmux {
             try await Self.closeLeftoverTmuxRow(
                 terminal, server: worktree.tmuxServer, history: db.terminalHistory)

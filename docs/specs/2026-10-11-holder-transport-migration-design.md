@@ -229,10 +229,18 @@ the session to the resume gate (below) as the mark would. So the write throws
 (`LeftoverTmuxMarkUnwritable`) and nothing is deleted:
 
 - **Closing the tab** fails with the reason and records `transport-failed`.
-- **Archiving a worktree or a scratch space** is refused before it changes
-  anything. The tmux rows are closed ahead of the status flip and of every
-  holder's disposal, since a row kept inside an archived worktree would go when
-  its repo is removed.
+  The app, which removed the tab at once, puts it back where it was and shows
+  the reason, and writes no tab order until every delete has succeeded.
+- **Archiving a worktree or a scratch space** is refused with the worktree's
+  status, its sessions and every row as they were. The tmux rows are closed
+  ahead of the status flip and of every holder's disposal, since a row kept
+  inside an archived worktree would go when its repo is removed. What the
+  refusal leaves is the Closed Terminals entries written for the tmux rows
+  closed ahead of the failing one: a parked row's, with its screen, and the
+  marks of live rows. A worktree archive whose marks are all written and whose
+  status write then fails leaves every row's entry the same way. Closed
+  Terminals lists each beside its open tab, and a retry writes the same
+  entries again, one per terminal.
 - **Reconcile's archive** leaves the worktree for its next sweep, as it does a
   teardown it could not record, and records the failure on that row's
   dispose.
@@ -324,15 +332,25 @@ record every close writes. A marked entry sits outside the newest-50 cap on a
 worktree's Closed Terminals, since pruning it would drop the mark while the
 session may still be running.
 
-The guarantee covers what this build closes: every tmux row it deletes whose
-session may still run in its worktree's server leaves a mark. A tab an older
-build failed to kill at archive is not marked. That archive killed each tab's
-tmux window, but left the window untouched when it could not confirm the pane
-was the tab's own, and could leave the agent running when the kill failed and
-the pane's pid could not be read to signal it. Such a session may still run with
-no mark and no open row naming it, so a revive starts it beside the tmux agent.
-It takes a failed kill, so it is rare, and a revive without the gate starts the
-same second agent: the gate neither adds the case nor removes it.
+What the gate covers is a session an open tmux row names, and one whose row
+was closed with a mark: closing its tab, archiving its worktree or scratch
+space, and reconcile's archive. These leave a session that may still run in
+tmux with neither, and the gate lets a start of it through:
+
+- **Removing a repo** – its main worktree's rows go with the worktree row
+  (`WorktreeStore.deleteForRepo`) rather than through a close, so they get no
+  entry.
+- **Forgetting a worktree or deleting a scratch space** – both remove every
+  entry the worktree had, a mark included (above).
+- **A row whose worktree the daemon has no local row for** – it names no
+  server, so its close writes no mark (above).
+- **An archive by an older build** – it wrote no mark. It killed each tab's
+  tmux window, but skipped the kill when it could not confirm the pane was the
+  tab's own, and could leave the agent running when the kill failed and the
+  pane's pid could not be read to signal it.
+
+In each, a start of the session without the gate puts the same second agent on
+it: the gate neither adds these cases nor removes them.
 
 **When it runs.** Reconcile probes once per server name per pass, wherever it
 runs: at daemon startup, on demand (`tbd cleanup`, a repo add), and on a timer —
@@ -576,6 +594,11 @@ never unlinks it, and nothing TBD runs creates one any more.
   as they were. Reconcile's archive leaves the worktree, records the failure,
   and archives it on the next sweep that can write the mark. A hook tab keeps
   its row.
+- In the app, a `terminal.delete` that fails puts the closed tab back in its
+  place with its label and composer draft, keeps the selection, shows the
+  daemon's message and writes no tab order. One that succeeds writes the order
+  without the tab and drops the draft; one that cannot reach the daemon writes
+  no order and shows no alert.
 - A marked entry survives the newest-50 prune, a later save of the same entry
   keeps its mark, and the lookup returns each server marked for the given
   session ids, across worktrees.

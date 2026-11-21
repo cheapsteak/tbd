@@ -155,9 +155,11 @@ extension WorktreeLifecycle {
     /// caller keeps the row, which names the session to the resume gate as
     /// the mark would (`TerminalStore.liveTmuxServers`). Closing the tab
     /// fails and says why; an archive of its worktree, repo worktree or
-    /// scratch space, is refused before it changes anything; reconcile's
-    /// archive leaves the worktree for its next sweep; a hook tab's close
-    /// keeps the tab. The notice is logged only once the mark is written. A
+    /// scratch space, is refused with the worktree, its sessions and every
+    /// row as they were, keeping the entries already written for the tmux
+    /// rows closed ahead of it (`beginArchiveWorktree`); reconcile's archive
+    /// leaves the worktree for its next sweep; a hook tab's close keeps the
+    /// tab. The notice is logged only once the mark is written. A
     /// parked row's entry carries no mark, so a failure to write it is logged
     /// and the close goes ahead, as any other close's is.
     ///
@@ -240,16 +242,25 @@ extension WorktreeLifecycle {
 /// tab, a carryover and a fresh-branch revive of a Claude conversation start
 /// with, writes a new session id and never a second agent on this one.
 ///
-/// The guarantee covers what this build closes: every tmux row it deletes
-/// whose session may still run in its worktree's server leaves a mark. A tab
-/// an older build failed to kill at archive is not marked. That archive
-/// killed each tab's tmux window, but left the window untouched when it could
-/// not confirm the pane was the tab's own, and could leave the agent running
-/// when the kill failed and the pane's pid could not be read to signal it.
-/// Such a session may still run with no mark and no open row naming it, and a
-/// revive starts it beside the tmux agent. It takes a failed kill, so it is
-/// rare, and a revive without this gate starts the same second agent: the
-/// gate neither adds the case nor removes it.
+/// What it covers is a session an open tmux row names, and one whose row was
+/// closed with a mark: closing its tab, archiving its worktree or scratch
+/// space, reconcile's archive. These leave a session that may still run in
+/// tmux with neither, and this gate lets a start of it through:
+///
+/// - Removing a repo deletes its main worktree's rows with the worktree row
+///   (`WorktreeStore.deleteForRepo`) rather than closing them, so they get
+///   no entry.
+/// - Forgetting a worktree and deleting a scratch space remove every Closed
+///   Terminals entry the worktree had, a mark included.
+/// - A row whose worktree the daemon has no local row for names no server, so
+///   its close writes no mark (`closeLeftoverTmuxRow`).
+/// - An archive by an older build wrote no mark. It killed each tab's tmux
+///   window, but skipped the kill when it could not confirm the pane was the
+///   tab's own, and could leave the agent running when the kill failed and
+///   the pane's pid could not be read to signal it.
+///
+/// In each, a start of the session without this gate puts the same second
+/// agent on it: the gate neither adds these cases nor removes them.
 ///
 /// Keyed by session id rather than by row or worktree, because the paths
 /// that resume a session reach it by id from different records — the

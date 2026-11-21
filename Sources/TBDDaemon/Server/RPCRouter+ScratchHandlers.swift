@@ -153,9 +153,11 @@ extension RPCRouter {
         // it only writes Closed Terminals entries (`closeLeftoverTmuxRow`).
         // A live row's entry that cannot be marked throws here, before any
         // holder is disposed of or any row deleted, so the archive fails
-        // with every session as it was and the open row keeps naming its
-        // session to the resume gate. Delete writes no entry, so it cannot
-        // fail here.
+        // with every session and row as it was and the open row keeps naming
+        // its session to the resume gate. The entries written for the tmux
+        // rows closed ahead of the failing one stay, listed in Closed
+        // Terminals beside their open tabs. Delete writes no entry, so it
+        // cannot fail here.
         for t in terminals where t.transport == .tmux {
             try await WorktreeLifecycle.closeLeftoverTmuxRow(
                 t, server: wt.tmuxServer,
