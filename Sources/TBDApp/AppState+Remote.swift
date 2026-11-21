@@ -47,7 +47,8 @@ extension AppState {
     /// The first two outcomes are the daemon's answer, so both set
     /// `remoteMirrorLoaded` and replay a held banner click if the repos and
     /// worktrees have loaded too (`drainPendingRemoteSessionLink`). A failure
-    /// leaves a held click held.
+    /// leaves a held click held, and the poll retries the load while it is
+    /// (`retryRemoteLoadForHeldClick`).
     func refreshRemote() async {
         do {
             let providers = try await remoteProvidersFetcher()
@@ -230,13 +231,14 @@ extension AppState {
     /// (`SidebarOutlineController.centerSelectionIfChanged`), so this asks
     /// for no scroll.
     ///
-    /// A click is held, not answered, until every list it is checked against
-    /// has loaded (`remoteSessionLinkCanBeAnswered`): the repos and the
-    /// worktrees, which hold the lane and the section to expand, and the
-    /// remote mirror. Until then an empty mirror would answer "not found" for
-    /// a session that may exist, and empty worktrees would miss its lane. The
-    /// click waits in `pendingRemoteSessionLink`, and
-    /// `drainPendingRemoteSessionLink` replays it once all are in.
+    /// A click is held, not answered, until the lists it is checked against
+    /// have loaded (`remoteSessionLinkCanBeAnswered`): the repos and the
+    /// worktrees, which hold the lane and the section to expand, and, unless
+    /// an active lane answers it from those alone, the remote mirror. Until
+    /// then an empty mirror would answer "not found" for a session that may
+    /// exist, and empty worktrees would miss its lane. The click waits in
+    /// `pendingRemoteSessionLink`, and `drainPendingRemoteSessionLink`
+    /// replays it once they are in.
     ///
     /// The rule holds after a failed launch too. A launch that could not
     /// connect, or whose remote load failed, still sets
@@ -253,18 +255,16 @@ extension AppState {
     /// navigated yet; its replay does.
     @MainActor
     func navigateToRemoteSession(provider: String, sessionID: String) {
-        if !remoteSessionLinkCanBeAnswered {
-            pendingRemoteSessionLink = RemoteSessionSelection(provider: provider, sessionID: sessionID)
+        let link = RemoteSessionSelection(provider: provider, sessionID: sessionID)
+        if !remoteSessionLinkCanBeAnswered(link) {
+            pendingRemoteSessionLink = link
             pendingDeepLinkID = nil
             pendingDeepLinkTerminalID = nil
             return
         }
         supersedeArchivedLookup()
 
-        if let lane = allWorktrees.first(where: { worktree in
-            guard worktree.status == .active, let binding = worktree.providerBinding else { return false }
-            return binding.provider == provider && !binding.sessionID.isEmpty && binding.sessionID == sessionID
-        }) {
+        if let lane = activeLane(for: link) {
             navigateToActiveWorktree(lane.id)
             return
         }
@@ -286,13 +286,25 @@ extension AppState {
         expandRepoContaining(remoteSession: session)
     }
 
-    /// Whether a banner click can be answered now: the initial load has
-    /// finished (`isInitialStateLoaded`), and the repos (`reposLoaded`), the
-    /// worktrees (`worktreesLoaded`) and the remote mirror
-    /// (`remoteMirrorLoaded`) have each loaded at least once. A launch that
-    /// could not connect sets the first with none of the lists loaded.
-    var remoteSessionLinkCanBeAnswered: Bool {
-        isInitialStateLoaded && reposLoaded && worktreesLoaded && remoteMirrorLoaded
+    /// The active adopted lane whose provider binding names `link`'s session.
+    func activeLane(for link: RemoteSessionSelection) -> Worktree? {
+        allWorktrees.first { worktree in
+            guard worktree.status == .active, let binding = worktree.providerBinding else { return false }
+            return binding.provider == link.provider && !binding.sessionID.isEmpty
+                && binding.sessionID == link.sessionID
+        }
+    }
+
+    /// Whether a banner click for `link` can be answered now: the initial
+    /// load has finished (`isInitialStateLoaded`), the repos (`reposLoaded`)
+    /// and the worktrees (`worktreesLoaded`) have each loaded at least once,
+    /// and either the session has an active lane, which answers it from the
+    /// worktree list alone, or the remote mirror has loaded
+    /// (`remoteMirrorLoaded`). A launch that could not connect sets the first
+    /// with none of the lists loaded.
+    func remoteSessionLinkCanBeAnswered(_ link: RemoteSessionSelection) -> Bool {
+        isInitialStateLoaded && reposLoaded && worktreesLoaded
+            && (remoteMirrorLoaded || activeLane(for: link) != nil)
     }
 
     /// Replay the banner click `navigateToRemoteSession` held, once it can be
@@ -309,9 +321,23 @@ extension AppState {
     /// answers with the not-found toast.
     @MainActor
     func drainPendingRemoteSessionLink() {
-        guard let pending = pendingRemoteSessionLink, remoteSessionLinkCanBeAnswered else { return }
+        guard let pending = pendingRemoteSessionLink, remoteSessionLinkCanBeAnswered(pending) else { return }
         pendingRemoteSessionLink = nil
         navigateToRemoteSession(provider: pending.provider, sessionID: pending.sessionID)
+    }
+
+    /// Retry the remote load while a banner click is held for it. A load that
+    /// fails while the app stays connected is not retried by
+    /// `pollTickDidReconnect`, which runs only on a reconnect, so without
+    /// this the click would wait for an unrelated `.remoteSessionsChanged`.
+    /// The poll cycle calls it after its `refreshAll()`. It loads nothing
+    /// when no click is held or the mirror has loaded, so a daemon that
+    /// refuses `remote.*` is asked again only until the click is answered or
+    /// a later navigation drops it.
+    @MainActor
+    func retryRemoteLoadForHeldClick() async {
+        guard pendingRemoteSessionLink != nil, !remoteMirrorLoaded else { return }
+        await refreshRemote()
     }
 
     // MARK: - Rename push (docs/remote-provider-contract.md § `rename`)

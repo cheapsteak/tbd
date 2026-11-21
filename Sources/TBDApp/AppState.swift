@@ -694,18 +694,20 @@ final class AppState {
     @ObservationIgnored var pendingDeepLinkTerminalID: UUID?
 
     /// Buffers a remote session's banner click until it can be answered: until
-    /// the initial state load has finished and the repos, the worktrees and
-    /// the remote mirror have each loaded (`remoteSessionLinkCanBeAnswered`).
-    /// Checked any earlier, against lists not yet loaded, it would answer "not
-    /// found" for a session that may exist, or miss the lane that stands for
-    /// it.
+    /// the initial state load has finished and the repos, the worktrees and,
+    /// unless the session has an active lane, the remote mirror have each
+    /// loaded (`remoteSessionLinkCanBeAnswered`). Checked any earlier, against
+    /// lists not yet loaded, it would answer "not found" for a session that
+    /// may exist, or miss the lane that stands for it.
     ///
     /// A failed load keeps it. A launch that cannot connect, or whose list or
     /// remote load fails, leaves the click held, and the load that completes
     /// the set replays it (`drainPendingRemoteSessionLink`), whether a later
-    /// `connectAndLoadInitialState()` run or the poll loads it. While
-    /// it is held, `restoreSavedSelection` does not restore the saved
-    /// selection over it. Holds one click; a later one, of either kind,
+    /// `connectAndLoadInitialState()` run or the poll loads it; the poll
+    /// retries a failed remote load while a click is held
+    /// (`retryRemoteLoadForHeldClick`). While it is held, and once a drain
+    /// has selected its session, `restoreSavedSelection` does not restore the
+    /// saved selection over it. Holds one click; a later one, of either kind,
     /// replaces it (`navigateToRemoteSession`, `navigateToWorktree`), and any
     /// later navigation the user makes drops it, so the load cannot replay it
     /// over that navigation (`recordNavigation`, which lists the exceptions).
@@ -3316,7 +3318,10 @@ final class AppState {
     /// Call this from `connectAndLoadInitialState()` after `refreshAll()` so
     /// the UI reflects the real restored selection.
     func restoreSavedSelection(validWorktreeIDs: [UUID]) {
-        guard selectedWorktreeIDs.isEmpty, pendingDeepLinkID == nil, pendingRemoteSessionLink == nil else { return }
+        // A selected remote session is a selection too: a held banner click
+        // that a `refreshAll()` answered before this runs keeps its answer.
+        guard selectedWorktreeIDs.isEmpty, selectedRemoteSession == nil,
+              pendingDeepLinkID == nil, pendingRemoteSessionLink == nil else { return }
         guard let data = userDefaults.data(forKey: Self.selectionOrderKey),
               let savedStrings = try? JSONDecoder().decode([String].self, from: data) else { return }
         let savedIDs = savedStrings.compactMap { UUID(uuidString: $0) }
@@ -4222,6 +4227,7 @@ final class AppState {
                     await self.retryDaemonCapabilitiesIfMissing()
                     self.retryPendingPanelTabSyncs()
                     await self.refreshAll()
+                    await self.retryRemoteLoadForHeldClick()
                     if self.subscriptionTask == nil || self.subscriptionTask?.isCancelled == true {
                         self.startSubscription()
                     }

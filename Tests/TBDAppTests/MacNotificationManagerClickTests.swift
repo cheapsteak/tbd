@@ -388,6 +388,29 @@ private func selectLocalWorktree(in appState: AppState) -> UUID {
 }
 
 @MainActor
+@Test func handleClick_remoteAdoptedLane_isAnsweredBeforeTheRemoteListLoads() async {
+    // The lane answers from the worktree list alone, so it does not wait for
+    // the remote mirror.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    let repoID = UUID()
+    let lane = Worktree(
+        repoID: repoID, name: "remote://acme/s1", displayName: "lane",
+        branch: "", path: "remote://acme/s1", tmuxServer: "",
+        location: .remote(provider: "acme", sessionID: "s1"))
+    appState.worktrees = [repoID: [lane]]
+
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+
+    #expect(!appState.remoteMirrorLoaded)
+    #expect(appState.selectedWorktreeIDs == [lane.id])
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast == nil)
+}
+
+@MainActor
 @Test func handleClick_remoteUnknownSession_leavesSelectionAndShowsErrorToast() async {
     let (appState, suite) = makeAppStateWithRemoteSession()
     defer { tearDown(suite) }
@@ -836,6 +859,80 @@ private final class RemoteFetchCount {
     await appState.pollTickDidReconnect()
 
     #expect(fetches.value == 0)
+}
+
+@MainActor
+@Test func pollCycle_retriesAFailedRemoteLoadWhileAClickIsHeld() async {
+    // The load fails while the app stays connected, so no reconnect loads it.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    stubRemoteLoad(appState, failure: .connectionFailed("acme down"))
+    await appState.refreshRemote()
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.retryRemoteLoadForHeldClick()
+
+    #expect(appState.remoteMirrorLoaded)
+    #expect(appState.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+    #expect(appState.pendingRemoteSessionLink == nil)
+}
+
+@MainActor
+@Test func pollCycle_leavesAFailedRemoteLoadAloneWhenNoClickIsHeld() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let fetches = RemoteFetchCount()
+    appState.remoteProvidersFetcher = {
+        fetches.value += 1
+        return RemoteProvidersResult(providers: [])
+    }
+    appState.remoteSessionsFetcher = {
+        fetches.value += 1
+        return RemoteSessionsResult(sessions: [])
+    }
+    appState.retainedTranscriptsFetcher = { [] }
+
+    await appState.retryRemoteLoadForHeldClick()
+
+    #expect(fetches.value == 0)
+    #expect(!appState.remoteMirrorLoaded)
+}
+
+@MainActor
+@Test func heldRemoteClick_answeredByASecondLaunchsListLoad_keepsItsAnswerOverTheSavedSelection() async {
+    // A first launch connected and loaded the remote list, but lost the
+    // daemon before the repo and worktree lists. The re-run's `refreshAll()`
+    // answers the held click; its saved-selection restore, which comes next,
+    // must not replace that answer.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let expected = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+    let repoID = UUID()
+    let savedID = UUID()
+    let repo = Repo(id: repoID, path: "/tmp/x", displayName: "x", expanded: false)
+    let saved = Worktree(id: savedID, repoID: repoID, name: "x", displayName: "X",
+                         branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x")
+    writeSavedSelection([savedID], to: suite.defaults)
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+    appState.isInitialStateLoaded = true
+    appState.drainPendingRemoteSessionLink()
+    #expect(appState.pendingRemoteSessionLink == expected)
+
+    // The re-run's order: `refreshAll()`, then the restore.
+    appState.reposFetcher = { return [repo] }
+    appState.worktreesFetcher = { _ in [saved] }
+    await appState.refreshAll()
+    #expect(appState.selectedRemoteSession == expected)
+    appState.restoreSavedSelection(validWorktreeIDs: appState.allWorktrees.map(\.id))
+
+    #expect(appState.selectedRemoteSession == expected)
+    #expect(appState.selectedWorktreeIDs.isEmpty)
 }
 
 @MainActor
