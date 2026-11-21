@@ -505,14 +505,38 @@ extension AppState {
         }
     }
 
-    /// Delete a terminal (kills tmux window and removes from daemon DB).
-    func deleteTerminal(terminalID: UUID, worktreeID: UUID) async {
+    /// How a `terminal.delete` ended, for the tab close that sent it.
+    enum TerminalDeleteOutcome: Equatable, Sendable {
+        /// The daemon deleted the terminal, and the app has dropped it.
+        case deleted
+        /// The call failed with the daemon reachable, so the terminal is
+        /// taken as kept: the daemon refused the close, or its answer was
+        /// lost. A kept row the daemon in fact deleted drops at the next
+        /// terminal refresh.
+        case failed
+        /// The daemon could not be reached. The connection state reports it.
+        case unreachable
+    }
+
+    /// Delete a terminal: the daemon stops its session and removes its row.
+    ///
+    /// The daemon can refuse and keep the terminal, for one: a tmux row whose
+    /// Closed Terminals record cannot be written stays, with a message that
+    /// says so. `handleConnectionError` acts on disconnects only, so any other
+    /// failure is shown as an error alert carrying the daemon's message, the
+    /// way `sendToTerminal`'s and `archiveScratch`'s are.
+    @discardableResult
+    func deleteTerminal(terminalID: UUID, worktreeID: UUID) async -> TerminalDeleteOutcome {
         do {
-            try await daemonClient.deleteTerminal(terminalID: terminalID)
+            try await terminalDeleter(terminalID)
             removeDeletedTerminalFromState(terminalID: terminalID, worktreeID: worktreeID)
+            return .deleted
         } catch {
             logger.error("Failed to delete terminal: \(error)")
             handleConnectionError(error)
+            if Self.isDisconnectError(error) { return .unreachable }
+            showAlert("Couldn't close terminal: \(error.localizedDescription)", isError: true)
+            return .failed
         }
     }
 

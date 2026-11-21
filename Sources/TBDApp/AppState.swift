@@ -2742,6 +2742,18 @@ final class AppState {
     /// same reason as `worktreeArchiver`.
     @ObservationIgnored lazy var scratchArchiver: @MainActor (UUID) async throws -> Void =
         { [daemonClient] id in try await daemonClient.archiveScratch(worktreeID: id) }
+    /// How `deleteTerminal` sends `terminal.delete` — injectable for the same
+    /// reason as `worktreeArchiver`, so a test can script the daemon keeping
+    /// a terminal a tab close asked it to delete.
+    @ObservationIgnored lazy var terminalDeleter: @MainActor (UUID) async throws -> Void =
+        { [daemonClient] terminalID in try await daemonClient.deleteTerminal(terminalID: terminalID) }
+    /// How a tab close or reorder persists a worktree's tab order
+    /// (`tab.setOrder`) — injectable for the same reason, so a test can see
+    /// which orders reach the daemon.
+    @ObservationIgnored lazy var tabOrderSender: @MainActor (UUID, [UUID]) async throws -> Void =
+        { [daemonClient] worktreeID, tabIDs in
+            try await daemonClient.setTabOrder(worktreeID: worktreeID, tabIDs: tabIDs)
+        }
     /// How `refreshArchivedScratch()` lists the archived scratch spaces —
     /// injectable for the same reason as `worktreesFetcher`, so a test can
     /// tell whether an archive asked for the refresh.

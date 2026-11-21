@@ -357,7 +357,8 @@ extension AppState {
 
     /// Close one tab and clean up resources owned by that tab. This is shared
     /// by the tab bar close button and the Cmd-W menu shortcut. The tab closes
-    /// before this returns.
+    /// before this returns, and comes back, with an alert, if the daemon
+    /// fails to delete one of its terminals (`restoreTabAfterFailedClose`).
     func closeTab(worktreeID: UUID, index: Int) {
         guard var arr = tabs[worktreeID],
               arr.indices.contains(index) else { return }
@@ -388,31 +389,28 @@ extension AppState {
         unreadTerminals.subtract(terminalIDsInTab)
 
         // A closed tab takes its composers' unsent messages — and their focus
-        // registrations and spawn bookkeeping — with it: the terminals below are
-        // being deleted, so a kept draft could never be sent and would only sit
-        // in the map for the app's lifetime. Safe from eating a send in flight —
-        // the send path clears the draft itself on success, and a tab cannot
-        // close while its own send is mid-flight without the person closing it
-        // deliberately.
+        // registrations and spawn bookkeeping — with it, or the draft would
+        // only sit in the map for the app's lifetime. Safe from eating a send
+        // in flight — the send path clears the draft itself on success, and a
+        // tab cannot close while its own send is mid-flight without the person
+        // closing it deliberately.
         //
         // `terminalIDs(in:)` rather than `terminalIDsInTab`, because a
         // `.liveTranscript` tab — the composer's own home — is exactly the
-        // shape `allTerminalIDs()` does not enumerate.
-        for terminalID in terminalIDs(in: tab) {
+        // shape `allTerminalIDs()` does not enumerate. Its terminal is not
+        // deleted, so its state goes here. A terminal the close deletes loses
+        // its state when the delete succeeds (`removeDeletedTerminalFromState`),
+        // so a delete the daemon refuses puts the tab back with its draft.
+        for terminalID in terminalIDs(in: tab) where !terminalIDsInTab.contains(terminalID) {
             forgetComposerState(for: terminalID)
         }
 
+        let closedLayout = layouts[tab.id]
         layouts.removeValue(forKey: tab.id)
         arr.remove(at: index)
         tabs[worktreeID] = arr
         worktreeTabOrders[worktreeID] = arr.map(\.id)
         prunePaneHistories()
-
-        for terminalID in terminalIDsInTab {
-            Task {
-                await deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
-            }
-        }
 
         if closingActiveTab {
             if arr.isEmpty {
@@ -424,15 +422,65 @@ extension AppState {
             repointActiveTab(worktreeID: worktreeID, to: selectionToPreserve)
         }
 
-        let snapshot = arr.map(\.id)
+        // The tab order is written only once the daemon has deleted every
+        // terminal the tab held, so the stored order never loses a tab whose
+        // terminal the daemon kept. A delete that fails puts the tab back
+        // instead, and one that cannot reach the daemon leaves the order as
+        // the daemon has it. The order written is the one standing when the
+        // deletes finish, not the one at the close: a reorder or another
+        // close in the meantime has already written a newer one.
         Task {
+            var outcomes: [UUID: TerminalDeleteOutcome] = [:]
+            for terminalID in terminalIDsInTab {
+                outcomes[terminalID] = await deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
+            }
+            if outcomes.values.contains(.failed) {
+                restoreTabAfterFailedClose(tab, layout: closedLayout, at: index, worktreeID: worktreeID)
+                return
+            }
+            let unreached = outcomes.filter { $0.value == .unreachable }.keys
+            guard unreached.isEmpty else {
+                for terminalID in unreached { forgetComposerState(for: terminalID) }
+                return
+            }
+            guard let order = tabs[worktreeID]?.map(\.id) else { return }
             do {
-                try await daemonClient.setTabOrder(worktreeID: worktreeID, tabIDs: snapshot)
+                try await tabOrderSender(worktreeID, order)
             } catch {
                 logger.error("closeTab persist order failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
                 handleConnectionError(error)
             }
         }
+    }
+
+    /// Put back a tab whose close failed for at least one of its terminals:
+    /// where it was, with its label and layout, without moving the
+    /// selection. The in-memory order takes it back too, so the next close or
+    /// reorder writes it. `reconcileTabs` then prunes any pane whose terminal
+    /// the daemon did delete, and gives every kept terminal a tab.
+    ///
+    /// When a terminal refresh has already given one of the closed tab's
+    /// terminals a pane elsewhere while the delete was in flight, that pane
+    /// stays and the closed tab is not put back.
+    func restoreTabAfterFailedClose(
+        _ tab: TBDShared.Tab, layout: LayoutNode?, at index: Int, worktreeID: UUID
+    ) {
+        guard var arr = tabs[worktreeID] else { return }
+        // Panes as `reconcileTabs` counts them: a `.liveTranscript` pane does
+        // not hold its terminal.
+        let shown = arr.reduce(into: Set<UUID>()) {
+            $0.formUnion((layouts[$1.id] ?? .pane($1.content)).allTerminalIDs())
+        }
+        let closedTerminalIDs = Set((layout ?? .pane(tab.content)).allTerminalIDs())
+        if shown.isDisjoint(with: closedTerminalIDs), !arr.contains(where: { $0.id == tab.id }) {
+            let selectedTabID = explicitActiveTabID(worktreeID: worktreeID)
+            arr.insert(tab, at: min(index, arr.count))
+            if let layout { layouts[tab.id] = layout }
+            tabs[worktreeID] = arr
+            worktreeTabOrders[worktreeID] = arr.map(\.id)
+            repointActiveTab(worktreeID: worktreeID, to: selectedTabID)
+        }
+        reconcileTabs(worktreeID: worktreeID, terminals: terminals[worktreeID] ?? [])
     }
 
     /// `closeTab(worktreeID:index:)` for the tab with this ID.
@@ -486,7 +534,7 @@ extension AppState {
         let snapshot = arr.map(\.id)
         Task {
             do {
-                try await daemonClient.setTabOrder(worktreeID: worktreeID, tabIDs: snapshot)
+                try await tabOrderSender(worktreeID, snapshot)
             } catch {
                 logger.error("reorderTab persist failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
                 handleConnectionError(error)

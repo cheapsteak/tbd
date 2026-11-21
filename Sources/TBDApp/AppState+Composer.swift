@@ -78,13 +78,14 @@ extension AppState {
     /// Forget everything the composer keys on this terminal, because the
     /// terminal itself is gone.
     ///
-    /// Called from both deaths a terminal has: the tab close that deletes it,
-    /// and `removeDeletedTerminalFromState`, which every other route — a pane
-    /// close, an archive, a daemon-reported removal — funnels through. The tab
-    /// close alone was not enough: it is the rarer of the two, and a draft left
-    /// behind by the common path sits in the map for the app's lifetime, joined
-    /// by a fresh empty one whenever a send finishing after the row is gone asks
-    /// `composerDraft(for:)` again.
+    /// Called from `removeDeletedTerminalFromState`, which every route — a tab
+    /// close whose delete succeeds, a pane close, an archive, a
+    /// daemon-reported removal — funnels through, and from the tab close
+    /// itself, for a terminal it shows but does not delete (a `.liveTranscript`
+    /// tab's) and for one whose delete could not reach the daemon. A draft
+    /// left behind on any of them sits in the map for the app's lifetime,
+    /// joined by a fresh empty one whenever a send finishing after the row is
+    /// gone asks `composerDraft(for:)` again.
     ///
     /// Memory only, and safe by construction: the terminal row no longer exists,
     /// so nothing can send this draft, mount this composer, or spawn into this
