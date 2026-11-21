@@ -44,8 +44,7 @@ import TestSupport
 
     private func coordinator(programStatus: ProgramStatusStore) throws -> HibernationCoordinator {
         HibernationCoordinator(
-            db: try TBDDatabase(inMemory: true), tmux: TmuxManager(dryRun: true),
-            configDirManager: makeIsolatedConfigDirManager(tag: "program-status-liveness"),
+            db: try TBDDatabase(inMemory: true), configDirManager: makeIsolatedConfigDirManager(tag: "program-status-liveness"),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(), programStatus: programStatus,
             leftoverTmuxProbe: .absent)

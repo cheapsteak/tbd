@@ -460,7 +460,7 @@ struct CheckoutTemplateStoreTests {
         let repo = try await db.repos.create(path: f.repo.path, displayName: "acme", defaultBranch: "main")
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             checkoutTemplates: store,
             leftoverTmuxProbe: .absent)
 
@@ -478,7 +478,7 @@ struct CheckoutTemplateStoreTests {
         try await db.config.setCloneCheckoutEnabled(true)
         let repo = try await db.repos.create(path: f.repo.path, displayName: "acme", defaultBranch: "main")
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             checkoutTemplates: CheckoutTemplateStore(reposDir: f.reposDir),
             leftoverTmuxProbe: .absent)
 

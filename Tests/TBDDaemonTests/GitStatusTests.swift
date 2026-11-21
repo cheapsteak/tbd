@@ -170,8 +170,7 @@ struct GitStatusTests {
 
         // Run refreshGitStatuses
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
+            db: db, git: GitManager(), hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
             leftoverTmuxProbe: .absent
         )
         await lifecycle.refreshGitStatuses(repoID: repo.id)
@@ -216,8 +215,7 @@ struct GitStatusTests {
 
         // Run refreshGitStatuses — branch is an ancestor of origin/main, no conflicts
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
+            db: db, git: GitManager(), hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
             leftoverTmuxProbe: .absent
         )
         await lifecycle.refreshGitStatuses(repoID: repo.id)
@@ -300,8 +298,7 @@ struct GitStatusTests {
         // The cache lives on the lifecycle instance — reuse ONE instance across
         // sweeps, like the daemon's periodic task does.
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
+            db: db, git: GitManager(), hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
             leftoverTmuxProbe: .absent
         )
 
@@ -376,8 +373,7 @@ struct GitStatusTests {
         )
 
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
+            db: db, git: GitManager(), hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
             leftoverTmuxProbe: .absent
         )
 
@@ -426,8 +422,7 @@ struct GitStatusTests {
             path: repoDir.path + "/.tbd/worktrees/pushed", tmuxServer: "tbd-test")
 
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
+            db: db, git: GitManager(), hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
             leftoverTmuxProbe: .absent
         )
         let moved = RemoteTipMoves()
@@ -488,8 +483,7 @@ struct GitStatusTests {
             path: repoDir.path + "/.tbd/worktrees/pushed", tmuxServer: "tbd-test")
 
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
+            db: db, git: GitManager(), hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
             leftoverTmuxProbe: .absent
         )
         let moved = RemoteTipMoves()

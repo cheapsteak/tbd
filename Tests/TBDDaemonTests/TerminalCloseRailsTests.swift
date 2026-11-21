@@ -6,7 +6,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 1 — in-memory DB, dry-run tmux, no real processes.
+/// Tier 1 — in-memory DB, no real processes.
 ///
 /// `terminal.delete`'s optional activity rails and its idempotent not-found
 /// path. Both branches of the rail conditional are covered per the repo rule,
@@ -63,15 +63,13 @@ struct TerminalCloseRailsTests {
     }
 
     private func makeRouter(
-        db: TBDDatabase, holder: HolderState = .unrecorded,
-        tmux: TmuxManager = TmuxManager(dryRun: true)
+        db: TBDDatabase, holder: HolderState = .unrecorded
     ) async -> RPCRouter {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: tmux,
             startTime: Date(), actuationLog: makeTestActuationLog())
         switch holder {
         case .unrecorded:
@@ -201,21 +199,18 @@ struct TerminalCloseRailsTests {
     /// The other branch of the transport conditional. A row an earlier build
     /// left on tmux is closed without running a tmux command, so closing it
     /// ends no in-flight turn and the activity rail has nothing to protect.
-    @Test("rails on: a mid-turn tmux row closes without running tmux", arguments: [
+    @Test("rails on: a mid-turn tmux row closes", arguments: [
         TerminalActivityState.working, .waitingForUser
     ])
     func railsOnClosesBusyTmuxRow(state: TerminalActivityState) async throws {
         let fx = try await makeFixture(activityState: state, transport: .tmux)
-        let recorded = RecordedTmuxArgs()
         let router = await makeRouter(
-            db: fx.db, tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) }))
+            db: fx.db)
 
         let resp = try await close(router, fx.terminal.id, rails: true)
 
         #expect(resp.success, "error: \(resp.error ?? "nil")")
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
-        #expect(recorded.snapshot().isEmpty,
-                "the close asked tmux about a tmux row: \(recorded.snapshot())")
     }
 
     // MARK: - Composer-draft rail

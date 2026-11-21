@@ -7,18 +7,17 @@ import TestSupport
 @testable import TBDShared
 
 extension TBDHomeSerialized {
-/// Tier 2 integration coverage using an in-memory database, dry-run tmux,
-/// and real Git repositories created under scratch directories.
+/// Tier 2 integration coverage using an in-memory database, the holder spawn
+/// double, and real Git repositories created under scratch directories.
 @Suite("Mixed local agent archive and revive")
 struct LocalAgentArchiveTests {
     /// Spawns go to the holder spawn double (`holder.launches`), and a hook
     /// tab's job reads as running until the test writes its marker: the
     /// double's pids name no process.
-    func lifecycle(_ db: TBDDatabase, _ recorder: PreSessionRecordedCommands,
+    func lifecycle(_ db: TBDDatabase,
                    home: URL, failPreparation: Bool = false,
                    holder: FakeHolderLaunch = FakeHolderLaunch()) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(db: db, git: GitManager(),
-            tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorder.append($0) }),
             hooks: HookResolver(), configDirManager: makeIsolatedConfigDirManager(tag: "archive"),
             preSessionTimeout: 2, preSessionPollInterval: 0.01,
             processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
@@ -59,7 +58,7 @@ struct LocalAgentArchiveTests {
         defer { try? FileManager.default.removeItem(at: temp) }
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
-        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home)
+        let lc = lifecycle(db, home: home)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
@@ -93,7 +92,7 @@ struct LocalAgentArchiveTests {
         defer { try? FileManager.default.removeItem(at: temp) }
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
-        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home)
+        let lc = lifecycle(db, home: home)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
@@ -142,7 +141,7 @@ struct LocalAgentArchiveTests {
         } else if recovery == "restart" {
             // Reproduce a crash before the inline failure handler commits status.
             try await db.worktrees.updateStatus(id: wt.id, status: .creating)
-            let restarted = lifecycle(db, PreSessionRecordedCommands(), home: home)
+            let restarted = lifecycle(db, home: home)
             for task in await restarted.recoverCreatingWorktrees() { await task.value }
         } else {
             _ = try await lc.beginReviveWorktree(worktreeID: wt.id)
@@ -162,8 +161,7 @@ struct LocalAgentArchiveTests {
         let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
         let (db, repoDir, wt, _) = try await makeWorktreeFixture(status: .active)
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
-        let recorder = PreSessionRecordedCommands()
-        let lc = lifecycle(db, recorder, home: home)
+        let lc = lifecycle(db, home: home)
         let options = CodexLaunchOptions(model: "model-a", disabledFeatures: ["feature-a"])
         let extras = ClaudeSpawnExtras(pluginDirs: ["/tmp/acme-plugin"])
         let b = try await db.terminals.create(worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
@@ -193,8 +191,7 @@ struct LocalAgentArchiveTests {
         let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
         let (db, repoDir, wt, _) = try await makeWorktreeFixture(status: .active)
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
-        let recorder = PreSessionRecordedCommands()
-        let lc = lifecycle(db, recorder, home: home)
+        let lc = lifecycle(db, home: home)
         let terminal = try await db.terminals.create(worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Codex", claudeSessionID: "codex-A", kind: .codex)
         try await db.writerForTests.write { conn in
@@ -206,7 +203,6 @@ struct LocalAgentArchiveTests {
         #expect(try await db.worktrees.get(id: wt.id)?.status == .active)
         #expect(try await db.worktrees.get(id: wt.id)?.branch == wt.branch)
         #expect(try await db.terminals.get(id: terminal.id) != nil)
-        #expect(!recorder.snapshot().contains { $0.contains("kill-window") })
     }
 
     @Test(arguments: [false, true])
@@ -218,7 +214,7 @@ struct LocalAgentArchiveTests {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
         let holder = FakeHolderLaunch()
-        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home, holder: holder)
+        let lc = lifecycle(db, home: home, holder: holder)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
@@ -249,8 +245,7 @@ struct LocalAgentArchiveTests {
         let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
         let (db, repoDir, wt, _) = try await makeWorktreeFixture(status: .creating)
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
-        let recorder = PreSessionRecordedCommands()
-        let lc = lifecycle(db, recorder, home: home)
+        let lc = lifecycle(db, home: home)
         let tabs = try await seedSnapshot(db, id: wt.id)
         if failSpawn {
             try await db.worktrees.setArchivedAgentTabs(id: wt.id, tabs: tabs)
@@ -299,8 +294,7 @@ struct LocalAgentArchiveTests {
         defer { try? FileManager.default.removeItem(at: temp) }
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
-        let recorder = PreSessionRecordedCommands()
-        let lc = lifecycle(db, recorder, home: home, failPreparation: true)
+        let lc = lifecycle(db, home: home, failPreparation: true)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
@@ -330,7 +324,7 @@ struct LocalAgentArchiveTests {
         if preSession { try await installPreSessionHook(repoDir: repoDir) }
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
-        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home, failPreparation: true)
+        let lc = lifecycle(db, home: home, failPreparation: true)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
@@ -359,7 +353,7 @@ struct LocalAgentArchiveTests {
         defer { try? FileManager.default.removeItem(at: temp) }
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
-        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home)
+        let lc = lifecycle(db, home: home)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
@@ -384,7 +378,7 @@ struct LocalAgentArchiveTests {
         let (db, repoDir, wt, _) = try await makeWorktreeFixture(status: .creating)
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
         let holder = FakeHolderLaunch()
-        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home, holder: holder)
+        let lc = lifecycle(db, home: home, holder: holder)
         try await db.writerForTests.write { conn in
             try conn.execute(sql: "UPDATE worktree SET archived_agent_tabs = '{invalid' WHERE id = ?", arguments: [wt.id.uuidString])
         }
@@ -411,9 +405,9 @@ struct LocalAgentArchiveTests {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
         let holder = FakeHolderLaunch()
-        let preparations = PreSessionRecordedCommands()
+        let preparations = RecordedPreparations()
         var lc = WorktreeLifecycle(db: db, git: GitManager(),
-            tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "prepared-archive"),
             preSessionTimeout: 2, preSessionPollInterval: 0.01,
             processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
@@ -456,9 +450,11 @@ struct LocalAgentArchiveTests {
         let second = try await db.modelProfiles.create(name: "second", kind: .oauth)
         let holder = FakeHolderLaunch()
         var lc = WorktreeLifecycle(db: db, git: GitManager(),
-            tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            hooks: HookResolver(),
             modelProfileResolver: ModelProfileResolver(profiles: db.modelProfiles, repos: db.repos, config: db.config),
             configDirManager: makeIsolatedConfigDirManager(tag: "archive-profiles"),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lc.holderRegistry = makeHolderRegistryDouble(launch: holder)
         let tabs = [
@@ -483,7 +479,7 @@ struct LocalAgentArchiveTests {
         try await db.worktrees.setArchivedClaudeSessions(id: wt.id, sessions: ["prior-session"])
         _ = try await db.terminals.create(worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "shell", kind: .shell)
-        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home)
+        let lc = lifecycle(db, home: home)
         _ = try await lc.beginArchiveWorktree(worktreeID: wt.id, force: true, discardUncommittedChanges: true)
         let archived = try #require(try await db.worktrees.get(id: wt.id))
         #expect(archived.archivedAgentTabs == [])
@@ -494,7 +490,7 @@ struct LocalAgentArchiveTests {
         let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
         let (db, repoDir, wt, _) = try await makeWorktreeFixture(status: .active)
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
-        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home)
+        let lc = lifecycle(db, home: home)
         let extras = ClaudeSpawnExtras(pluginDirs: ["/tmp/acme-plugin"])
         _ = try await db.terminals.create(worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "Claude", claudeSessionID: "claude-B", kind: .claude, claudeSpawnExtras: extras)
@@ -539,4 +535,19 @@ struct LocalAgentArchiveTests {
     }
 
 }
+}
+
+/// Every Codex preparation a lifecycle asked for, recorded from its
+/// `@Sendable` resolver.
+private final class RecordedPreparations: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [[String]] = []
+
+    func append(_ entry: [String]) {
+        lock.withLock { entries.append(entry) }
+    }
+
+    func snapshot() -> [[String]] {
+        lock.withLock { entries }
+    }
 }

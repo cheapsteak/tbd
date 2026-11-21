@@ -752,7 +752,8 @@ jobs:
       - name: Install tmux
         # macos-26 runners don't ship tmux. The whole TBDDaemonLiveTests target
         # (e.g. WorktreeLifecycleLiveTests.testReconcileRebootParksClaudeAndDeletesShell)
-        # drives TmuxManager against a real tmux server on a unique socket.
+        # starts a real tmux server on a unique socket for the leftover-tmux probe
+        # to find.
         run: brew install tmux
 
       # macos-26 arm64 runner defaults to Xcode 26.5 (Swift 6.3.2). Pin 26.6

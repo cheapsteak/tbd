@@ -38,13 +38,12 @@ struct ScratchPromoteReconcileTests {
     private func makeRouter(_ db: TBDDatabase, home: URL) -> RPCRouter {
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
@@ -105,7 +104,7 @@ struct ScratchPromoteReconcileTests {
 
         // Sanity: the inherited scratch server is NOT the canonical name for
         // the promoted repo path — otherwise this test proves nothing.
-        let canonical = TmuxManager.serverName(forRepoPath: promoted.dest)
+        let canonical = TmuxServerName.forRepoPath(promoted.dest)
         #expect(promoted.mainWorktree.tmuxServer != canonical)
         #expect(promoted.mainWorktree.tmuxServer == promoted.scratch.tmuxServer)
 
@@ -115,7 +114,7 @@ struct ScratchPromoteReconcileTests {
             server == canonical ? .absent : .running
         })
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: probe.probe)
         try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
 
@@ -142,12 +141,12 @@ struct ScratchPromoteReconcileTests {
         // The inherited server is gone: reconcile must park the resumable
         // Claude terminal and delete the shell row, and still leave the stored
         // server name as it was.
-        let canonical = TmuxManager.serverName(forRepoPath: promoted.dest)
+        let canonical = TmuxServerName.forRepoPath(promoted.dest)
         let probe = RecordingLeftoverTmuxProbe(answer: { server in
             server == canonical ? .running : .absent
         })
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: probe.probe)
         try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
 

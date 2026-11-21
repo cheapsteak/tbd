@@ -59,7 +59,7 @@ extension WorktreeLifecycle {
         try await db.forgottenWorktrees.delete(path: path)
 
         let name = (path as NSString).lastPathComponent
-        let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
+        let tmuxServer = TmuxServerName.forRepoPath(repo.path)
 
         // Idempotency: check for an existing row at this exact path.
         let existingActive = try await db.worktrees.list(repoID: repoID, status: .active)

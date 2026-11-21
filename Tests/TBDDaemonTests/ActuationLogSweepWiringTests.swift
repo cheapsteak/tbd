@@ -5,7 +5,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 — dry-run tmux, a real (temp-directory) actuation log, and a real git
+/// Tier 2 — a real (temp-directory) actuation log, and a real git
 /// repo for the reconcile fixture.
 ///
 /// The two daemon-internal rails this covers act with nobody having asked: the
@@ -54,8 +54,8 @@ struct ActuationLogSweepWiringTests {
         try rows(at: path).filter { $0["kind"] as? String == "outcome" }
     }
 
-    private func makeLifecycle(db: TBDDatabase, tmux: TmuxManager) -> WorktreeLifecycle {
-        WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
+    private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
+        WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), leftoverTmuxProbe: .absent)
     }
 
     // MARK: - reconcile: a worktree that left disk
@@ -67,7 +67,7 @@ struct ActuationLogSweepWiringTests {
 
         let logPath = try makeLogPath()
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        let lifecycle = makeLifecycle(db: db)
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         // A worktree row whose path is not a live git worktree → reconcile
@@ -111,7 +111,7 @@ struct ActuationLogSweepWiringTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        var lifecycle = makeLifecycle(db: db)
         // The worktree stays active, so the per-terminal pass that follows
         // the archive arm sees its tmux row too, and would delete a row with
         // no session whose server is gone. A server that may still be running
@@ -148,13 +148,13 @@ struct ActuationLogSweepWiringTests {
         let db = try TBDDatabase(inMemory: true)
         // The tmux server is gone, so the live main worktree's Claude session
         // takes the park-on-recovery branch.
-        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        var lifecycle = makeLifecycle(db: db)
         lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
@@ -192,12 +192,12 @@ struct ActuationLogSweepWiringTests {
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
         let terminalID = terminal.id
-        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        var lifecycle = makeLifecycle(db: db)
         // The tab closes while its server is probed, then the server reads gone.
         lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in
             _ = try? await db.terminals.delete(id: terminalID)
@@ -228,11 +228,11 @@ struct ActuationLogSweepWiringTests {
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
-        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        var lifecycle = makeLifecycle(db: db)
         lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         // A wake lands between the park and its fence.
         lifecycle.leftoverParkBetweenHalvesForTesting = { id in
@@ -261,13 +261,13 @@ struct ActuationLogSweepWiringTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        var lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        var lifecycle = makeLifecycle(db: db)
         lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
@@ -286,7 +286,7 @@ struct ActuationLogSweepWiringTests {
     ) async throws -> (coordinator: AutoArchiveOnMergeCoordinator, db: TBDDatabase, worktreeID: UUID) {
         let db = try TBDDatabase(inMemory: true)
         let subscriptions = StateSubscriptionManager()
-        let lifecycle = makeLifecycle(db: db, tmux: TmuxManager(dryRun: true))
+        let lifecycle = makeLifecycle(db: db)
         let repo = try await db.repos.create(
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         let worktree = try await db.worktrees.create(

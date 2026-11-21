@@ -262,7 +262,7 @@ let package = Package(
                 "TBDDaemonLib",
             ],
             path: "Sources/TBDDaemon",
-            exclude: ["Actuation", "Database", "Git", "Hooks", "Tmux", "Lifecycle", "Server", "SSH", "PR", "Keychain", "Claude", "Codex", "ModelProfile", "AskUserQuestion", "Diagnostics", "Process", "Mock", "PhoneBridge", "Resources", "Daemon.swift", "PIDFile.swift"],
+            exclude: ["Actuation", "Database", "Git", "Hooks", "Lifecycle", "Server", "SSH", "PR", "Keychain", "Claude", "Codex", "ModelProfile", "AskUserQuestion", "Diagnostics", "Process", "Mock", "PhoneBridge", "Resources", "Daemon.swift", "PIDFile.swift"],
             sources: ["main.swift"]
         ),
         .executableTarget(
@@ -371,7 +371,7 @@ let package = Package(
             path: "Tests/TestSupport"
         ),
         // The test helpers only the daemon and live tests use: the ones that
-        // need the daemon library, and the sidecar-frame and tmux-executable
+        // need the daemon library, and the sidecar-frame and recorded-child
         // fixtures, which need `TBDShared` and `TBDKernel`. They live apart
         // from `TestSupport` so that the app and holder tests, which use only
         // the generic helpers, compile against neither `TBDDaemonLib` nor

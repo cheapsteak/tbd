@@ -6,7 +6,7 @@ import Testing
 @testable import TBDShared
 import TBDKernel
 
-/// Build a fresh router over an in-memory DB with dry-run tmux. Returns the
+/// Build a fresh router over an in-memory DB. Returns the
 /// DB too so tests can create the repo, worktree and terminal rows a request
 /// names.
 private func makeRouterAndDB() throws -> (RPCRouter, TBDDatabase) {
@@ -16,11 +16,9 @@ private func makeRouterAndDB() throws -> (RPCRouter, TBDDatabase) {
         lifecycle: WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         ),
-        tmux: TmuxManager(dryRun: true),
         startTime: Date(),
         actuationLog: makeTestActuationLog()
     )

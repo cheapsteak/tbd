@@ -13,7 +13,7 @@ import TestSupport
 struct SocketServerConnectedClientsTests {
 
     /// Build a throwaway RPCRouter the same way RPCRouterTestHelpers does:
-    /// in-memory DB + dryRun tmux so no real tmux server is contacted.
+    /// in-memory DB, so no real server is contacted.
     private func makeRouter() throws -> RPCRouter {
         let db = try TBDDatabase(inMemory: true)
         return RPCRouter(
@@ -21,11 +21,9 @@ struct SocketServerConnectedClientsTests {
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )

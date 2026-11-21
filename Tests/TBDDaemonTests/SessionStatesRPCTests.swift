@@ -5,93 +5,62 @@ import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Records every tmux interaction the router would have had. `session.states`
-/// must leave it empty — that is the cheap-path property, asserted rather than
-/// assumed.
-///
-/// `dryRunRecorder` alone is **not** enough, and the gap matters here more than
-/// anywhere: it fires on the mutating commands, while `capturePaneOutput`,
-/// `capturePaneWithAnsi`, `capturePaneScrollback`, `paneCurrentCommand`,
-/// `paneSendTarget`, `listWindows` and `windowExists` short-circuit on their own
-/// dryRun hooks and never reach it. A pane *read* is exactly what this method
-/// must never do, so the fixture wires every one of those hooks into the same
-/// recorder and the assertion covers the composed set rather than one arm of it.
-private final class TmuxCommandRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var commands: [[String]] = []
-
-    func record(_ args: [String]) {
-        lock.lock()
-        defer { lock.unlock() }
-        commands.append(args)
-    }
-
-    var recorded: [[String]] {
-        lock.lock()
-        defer { lock.unlock() }
-        return commands
-    }
-}
-
-/// Tier 2 — in-memory database plus real (temp-dir) transcript files, no tmux
-/// server and no subprocess.
+/// Tier 2 — in-memory database plus real (temp-dir) transcript files, no
+/// holder and no subprocess.
 @Suite("session.states RPC")
 struct SessionStatesRPCTests {
 
     private struct Fixture {
         let db: TBDDatabase
         let router: RPCRouter
-        let recorder: TmuxCommandRecorder
         let scratch: URL
         let worktreeID: UUID
 
         func cleanUp() { try? FileManager.default.removeItem(at: scratch) }
     }
 
-    /// - Parameter now: the router's date seam. Defaulted so every existing
-    ///   case is unchanged; the fallback-stamp case below pins it, which is the
-    ///   only way to tell an injected clock from wall time.
+    /// - Parameters:
+    ///   - now: the router's date seam. Defaulted so every existing case is
+    ///     unchanged; the fallback-stamp case below pins it, which is the only
+    ///     way to tell an injected clock from wall time.
+    ///   - touches: when given, every seam through which the router can reach
+    ///     a holder session's process or screen records into it, and the
+    ///     router's holder registry spawns through `holder`.
     private func makeFixture(
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        touches: HolderTouchRecorder? = nil,
+        holder: FakeHolderLaunch = FakeHolderLaunch()
     ) async throws -> Fixture {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-session-states-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = TmuxCommandRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.record($0) },
-            dryRunWindowIsDead: { window in
-                recorder.record(["window-exists", window])
-                return false
-            },
-            dryRunListWindows: { server, session in
-                recorder.record(["list-windows", server, session])
-                return []
-            },
-            dryRunCapturePane: { server, pane in
-                recorder.record(["capture-pane", server, pane])
-                return ""
-            },
-            dryRunPaneCurrentCommand: { server, pane in
-                recorder.record(["pane-current-command", server, pane])
-                return "zsh"
-            },
-            dryRunPaneSendTarget: { server, pane in
-                recorder.record(["pane-send-target", server, pane])
-                return .live(terminalID: nil)
-            })
+        // Typed as `RPCRouter.init` takes them, and chosen here rather than
+        // inside the call, so the call infers nothing.
+        let processSignaller: any ProcessSignaller
+        let processTableReader: @Sendable () -> ProcessTableSnapshot?
+        if let touches {
+            processSignaller = touches.signaller
+            processTableReader = touches.processTableReader
+        } else {
+            processSignaller = ProductionProcessSignaller()
+            processTableReader = { ProcessTableSnapshot.read() }
+        }
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: tmux,
             startTime: Date(),
             now: now,
-            actuationLog: makeTestActuationLog())
+            processSignaller: processSignaller,
+            actuationLog: makeTestActuationLog(),
+            processTableReader: processTableReader)
+        if let touches {
+            touches.install(on: router)
+            router.holderRegistry = makeHolderRegistryDouble(launch: holder)
+        }
 
         let repo = try await db.repos.create(
             path: scratch.appendingPathComponent("repo").path,
@@ -100,7 +69,7 @@ struct SessionStatesRPCTests {
             repoID: repo.id, name: "wt", branch: "feature",
             path: scratch.appendingPathComponent("repo").path, tmuxServer: "tbd-states-test")
         return Fixture(
-            db: db, router: router, recorder: recorder, scratch: scratch,
+            db: db, router: router, scratch: scratch,
             worktreeID: worktree.id)
     }
 
@@ -219,28 +188,36 @@ struct SessionStatesRPCTests {
         #expect(report.state.observedAt == reportedAt)
     }
 
-    @Test func performsNoSubprocessOrPaneRead() async throws {
-        let fixture = try await makeFixture()
+    /// The cheap-path property, asserted rather than assumed: a pass over a
+    /// live holder Claude row starts no process, reads no screen, types
+    /// nothing, reads no process table and signals nothing. Every way the
+    /// router has to do one of those records into `touches`, so an empty
+    /// record is the proof that the pass costs no subprocess and no screen
+    /// read, which is what lets this method be called on a cadence for every
+    /// agent at once.
+    @Test func performsNoSubprocessOrScreenRead() async throws {
+        let touches = HolderTouchRecorder()
+        let holder = FakeHolderLaunch()
+        let fixture = try await makeFixture(touches: touches, holder: holder)
         defer { fixture.cleanUp() }
 
+        // Pids above macOS's PID_MAX, so none can name a real process.
         let terminal = try await fixture.db.terminals.create(
-            worktreeID: fixture.worktreeID, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", kind: .claude)
+            worktreeID: fixture.worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", kind: .claude, transport: .holder,
+            holderPID: 100_001, childPID: 100_002)
         let path = try writeTranscript(
             fixture, name: "session.jsonl",
             lines: [#"{"type":"assistant","message":{"usage":{"input_tokens":1000}}}"#])
         try await fixture.db.terminals.updateSession(
             id: terminal.id, sessionID: "sess-1", transcriptPath: path)
 
-        _ = try await states(fixture)
+        let reports = try await states(fixture)
 
-        // Every tmux interaction the router could have in dryRun lands in the
-        // recorder — the mutating commands and, separately wired, every
-        // read-only query and pane capture. An empty recorder is the proof
-        // that the pass costs no subprocess and reads no pane, which is what
-        // lets this method be called on a cadence for every agent at once.
-        #expect(fixture.recorder.recorded.isEmpty,
-                "session.states touched tmux: \(fixture.recorder.recorded)")
+        #expect(reports.map(\.terminalID) == [terminal.id])
+        #expect(touches.events.isEmpty,
+                "session.states reached a holder session's process or screen: \(touches.events)")
+        #expect(holder.launches.isEmpty)
     }
 
     @Test func theWorktreeFilterNarrowsTheReport() async throws {

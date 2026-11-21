@@ -20,7 +20,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -71,7 +70,6 @@ import Testing
     let lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -89,7 +87,6 @@ import Testing
     let lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -100,7 +97,7 @@ import Testing
         name: "main",
         branch: "main",
         path: repoDir.path,
-        tmuxServer: TmuxManager.serverName(forRepoPath: repo.path)
+        tmuxServer: TmuxServerName.forRepoPath(repo.path)
     )
 
     await #expect(throws: WorktreeLifecycleError.self) {

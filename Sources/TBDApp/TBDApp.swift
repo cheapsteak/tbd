@@ -415,9 +415,9 @@ struct TBDAppMain: App {
     /// this expression used to run lazily, on the first body evaluation;
     /// `State.init(wrappedValue:)` takes the value directly, so it now runs when
     /// this struct is constructed, inside `App.main()`. `AppState.init` does
-    /// real work — a tmux-executable resolve, three `UserDefaults` restores, a
-    /// memory-pressure source, focus observers, a theme-file watcher and a
-    /// connect/poll `Task` — so *when* it runs matters.
+    /// real work — three `UserDefaults` restores, a memory-pressure source,
+    /// focus observers, a theme-file watcher and a connect/poll `Task` — so
+    /// *when* it runs matters.
     ///
     /// It is safe here for a reason that does not generalise to views: this is
     /// the `@main` `App`, which `App.main()` instantiates exactly once. The

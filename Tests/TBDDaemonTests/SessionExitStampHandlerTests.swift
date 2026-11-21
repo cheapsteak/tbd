@@ -33,7 +33,7 @@ private final class BroadcastDeltas: @unchecked Sendable {
 
 /// The hook rail that makes "not running" a machine-readable fact.
 ///
-/// Tier 2: an in-memory database and a dry-run tmux manager; no process is
+/// Tier 2: an in-memory database; no process is
 /// spawned and no pane is consulted.
 @Suite("SessionEnd exit stamp handlers")
 struct SessionExitStampHandlerTests {
@@ -65,9 +65,6 @@ struct SessionExitStampHandlerTests {
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "claude", claudeSessionID: "sess-1", kind: .claude)
-        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in
-            .live(terminalID: nil)
-        })
         let deltas = BroadcastDeltas()
         let subscriptions = StateSubscriptionManager()
         subscriptions.addSubscriber { data in
@@ -79,10 +76,9 @@ struct SessionExitStampHandlerTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 subscriptions: subscriptions,
                 leftoverTmuxProbe: .absent),
-            tmux: tmux,
             subscriptions: subscriptions,
             actuationLog: ActuationLog(path: Self.scratchLogPath()))
         return Fixture(router: router, db: db, terminal: terminal, deltas: deltas)

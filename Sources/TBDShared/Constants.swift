@@ -43,8 +43,9 @@ public enum TBDConstants {
         return overrideStat.st_dev == defaultStat.st_dev && overrideStat.st_ino == defaultStat.st_ino
     }
 
-    /// File containing the user-selected tmux executable fallback. Honors
-    /// `TBD_HOME` so the app and daemon share the same configured value.
+    /// File naming the tmux executable when it is not on `PATH`, which the
+    /// leftover-tmux probe reads to recognize a tmux server by its binary.
+    /// Honors `TBD_HOME`.
     public static func tmuxExecutablePathFile(environment: [String: String]) -> URL {
         configDir(environment: environment).appendingPathComponent("tmux-executable-path")
     }

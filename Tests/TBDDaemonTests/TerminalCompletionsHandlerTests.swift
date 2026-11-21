@@ -37,13 +37,11 @@ struct TerminalCompletionsHandlerTests {
             = makeIsolatedConfigDirManager(tag: "completions-handler"),
         probe: @escaping CompletionInventoryService.Prober = { _, _, _ in stubOutcome }
     ) -> RPCRouter {
-        let tmux = TmuxManager(dryRun: true)
         return RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: tmux,
             configDirManager: configDirManager,
             completionInventory: CompletionInventoryService(
                 probe: probe,

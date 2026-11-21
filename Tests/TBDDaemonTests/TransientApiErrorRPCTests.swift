@@ -19,9 +19,8 @@ import TestSupport
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(),
-                tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(), actuationLog: makeTestActuationLog())
         let repo = try await db.repos.create(
             path: "/tmp/tae-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")

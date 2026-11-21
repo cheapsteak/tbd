@@ -1,8 +1,7 @@
 import Foundation
 
 /// Injectable seam over OS process operations so reaper logic is unit-testable
-/// without sending real signals or shelling out to `ps`. Mirrors TmuxManager's
-/// dryRun-injection pattern.
+/// without sending real signals or shelling out to `ps`.
 public protocol ProcessSignaller: Sendable {
     /// True if the pid exists. Uses `kill(pid, 0)`: 0 => alive; EPERM => alive
     /// but owned by another uid (still "alive"); ESRCH => dead.

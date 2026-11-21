@@ -61,7 +61,7 @@ Guard rails:
 - Every step parses the executed-test count from output and **fails below a floor** (`swift test --filter`/`--skip` exits green on zero matches; a renamed or collapsed target must not silently fall out of its pass). The floors catch collapse and rename; the complement shape above is what catches an unlisted *new* target.
 - Every step gets an explicit `timeout-minutes` so a wedged tmux test — or a wedged clock-driven suite, whose per-test limit is now 4 minutes — cannot eat the job's 6 h default.
 
-PR CI never runs randomized anything. A new scheduled `nightly.yml` workflow (§9) carries fuzzing, live probes, the flake-ledger stress loop, and the quarantine audit.
+PR CI never runs randomized anything. A new scheduled `nightly.yml` workflow (§9) carries fuzzing, the flake-ledger stress loop, and the quarantine audit.
 
 ## 5. Clock standardization
 
@@ -132,12 +132,11 @@ Metrics: retry events are written to a JSON artifact per CI run; the nightly job
 
 ## 9. Nightly workflow
 
-One scheduled `nightly.yml` job (one macOS slot, off-peak; public-repo minutes are free), four steps:
+One scheduled `nightly.yml` job (one macOS slot, off-peak; public-repo minutes are free), three steps:
 
 1. Interleaving fuzz pass (§8) — added in Stage 4; the workflow ships earlier without it.
-2. **Live tmux probes:** executable checks of behavioral claims currently trusted from memory (pane-reuse, paste-buffer semantics, control-mode quirks).
-3. **Flake-ledger stress loop:** the historically flaky suites run repeatedly under induced CPU load (PID-captured cleanup per `Tests/CLAUDE.md` — never `jobs -p`).
-4. Quarantine audit (§7).
+2. **Flake-ledger stress loop:** the historically flaky suites run repeatedly under induced CPU load (PID-captured cleanup per `Tests/CLAUDE.md` — never `jobs -p`).
+3. Quarantine audit (§7).
 
 Failures land as issue comments — never as PR noise.
 
@@ -150,7 +149,7 @@ Each stage is independently shippable; order front-loads flake payoff per unit e
 | **0** | `TBDDaemonLiveTests` target + two-step CI split + quiet-pass count guard + assertion rules in `Tests/CLAUDE.md` | Contention class contained; hygiene rules live for all future reviews. No production code touched. |
 | **1** | `swift-clocks` test-only dep + clock-seam convention + `no_raw_task_sleep` ratchet + migrate the ledger subsystems (debounce, Daywatch, Git/Subprocess timeouts, FileWatcher) — one small PR each | Known repeat-offenders become deterministic; new unseamed sleeps impossible without a visible suppression. |
 | **2** | Migrate control-mode/attach timers to injected clock; burn down remaining suppressions in mechanical batches | Wall-clock class structurally dead; harness precondition met. |
-| **3** | `.flaky(issue:)` trait + retry-metrics artifact + `nightly.yml` (probes, ledger stress loop, quarantine audit; fuzz slot empty) | Rerun lore replaced by named, audited quarantine; regressions in "fixed" flakes caught nightly, not by the next unlucky PR. |
+| **3** | `.flaky(issue:)` trait + retry-metrics artifact + `nightly.yml` (ledger stress loop, quarantine audit; fuzz slot empty) | Rerun lore replaced by named, audited quarantine; regressions in "fixed" flakes caught nightly, not by the next unlucky PR. |
 | **4** | Interleaving harness MVP + corpus in PR CI + nightly fuzz wired into the existing workflow | Attach/supersession TOCTOU residuals quantified and permanently regression-guarded. |
 
 **Dependency edges:** Stage 4 needs Stage 2 (virtual time in the orchestrator). Stage 3's nightly workflow is extended, not created, by Stage 4. Everything else is independent — Stage 0 can land immediately, and Stage 1's per-subsystem PRs can interleave with anything.

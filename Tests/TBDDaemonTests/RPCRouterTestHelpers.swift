@@ -9,8 +9,7 @@ import TestSupport
 ///
 /// Each `@Test` method declared in an extension of this `@Suite` struct gets
 /// its own instance, so `db`, `router` and `holder` are isolated per test. The
-/// router is wired with `dryRun=true` tmux so no real tmux server is
-/// contacted, and with the holder spawn double, so every session it opens
+/// router is wired with the holder spawn double, so every session it opens
 /// lands on the holder transport without starting a process.
 @Suite("RPCRouter Tests")
 struct RPCRouterTests {
@@ -30,7 +29,6 @@ struct RPCRouterTests {
         var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
@@ -38,7 +36,6 @@ struct RPCRouterTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )

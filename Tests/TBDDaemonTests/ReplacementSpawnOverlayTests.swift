@@ -210,8 +210,7 @@ extension TBDHomeSerialized {
         let sessions = scratch.home.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         let coordinator = HibernationCoordinator(
-            db: db, tmux: TmuxManager(dryRun: true),
-            configDirManager: isolatedConfigDirManager(), sessionsDir: sessions,
+            db: db, configDirManager: isolatedConfigDirManager(), sessionsDir: sessions,
             sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog(),
             leftoverTmuxProbe: .absent)
         await coordinator.setHolderRegistry(registry)

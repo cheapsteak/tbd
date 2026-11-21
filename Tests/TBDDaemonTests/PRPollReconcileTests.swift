@@ -132,13 +132,12 @@ struct PRPollReconcileTests {
             let subscriptions = StateSubscriptionManager()
             let lifecycle = WorktreeLifecycle(
                 db: db, git: GitManager(),
-                tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                hooks: HookResolver(),
                 subscriptions: subscriptions,
                 leftoverTmuxProbe: .absent)
             router = RPCRouter(
                 db: db,
                 lifecycle: lifecycle,
-                tmux: TmuxManager(dryRun: true),
                 startTime: Date(),
                 prManager: manager,
                 prBindingRepoResolver: { _ in ("acme", "acme-prod", "github.com") },
@@ -159,7 +158,7 @@ struct PRPollReconcileTests {
                 let logPath = logDirectory.appendingPathComponent("actuations.jsonl").path
                 actuationLogPath = logPath
                 let hibernation = HibernationCoordinator(
-                    db: db, tmux: TmuxManager(dryRun: true), subscriptions: subscriptions,
+                    db: db, subscriptions: subscriptions,
                     configDirManager: makeIsolatedConfigDirManager(tag: "prpoll"),
                     sessionTitles: ClaudeSessionTitleStore(),
                     actuationLog: makeTestActuationLog(),

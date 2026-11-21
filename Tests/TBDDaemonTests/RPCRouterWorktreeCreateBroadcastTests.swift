@@ -48,7 +48,6 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             subscriptions: subs,
             preSessionPollInterval: 0.05,
@@ -59,7 +58,6 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: TmuxManager(dryRun: true),
             subscriptions: subs,
             actuationLog: makeTestActuationLog()
         )

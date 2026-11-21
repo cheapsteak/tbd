@@ -52,7 +52,7 @@ struct ReconcileLeftoverTmuxTests {
         db: TBDDatabase, probe: RecordingLeftoverTmuxProbe
     ) -> WorktreeLifecycle {
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: probe.probe)
         return lifecycle
     }
@@ -62,7 +62,7 @@ struct ReconcileLeftoverTmuxTests {
             path: repoPath, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoPath,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoPath))
+            tmuxServer: TmuxServerName.forRepoPath(repoPath))
         return (repo, main)
     }
 
@@ -185,7 +185,6 @@ struct ReconcileLeftoverTmuxTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(dryRun: true)
         let probe = RecordingLeftoverTmuxProbe(answer: { _ in .absent })
         let lifecycle = makeLifecycle(db: db, probe: probe)
         let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
@@ -198,8 +197,7 @@ struct ReconcileLeftoverTmuxTests {
             id: shell.id, sessionID: "sess-hand-started", reason: .exited)
 
         let coordinator = HibernationCoordinator(
-            db: db, tmux: tmux,
-            configDirManager: makeIsolatedConfigDirManager(tag: "reconcile-lift"),
+            db: db, configDirManager: makeIsolatedConfigDirManager(tag: "reconcile-lift"),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(),
             leftoverTmuxProbe: .absent)
@@ -417,7 +415,7 @@ struct ReconcileLeftoverTmuxTests {
         let claudeID = rows.claude.id
         let shellID = rows.shell.id
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in
                 await Self.migrateToHolder(db: db, claudeID: claudeID, shellID: shellID)
                 return .absent

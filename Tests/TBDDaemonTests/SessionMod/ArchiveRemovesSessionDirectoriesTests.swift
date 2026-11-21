@@ -16,8 +16,7 @@ import TBDKernel
 /// a live row an earlier build left on tmux is one: closing it runs no tmux
 /// command, so its session may still be running there.
 ///
-/// tmux runs in dry-run mode, and every directory lives under an injected
-/// scratch `sessionsDir`.
+/// Every directory lives under an injected scratch `sessionsDir`.
 @Suite("Session mod: archive removes session directories")
 struct ArchiveRemovesSessionDirectoriesTests {
 
@@ -36,10 +35,10 @@ struct ArchiveRemovesSessionDirectoriesTests {
         }
 
         func lifecycle(
-            tmux: TmuxManager = TmuxManager(dryRun: true), registry: HolderRegistry? = nil
+            registry: HolderRegistry? = nil
         ) -> WorktreeLifecycle {
             var lifecycle = WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 configDirManager: makeIsolatedConfigDirManager(tag: "archmod"),
                 sessionsDir: sessionsDir,
                 leftoverTmuxProbe: .absent)
@@ -230,8 +229,6 @@ struct ArchiveRemovesSessionDirectoriesTests {
     @Test func archivingAParkedSessionRemovesItsDirectory() async throws {
         let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
-        let recorded = RecordedTmuxArgs()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
 
         _ = try await fixture.parkedTmuxClaude("sess-parked-tmux", pane: "%3")
         let parkedHolder = try await fixture.parkedHolderClaude("sess-parked-holder")
@@ -240,11 +237,9 @@ struct ArchiveRemovesSessionDirectoriesTests {
         try fixture.seed("sess-parked-holder")
         let registry = Self.holderRegistry(listing: [parkedHolder])
 
-        _ = try await fixture.lifecycle(tmux: tmux, registry: registry)
+        _ = try await fixture.lifecycle(registry: registry)
             .beginArchiveWorktree(worktreeID: fixture.worktree.id)
 
-        #expect(recorded.snapshot().isEmpty,
-                "archive ran a tmux command: \(recorded.snapshot())")
         #expect(!fixture.hasDirectory("sess-parked-tmux"))
         #expect(!fixture.hasDirectory("sess-parked-holder"))
         #expect(try await fixture.db.worktrees.get(id: fixture.worktree.id)?.status == .archived)
@@ -333,7 +328,7 @@ struct ArchiveRemovesSessionDirectoriesTests {
         // the first through the same registry.
         let holder = FakeHolderLaunch()
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "archrev"),
             sessionsDir: sessionsDir,
             leftoverTmuxProbe: .absent)
@@ -397,7 +392,7 @@ struct ArchiveRemovesSessionDirectoriesTests {
             inMemory: true,
             terminalHistoryDir: home.appendingPathComponent("history", isDirectory: true).path)
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "archrec"),
             sessionsDir: sessionsDir,
             // The worktree the first sweep leaves active reaches the leftover-tmux
@@ -462,16 +457,14 @@ struct ArchiveRemovesSessionDirectoriesTests {
             name: "scratch", displayName: "scratch", path: scratchPath.path,
             tmuxServer: "tbd-archscr")
 
-        let recorded = RecordedTmuxArgs()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
         let configDirManager = makeIsolatedConfigDirManager(tag: "archscr")
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
             sessionsDir: sessionsDir,
             leftoverTmuxProbe: .absent)
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: configDirManager, sessionsDir: sessionsDir,
             actuationLog: makeTestActuationLog())
 
@@ -496,8 +489,6 @@ struct ArchiveRemovesSessionDirectoriesTests {
 
         #expect(response.success, "scratch.archive failed: \(response.error ?? "")")
         #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
-        #expect(recorded.snapshot().isEmpty,
-                "scratch.archive ran a tmux command: \(recorded.snapshot())")
         #expect(Self.hasDraft(sessionsDir, sessionID: "sess-live-tmux"))
         #expect(!FileManager.default.fileExists(
             atPath: sessionsDir.appendingPathComponent("sess-parked-tmux").path))

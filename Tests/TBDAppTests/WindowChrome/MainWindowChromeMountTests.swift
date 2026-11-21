@@ -594,11 +594,6 @@ private final class ChromeMount {
         ]
         state.repos = [repo]
         state.worktrees = [repo.id: worktrees]
-        // Run and answered before the mount, so `ContentView.onAppear`'s call
-        // finds the check done and no "tmux Not Found" alert can be raised
-        // over the window, whatever the runner's PATH holds.
-        state.checkTmuxAvailabilityAtStartup()
-        state.dismissTmuxLocationPrompt()
         self.state = state
         self.repo = repo
         self.worktrees = worktrees

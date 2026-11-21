@@ -9,7 +9,6 @@ private let routerLogger = Logger(subsystem: "com.tbd.daemon", category: "rpcRou
 public final class RPCRouter: Sendable {
     public let db: TBDDatabase
     public let lifecycle: WorktreeLifecycle
-    public let tmux: TmuxManager
     public let git: GitManager
     public let startTime: Date
     public let subscriptions: StateSubscriptionManager
@@ -287,9 +286,8 @@ public final class RPCRouter: Sendable {
     // without touching them still works; tests replace them with fakes.
 
     nonisolated(unsafe) var devServerStopper = DevServerStopper()
-    /// nil → `ProductionDevServerTabInspector` over `lifecycle.tmux` and
-    /// `holderRegistry`, built per call so a later `holderRegistry`
-    /// assignment is honored.
+    /// nil → `ProductionDevServerTabInspector` over `holderRegistry`, built
+    /// per call so a later `holderRegistry` assignment is honored.
     nonisolated(unsafe) var devServerTabInspector: (any DevServerTabInspecting)?
     nonisolated(unsafe) var devServerCommandRunner: any DevServerCommandRunning = ProductionDevServerCommandRunner()
     nonisolated(unsafe) var devServerRunningFiles = DevServerRunningFileStore()
@@ -335,7 +333,7 @@ public final class RPCRouter: Sendable {
 
     /// How the fork swap builds the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
-    /// `SessionRecaptureScheduler(db:tmux:)`.
+    /// `SessionRecaptureScheduler(db:)`.
     ///
     /// A seam because the decision it feeds — whether a fork tab's recapture
     /// is scheduled, and against which holder child — is otherwise
@@ -345,7 +343,7 @@ public final class RPCRouter: Sendable {
     /// nothing" look identical from the row. Injecting the scheduler makes the
     /// decision itself the observable, on virtual time.
     nonisolated(unsafe) var sessionRecaptureFactory: (
-        @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler
+        @Sendable (TBDDatabase) -> SessionRecaptureScheduler
     )?
 
     /// The instant between the two halves of a holder in-place profile swap,
@@ -458,7 +456,6 @@ public final class RPCRouter: Sendable {
     public init(
         db: TBDDatabase,
         lifecycle: WorktreeLifecycle,
-        tmux: TmuxManager,
         git: GitManager = GitManager(),
         startTime: Date = Date(),
         subscriptions: StateSubscriptionManager = StateSubscriptionManager(),
@@ -500,7 +497,6 @@ public final class RPCRouter: Sendable {
         self.actuationLog = actuationLog
         self.db = db
         self.lifecycle = lifecycle
-        self.tmux = tmux
         self.git = git
         self.startTime = startTime
         self.subscriptions = subscriptions
@@ -580,7 +576,7 @@ public final class RPCRouter: Sendable {
             db: db, subscriptions: subscriptions, ledger: ledger, now: now)
         self.programStatus = resolvedProgramStatus
         self.hibernationCoordinator = HibernationCoordinator(
-            db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
+            db: db, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions, configDirManager: configDirManager,
             sessionsDir: sessionsDir,
             sessionTitles: lifecycle.sessionTitles,
@@ -687,14 +683,10 @@ public final class RPCRouter: Sendable {
         }
         self.claudeCloudLive = claudeCloudLive
         self.codexExecutableResolver = codexExecutableResolver ?? {
-            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
-            return try CodexExecutableResolver.resolve()
+            try CodexExecutableResolver.resolve()
         }
         self.codexHomeEnsurer = codexHomeEnsurer ?? {
-            if tmux.dryRun {
-                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
-            }
-            return try CodexHomeManager().ensureProfilePlugin()
+            try CodexHomeManager().ensureProfilePlugin()
         }
         // The poller is a timer and nothing else; the pass it drives is
         // `runPollPass`, which lives here because `pr.refresh` and the on-select

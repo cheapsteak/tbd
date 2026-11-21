@@ -212,10 +212,11 @@ extension RPCRouter {
             codexPreparation = nil
         }
 
-        // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
-        // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
-        let resolvedCols = params.cols ?? TmuxManager.defaultCols
-        let resolvedRows = params.rows ?? TmuxManager.defaultRows
+        // Resolve initial size: caller-supplied → `TerminalSpawnSize` defaults,
+        // wider than 80x24 so an agent does not render into un-reflowable
+        // hard-wrapped scrollback.
+        let resolvedCols = params.cols ?? TerminalSpawnSize.defaultCols
+        let resolvedRows = params.rows ?? TerminalSpawnSize.defaultRows
 
         // Pre-mint the terminal ID so we can inject it into the spawned env
         // as TBD_TERMINAL_ID. Claude's SessionStart hook (registered via the
@@ -1065,8 +1066,8 @@ extension RPCRouter {
             return RPCResponse(error: "Closed-terminal history entry not found: \(params.id)")
         }
 
-        let resolvedCols = params.cols ?? TmuxManager.defaultCols
-        let resolvedRows = params.rows ?? TmuxManager.defaultRows
+        let resolvedCols = params.cols ?? TerminalSpawnSize.defaultCols
+        let resolvedRows = params.rows ?? TerminalSpawnSize.defaultRows
         let plannedTerminalID = UUID()
         let defaultShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
@@ -2376,10 +2377,11 @@ extension RPCRouter {
         // free-form overrides, so auth wins.
         let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
 
-        // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
-        // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
-        let resolvedCols = params.cols ?? TmuxManager.defaultCols
-        let resolvedRows = params.rows ?? TmuxManager.defaultRows
+        // Resolve initial size: caller-supplied → `TerminalSpawnSize` defaults,
+        // wider than 80x24 so an agent does not render into un-reflowable
+        // hard-wrapped scrollback.
+        let resolvedCols = params.cols ?? TerminalSpawnSize.defaultCols
+        let resolvedRows = params.rows ?? TerminalSpawnSize.defaultRows
 
         let response: RPCResponse
         // Set when the in-place swap's transport half failed: the park,
@@ -2984,8 +2986,8 @@ extension RPCRouter {
         target: SessionRecaptureTarget,
         expectedIncarnationID: UUID?
     ) {
-        let scheduler = sessionRecaptureFactory?(db, tmux)
-            ?? SessionRecaptureScheduler(db: db, tmux: tmux)
+        let scheduler = sessionRecaptureFactory?(db)
+            ?? SessionRecaptureScheduler(db: db)
         scheduler.schedule(
             terminalID: terminalID,
             target: target,
@@ -4393,7 +4395,7 @@ extension RPCRouter {
     /// A tmux row is left alone: TBD no longer drives tmux.
     func handleSetMainAreaSize(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(SetMainAreaSizeParams.self, from: paramsData)
-        guard params.cols >= TmuxManager.minCols, params.rows >= TmuxManager.minRows else {
+        guard params.cols >= TerminalSpawnSize.minCols, params.rows >= TerminalSpawnSize.minRows else {
             // Silently ignore degenerate sizes — clients can race below the
             // minimum during window setup, and the next valid size follows.
             return .ok()

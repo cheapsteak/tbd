@@ -17,7 +17,6 @@ import TestSupport
         WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
@@ -78,11 +77,9 @@ import TestSupport
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )
@@ -120,11 +117,9 @@ import TestSupport
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )
@@ -165,7 +160,6 @@ import TestSupport
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -198,7 +192,6 @@ import TestSupport
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )

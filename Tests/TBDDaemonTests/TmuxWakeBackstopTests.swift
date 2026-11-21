@@ -10,8 +10,7 @@ import TestSupport
 /// parked one is refused with the migration gesture, before anything else
 /// about it is asked, and stays parked with its session id; a live one is
 /// refused as still running in tmux and left exactly as it was. Either way
-/// nothing is touched, whether or not tmux is installed. A parked holder row
-/// wakes as before. `worktree.resume` hands the refusal to its caller when it
+/// nothing is touched. A parked holder row wakes as before. `worktree.resume` hands the refusal to its caller when it
 /// woke nothing.
 @Suite("Tmux wake backstop")
 struct TmuxWakeBackstopTests {
@@ -22,29 +21,16 @@ struct TmuxWakeBackstopTests {
         let coordinator: HibernationCoordinator
         let worktree: Worktree
         let holder: FakeHolderLaunch
-        let tmuxCommands: TmuxCommandLog
         let scratch: String
         func tearDown() { try? FileManager.default.removeItem(atPath: scratch) }
     }
 
-    /// Every tmux command a dry-run manager was asked to run.
-    final class TmuxCommandLog: @unchecked Sendable {
-        private let lock = NSLock()
-        private var commands: [[String]] = []
-        func append(_ args: [String]) { lock.withLock { commands.append(args) } }
-        var snapshot: [[String]] { lock.withLock { commands } }
-    }
-
-    /// `tmuxResolvable: false` builds a real-mode manager whose PATH is an empty
-    /// directory, so the binary genuinely cannot resolve. `true` is dry-run,
-    /// which can always serve and records every command it is asked to run.
-    /// Either way the coordinator holds a holder registry that can spawn,
-    /// through the spawn double, so a refusal is never for want of one.
-    private static func makeFixture(tmuxResolvable: Bool) async throws -> Fixture {
+    /// The coordinator holds a holder registry that can spawn, through the
+    /// spawn double, so a refusal is never for want of one.
+    private static func makeFixture() async throws -> Fixture {
         let scratch = fencedScratchRoot(prefix: "tbdbackstop")
-        let emptyBin = "\(scratch)/empty-bin"
         let wtPath = "\(scratch)/wt"
-        for dir in [emptyBin, wtPath, "\(scratch)/repo"] {
+        for dir in [wtPath, "\(scratch)/repo"] {
             try FileManager.default.createDirectory(
                 atPath: dir, withIntermediateDirectories: true)
         }
@@ -54,21 +40,20 @@ struct TmuxWakeBackstopTests {
         let worktree = try await db.worktrees.create(
             repoID: repo.id, name: "wt", branch: "tbd/wt",
             path: wtPath, tmuxServer: "tbd-backstop-test")
-        let log = TmuxCommandLog()
-        let tmux = tmuxResolvable
-            ? TmuxManager(dryRun: true, dryRunRecorder: { args in log.append(args) })
-            : TmuxManager(dryRun: false, tmuxPathOverride: emptyBin)
+        // The Codex stub, so a refusal that came later than it should resolves
+        // the stub rather than the machine's own `codex`.
         let coordinator = HibernationCoordinator(
-            db: db, tmux: tmux,
-            configDirManager: makeIsolatedConfigDirManager(tag: "tmux-backstop"),
+            db: db, configDirManager: makeIsolatedConfigDirManager(tag: "tmux-backstop"),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "tmux-backstop"),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         let holder = FakeHolderLaunch()
         await coordinator.setHolderRegistry(makeHolderRegistryDouble(launch: holder))
         return Fixture(
             db: db, coordinator: coordinator, worktree: worktree, holder: holder,
-            tmuxCommands: log, scratch: scratch)
+            scratch: scratch)
     }
 
     private static func parkedRow(
@@ -107,15 +92,17 @@ struct TmuxWakeBackstopTests {
     /// A router on the fixture's database whose coordinator wakes holder rows
     /// through the fixture's spawn double.
     private static func makeRouter(_ f: Fixture) async -> RPCRouter {
-        let tmux = TmuxManager(dryRun: true)
         let registry = makeHolderRegistryDouble(launch: f.holder)
         var lifecycle = WorktreeLifecycle(
-            db: f.db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: f.db, git: GitManager(), hooks: HookResolver(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
-            db: f.db, lifecycle: lifecycle, tmux: tmux,
-            configDirManager: makeIsolatedConfigDirManager(tag: "tmux-backstop-router"),
+            db: f.db, lifecycle: lifecycle, configDirManager: makeIsolatedConfigDirManager(tag: "tmux-backstop-router"),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog(tag: "tmux-backstop-router"))
         router.holderRegistry = registry
         await router.hibernationCoordinator.setHolderRegistry(registry)
@@ -146,28 +133,14 @@ struct TmuxWakeBackstopTests {
         #expect(f.holder.launches.isEmpty, "a tmux row's wake started a holder")
     }
 
-    @Test func aTmuxRowRefusesItsWakeWhenTmuxIsMissing() async throws {
-        let f = try await Self.makeFixture(tmuxResolvable: false)
+    @Test func aParkedTmuxRowRefusesItsWake() async throws {
+        let f = try await Self.makeFixture()
         defer { f.tearDown() }
         let row = try await Self.parkedRow(f, transport: .tmux)
 
         let result = await f.coordinator.wake(terminalID: row.id)
 
         try await Self.expectRefused(result, row: row, f)
-    }
-
-    /// The case the backstop exists for now: tmux is there and could serve,
-    /// and the row still refuses, without a single tmux command.
-    @Test func aTmuxRowRefusesItsWakeEvenWhenTmuxCanServe() async throws {
-        let f = try await Self.makeFixture(tmuxResolvable: true)
-        defer { f.tearDown() }
-        let row = try await Self.parkedRow(f, transport: .tmux)
-
-        let result = await f.coordinator.wake(terminalID: row.id)
-
-        try await Self.expectRefused(result, row: row, f)
-        #expect(f.tmuxCommands.snapshot.isEmpty,
-                "a refused wake ran tmux: \(f.tmuxCommands.snapshot)")
     }
 
     /// The refusal comes before every other question the wake would ask. A
@@ -175,7 +148,7 @@ struct TmuxWakeBackstopTests {
     /// delivered — advice that changes nothing, since the row cannot wake on
     /// tmux with or without one.
     @Test func aParkedTmuxCodexRowGivenAPromptIsToldToMigrate() async throws {
-        let f = try await Self.makeFixture(tmuxResolvable: true)
+        let f = try await Self.makeFixture()
         defer { f.tearDown() }
         let row = try await Self.parkedRow(f, transport: .tmux, kind: .codex)
         // The precondition that makes this discriminate: on a holder row, this
@@ -185,8 +158,6 @@ struct TmuxWakeBackstopTests {
         let result = await f.coordinator.wake(terminalID: row.id, initialPrompt: "acme prompt")
 
         try await Self.expectRefused(result, row: row, f)
-        #expect(f.tmuxCommands.snapshot.isEmpty,
-                "a refused wake ran tmux: \(f.tmuxCommands.snapshot)")
     }
 
     /// The same order for a parked tmux row with no session id: it is told to
@@ -194,7 +165,7 @@ struct TmuxWakeBackstopTests {
     /// what the person can do about a tmux row and the answer it would
     /// otherwise get is a holder row's.
     @Test func aParkedTmuxRowWithNoSessionIDIsToldToMigrate() async throws {
-        let f = try await Self.makeFixture(tmuxResolvable: true)
+        let f = try await Self.makeFixture()
         defer { f.tearDown() }
         var row = try await Self.parkedRow(f, transport: .tmux)
         let rowID = row.id
@@ -215,12 +186,10 @@ struct TmuxWakeBackstopTests {
     /// A LIVE tmux row is running in tmux as far as this daemon knows — a row
     /// is parked once its server is gone — and TBD can neither reach nor stop
     /// it. So a wake says so, with the command that ends it, instead of
-    /// answering "already awake" for a session TBD cannot reach. No tmux
-    /// command is run, the prompt is not delivered, and the row is left
-    /// exactly as it was.
-    @Test(arguments: [false, true])
-    func aLiveTmuxRowRefusesItsWakeAsStillRunning(tmuxResolvable: Bool) async throws {
-        let f = try await Self.makeFixture(tmuxResolvable: tmuxResolvable)
+    /// answering "already awake" for a session TBD cannot reach. The prompt is
+    /// not delivered, and the row is left exactly as it was.
+    @Test func aLiveTmuxRowRefusesItsWakeAsStillRunning() async throws {
+        let f = try await Self.makeFixture()
         defer { f.tearDown() }
         let row = try await Self.liveTmuxRow(f)
 
@@ -231,15 +200,13 @@ struct TmuxWakeBackstopTests {
                 "a live tmux row's wake did not say it is still running: \(result)")
         #expect(try await f.db.terminals.get(id: row.id) == row,
                 "a refused wake changed the row")
-        #expect(f.tmuxCommands.snapshot.isEmpty,
-                "a refused wake ran tmux: \(f.tmuxCommands.snapshot)")
         #expect(f.holder.launches.isEmpty, "a tmux row's wake started a holder")
     }
 
     /// The other branch of the backstop: a parked holder row wakes on the
-    /// holder, with tmux missing, and resumes its own session.
+    /// holder and resumes its own session.
     @Test func aParkedHolderRowStillWakes() async throws {
-        let f = try await Self.makeFixture(tmuxResolvable: false)
+        let f = try await Self.makeFixture()
         defer { f.tearDown() }
         let row = try await Self.parkedRow(f, transport: .holder)
 
@@ -260,7 +227,7 @@ struct TmuxWakeBackstopTests {
     /// with the refusal that names the migration rather than with success, and
     /// the row stays parked.
     @Test func aResumeThatWokeNothingAnswersWithTheMigration() async throws {
-        let f = try await Self.makeFixture(tmuxResolvable: true)
+        let f = try await Self.makeFixture()
         defer { f.tearDown() }
         let row = try await Self.parkedRow(f, transport: .tmux)
         let router = await Self.makeRouter(f)
@@ -279,7 +246,7 @@ struct TmuxWakeBackstopTests {
     /// The other branch: a resume that woke another session succeeds, as it
     /// does when any other row fails, and the tmux row stays parked.
     @Test func aResumeThatWokeAnotherSessionStillSucceeds() async throws {
-        let f = try await Self.makeFixture(tmuxResolvable: true)
+        let f = try await Self.makeFixture()
         defer { f.tearDown() }
         let tmuxRow = try await Self.parkedRow(f, transport: .tmux)
         let holderRow = try await Self.parkedRow(

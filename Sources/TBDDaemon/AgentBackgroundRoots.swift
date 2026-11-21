@@ -9,7 +9,6 @@ import TBDShared
 /// TBD runs no tmux command to read.
 struct AgentBackgroundRoots: Sendable {
     let database: TBDDatabase
-    let tmux: TmuxManager
     let priority: any ProcessPriority
 
     func resolve() async -> [pid_t] {

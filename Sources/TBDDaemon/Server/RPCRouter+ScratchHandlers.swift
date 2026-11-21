@@ -48,7 +48,7 @@ extension RPCRouter {
         // never delete a directory it didn't create (i.e. the race winner's).
         try fm.createDirectory(at: dir, withIntermediateDirectories: false)
 
-        let tmuxServer = TmuxManager.serverName(forRepoPath: base.path)
+        let tmuxServer = TmuxServerName.forRepoPath(base.path)
         let wt: Worktree
         do {
             wt = try await db.worktrees.createScratch(

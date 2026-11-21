@@ -54,8 +54,8 @@ struct TerminalAutoResizeFlagTests {
             state.mainAreaSize = CGSize(width: 1200, height: 800)
             let size = state.mainAreaTerminalSize()
             // nil (not 0) is required so callers' Int? params trigger the
-            // daemon's `?? TmuxManager.defaultCols` fallback. `Some(0)` would
-            // bypass the fallback and tmux would land at 80×24.
+            // daemon's `?? TerminalSpawnSize.defaultCols` fallback. `Some(0)`
+            // would bypass the fallback.
             #expect(size.cols == nil)
             #expect(size.rows == nil)
         }

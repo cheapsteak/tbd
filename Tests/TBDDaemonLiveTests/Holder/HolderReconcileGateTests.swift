@@ -184,7 +184,7 @@ struct HolderReconcileGateTests {
     private func makeLifecycle(registry: HolderRegistry) throws -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
             db: try TBDDatabase(inMemory: true), git: GitManager(),
-            tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         return lifecycle

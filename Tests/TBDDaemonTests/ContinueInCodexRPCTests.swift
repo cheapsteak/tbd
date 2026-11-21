@@ -10,25 +10,12 @@ import TestSupport
 struct ContinueInCodexRPCTests {
     private final class Recorder: @unchecked Sendable {
         private let lock = NSLock()
-        private var commandStorage: [[String]] = []
         private var eventStorage: [String] = []
-
-        func command(_ arguments: [String]) {
-            lock.lock()
-            commandStorage.append(arguments)
-            lock.unlock()
-        }
 
         func event(_ value: String) {
             lock.lock()
             eventStorage.append(value)
             lock.unlock()
-        }
-
-        var commands: [[String]] {
-            lock.lock()
-            defer { lock.unlock() }
-            return commandStorage
         }
 
         var events: [String] {
@@ -60,22 +47,20 @@ struct ContinueInCodexRPCTests {
 
         let db = try TBDDatabase(inMemory: true)
         let recorder = Recorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.command($0) })
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: tmux,
             hooks: HookResolver(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux, actuationLog: makeTestActuationLog())
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver, codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer, actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         router.codexExecutableResolver = {
             recorder.event("resolve")
@@ -160,8 +145,6 @@ struct ContinueInCodexRPCTests {
         let launch = try #require(fixture.holder.launch(for: target.id)?.commandLine)
         #expect(launch.contains("resume 'thread-native-123'"))
         #expect(!launch.contains("continue this"))
-        #expect(!fixture.recorder.commands.contains { $0.contains("send-keys") })
-        #expect(!fixture.recorder.commands.contains { $0.contains("paste-buffer") })
     }
 
     @Test("start admission holds the continuation before any Codex terminal opens",
@@ -214,7 +197,6 @@ struct ContinueInCodexRPCTests {
         #expect(!response.success)
         #expect(response.error?.contains("requires a Claude terminal") == true)
         #expect(fixture.recorder.events.isEmpty)
-        #expect(fixture.recorder.commands.isEmpty)
         #expect(fixture.holder.launches.isEmpty)
         #expect(try await fixture.db.terminals.list(
             worktreeID: fixture.worktree.id) == before)
@@ -239,7 +221,6 @@ struct ContinueInCodexRPCTests {
         #expect(!response.success)
         #expect(response.error?.contains("no transcript path") == true)
         #expect(fixture.recorder.events.isEmpty)
-        #expect(fixture.recorder.commands.isEmpty)
         #expect(fixture.holder.launches.isEmpty)
     }
 
@@ -260,7 +241,6 @@ struct ContinueInCodexRPCTests {
 
         #expect(!response.success)
         #expect(fixture.recorder.events == ["resolve"])
-        #expect(fixture.recorder.commands.isEmpty)
         #expect(fixture.holder.launches.isEmpty)
         #expect(try await fixture.db.terminals.list(
             worktreeID: fixture.worktree.id) == [source])
@@ -281,7 +261,6 @@ struct ContinueInCodexRPCTests {
         #expect(!response.success)
         #expect(response.error?.contains("not active") == true)
         #expect(fixture.recorder.events.isEmpty)
-        #expect(fixture.recorder.commands.isEmpty)
         #expect(fixture.holder.launches.isEmpty)
     }
 
@@ -301,7 +280,6 @@ struct ContinueInCodexRPCTests {
 
         #expect(!response.success)
         #expect(response.error?.contains("conversion failed") == true)
-        #expect(fixture.recorder.commands.isEmpty)
         #expect(fixture.holder.launches.isEmpty)
         #expect(try await fixture.db.terminals.list(
             worktreeID: fixture.worktree.id) == [source])

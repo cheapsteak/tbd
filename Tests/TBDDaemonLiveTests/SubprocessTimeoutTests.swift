@@ -4,43 +4,21 @@ import Testing
 import TestSupport
 @testable import TBDDaemonLib
 
-/// Covers the wake-hang fix's core mechanism: an external subprocess that never
-/// returns must be killed and the call must throw a timeout error, rather than
-/// hanging the RPC to the app's 300s ceiling. Drives the package-internal
-/// `runExternalCommand` seam against `/bin/sleep` so no tmux server is needed.
-///
-/// **Tier 3** — still spawns real children and drives the real SIGTERM→SIGKILL
-/// path; two tests deliberately orphan a backgrounded grandchild. Only the
-/// *deadline* is virtual. See `GitManagerTimeoutTests` for the full rationale;
-/// both suites map the same `runBoundedProcess` machinery to different error
-/// types, and `SubprocessTimeoutStarvationTests` covers the production
+/// The kill path of `runBoundedProcess` when the child's streams are a
+/// pseudo-terminal. The pipe-mode deadline, drain and grandchild cases are
+/// `GitManagerTimeoutTests`, which drives the same runner through `GitManager`;
+/// `SubprocessTimeoutStarvationTests` covers the production
 /// `SubprocessWatchdog` on a real clock.
 ///
-/// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`. Do not
-/// "tidy" this back to the shared trait — the two halves below are why.
+/// **Tier 3** — spawns a real child and drives the real SIGTERM→SIGKILL path.
+/// Only the *deadline* is virtual.
 ///
-/// 1. **60 s is this suite's detector, not a hang guard.**
-///    `runExternalCommandTimesOutPromptlyWhenGrandchildHoldsPipeOpen` and
-///    `runExternalCommandReturnsWithoutWaitingForGrandchildEOF` prove promptness
-///    *structurally*: their grandchildren hold the pipe write ends open for 120 s
-///    and 30 s of REAL time, and the only thing that distinguishes "returned
-///    without waiting for EOF" from "regressed into an EOF-waiting drain" is that
-///    the latter blocks past the limit. At 300 s a regressed 120 s drain finishes
-///    inside the budget and the test goes green — mutation-verified proof,
-///    silently disarmed, with nothing going red to tell you.
-/// 2. **It does not need the larger budget.** `.clockDriven` is 5 minutes to
-///    absorb the arming latency of the fast parallel pass, whose population of
-///    thousands of in-process tests is what makes a clock handshake take tens
-///    of seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
-///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
-///    machine, so real arming latency here is milliseconds.
-///
-/// One residual, stated rather than glossed: `requireSleeperArmed`'s default is
-/// 45 s, so a test that waited **twice** would need 90 s and would trip this
-/// 60 s limit. No test here chains two — each of the suite's
-/// `requireAdvanceWhenArmed` sites is in its own `@Test` — and in the quiet
-/// pass a healthy handshake returns in milliseconds, so only a genuine hang
-/// ever pays the timeout, which is exactly what this limit is here to catch.
+/// An explicit `.timeLimit(.minutes(1))` rather than `.clockDriven`: this is
+/// tier 3, which CI runs as `--filter '^TBDDaemonLiveTests\.' --no-parallel`
+/// on an otherwise-idle machine, so real arming latency is milliseconds and
+/// the five-minute budget `.clockDriven` carries for the fast parallel pass is
+/// not needed. `requireSleeperArmed`'s default is 45 s, so the test waits on
+/// one handshake only; two would trip the limit.
 @Suite("Subprocess timeout / kill path", .timeLimit(.minutes(1)))
 struct SubprocessTimeoutTests {
 
@@ -53,140 +31,11 @@ struct SubprocessTimeoutTests {
     /// guard (45 s) plus this budget still fits the suite's 60 s limit.
     private static let killObservationBudget: Duration = .seconds(10)
 
-    @Test func runExternalCommandThrowsTimedOutOnSlowBinary() async throws {
-        // Assert the OUTCOME (throws .timedOut), never wall-clock timing. The
-        // `sleep 30` guarantees the child never finishes on its own, so a thrown
-        // error can only mean the deadline fired — and the deadline now fires
-        // because this test advanced virtual time, not because the runner
-        // happened to be fast enough.
-        let clock = EventDrivenTestClock()
-        let call = Task {
-            try await TmuxManager.runExternalCommand(
-                executable: "/bin/sleep",
-                arguments: ["30"],
-                label: "timeout-test",
-                timeout: Self.unreachableTimeout,
-                clock: clock
-            )
-        }
-        try await clock.requireAdvanceWhenArmed(by: Self.unreachableTimeout)
-        do {
-            _ = try await call.value
-            Issue.record("expected runExternalCommand to time out, but it returned")
-        } catch let error as TmuxError {
-            guard case .timedOut = error else {
-                Issue.record("expected TmuxError.timedOut, got \(error)")
-                return
-            }
-        } catch {
-            Issue.record("expected TmuxError.timedOut, got \(error)")
-        }
-    }
-
-    @Test func runExternalCommandDrainsOutputLargerThanPipeBuffer() async throws {
-        // A macOS pipe buffer is 64KB. Before stdout was drained concurrently
-        // with the child, a command emitting more (e.g. `ps -Ao` with ~900+
-        // processes) blocked writing to the full pipe while the caller waited
-        // for exit — mutual deadlock, resolved only by the timeout (or, at a
-        // call site with no timeout, never). Lock down
-        // that a 100KB emitter completes and returns its FULL output. With the
-        // deadline virtual and never advanced, a regression presents as a hang
-        // caught by the suite's limit instead of being masked as a timeout.
-        let bytes = 102_400
-        let out = try await TmuxManager.runExternalCommand(
-            executable: "/bin/sh",
-            arguments: ["-c", "yes x | head -c \(bytes)"],
-            label: "big-output-test",
-            timeout: Self.unreachableTimeout,
-            clock: EventDrivenTestClock()
-        )
-        #expect(out.utf8.count == bytes)
-    }
-
-    @Test func runExternalCommandTimesOutPromptlyWhenGrandchildHoldsPipeOpen() async throws {
-        // Any spawned process can fork background grandchildren that
-        // inherit the pipe write ends. The deadline
-        // kills only the DIRECT child, so EOF never arrives on the pipes. The
-        // old blocking `readDataToEndOfFile` drain leaked two parked
-        // global-queue threads + two pipe FDs (+ retained closures) per
-        // timed-out call.
-        //
-        // The promptness proof is structural rather than a tolerance: the call
-        // resolves after 600 VIRTUAL seconds while the grandchild holds the pipe
-        // for 120 REAL ones, so returning at all proves nothing waited for EOF.
-        // A regressed EOF-waiting drain would block ~120 real seconds and trip
-        // the suite's 60 s limit. This replaces a wall-clock upper bound
-        // RAISED TWICE after measured breaches (4s → 15s → 60s, the last at
-        // 19.2s on a 2-core runner) — the tolerance-widening shape hygiene rule
-        // 2 forbids.
-        //
-        // The plain `sleep 120 &` grandchild is NOT killed and may linger up to
-        // 120s after the suite — harmless orphanage locally, irrelevant on
-        // ephemeral CI runners.
-        let clock = EventDrivenTestClock()
-        let call = Task {
-            try await TmuxManager.runExternalCommand(
-                executable: "/bin/sh",
-                arguments: ["-c", "sleep 120 & echo hi; exec sleep 120"],
-                label: "grandchild-pipe-timeout-test",
-                timeout: Self.unreachableTimeout,
-                clock: clock
-            )
-        }
-        try await clock.requireAdvanceWhenArmed(by: Self.unreachableTimeout)
-        do {
-            _ = try await call.value
-            Issue.record("expected runExternalCommand to time out, but it returned")
-        } catch let error as TmuxError {
-            guard case .timedOut = error else {
-                Issue.record("expected TmuxError.timedOut, got \(error)")
-                return
-            }
-        } catch {
-            Issue.record("expected TmuxError.timedOut, got \(error)")
-        }
-    }
-
-    @Test func runExternalCommandReturnsWithoutWaitingForGrandchildEOF() async throws {
-        // Termination-path variant: the direct child exits IMMEDIATELY (and
-        // successfully) while its backgrounded grandchild holds the pipe write
-        // end for 30s. The call must return the child's output right away — a
-        // drain that waits for pipe EOF stalls until the grandchild exits, which
-        // with the old shape surfaced as a spurious .timedOut (timeout 3s <<
-        // grandchild 30s). That 3 s margin was the thinnest in the suite and the
-        // likeliest to be blown by a loaded runner; with the deadline virtual and
-        // never advanced there is no margin left to blow. The `sleep 30 &`
-        // grandchild may linger up to 30s — tolerable orphanage.
-        let out = try await TmuxManager.runExternalCommand(
-            executable: "/bin/sh",
-            arguments: ["-c", "sleep 30 & echo hi"],
-            label: "grandchild-pipe-eof-test",
-            timeout: Self.unreachableTimeout,
-            clock: EventDrivenTestClock()
-        )
-        #expect(out == "hi\n")
-    }
-
-    @Test func runExternalCommandSucceedsWellWithinTimeout() async throws {
-        // A fast binary returns normally — the timeout wrapper must not break the
-        // happy path (regression guard for the kill/continuation plumbing).
-        let out = try await TmuxManager.runExternalCommand(
-            executable: "/bin/echo",
-            arguments: ["ok"],
-            label: "fast",
-            timeout: Self.unreachableTimeout,
-            clock: EventDrivenTestClock()
-        )
-        #expect(out.contains("ok"))
-    }
-
     /// The deadline and the kill must still work when the child's streams are a
     /// pseudo-terminal rather than pipes — the mode replaces the pipe pair with
     /// one `openpty(3)` descriptor, and the deadline path snapshots and CLOSES
     /// that descriptor before it signals. A pty primary is a character device,
     /// so nothing about closing it terminates the child; only the SIGTERM does.
-    /// This drives `runBoundedProcess` directly rather than
-    /// `runExternalCommand`, which has no `stdio` parameter of its own.
     ///
     /// The kill is asserted, not assumed, and the observation is deliberately
     /// argv-based rather than pid-file-based. Under an `EventDrivenTestClock` the deadline
@@ -202,8 +51,8 @@ struct SubprocessTimeoutTests {
     /// after `Process.run()` succeeded — so a marked process definitely existed,
     /// and "no live marked process remains" is a real claim about the
     /// SIGTERM→SIGKILL path. Mutation-checked: neutering BOTH signals turns this
-    /// red (`still live: [<pid> S /bin/sh -c :; sleep 60 # tbd-pty-timeout-…]`)
-    /// while every other test in the file stays green. Deleting only the SIGTERM
+    /// red (`still live: [<pid> S /bin/sh -c :; sleep 60 # tbd-pty-timeout-…]`).
+    /// Deleting only the SIGTERM
     /// does NOT redden it — the 500 ms SIGKILL escalation covers that on its
     /// own, which is the escalation working as designed, not a weak assertion.
     ///
@@ -215,7 +64,8 @@ struct SubprocessTimeoutTests {
     /// The signals are the only thing that ends it.
     ///
     /// The `sleep 60` grandchild is NOT killed and may linger for its full
-    /// minute — the same tolerated orphanage as the two grandchild tests above.
+    /// minute — tolerated orphanage, as in `GitManagerTimeoutTests`' grandchild
+    /// tests.
     @Test func pseudoTerminalRunTimesOutAndKillsTheChild() async throws {
         let marker = "tbd-pty-timeout-\(UUID().uuidString)"
 

@@ -22,27 +22,27 @@ struct ScratchDeleteRPCTests {
     private func makeHolderBackedRouter(db: TBDDatabase) -> RPCRouter {
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db, lifecycle: lifecycle,
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+            startTime: Date(), actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         return router
     }
 
-    /// A router on `tmux` whose registry is the holder spawn double, so
+    /// A router whose registry is the holder spawn double, so
     /// `scratch.create` passes the spawn gate. The transport tests below clear
     /// the primary terminal it opens and put the registry under test in its
     /// place before the delete.
-    private static func routerPastTheSpawnGate(db: TBDDatabase, tmux: TmuxManager) -> RPCRouter {
+    private static func routerPastTheSpawnGate(db: TBDDatabase) -> RPCRouter {
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db, lifecycle: lifecycle,
-            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+            startTime: Date(), actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         return router
     }
@@ -180,8 +180,8 @@ struct ScratchDeleteRPCTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), leftoverTmuxProbe: .absent),
+            startTime: Date(), actuationLog: makeTestActuationLog())
         let repo = try await db.repos.create(path: "/tmp/r-\(UUID().uuidString)", displayName: "r", defaultBranch: "main")
         let wt = try await db.worktrees.create(repoID: repo.id, name: "w", branch: "b",
                                                path: "/tmp/w-\(UUID().uuidString)", tmuxServer: "tbd-x")
@@ -208,13 +208,7 @@ struct ScratchDeleteRPCTests {
     @Test func scratchDeleteDisposesHolderInsteadOfKillingAWindow() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxArgs()
-        // Reports every window dead, which is what a real server answers for
-        // the empty window id, and records every argv it is handed.
-        let tmux = TmuxManager(
-            dryRun: true, dryRunRecorder: { recorded.append($0) },
-            dryRunWindowIsDead: { _ in true })
-        let router = Self.routerPastTheSpawnGate(db: db, tmux: tmux)
+        let router = Self.routerPastTheSpawnGate(db: db)
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "holder-scratch")))
         let wt = try created.decodeResult(Worktree.self)
@@ -249,8 +243,6 @@ struct ScratchDeleteRPCTests {
         let disposed = await registry.lastKnownStatus(for: terminal.id)
         #expect(disposed == nil,
                 "scratch.delete removed the row without disposing of its holder, so the holder, its child and its rendezvous files are now owned by nothing")
-        #expect(recorded.snapshot().contains { $0.contains("kill-window") } == false,
-                "scratch.delete reached tmux kill-window for a holder row: \(recorded.snapshot())")
     }
 
     /// A scratch space whose only terminal is a holder row, on a router whose
@@ -260,8 +252,7 @@ struct ScratchDeleteRPCTests {
         name: String
     ) async throws -> (RPCRouter, TBDDatabase, Worktree, Terminal, HolderRegistry) {
         let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true })
-        let router = Self.routerPastTheSpawnGate(db: db, tmux: tmux)
+        let router = Self.routerPastTheSpawnGate(db: db)
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: name)))
         let wt = try created.decodeResult(Worktree.self)
@@ -329,11 +320,7 @@ struct ScratchDeleteRPCTests {
     @Test func scratchDeleteRemovesAnIdenticalTmuxRowWithoutRunningTmux() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxArgs()
-        let tmux = TmuxManager(
-            dryRun: true, dryRunRecorder: { recorded.append($0) },
-            dryRunWindowIsDead: { _ in true })
-        let router = Self.routerPastTheSpawnGate(db: db, tmux: tmux)
+        let router = Self.routerPastTheSpawnGate(db: db)
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "tmux-scratch")))
         let wt = try created.decodeResult(Worktree.self)
@@ -348,15 +335,11 @@ struct ScratchDeleteRPCTests {
             environment: ["TBD_HOME": "/tmp/tbd-sd-\(UUID().uuidString.prefix(8))"],
             listTerminals: { [] })
 
-        let before = recorded.snapshot().count
-
         let del = await router.handle(try RPCRequest(
             method: RPCMethod.scratchDelete, params: ScratchDeleteParams(worktreeID: wt.id)))
 
         #expect(del.success, "error: \(del.error ?? "nil")")
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
-        let issued = Array(recorded.snapshot().dropFirst(before))
-        #expect(issued.isEmpty, "scratch.delete ran a tmux command for a tmux row: \(issued)")
     }
 }
 }

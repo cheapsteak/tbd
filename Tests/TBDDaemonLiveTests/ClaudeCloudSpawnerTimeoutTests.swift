@@ -10,7 +10,7 @@ import TestSupport
 /// still living in this tier.
 ///
 /// `BoundedProcessClaudeSpawner` now threads an injected `clock:` through to
-/// `runBoundedProcess`, matching `GitManager`/`TmuxManager.runExternalCommand`.
+/// `runBoundedProcess`, matching `GitManager`.
 /// `spawnTimesOutOnInjectedClockDeadline` below is the discriminating proof of
 /// that wiring: it advances only an `EventDrivenTestClock` the spawner was constructed
 /// with, never sleeps for real, and the deadline still fires — which is only

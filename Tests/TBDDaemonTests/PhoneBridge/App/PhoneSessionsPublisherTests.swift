@@ -669,10 +669,9 @@ struct PhoneSessionsPublisherTests {
         let router = RPCRouter(
             db: h.db,
             lifecycle: WorktreeLifecycle(
-                db: h.db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                db: h.db, git: GitManager(), hooks: HookResolver(),
                 subscriptions: h.subscriptions,
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: h.subscriptions,
             actuationLog: ActuationLog(path: logPath))

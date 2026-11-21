@@ -82,10 +82,9 @@ struct TerminalSpawnGateTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(),
+            startTime: Date(),
             actuationLog: makeTestActuationLog())
         router.holderRegistry = Self.registry(spawner: nil)
         let scratch = fencedScratchRoot(prefix: "tbdgate")
@@ -115,10 +114,9 @@ struct TerminalSpawnGateTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(),
+            startTime: Date(),
             actuationLog: makeTestActuationLog())
         router.holderRegistry = Self.registry(spawner: nil)
         let scratch = fencedScratchRoot(prefix: "tbdgate")
@@ -153,10 +151,9 @@ struct TerminalSpawnGateTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(),
+            startTime: Date(),
             actuationLog: makeTestActuationLog())
         router.holderRegistry = Self.registry(spawner: nil)
         let admission = StubAdmission(.hold(reason: "camera in use"))
@@ -203,10 +200,9 @@ struct TerminalSpawnGateTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(),
+            startTime: Date(),
             actuationLog: makeTestActuationLog())
         router.holderRegistry = Self.registry(spawner: nil)
         let scratch = fencedScratchRoot(prefix: "tbdgate")
@@ -251,7 +247,7 @@ struct TerminalSpawnGateTests {
     @Test func aFirstReviveAsksTheSpawnGate() async throws {
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         let scratch = fencedScratchRoot(prefix: "tbdgate")
         defer { try? FileManager.default.removeItem(atPath: scratch) }

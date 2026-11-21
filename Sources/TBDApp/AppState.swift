@@ -6,10 +6,6 @@ import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState")
-private let tmuxResolutionLogger = Logger(
-    subsystem: "com.tbd.app",
-    category: "tmux"
-)
 /// Dedicated channel for RPC/poll-cadence observability (storm diagnostics).
 /// Silent by default; activate with `log stream --level debug`.
 private let perfRPCLogger = Logger(subsystem: "com.tbd.app", category: "perf-rpc")
@@ -66,47 +62,12 @@ struct RemoteAttachGeneration: Equatable {
     var startedAt: Date?
 }
 
-enum TmuxStartupResolutionDiagnostic: Equatable {
-    case path(String)
-    case savedFallback(String)
-    case unavailable
-
-    init(resolution: TmuxExecutableResolution?) {
-        switch resolution {
-        case .some(let resolution):
-            switch resolution.source {
-            case .path:
-                self = .path(resolution.path)
-            case .savedFallback:
-                self = .savedFallback(resolution.path)
-            }
-        case .none:
-            self = .unavailable
-        }
-    }
-
-    func log() {
-        switch self {
-        case .path(let path):
-            tmuxResolutionLogger.notice(
-                "startup resolution source=PATH path=\(path, privacy: .public)"
-            )
-        case .savedFallback(let path):
-            tmuxResolutionLogger.notice(
-                "startup resolution source=saved-fallback path=\(path, privacy: .public)"
-            )
-        case .unavailable:
-            tmuxResolutionLogger.error("startup resolution source=unavailable")
-        }
-    }
-}
-
 @MainActor
 @Observable
 final class AppState {
     /// Reference to the global appearance settings, wired by `TBDAppMain`
     /// after both root-owned objects are constructed. Used by
-    /// `mainAreaTerminalSize()` to compute initial tmux pane dimensions
+    /// `mainAreaTerminalSize()` to compute initial terminal dimensions
     /// from the user's current font, before any `TBDTerminalView` exists.
     /// Plain (non-weak) optional — `AppState` and `AppearanceSettings` share
     /// the app's lifetime, so this reference cannot outlive its target.
@@ -2087,15 +2048,9 @@ final class AppState {
     /// a later plain alert can never inherit buttons for an earlier file.
     var alertRevealPath: String? = nil
 
-    private(set) var tmuxExecutableResolution: TmuxExecutableResolution?
-    private(set) var savedTmuxExecutablePath: String?
-    private(set) var isTmuxLocationPromptPresented = false
-    @ObservationIgnored private var hasCheckedTmuxAvailabilityAtStartup = false
-
     let themeStore = ThemeStore()
 
     let daemonClient: DaemonClient
-    let tmuxExecutableResolver: TmuxExecutableResolver
     /// The app's own transcript reader. Constructed unconditionally — it costs
     /// nothing until a pane registers, and it stats no file until then.
     let transcriptSource = TranscriptSource()
@@ -2945,7 +2900,6 @@ final class AppState {
 
     init(
         userDefaults: UserDefaults = .standard,
-        tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
         onEngineNotice: @escaping @MainActor (TerminalEngineNotice) -> Void = TerminalEngineNotice.log,
         phoneRetryClock: any Clock<Duration> = ContinuousClock(),
         daemonClient: DaemonClient = DaemonClient()
@@ -2955,9 +2909,6 @@ final class AppState {
         self.onEngineNotice = onEngineNotice
         self.phoneRetryClock = phoneRetryClock
         self.windowChrome = WindowChromeState()
-        self.tmuxExecutableResolver = tmuxExecutableResolver
-        self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()
-        self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
         RetiredFilePanelDefaults.remove(from: userDefaults)
         restoreLayouts()
         restorePaneHistories()
@@ -3012,34 +2963,6 @@ final class AppState {
                 startPolling()
             }
         }
-    }
-
-    func refreshTmuxExecutableState() {
-        savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
-        tmuxExecutableResolution = tmuxExecutableResolver.resolve()
-    }
-
-    func checkTmuxAvailabilityAtStartup() {
-        guard !hasCheckedTmuxAvailabilityAtStartup else { return }
-        hasCheckedTmuxAvailabilityAtStartup = true
-        refreshTmuxExecutableState()
-        TmuxStartupResolutionDiagnostic(resolution: tmuxExecutableResolution).log()
-        isTmuxLocationPromptPresented = tmuxExecutableResolution == nil
-    }
-
-    func dismissTmuxLocationPrompt() {
-        isTmuxLocationPromptPresented = false
-    }
-
-    func saveTmuxExecutableFallback(_ path: String) throws {
-        try tmuxExecutableResolver.save(path)
-        refreshTmuxExecutableState()
-        isTmuxLocationPromptPresented = false
-    }
-
-    func clearTmuxExecutableFallback() throws {
-        try tmuxExecutableResolver.clear()
-        refreshTmuxExecutableState()
     }
 
     /// True when this process is a SwiftPM / XCTest test harness. Detected by
@@ -4988,11 +4911,12 @@ final class AppState {
     }
 
     /// UserDefaults key for the WIP terminal-auto-resize feature. Off by
-    /// default — the feature broadcasts main-area pixel size to the daemon
-    /// and resizes every tracked tmux window on app resize / terminal
-    /// create. See `mainAreaTerminalSize()` and `scheduleMainAreaSizeBroadcast()`
-    /// for the two enforcement points. Settings UI toggle lives in the
-    /// "Experimental" section of the General settings tab.
+    /// default — the feature opens new terminals at the main area's size and
+    /// broadcasts that size to the daemon on app resize, which resizes every
+    /// holder session no pane is showing. See `mainAreaTerminalSize()` and
+    /// `scheduleMainAreaSizeBroadcast()` for the two enforcement points.
+    /// Settings UI toggle lives in the "Experimental" section of the Terminal
+    /// settings tab.
     static let terminalAutoResizeKey = "enableTerminalAutoResize"
 
     /// UserDefaults key for the experimental Metal terminal renderer. When on,
@@ -5357,15 +5281,15 @@ final class AppState {
         }
     }
 
-    /// Convert the current `mainAreaSize` (pixels) into tmux cell dimensions
-    /// using SwiftTerm's font metrics. Floors at the tmux minimum (80x24) so
-    /// degenerate window sizes during launch never produce a too-small pane.
+    /// Convert the current `mainAreaSize` (pixels) into cell dimensions
+    /// using SwiftTerm's font metrics. Floors at 80x24 so degenerate window
+    /// sizes during launch never produce a too-small session.
     /// Returns `(nil, nil)` when the auto-resize feature flag is off so the
-    /// daemon's `cols ?? TmuxManager.defaultCols` / `rows ?? defaultRows`
+    /// daemon's `cols ?? TerminalSpawnSize.defaultCols` / `rows ?? defaultRows`
     /// fallback fires (220×50). Returning `(0, 0)` would NOT trigger the
-    /// fallback — `Optional.some(0)` is non-nil — and tmux would drop back
-    /// to its own 80×24 default with the un-reflowable hard-wrapped
-    /// scrollback that #73 introduced these defaults to prevent.
+    /// fallback — `Optional.some(0)` is non-nil — and the session would open
+    /// at whatever size `(0, 0)` comes to rather than at the default that
+    /// spares an agent un-reflowable hard-wrapped scrollback.
     func mainAreaTerminalSize() -> (cols: Int?, rows: Int?) {
         guard terminalAutoResizeEnabled else { return (nil, nil) }
         // Use the user's current font so initial pane dimensions match what
@@ -5381,7 +5305,7 @@ final class AppState {
     }
 
     /// Debounced RPC: tell the daemon the main area resized so it can resize
-    /// every tracked tmux window. Coalesces rapid resize events into a single
+    /// every holder session. Coalesces rapid resize events into a single
     /// RPC ~300ms after the user stops dragging the window edge.
     private func scheduleMainAreaSizeBroadcast() {
         // Belt-and-suspenders: `mainAreaTerminalSize()` already returns

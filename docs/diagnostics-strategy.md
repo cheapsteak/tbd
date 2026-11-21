@@ -40,7 +40,7 @@ deleted an hour later.
 | Level     | When to use                                                                                                              | Visible by default? |
 |-----------|--------------------------------------------------------------------------------------------------------------------------|---------------------|
 | `.debug`  | Per-event traces: "received X", "computed Y", "about to call Z". The stuff you'd `print()` during a bug hunt.            | No (ring buffer only — see below) |
-| `.info`   | Lifecycle milestones inside a subsystem: "tmux server started", "resolved ssh agent at /tmp/...", "loaded N worktrees".  | No (briefly retained)             |
+| `.info`   | Lifecycle milestones inside a subsystem: "holder session spawned", "resolved ssh agent at /tmp/...", "loaded N worktrees".  | No (briefly retained)             |
 | `.notice` | Things a user-facing operator should see in Console.app without filtering: startup, shutdown, config changes, migrations.| **Yes** (default)   |
 | `.error`  | Recoverable failures. The operation didn't happen but the process is fine.                                               | Yes                 |
 | `.fault`  | Invariants violated, programmer errors, "this should never happen". Pair with `assertionFailure` in debug builds.        | Yes                 |
@@ -110,7 +110,6 @@ participate):
 |---------------------|------------------------------------------------------------------|
 | `worktrees`         | Create / list / rename / delete, git worktree shellouts          |
 | `terminals`         | Terminal lifecycle as a *feature*: create/destroy, send/output, what the user asked for |
-| `tmux`              | tmux as a *transport*: TmuxManager command/response traffic |
 | `notifications`     | MacNotificationManager, daemon→app notification fanout           |
 | `notes`             | Note CRUD, persistence                                           |
 | `pr-status`         | PR polling, gh shellouts                                         |
@@ -124,14 +123,6 @@ participate):
 A category should be small enough that streaming it gives a coherent narrative
 of one feature, large enough that you don't need to remember which of seven
 sibling categories to enable.
-
-> **`terminals` vs `tmux` boundary:** `terminals` is feature-level intent
-> ("user asked to create a terminal in worktree X"). `tmux` is the
-> protocol/transport layer ("sent `new-window` command, got pane id %42
-> back"). A single user action will usually produce one `terminals` line and
-> several `tmux` lines. When in doubt: if removing tmux from the architecture
-> would delete the line, it's `tmux`; if it would survive a transport swap,
-> it's `terminals`.
 
 ### Streaming recipes
 

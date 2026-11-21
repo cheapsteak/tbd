@@ -1,9 +1,9 @@
 name: Nightly
 
 # Stage 3 of the test-hardening program
-# (docs/specs/2026-07-24-test-hardening-design.md §9). Three steps today —
-# live tmux probes, the flake-ledger stress loop, and the quarantine audit —
-# with a slot reserved for the interleaving fuzz pass (§8, stage 4).
+# (docs/specs/2026-07-24-test-hardening-design.md §9). Two steps — the
+# flake-ledger stress loop and the quarantine audit — with a slot reserved for
+# the interleaving fuzz pass (§8, stage 4).
 #
 # WHY THERE IS NO `pull_request` OR `push` TRIGGER: §9 requires that failures
 # land as issue comments and never as PR noise. With only `schedule` and
@@ -54,7 +54,6 @@ env:
   # root, and uploaded an empty artifact forever while `if-no-files-found` buried
   # it. A feature dead on arrival, green for as long as nobody looked.
   TRACKING_ISSUE: '519'
-  PROBE_LOG: /tmp/nightly-probes.log
   STRESS_LOG: /tmp/nightly-stress.log
   STRESS_REPORT_DIR: /tmp/nightly-stress-reports
   XUNIT_DIR: /tmp/nightly-xunit
@@ -62,17 +61,18 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # macOS: everything that needs a real tmux server or a Swift toolchain.
+  # macOS: everything that needs a Swift toolchain.
   # ─────────────────────────────────────────────────────────────────────────────
-  probes-and-stress:
-    name: tmux probes + flake-ledger stress loop
+  stress-loop:
+    name: flake-ledger stress loop
     runs-on: macos-26
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
       - name: Install tmux
-        # macos runners don't ship tmux, and the probes drive a real server.
+        # macos runners don't ship tmux, and the stress loop reruns test.yml's
+        # passes, which run with it installed.
         run: brew install tmux
 
       - name: Select Xcode 26.6 (Swift 6.3.3)
@@ -99,30 +99,7 @@ jobs:
       - name: Repair the restored SwiftPM workspace if it is damaged
         run: bash scripts/repair-spm-workspace.sh
 
-      # ── Step 1: live tmux probes ────────────────────────────────────────────
-      # continue-on-error so a probe failure still lets the stress loop run and
-      # still gets reported; the job is failed deliberately at the end.
-      - name: Live tmux probes
-        id: probes
-        continue-on-error: true
-        # Measured at ~9s locally. Ten minutes is a hang-guard, not a budget.
-        timeout-minutes: 10
-        run: |
-          set -o pipefail
-          bash scripts/nightly-tmux-probes.sh 2>&1 | tee "$PROBE_LOG"
-
-      - name: Report probe failures
-        if: steps.probes.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          bash scripts/nightly-report.sh \
-            --issue "$TRACKING_ISSUE" \
-            --title "Live tmux probes FAILED — a behaviour this repo relies on has changed" \
-            --body-file "$PROBE_LOG" \
-            --post
-
-      # ── Step 2: flake-ledger stress loop ────────────────────────────────────
+      # ── Step 1: flake-ledger stress loop ────────────────────────────────────
       # Attaches to #961 (GitManagerTimeout) and #962 (the whole-fast-pass
       # catch-all).
       # #503 is the archive of both #961's and #962's earlier reports.
@@ -185,22 +162,22 @@ jobs:
               --post
           done
 
-      # ── Step 3 slot: interleaving fuzz pass (§8, stage 4 — slice I) ─────────
+      # ── Step 2 slot: interleaving fuzz pass (§8, stage 4 — slice I) ─────────
       # Append here rather than in a new job: this job already pays the toolchain
       # setup and the cache restore, and the fuzz pass needs both.
 
       - name: Fail the job if any nightly step failed
         # Without this, `continue-on-error` would leave the run green and the
         # only signal would be an issue comment nobody is watching for.
-        if: steps.probes.outcome == 'failure' || steps.stress.outcome == 'failure'
+        if: steps.stress.outcome == 'failure'
         run: |
-          echo "::error::probes=${{ steps.probes.outcome }} stress=${{ steps.stress.outcome }}"
+          echo "::error::stress=${{ steps.stress.outcome }}"
           exit 1
 
   # ─────────────────────────────────────────────────────────────────────────────
   # ubuntu: the quarantine audit. A SEPARATE JOB, deviating from §9's "one job".
   #
-  # It needs only `gh` and `jq`. As a fourth step on the macOS job it would be
+  # It needs only `gh` and `jq`. As a step on the macOS job it would be
   # suppressed whenever the macOS half wedges or a macOS runner is unavailable —
   # i.e. it would stop reporting exactly when things are worst, and a silent
   # audit is indistinguishable from a clean codebase. ubuntu costs nothing

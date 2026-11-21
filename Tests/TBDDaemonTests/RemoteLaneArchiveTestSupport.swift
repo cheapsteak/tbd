@@ -8,7 +8,7 @@ import Testing
 /// Shared fixture for the remote halves of `worktree.archive`,
 /// `worktree.revive` and the auto-archive-on-merge rail
 /// (`docs/specs/2026-08-16-remote-lane-archive-design.md`). Tier 2:
-/// in-memory GRDB, dry-run tmux, a real actuation log in a temp directory,
+/// in-memory GRDB, a real actuation log in a temp directory,
 /// and a scripted fake provider invoker — no subprocess, no network, no
 /// `TBD_HOME`.
 ///
@@ -79,16 +79,14 @@ struct RemoteLaneFixture {
     /// passes one, because a revive asks the spawn gate before it records its
     /// request row.
     func router(holderRegistry: HolderRegistry? = nil) -> RPCRouter {
-        let tmux = TmuxManager(dryRun: true)
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             subscriptions: subscriptions,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = holderRegistry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             subscriptions: subscriptions,
             remoteManager: manager,
@@ -108,8 +106,7 @@ struct RemoteLaneFixture {
         AutoArchiveOnMergeCoordinator(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver(), subscriptions: subscriptions,
+                db: db, git: GitManager(), hooks: HookResolver(), subscriptions: subscriptions,
                 leftoverTmuxProbe: .absent),
             subscriptions: subscriptions,
             actuationLog: actuationLog,

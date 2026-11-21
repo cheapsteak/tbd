@@ -25,7 +25,7 @@ final class StubAdmission: StartAdmissionEvaluating, @unchecked Sendable {
     }
 }
 
-/// Hold paths through the real router, with dry-run tmux, a real temp-directory
+/// Hold paths through the real router, with a real temp-directory
 /// actuation log and a stubbed verdict. The runner itself is covered by
 /// `StartAdmissionGateTests`.
 @Suite("StartAdmissionRouter")
@@ -48,16 +48,15 @@ struct StartAdmissionRouterTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let path = directory.appendingPathComponent("actuations.jsonl").path
         let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(dryRun: true)
         // Spawns go through the holder spawn double, so an admitted
         // `terminal.create` opens a session without starting a process.
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux, startTime: Date(), actuationLog: ActuationLog(path: path))
+            startTime: Date(), actuationLog: ActuationLog(path: path))
         router.holderRegistry = registry
         let stub = StubAdmission(verdict)
         router.startAdmission = stub

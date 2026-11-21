@@ -66,7 +66,7 @@ public protocol RemoteProviderInvoking: Sendable {
 /// contract's `log` verb routinely returns more than the ~64KB darwin pipe
 /// buffer), no-EOF-wait, single-resume guard — lives in the shared
 /// `runBoundedProcess` (`BoundedProcessRunner.swift`), the same engine
-/// `GitManager.run` and `TmuxManager.runExternalCommand` use. This only maps
+/// `GitManager.run` uses. This only maps
 /// the outcome to `ProviderResult` / `ProviderRunError`.
 public struct ProviderRunner: RemoteProviderInvoking {
     public init() {}

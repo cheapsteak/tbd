@@ -76,7 +76,7 @@ Sources/TBDDaemon/Keychain/ModelProfileKeychain.swift:253: Keychain (layer 1) us
 Line 253 of that file names `RPCRouter`, which Server declares, and Server is eight layers above Keychain. A reference within one layer says so:
 
 ```
-Sources/TBDDaemon/Git/GitManager.swift:40: Git (layer 4) uses Tmux (layer 4), its own layer: TmuxManager is declared in Tmux
+Sources/TBDDaemon/Git/GitManager.swift:40: Git (layer 4) uses Holder (layer 4), its own layer: HolderRegistry is declared in Holder
 ```
 
 A unit with no layer is named with where it fits: the lowest layer above every unit it uses and below every unit that uses it.
@@ -96,7 +96,7 @@ When no line can hold the unit, the message says `no layer fits it` and why:
 
 In the first two, `uses it through <unit>` names a unit with no layer that the use from above runs through.
 
-To make room, change a reference, or move the units involved to other lines so that every use points down; `Base` never moves. Moving one unit is often enough. A new `Sandbox` that uses `Tmux` and that `Git` uses fits no layer while both are in layer 4; moving `Git` up to the `Hooks, Remote` line lets `Sandbox` go on the `Claude, DevServers, Mock` line between them. Moving a unit holds it to its new place, as under "Move the using unit up" below.
+To make room, change a reference, or move the units involved to other lines so that every use points down; `Base` never moves. Moving one unit is often enough. A new `Sandbox` that uses `Holder` and that `Git` uses fits no layer while both are in layer 4; moving `Git` up to the `Hooks, Remote` line lets `Sandbox` go on the `Claude, DevServers, Mock` line between them. Moving a unit holds it to its new place, as under "Move the using unit up" below.
 
 ### Fixing a reference against the order
 

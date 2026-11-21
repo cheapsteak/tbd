@@ -5,7 +5,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 — dry-run tmux plus a real (temp-directory) actuation log.
+/// Tier 2 — a real (temp-directory) actuation log.
 ///
 /// The teardown surfaces: `worktree.archive`, `worktree.forget`,
 /// `scratch.delete` and `scratch.archive` all end a worktree's sessions, and
@@ -52,14 +52,13 @@ struct ActuationLogTeardownWiringTests {
     }
 
     private func makeRouter(
-        db: TBDDatabase, logPath: String, tmux: TmuxManager = TmuxManager(dryRun: true)
+        db: TBDDatabase, logPath: String
     ) -> RPCRouter {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: tmux,
             startTime: Date(),
             actuationLog: ActuationLog(path: logPath))
     }
@@ -546,17 +545,15 @@ struct ActuationLogTeardownWiringTests {
     }
 
     /// A row an earlier build left on tmux is closed like a holder whose
-    /// disposal had nothing to kill: no tmux command runs, and the close reads
-    /// as dispatched whether the row is live or parked.
-    @Test("closing a row left on tmux runs no tmux command and reads as dispatched",
+    /// disposal had nothing to kill: the close reads as dispatched whether the
+    /// row is live or parked.
+    @Test("closing a row left on tmux reads as dispatched",
           arguments: [false, true])
-    func deleteOfATmuxRowIsDispatchedWithoutTmux(parked: Bool) async throws {
+    func deleteOfATmuxRowIsDispatched(parked: Bool) async throws {
         let logPath = try makeLogPath()
         let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxArgs()
         let router = makeRouter(
-            db: db, logPath: logPath,
-            tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) }))
+            db: db, logPath: logPath)
         let worktree = try await makeWorktree(in: db, terminals: 0)
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
@@ -571,8 +568,6 @@ struct ActuationLogTeardownWiringTests {
 
         #expect(response.success, "error: \(response.error ?? "nil")")
         #expect(try await db.terminals.get(id: terminal.id) == nil)
-        #expect(recorded.snapshot().isEmpty,
-                "closing a tmux row ran a tmux command: \(recorded.snapshot())")
         let written = try rows(at: logPath)
         #expect(written.count == 2)
         #expect(written.last?["result"] as? String == "dispatched")
@@ -598,18 +593,16 @@ struct ActuationLogTeardownWiringTests {
             baseDirectory: baseDir, hostBaseDirectory: hostDir)
 
         let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(dryRun: true)
         // An in-place switch runs on a holder row and passes the spawn gate
         // before the row is written, so the router has the holder spawn double.
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,

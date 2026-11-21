@@ -180,14 +180,12 @@ struct ModelProfileRPCTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(
                     globalHooksDir: home.appendingPathComponent("hooks/default").path),
                 configDirManager: manager,
                 sessionsDir: sessionsDir,
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             usageFetcher: stub,
             configDirManager: manager,

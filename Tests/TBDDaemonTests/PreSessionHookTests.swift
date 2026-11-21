@@ -17,7 +17,7 @@ struct PreSessionHookTests {
     // MARK: - Helpers
     //
     // isolateTBDHome / installHook / installPreSessionHook / makeLifecycle /
-    // makeWorktreeFixture / writeMarker / PreSessionRecordedCommands live in
+    // makeWorktreeFixture / writeMarker live in
     // PreSessionTestSupport.swift, shared with PreSessionRerunTests.
 
     // MARK: - HookEvent + resolution
@@ -1235,7 +1235,7 @@ struct PreSessionHookTests {
         var lifecycle = makeLifecycle(db: db)
         lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-        let server = TmuxManager.serverName(forRepoPath: repo.path)
+        let server = TmuxServerName.forRepoPath(repo.path)
 
         // Active worktree at the main checkout path so `git worktree list`
         // reports it and reconcile doesn't archive it as missing. Its tab
@@ -1280,7 +1280,7 @@ struct PreSessionHookTests {
         var lifecycle = makeLifecycle(db: db)
         lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-        let server = TmuxManager.serverName(forRepoPath: repo.path)
+        let server = TmuxServerName.forRepoPath(repo.path)
 
         // Daemon restarted mid-pre-session-wait: .creating row, checkout on
         // disk, only the pre-session terminal.

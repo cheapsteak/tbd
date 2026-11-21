@@ -131,8 +131,8 @@ struct ComposerDraftFlagTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), leftoverTmuxProbe: .absent),
+            startTime: Date(), actuationLog: makeTestActuationLog())
         for value in [true, false] {
             let setRequest = try RPCRequest(
                 method: RPCMethod.configSetComposerDraftEnabled,
@@ -152,8 +152,8 @@ struct ComposerDraftFlagTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), leftoverTmuxProbe: .absent),
+            startTime: Date(), actuationLog: makeTestActuationLog())
         // The other features ship on; off, the list is composer drafts alone.
         try await db.config.setEverySessionModFeatureOff()
         let recorder = SessionModPluginSyncRecorder()

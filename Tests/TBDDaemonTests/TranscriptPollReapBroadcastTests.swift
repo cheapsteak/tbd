@@ -30,11 +30,9 @@ struct TranscriptPollReapBroadcastTests {
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             subscriptions: subs,
             actuationLog: makeTestActuationLog()
         )

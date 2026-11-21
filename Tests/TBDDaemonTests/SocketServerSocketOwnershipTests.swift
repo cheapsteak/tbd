@@ -16,8 +16,8 @@ import TestSupport
 @Suite("SocketServer socket-file ownership")
 struct SocketServerSocketOwnershipTests {
 
-    /// Throwaway RPCRouter: in-memory DB + dryRun tmux, so no real tmux server
-    /// is contacted and nothing under ~/tbd is touched.
+    /// Throwaway RPCRouter: in-memory DB, so no real server is contacted and
+    /// nothing under ~/tbd is touched.
     private func makeRouter() throws -> RPCRouter {
         let db = try TBDDatabase(inMemory: true)
         return RPCRouter(
@@ -25,11 +25,9 @@ struct SocketServerSocketOwnershipTests {
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )

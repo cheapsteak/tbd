@@ -6,7 +6,7 @@ import Testing
 @testable import TBDShared
 
 // Tier 2: uses temporary Git repositories and filesystem-backed transcript and
-// note content, while tmux stays in deterministic dry-run mode.
+// note content.
 //
 // Nested under TBDHomeSerialized because isolateTBDHome() mutates TBD_HOME.
 extension TBDHomeSerialized {
@@ -329,7 +329,6 @@ struct WorktreeConversationCarryoverTests {
         var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: claudeHome.appendingPathComponent("profiles", isDirectory: true),
@@ -337,6 +336,8 @@ struct WorktreeConversationCarryoverTests {
             ),
             preSessionPollInterval: 0.05,
             processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)

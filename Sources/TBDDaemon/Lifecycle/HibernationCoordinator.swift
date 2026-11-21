@@ -410,7 +410,6 @@ public actor HibernationCoordinator {
 
     public init(
         db: TBDDatabase,
-        tmux: TmuxManager,
         modelProfileResolver: ModelProfileResolver? = nil,
         subscriptions: StateSubscriptionManager? = nil,
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
@@ -444,14 +443,10 @@ public actor HibernationCoordinator {
         self.actuationLog = actuationLog
         self.programStatus = programStatus
         self.codexExecutableResolver = codexExecutableResolver ?? {
-            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
-            return try CodexExecutableResolver.resolve()
+            try CodexExecutableResolver.resolve()
         }
         self.codexHomeEnsurer = codexHomeEnsurer ?? {
-            if tmux.dryRun {
-                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
-            }
-            return try CodexHomeManager().ensureProfilePlugin()
+            try CodexHomeManager().ensureProfilePlugin()
         }
     }
 
@@ -746,8 +741,8 @@ public actor HibernationCoordinator {
                     // no resume argv.
                     sensitiveEnv: [:],
                     workingDirectory: worktree.path,
-                    cols: TmuxManager.defaultCols,
-                    rows: TmuxManager.defaultRows,
+                    cols: TerminalSpawnSize.defaultCols,
+                    rows: TerminalSpawnSize.defaultRows,
                     environment: spawnEnvironment))
         } catch {
             // Not a spawn that failed: a spawn the registry DECLINED because

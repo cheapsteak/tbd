@@ -13,7 +13,6 @@ import Testing
     let lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -41,7 +40,7 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     let repo = try await db.repos.create(
@@ -71,7 +70,7 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     let repo = try await db.repos.create(
@@ -104,7 +103,7 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     let repo = try await db.repos.create(
@@ -144,7 +143,7 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     let repo = try await db.repos.create(
@@ -160,7 +159,7 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     let bogusRepoID = UUID()
@@ -176,7 +175,7 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     let repo = try await db.repos.create(
@@ -212,7 +211,7 @@ import Testing
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(),
-        tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     let repo = try await db.repos.create(

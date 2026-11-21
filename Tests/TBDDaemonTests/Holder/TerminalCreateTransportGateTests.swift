@@ -24,30 +24,9 @@ struct TerminalCreateTransportGateTests {
 
     // MARK: - Fixture
 
-    private final class TmuxArgvRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var argvs: [[String]] = []
-        func record(_ argv: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            argvs.append(argv)
-        }
-        var newWindowCount: Int {
-            lock.lock(); defer { lock.unlock() }
-            return argvs.filter { $0.contains("new-window") }.count
-        }
-        /// Whether a tmux *server* was started. A spawn must not start one at
-        /// all, and a window count alone cannot say so: a server is ensured
-        /// before its first window.
-        var newSessionCount: Int {
-            lock.lock(); defer { lock.unlock() }
-            return argvs.filter { $0.contains("new-session") }.count
-        }
-    }
-
     private struct Fixture {
         let db: TBDDatabase
         let router: RPCRouter
-        let recorder: TmuxArgvRecorder
         let environment: [String: String]
         let worktree: Worktree
         let home: String
@@ -81,23 +60,25 @@ struct TerminalCreateTransportGateTests {
             "PATH": "/usr/bin:/bin",
             "SHELL": "/bin/sh",
         ]
-        let recorder = TmuxArgvRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorder.record($0) })
         let db = try TBDDatabase(inMemory: true)
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "terminal-create-gate")
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: configDirManager,
             // The login-session case below arms the identity watcher; on the
             // router's default delays it would poll for half an hour.
             loginSessions: LoginSessionCoordinator(delays: .init(
                 identityPollInterval: .milliseconds(5),
                 identityPollTimeout: .milliseconds(50))),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
@@ -121,8 +102,7 @@ struct TerminalCreateTransportGateTests {
             repoID: repo.id, name: "wt", branch: "tbd/wt",
             path: worktreePath, tmuxServer: "tbd-tcg-test")
         return Fixture(
-            db: db, router: router, recorder: recorder,
-            environment: environment, worktree: worktree, home: home,
+            db: db, router: router, environment: environment, worktree: worktree, home: home,
             worktreePath: worktreePath)
     }
 
@@ -141,8 +121,6 @@ struct TerminalCreateTransportGateTests {
         #expect(!response.success)
         #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
         #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
-        #expect(fixture.recorder.newWindowCount == 0)
-        #expect(fixture.recorder.newSessionCount == 0)
     }
 
     // MARK: - The holder spawn fails
@@ -162,7 +140,6 @@ struct TerminalCreateTransportGateTests {
             response.error?.contains("/nonexistent/TBDHolder") == true,
             "the request failed before the holder spawn: \(response.error ?? "")")
         #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
-        #expect(fixture.recorder.newWindowCount == 0, "a failed holder spawn fell through to tmux")
     }
 
     /// A shell takes the holder path too (the spawn fails, which is the
@@ -178,7 +155,6 @@ struct TerminalCreateTransportGateTests {
         #expect(
             response.error?.contains("/nonexistent/TBDHolder") == true,
             "a shell extra terminal did not take the holder path: \(response.error ?? "success")")
-        #expect(fixture.recorder.newWindowCount == 0)
     }
 
     /// The holder runs any command, so a Codex extra terminal takes it too,
@@ -194,7 +170,6 @@ struct TerminalCreateTransportGateTests {
         #expect(
             response.error?.contains("/nonexistent/TBDHolder") == true,
             "a Codex extra terminal did not take the holder path: \(response.error ?? "success")")
-        #expect(fixture.recorder.newWindowCount == 0)
     }
 
     // MARK: - The login tab takes the decided transport
@@ -219,10 +194,6 @@ struct TerminalCreateTransportGateTests {
         #expect(
             response.error?.contains("/nonexistent/TBDHolder") == true,
             "a login session did not take the holder path: \(response.error ?? "success")")
-        #expect(fixture.recorder.newWindowCount == 0, "a failed holder login tab fell through to tmux")
-        #expect(
-            fixture.recorder.newSessionCount == 0,
-            "a tmux server was started for a holder-transport login tab")
         #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
     }
 }

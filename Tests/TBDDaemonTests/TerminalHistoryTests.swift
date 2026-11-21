@@ -47,13 +47,12 @@ import Testing
         return Fixture(db: db, historyDir: historyDir, worktree: wt, terminal: terminal)
     }
 
-    private func makeRouter(db: TBDDatabase, tmux: TmuxManager) -> RPCRouter {
+    private func makeRouter(db: TBDDatabase) -> RPCRouter {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: tmux,
             startTime: Date(), actuationLog: makeTestActuationLog())
     }
 
@@ -66,20 +65,10 @@ import Testing
     // first (`TmuxResumeGate`). A parked one ended its session when it was
     // parked, and its entry carries the screen the park stored, unmarked.
 
-    /// A dry-run tmux that records every command it is asked to run and
-    /// answers any capture with text no test expects to see in history.
-    private func recordingTmux(_ recorder: RecordedTmuxArgs) -> TmuxManager {
-        TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.append($0) },
-            dryRunCapturePane: { _, _ in "TMUX PANE TEXT" })
-    }
-
-    @Test func deleteOfALiveTmuxRowWritesAMarkedEntryAndRunsNoTmux() async throws {
+    @Test func deleteOfALiveTmuxRowWritesAMarkedEntryWithoutAScreen() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
-        let recorder = RecordedTmuxArgs()
-        let router = makeRouter(db: fx.db, tmux: recordingTmux(recorder))
+        let router = makeRouter(db: fx.db)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalDelete,
@@ -96,8 +85,6 @@ import Testing
         #expect(entry.lineCount == 0)
         #expect(!FileManager.default.fileExists(atPath: fx.db.terminalHistory.contentPath(
             worktreeID: fx.worktree.id, terminalID: fx.terminal.id)))
-        #expect(recorder.snapshot().isEmpty,
-                "closing a tmux row ran a tmux command: \(recorder.snapshot())")
     }
 
     /// A live tmux row with no session has nothing to resume and no screen to
@@ -105,7 +92,7 @@ import Testing
     @Test func deleteOfALiveTmuxShellRowWritesNoEntry() async throws {
         let fx = try await makeFixture(label: "sh", kind: .shell, claudeSessionID: nil)
         defer { fx.cleanup() }
-        let router = makeRouter(db: fx.db, tmux: TmuxManager(dryRun: true))
+        let router = makeRouter(db: fx.db)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalDelete,
@@ -122,8 +109,7 @@ import Testing
         let snapshot = "line one\nline two\nline three"
         try await fx.db.terminals.setHibernated(
             id: fx.terminal.id, sessionID: "sess-abc", snapshot: snapshot)
-        let recorder = RecordedTmuxArgs()
-        let router = makeRouter(db: fx.db, tmux: recordingTmux(recorder))
+        let router = makeRouter(db: fx.db)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalDelete,
@@ -144,8 +130,6 @@ import Testing
         let path = fx.db.terminalHistory.contentPath(
             worktreeID: fx.worktree.id, terminalID: fx.terminal.id)
         #expect(try String(contentsOfFile: path, encoding: .utf8) == snapshot)
-        #expect(recorder.snapshot().isEmpty,
-                "closing a tmux row ran a tmux command: \(recorder.snapshot())")
 
         // RPC list returns it too.
         let listResp = await router.handle(try RPCRequest(
@@ -162,7 +146,7 @@ import Testing
         let fx = try await makeFixture()
         defer { fx.cleanup() }
         try await fx.db.terminals.setHibernated(id: fx.terminal.id, sessionID: "sess-abc")
-        let router = makeRouter(db: fx.db, tmux: TmuxManager(dryRun: true))
+        let router = makeRouter(db: fx.db)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalDelete,
@@ -179,12 +163,11 @@ import Testing
 
     // MARK: - Hook-terminal close of a tab left on tmux
 
-    @Test func closeHookTerminalOnTmuxWritesNoEntryAndRunsNoTmux() async throws {
+    @Test func closeHookTerminalOnTmuxRemovesTheRowAndWritesNoEntry() async throws {
         let fx = try await makeFixture(label: TerminalLabel.preSession, kind: .shell, claudeSessionID: nil)
         defer { fx.cleanup() }
-        let recorder = RecordedTmuxArgs()
         let lifecycle = WorktreeLifecycle(
-            db: fx.db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver(),
+            db: fx.db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
 
         await lifecycle.closeHookTerminal(
@@ -198,8 +181,6 @@ import Testing
 
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
         #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)
-        #expect(recorder.snapshot().isEmpty,
-                "closing a tmux hook tab ran a tmux command: \(recorder.snapshot())")
     }
 
     /// A hook tab left on tmux whose session id makes its close a mark, and
@@ -232,9 +213,8 @@ import Testing
         let snapshot = "agent output before archive\nsecond line\n"
         try await fx.db.terminals.setHibernated(
             id: fx.terminal.id, sessionID: "sess-abc", snapshot: snapshot)
-        let recorder = RecordedTmuxArgs()
         let lifecycle = WorktreeLifecycle(
-            db: fx.db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver(),
+            db: fx.db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
 
         _ = try await lifecycle.beginArchiveWorktree(worktreeID: fx.worktree.id)
@@ -248,16 +228,13 @@ import Testing
         let path = fx.db.terminalHistory.contentPath(
             worktreeID: fx.worktree.id, terminalID: fx.terminal.id)
         #expect(try String(contentsOfFile: path, encoding: .utf8) == snapshot)
-        #expect(recorder.snapshot().isEmpty,
-                "archive ran a tmux command: \(recorder.snapshot())")
     }
 
     @Test func archiveOfALiveTmuxRowWritesAMarkedEntryAndStillArchives() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
-        let recorder = RecordedTmuxArgs()
         let lifecycle = WorktreeLifecycle(
-            db: fx.db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver(),
+            db: fx.db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
 
         _ = try await lifecycle.beginArchiveWorktree(worktreeID: fx.worktree.id)
@@ -267,15 +244,13 @@ import Testing
         let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
         #expect(entries.map(\.id) == [fx.terminal.id])
         #expect(entries.first?.liveOnTmuxServer == fx.worktree.tmuxServer)
-        #expect(recorder.snapshot().isEmpty,
-                "archive ran a tmux command: \(recorder.snapshot())")
     }
 
     // MARK: - Reconcile auto-archive
 
     /// A worktree whose git checkout has vanished is auto-archived by
     /// reconcile; a parked tmux row's stored screen lands in Closed Terminals
-    /// history, and no tmux command runs.
+    /// history.
     @Test func reconcileAutoArchiveRecordsAParkedTmuxRowsStoredScreen() async throws {
         let historyDir = try Self.makeTempDir()
         defer { try? FileManager.default.removeItem(atPath: historyDir) }
@@ -286,9 +261,8 @@ import Testing
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        let recorder = RecordedTmuxArgs()
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "test", defaultBranch: "main")
@@ -311,8 +285,6 @@ import Testing
         #expect(entries.map(\.id) == [terminal.id])
         let path = db.terminalHistory.contentPath(worktreeID: wt.id, terminalID: terminal.id)
         #expect(try String(contentsOfFile: path, encoding: .utf8) == snapshot)
-        #expect(recorder.snapshot().isEmpty,
-                "reconcile ran a tmux command: \(recorder.snapshot())")
     }
 
     // MARK: - Retention
@@ -462,7 +434,7 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: dir))
 
         let lifecycle = WorktreeLifecycle(
-            db: fx.db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: fx.db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         try await lifecycle.forgetWorktree(worktreeID: fx.worktree.id)
 
@@ -483,7 +455,7 @@ import Testing
     /// each spawn's command line instead of starting it.
     private func makeHolderRouter(db: TBDDatabase) -> (RPCRouter, FakeHolderLaunch) {
         let holder = FakeHolderLaunch()
-        let router = makeRouter(db: db, tmux: TmuxManager(dryRun: true))
+        let router = makeRouter(db: db)
         router.holderRegistry = makeHolderRegistryDouble(launch: holder)
         return (router, holder)
     }
@@ -594,8 +566,7 @@ import Testing
     @Test func reviveUnknownWorktreeErrorsWithoutTerminal() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
-        let tmux = TmuxManager(dryRun: true)
-        let router = makeRouter(db: fx.db, tmux: tmux)
+        let router = makeRouter(db: fx.db)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalHistoryRevive,
@@ -608,8 +579,7 @@ import Testing
         defer { fx.cleanup() }
         try makeLiveDir(fx.worktree.localPath)
         defer { try? FileManager.default.removeItem(atPath: fx.worktree.localPath) }
-        let tmux = TmuxManager(dryRun: true)
-        let router = makeRouter(db: fx.db, tmux: tmux)
+        let router = makeRouter(db: fx.db)
 
         let before = try await fx.db.terminals.list(worktreeID: fx.worktree.id).count
         let resp = await router.handle(try RPCRequest(

@@ -24,26 +24,9 @@ struct TerminalReviveTransportGateTests {
 
     // MARK: - Fixture
 
-    private final class TmuxArgvRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var argvs: [[String]] = []
-        func record(_ argv: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            argvs.append(argv)
-        }
-        var all: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return argvs
-        }
-        func count(_ subcommand: String) -> Int {
-            all.filter { $0.contains(subcommand) }.count
-        }
-    }
-
     private struct Fixture {
         let db: TBDDatabase
         let router: RPCRouter
-        let recorder: TmuxArgvRecorder
         let worktree: Worktree
         let closedTerminalID: UUID
         let home: String
@@ -80,22 +63,17 @@ struct TerminalReviveTransportGateTests {
             "PATH": "/usr/bin:/bin",
             "SHELL": "/bin/sh",
         ]
-        let recorder = TmuxArgvRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.record($0) },
-            dryRunCapturePane: { _, _ in "" })
         let db = try TBDDatabase(
             inMemory: true,
             terminalHistoryDir: (home as NSString).appendingPathComponent("history"))
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "terminal-revive-gate")
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
             leftoverTmuxProbe: .absent)
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: configDirManager,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = HolderRegistry(
@@ -126,8 +104,7 @@ struct TerminalReviveTransportGateTests {
             terminal: closed, text: "prior shell output\n", closedAt: Date())
 
         return Fixture(
-            db: db, router: router, recorder: recorder,
-            worktree: worktree, closedTerminalID: closed.id, home: home,
+            db: db, router: router, worktree: worktree, closedTerminalID: closed.id, home: home,
             worktreePath: worktreePath)
     }
 
@@ -145,9 +122,6 @@ struct TerminalReviveTransportGateTests {
         #expect(!response.success)
         #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
         #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
-        #expect(
-            fixture.recorder.count("new-window") == 0 && fixture.recorder.count("new-session") == 0,
-            "a refused revive reached tmux: \(fixture.recorder.all)")
     }
 
     // MARK: - The holder spawn fails
@@ -165,11 +139,5 @@ struct TerminalReviveTransportGateTests {
             response.error?.contains("/nonexistent/TBDHolder") == true,
             "the revive did not take the holder path: \(response.error ?? "success")")
         #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
-        #expect(
-            fixture.recorder.count("new-window") == 0,
-            "a failed holder revive fell through to tmux: \(fixture.recorder.all)")
-        #expect(
-            fixture.recorder.count("new-session") == 0,
-            "a holder revive started a tmux server: \(fixture.recorder.all)")
     }
 }

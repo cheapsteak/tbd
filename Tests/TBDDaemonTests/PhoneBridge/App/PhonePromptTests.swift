@@ -1608,7 +1608,7 @@ struct PhonePromptTests {
 /// laptop's prompt card does: by its own check, and by the core's when the
 /// setting changes, or stops being readable, between the two.
 ///
-/// Tier 2: in-memory GRDB, a dry-run tmux and an actuation log under the
+/// Tier 2: in-memory GRDB and an actuation log under the
 /// run's fenced scratch dir.
 @Suite("Phone prompt.answer through the router", .fastPassBounded)
 struct PhonePromptAnswerRouterTests {
@@ -1666,10 +1666,9 @@ struct PhonePromptAnswerRouterTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 subscriptions: subs,
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
             remoteManager: remoteManager,

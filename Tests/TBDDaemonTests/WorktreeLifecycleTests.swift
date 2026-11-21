@@ -25,7 +25,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -63,8 +62,9 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -86,8 +86,9 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -119,8 +120,9 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
@@ -166,9 +168,10 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         modelProfileResolver: resolver,
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -186,7 +189,6 @@ import Testing
     let lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -204,7 +206,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -232,7 +233,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -269,7 +269,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -295,7 +294,6 @@ import Testing
     let lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -313,7 +311,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -341,7 +338,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -363,7 +359,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -401,7 +396,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -444,7 +438,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -469,8 +462,9 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -493,8 +487,9 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -520,7 +515,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -560,7 +554,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -590,7 +583,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -603,16 +595,14 @@ import Testing
 
     // Simulate a second Claude terminal added by the user
     let secondSessionID = UUID().uuidString
-    let window = try await lifecycle.tmux.createWindow(
-        server: wt.tmuxServer, session: "main",
-        cwd: wt.localPath, shellCommand: "echo test"
-    )
     _ = try await db.terminals.create(
         worktreeID: wt.id,
-        tmuxWindowID: window.windowID,
-        tmuxPaneID: window.paneID,
+        tmuxWindowID: "",
+        tmuxPaneID: "",
         label: "claude",
-        claudeSessionID: secondSessionID
+        claudeSessionID: secondSessionID,
+        kind: .claude,
+        transport: .holder
     )
 
     let allSessions = try await db.terminals.list(worktreeID: wt.id)
@@ -658,7 +648,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         modelProfileResolver: resolver,
         // This is the only test in the file that spawns Claude against a
@@ -704,7 +693,7 @@ private func seedTmuxShellTerminals(
 ) async throws -> Worktree {
     let main = try await db.worktrees.createMain(
         repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-        tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+        tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
     for index in 1...2 {
         _ = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@\(index)", tmuxPaneID: "%\(index)",
@@ -719,7 +708,7 @@ private func makeProbedLifecycle(
     db: TBDDatabase, state: LeftoverTmuxServerState
 ) -> WorktreeLifecycle {
     let lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        db: db, git: GitManager(), hooks: HookResolver(),
         leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in state })
     return lifecycle
 }
@@ -730,7 +719,7 @@ private func makeReconcileFixture(
     tempDir: URL, repoDir: URL, serverState: LeftoverTmuxServerState
 ) async throws -> (TBDDatabase, WorktreeLifecycle, Repo, Terminal) {
     let db = try TBDDatabase(inMemory: true)
-    let server = TmuxManager.serverName(forRepoPath: repoDir.path)
+    let server = TmuxServerName.forRepoPath(repoDir.path)
     let lifecycle = makeProbedLifecycle(db: db, state: serverState)
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let main = try await db.worktrees.createMain(
@@ -882,11 +871,11 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     // The server reads as gone — the exact scenario the parking pass acts on.
     let probe = RecordingLeftoverTmuxProbe(answer: { _ in .absent })
     let lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        db: db, git: GitManager(), hooks: HookResolver(),
         leftoverTmuxProbe: probe.probe)
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
+    let serverName = TmuxServerName.forRepoPath(repo.path)
     // A worktree at the repo path so `git worktree list` reports it and
     // reconcile doesn't archive it as missing.
     let wt = try await db.worktrees.create(
@@ -989,7 +978,6 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )

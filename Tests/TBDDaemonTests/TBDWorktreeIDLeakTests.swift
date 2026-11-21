@@ -17,10 +17,8 @@ import TBDKernel
 ///     export `TBD_WORKTREE_ID` into every session they open, read here from
 ///     the launch the holder spawn double recorded.
 
-private let codexDryRunExecutable = "/opt/tbd-test/bin/codex"
-
 private func containsCodexProfileLaunch(_ body: String) -> Bool {
-    let executable = shellEscape(codexDryRunExecutable)
+    let executable = shellEscape(CodexLaunchTestStub.executablePath)
     return body.contains(
         "unset CODEX_CI CODEX_THREAD_ID; \(executable) --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox")
 }
@@ -60,15 +58,17 @@ private func makeHolderBackedRouter(
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = registry
     let router = RPCRouter(
         db: db,
         lifecycle: lifecycle,
-        tmux: TmuxManager(dryRun: true),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         actuationLog: makeTestActuationLog()
     )
     router.holderRegistry = registry
@@ -96,8 +96,7 @@ func testScrubInheritedTBDEnv() {
     // it is the one name the scrub judges by VALUE, and setting it in-process
     // would hand every concurrent suite that resolves the ambient Claude config
     // dir a sentinel path. That by-value rule is covered over injected
-    // dictionaries by `SpawnBaseEnvironmentTests` and
-    // `TmuxServerEnvironmentRepairTests`.
+    // dictionaries by `SpawnBaseEnvironmentTests`.
     let names = SpawnBaseEnvironment.enclosingSessionMarkers
         .subtracting(SpawnBaseEnvironment.tmuxPaneMarkers)
         .sorted()
@@ -151,8 +150,9 @@ func testCreateWorktreeSetupTabExportsTBDIDs() async throws {
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(globalHooksDir: hooksDir.path),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)

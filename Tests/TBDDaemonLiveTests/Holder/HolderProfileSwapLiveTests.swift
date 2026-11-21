@@ -903,18 +903,17 @@ private final class SwapFixture {
             listTerminals: { [] },
             spawner: HolderSpawner(executableURL: URL(fileURLWithPath: helperLink)))
 
-        let tmux = TmuxManager(dryRun: true)
         let configDirManager = ClaudeProfileConfigDirManager(
             baseDirectory: URL(fileURLWithPath: home)
                 .appendingPathComponent("profiles", isDirectory: true),
             hostBaseDirectory: URL(fileURLWithPath: home)
                 .appendingPathComponent("claude", isDirectory: true))
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
             leftoverTmuxProbe: .absent)
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: configDirManager,
             actuationLog: ActuationLog(path: "\(home)/actuations.jsonl"))
         router.holderRegistry = registry
@@ -925,7 +924,7 @@ private final class SwapFixture {
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let worktree = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let dest = try await db.modelProfiles.create(name: "Dest", kind: .oauth)
 
         return SwapFixture(

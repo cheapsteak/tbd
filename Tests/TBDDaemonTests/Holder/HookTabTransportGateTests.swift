@@ -81,9 +81,8 @@ struct HookTabTransportGateTests {
         defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
         try await installPreSessionHook(repoDir: fx.repoDir)
 
-        let recorder = PreSessionRecordedCommands()
         let launch = FakeHolderLaunch()
-        var lifecycle = makeLifecycle(db: fx.db, recorder: recorder)
+        var lifecycle = makeLifecycle(db: fx.db)
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: launch)
 
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
@@ -97,9 +96,6 @@ struct HookTabTransportGateTests {
         #expect(row.transport == .holder)
         #expect(row.tmuxWindowID.isEmpty)
         #expect(row.label == TerminalLabel.preSession)
-        #expect(
-            !recorder.snapshot().contains { $0.contains("new-window") || $0.contains("new-session") },
-            "a holder hook tab opened tmux: \(recorder.snapshot())")
     }
 
     /// Nothing to spawn with: the hook tab is refused with the gate's reason,
@@ -115,8 +111,7 @@ struct HookTabTransportGateTests {
         let scratch = fencedScratchRoot(prefix: "tbdhtg")
         defer { try? FileManager.default.removeItem(atPath: scratch) }
 
-        let recorder = PreSessionRecordedCommands()
-        var lifecycle = makeLifecycle(db: fx.db, recorder: recorder)
+        var lifecycle = makeLifecycle(db: fx.db)
         lifecycle.holderRegistry = Self.registry(spawner: nil, home: scratch)
 
         await #expect(throws: TerminalSpawnRefusal.holderUnavailable) {
@@ -125,9 +120,6 @@ struct HookTabTransportGateTests {
         }
 
         #expect(try await fx.db.terminals.list(worktreeID: fx.worktree.id).isEmpty)
-        #expect(
-            !recorder.snapshot().contains { $0.contains("new-window") || $0.contains("new-session") },
-            "a refused hook tab opened tmux: \(recorder.snapshot())")
     }
 
     /// A spawner that cannot start anything: the holder path IS taken — that
@@ -143,8 +135,7 @@ struct HookTabTransportGateTests {
         let scratch = fencedScratchRoot(prefix: "tbdhtg")
         defer { try? FileManager.default.removeItem(atPath: scratch) }
 
-        let recorder = PreSessionRecordedCommands()
-        var lifecycle = makeLifecycle(db: fx.db, recorder: recorder)
+        var lifecycle = makeLifecycle(db: fx.db)
         lifecycle.holderRegistry = Self.registry(
             spawner: Self.unspawnableSpawner(), home: scratch)
 
@@ -160,12 +151,6 @@ struct HookTabTransportGateTests {
             "the hook-tab spawn did not fail at the holder launch: \(String(describing: thrown))")
 
         #expect(try await fx.db.terminals.list(worktreeID: fx.worktree.id).isEmpty)
-        #expect(
-            !recorder.snapshot().contains { $0.contains("new-window") },
-            "a failed holder hook-tab spawn fell through to tmux: \(recorder.snapshot())")
-        #expect(
-            !recorder.snapshot().contains { $0.contains("new-session") },
-            "a holder hook-tab spawn started a tmux server: \(recorder.snapshot())")
     }
 
     // MARK: - The liveness probe
@@ -198,8 +183,7 @@ struct HookTabTransportGateTests {
         // holder tab it would never short-circuit, and this test would hang
         // out to its timeout rather than pass.
         let lifecycle = makeLifecycle(
-            db: fx.db, timeout: 2, windowIsDead: { _ in false },
-            processSignaller: signaller)
+            db: fx.db, timeout: 2, processSignaller: signaller)
         let terminal = try await fx.db.terminals.create(
             worktreeID: fx.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
             label: TerminalLabel.preSession, kind: .shell,
@@ -225,8 +209,7 @@ struct HookTabTransportGateTests {
         let signaller = FakeProcessSignaller()
         signaller.behaviors[9002] = .init(aliveInitially: true)
         let lifecycle = makeLifecycle(
-            db: fx.db, timeout: 2, windowIsDead: { _ in false },
-            processSignaller: signaller)
+            db: fx.db, timeout: 2, processSignaller: signaller)
 
         // No row is ever created for this terminal id.
         let outcome = await lifecycle.waitForPreSessionCompletion(
@@ -250,8 +233,7 @@ struct HookTabTransportGateTests {
         let signaller = FakeProcessSignaller()
         signaller.behaviors[9003] = .init(aliveInitially: false)
         let lifecycle = makeLifecycle(
-            db: fx.db, timeout: 2, windowIsDead: { _ in false },
-            processSignaller: signaller)
+            db: fx.db, timeout: 2, processSignaller: signaller)
 
         let outcome = await lifecycle.waitForPreSessionCompletion(
             preSession: holderSpawnDescriptor(
@@ -282,8 +264,7 @@ struct HookTabTransportGateTests {
         defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
 
         let lifecycle = makeLifecycle(
-            db: fx.db, timeout: 0.2, windowIsDead: { _ in false },
-            processSignaller: AlwaysDeadProcessSignaller())
+            db: fx.db, timeout: 0.2, processSignaller: AlwaysDeadProcessSignaller())
         let terminal = try await fx.db.terminals.create(
             worktreeID: fx.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
             label: TerminalLabel.preSession, kind: .shell,
@@ -314,8 +295,7 @@ struct HookTabTransportGateTests {
         let signaller = FakeProcessSignaller()
         signaller.behaviors[9004] = .init(aliveInitially: true)
         let lifecycle = makeLifecycle(
-            db: fx.db, timeout: 0.2, windowIsDead: { _ in false },
-            processSignaller: signaller)
+            db: fx.db, timeout: 0.2, processSignaller: signaller)
         try fx.db.writerForTests.close()
 
         let outcome = await lifecycle.waitForPreSessionCompletion(
@@ -344,8 +324,7 @@ struct HookTabTransportGateTests {
         let fx = try await makeWorktreeFixture()
         defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
 
-        let recorder = PreSessionRecordedCommands()
-        var lifecycle = makeLifecycle(db: fx.db, recorder: recorder, timeout: 2)
+        var lifecycle = makeLifecycle(db: fx.db, timeout: 2)
         // `makeLifecycle` wires a registry; the branch under test is the one a
         // lifecycle with none takes.
         lifecycle.holderRegistry = nil
@@ -367,30 +346,9 @@ struct HookTabTransportGateTests {
         // would refuse a row for a deleted worktree anyway, so it cannot fail
         // whatever phase 3 does. The `new-window` assertion below is the one
         // the code under test can actually break.
-        #expect(
-            !recorder.snapshot().contains { $0.contains("kill-window") },
-            "a holder hook tab was torn down through tmux: \(recorder.snapshot())")
-        #expect(
-            !recorder.snapshot().contains { $0.contains("new-window") },
-            "phase 3 spawned primaries after the row vanished: \(recorder.snapshot())")
     }
 
     // MARK: - Teardown
-
-    /// A thread-safe tally. The dry-run hooks are `@Sendable` closures called
-    /// from whatever executor the teardown happens to be on.
-    private final class CaptureCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = 0
-        func increment() {
-            lock.lock(); defer { lock.unlock() }
-            value += 1
-        }
-        var count: Int {
-            lock.lock(); defer { lock.unlock() }
-            return value
-        }
-    }
 
     /// The descriptor a hook tab's spawn would have returned for `terminal`.
     private static func hookDescriptor(of terminal: Terminal) -> PreSessionSpawn {
@@ -405,49 +363,31 @@ struct HookTabTransportGateTests {
             childStartedAt: terminal.holderChildStartedAt)
     }
 
-    /// A lifecycle whose dry-run tmux both records its argv and answers
-    /// `capture-pane` with real text — `capturePaneScrollback` returns the
-    /// closure's value in dry run and records no argv, so the counter is the
-    /// only way to see the call, and non-empty text is what makes a Closed
-    /// Terminals row observable at all.
-    private static func teardownLifecycle(
-        db: TBDDatabase,
-        recorder: PreSessionRecordedCommands,
-        captureCalls: CaptureCounter
-    ) -> WorktreeLifecycle {
+    /// A lifecycle with no holder registry; a test that needs one wires it.
+    private static func teardownLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
         WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(
-                dryRun: true,
-                dryRunRecorder: { recorder.append($0) },
-                dryRunCapturePane: { _, _ in
-                    captureCalls.increment()
-                    return "hook output\n"
-                }),
             hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
     }
 
-    /// A holder hook tab is torn down through the holder, never through tmux.
+    /// A holder hook tab is torn down through the holder.
     ///
-    /// Both negatives matter. `capture-pane` would read a pane that is the
-    /// empty string, and `kill-window` would address a window id naming
-    /// nothing — while the holder, its job and its rendezvous files outlive the
-    /// row that is their only record. With no registry wired the teardown can
-    /// only report that; the row, tab and order cleanup still has to run, or
-    /// the worktree keeps a tab whose terminal is gone.
-    @Test("closing a holder hook tab issues no capture-pane and no kill-window")
-    func holderHookTabTeardownSkipsTmux() async throws {
+    /// With no registry wired the teardown can only report that the holder,
+    /// its job and its rendezvous files outlive the row that is their only
+    /// record. The row, tab and order cleanup still has to run, or the worktree
+    /// keeps a tab whose terminal is gone, and the Closed Terminals entry is
+    /// still written, without a capture.
+    @Test("closing a holder hook tab with no registry writes its entry and removes its row and tab")
+    func holderHookTabTeardownWithoutARegistry() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let fx = try await makeWorktreeFixture(status: .active)
         defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
 
-        let recorder = PreSessionRecordedCommands()
-        let captureCalls = CaptureCounter()
         let lifecycle = Self.teardownLifecycle(
-            db: fx.db, recorder: recorder, captureCalls: captureCalls)
+            db: fx.db)
         let terminal = try await fx.db.terminals.create(
             worktreeID: fx.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
             label: TerminalLabel.preSession, kind: .shell,
@@ -458,12 +398,6 @@ struct HookTabTransportGateTests {
         await lifecycle.closeHookTerminal(
             worktree: fx.worktree, preSession: Self.hookDescriptor(of: terminal))
 
-        #expect(
-            captureCalls.count == 0,
-            "a holder hook tab was captured through tmux capture-pane")
-        #expect(
-            !recorder.snapshot().contains { $0.contains("kill-window") },
-            "a holder hook tab was killed through tmux: \(recorder.snapshot())")
         #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
         #expect(try await fx.db.worktrees.getTabOrder(worktreeID: fx.worktree.id).isEmpty)
         // Written through the holder helper, not tmux: an entry, and — with no
@@ -482,9 +416,8 @@ struct HookTabTransportGateTests {
     /// The window this closes is real and routine: a hook tab is closed
     /// *because* its hook finished, so its job has usually already exited and
     /// the kernel is free to hand the number out again. The row cleanup still
-    /// has to happen — a tab whose terminal is gone must not survive it — and
-    /// so does the absence of every tmux gesture, so this discriminates against
-    /// both a teardown that kills blind and one that fell into the tmux arm.
+    /// has to happen — a tab whose terminal is gone must not survive it — so
+    /// this discriminates against a teardown that kills blind.
     @Test("closing a holder hook tab never signals a recycled child pid")
     func holderHookTabTeardownSkipsARecycledPID() async throws {
         let (_, cleanup) = isolateTBDHome()
@@ -492,8 +425,6 @@ struct HookTabTransportGateTests {
         let fx = try await makeWorktreeFixture(status: .active)
         defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
 
-        let recorder = PreSessionRecordedCommands()
-        let captureCalls = CaptureCounter()
         let signaller = FakeProcessSignaller()
         signaller.behaviors[Self.jobPID] = .init(aliveInitially: true)
         // Alive, wearing a shell's command line, and started an hour away from
@@ -504,7 +435,7 @@ struct HookTabTransportGateTests {
         let scratch = fencedScratchRoot(prefix: "tbdhtg")
         defer { try? FileManager.default.removeItem(atPath: scratch) }
         var lifecycle = Self.teardownLifecycle(
-            db: fx.db, recorder: recorder, captureCalls: captureCalls)
+            db: fx.db)
         lifecycle.holderRegistry = Self.registry(
             spawner: nil, home: scratch, signaller: signaller)
 
@@ -521,10 +452,6 @@ struct HookTabTransportGateTests {
 
         #expect(signaller.killed.isEmpty, "a recycled pid was force-killed by the hook teardown")
         #expect(signaller.terminated.isEmpty, "a recycled pid was signalled by the hook teardown")
-        #expect(captureCalls.count == 0)
-        #expect(
-            !recorder.snapshot().contains { $0.contains("kill-window") },
-            "a holder hook tab was killed through tmux: \(recorder.snapshot())")
         #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
         #expect(try await fx.db.worktrees.getTabOrder(worktreeID: fx.worktree.id).isEmpty)
     }
@@ -539,8 +466,6 @@ struct HookTabTransportGateTests {
         let fx = try await makeWorktreeFixture(status: .active)
         defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
 
-        let recorder = PreSessionRecordedCommands()
-        let captureCalls = CaptureCounter()
         let signaller = FakeProcessSignaller()
         signaller.behaviors[Self.jobPID] = .init(
             aliveInitially: true, aliveAfterTerminate: true, aliveAfterKill: false)
@@ -550,7 +475,7 @@ struct HookTabTransportGateTests {
         let scratch = fencedScratchRoot(prefix: "tbdhtg")
         defer { try? FileManager.default.removeItem(atPath: scratch) }
         var lifecycle = Self.teardownLifecycle(
-            db: fx.db, recorder: recorder, captureCalls: captureCalls)
+            db: fx.db)
         lifecycle.holderRegistry = Self.registry(
             spawner: nil, home: scratch, signaller: signaller)
 
@@ -564,25 +489,22 @@ struct HookTabTransportGateTests {
             worktree: fx.worktree, preSession: Self.hookDescriptor(of: terminal))
 
         #expect(signaller.killed == [Self.jobPID])
-        #expect(captureCalls.count == 0)
         #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
     }
 
-    /// A hook tab an earlier build left on tmux is closed without running a
-    /// tmux command: nothing is captured, nothing is killed, and — a shell
-    /// with no session to resume and no screen to keep — no Closed Terminals
-    /// entry is written. The row, tab and order cleanup still runs.
-    @Test("closing a tmux hook tab runs no tmux command")
-    func tmuxHookTabTeardownRunsNoTmux() async throws {
+    /// A hook tab an earlier build left on tmux is closed by its row's
+    /// teardown alone. A shell with no session to resume and no screen to
+    /// keep, it gets no Closed Terminals entry; the row, tab and order cleanup
+    /// still runs.
+    @Test("closing a tmux hook tab removes its row and tab and writes no entry")
+    func tmuxHookTabTeardownRemovesRowAndTab() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let fx = try await makeWorktreeFixture(status: .active)
         defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
 
-        let recorder = PreSessionRecordedCommands()
-        let captureCalls = CaptureCounter()
         let lifecycle = Self.teardownLifecycle(
-            db: fx.db, recorder: recorder, captureCalls: captureCalls)
+            db: fx.db)
         let terminal = try await fx.db.terminals.create(
             worktreeID: fx.worktree.id, tmuxWindowID: "@hook", tmuxPaneID: "%hook",
             label: TerminalLabel.preSession, kind: .shell)
@@ -592,9 +514,6 @@ struct HookTabTransportGateTests {
         await lifecycle.closeHookTerminal(
             worktree: fx.worktree, preSession: Self.hookDescriptor(of: terminal))
 
-        #expect(captureCalls.count == 0)
-        #expect(recorder.snapshot().isEmpty,
-                "closing a tmux hook tab ran a tmux command: \(recorder.snapshot())")
         #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
         #expect(try await fx.db.worktrees.getTabOrder(worktreeID: fx.worktree.id).isEmpty)
         #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)

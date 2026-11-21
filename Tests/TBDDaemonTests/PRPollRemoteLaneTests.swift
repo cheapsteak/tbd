@@ -817,9 +817,8 @@ struct PRPollRemoteLaneTests {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(),
-                                         tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                                         hooks: HookResolver(),
                                          leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             prManager: gh.map { stub in
                 PRStatusManager(ghRunner: { args, path in await stub.run(args: args, repoPath: path) },

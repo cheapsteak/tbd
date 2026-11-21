@@ -64,7 +64,6 @@ struct ProductionDevServerTabInspector: DevServerTabInspecting {
     static let tmuxTabReason =
         "the tab is still on the tmux transport, which TBD does not read; closing the tab leaves it running there"
 
-    let tmux: TmuxManager
     let holderRegistry: HolderRegistry?
     let signaller: any ProcessSignaller
     /// Reads the kernel's start time for a pid checked against the row's.

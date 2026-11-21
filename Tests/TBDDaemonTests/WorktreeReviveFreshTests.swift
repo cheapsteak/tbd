@@ -7,7 +7,7 @@ import Testing
 @testable import TBDShared
 
 // Tier 2: uses temporary repositories and filesystem-backed transcript
-// fixtures while tmux stays in deterministic dry-run mode.
+// fixtures.
 //
 // Nested under TBDHomeSerialized because the lifecycle's ambient Claude
 // projects root is redirected through a temporary TBD_HOME fixture.
@@ -980,7 +980,8 @@ struct WorktreeReviveFreshTests {
         let currentSHA = try await GitManager().headSHA(repoPath: repoDir.path)
         let holder = FakeHolderLaunch()
         let lifecycle = makeReviveFreshLifecycle(db: db, holder: holder)
-        let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: lifecycle.tmux,
+        let router = RPCRouter(db: db, lifecycle: lifecycle, codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = lifecycle.holderRegistry
         let admission = StubAdmission(.admit)
@@ -1123,7 +1124,6 @@ struct WorktreeReviveFreshTests {
         var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             subscriptions: subscriptions,
             modelProfileResolver: modelProfileResolver,
@@ -1171,8 +1171,9 @@ struct WorktreeReviveFreshTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: lifecycle.tmux,
             subscriptions: subscriptions,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog()
         )
         router.holderRegistry = lifecycle.holderRegistry

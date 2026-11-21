@@ -5,7 +5,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 — in-memory database, dry-run tmux, a scripted fake provider, and a
+/// Tier 2 — in-memory database, a scripted fake provider, and a
 /// real actuation log in a temp directory. No `TBD_HOME`, no subprocesses.
 ///
 /// The auto-archive-on-merge rail reaches remote lanes
@@ -181,8 +181,7 @@ struct AutoArchiveRemoteLaneTests {
         let coordinator = AutoArchiveOnMergeCoordinator(
             db: fixture.db,
             lifecycle: WorktreeLifecycle(
-                db: fixture.db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver(), subscriptions: fixture.subscriptions,
+                db: fixture.db, git: GitManager(), hooks: HookResolver(), subscriptions: fixture.subscriptions,
                 leftoverTmuxProbe: .absent),
             subscriptions: fixture.subscriptions,
             actuationLog: ActuationLog(path: fixture.logPath))

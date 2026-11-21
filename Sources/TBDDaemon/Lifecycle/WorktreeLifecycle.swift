@@ -55,12 +55,11 @@ public enum WorktreeLifecycleError: LocalizedError, CustomStringConvertible {
 
 /// Orchestrates the full lifecycle of worktrees: create, archive, revive, and reconcile.
 ///
-/// Coordinates between git, the database, tmux, and hooks to provide
+/// Coordinates between git, the database, the pty holder, and hooks to provide
 /// high-level operations that maintain consistency across all subsystems.
 public struct WorktreeLifecycle: Sendable {
     public let db: TBDDatabase
     public let git: GitManager
-    public let tmux: TmuxManager
     public let hooks: HookResolver
     public let subscriptions: StateSubscriptionManager?
     public let modelProfileResolver: ModelProfileResolver?
@@ -77,11 +76,12 @@ public struct WorktreeLifecycle: Sendable {
     public let preSessionPollInterval: TimeInterval
     /// Process-signal seam for the agent reaper. Injectable for tests.
     public let processSignaller: ProcessSignaller
-    /// Resolves the Codex CLI before lifecycle code creates tmux or DB state.
-    /// Stored as a seam so tests do not require Codex or ChatGPT.app installed.
+    /// Resolves the Codex CLI before lifecycle code starts a session or writes
+    /// DB state. Stored as a seam so tests do not require Codex or ChatGPT.app
+    /// installed; `CodexLaunchTestStub` is the one they pass.
     let codexExecutableResolver: @Sendable () throws -> String
     /// Prepares TBD's profile in the user's existing global Codex home before
-    /// lifecycle code creates tmux or terminal state.
+    /// lifecycle code starts a session or writes terminal state.
     let codexHomeEnsurer: @Sendable () throws -> URL
     /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
     /// An actor reference, so every copy of this struct shares one cache.
@@ -219,7 +219,6 @@ public struct WorktreeLifecycle: Sendable {
     public init(
         db: TBDDatabase,
         git: GitManager,
-        tmux: TmuxManager,
         hooks: HookResolver,
         subscriptions: StateSubscriptionManager? = nil,
         modelProfileResolver: ModelProfileResolver? = nil,
@@ -242,7 +241,6 @@ public struct WorktreeLifecycle: Sendable {
         self.leftoverTmuxProbe = leftoverTmuxProbe ?? LeftoverTmuxServerProbe.production()
         self.db = db
         self.git = git
-        self.tmux = tmux
         self.hooks = hooks
         self.subscriptions = subscriptions
         self.modelProfileResolver = modelProfileResolver
@@ -253,14 +251,10 @@ public struct WorktreeLifecycle: Sendable {
         self.processSignaller = processSignaller
         self.checkoutTemplates = checkoutTemplates
         self.codexExecutableResolver = codexExecutableResolver ?? {
-            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
-            return try CodexExecutableResolver.resolve()
+            try CodexExecutableResolver.resolve()
         }
         self.codexHomeEnsurer = codexHomeEnsurer ?? {
-            if tmux.dryRun {
-                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
-            }
-            return try CodexHomeManager().ensureProfilePlugin()
+            try CodexHomeManager().ensureProfilePlugin()
         }
     }
 

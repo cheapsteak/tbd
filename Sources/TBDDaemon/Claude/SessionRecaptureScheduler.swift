@@ -18,21 +18,18 @@ public enum SessionRecaptureTarget: Sendable, Equatable {
 /// Production passes nil.
 struct SessionRecaptureScheduler: Sendable {
     let db: TBDDatabase
-    let tmux: TmuxManager
     let clock: any Clock<Duration>
     private let captureSessionID: @Sendable (SessionRecaptureTarget) async -> String?
     private let executor: (any TaskExecutor)?
 
     init(
         db: TBDDatabase,
-        tmux: TmuxManager,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.db = db
-        self.tmux = tmux
         self.clock = clock
         self.executor = nil
-        let detector = ClaudeStateDetector(tmux: tmux)
+        let detector = ClaudeStateDetector()
         self.captureSessionID = { target in
             await detector.captureSessionID(target: target)
         }
@@ -43,13 +40,11 @@ struct SessionRecaptureScheduler: Sendable {
     ///   they own; see the type comment.
     init(
         db: TBDDatabase,
-        tmux: TmuxManager,
         captureSessionID: @escaping @Sendable (SessionRecaptureTarget) async -> String?,
         executor: (any TaskExecutor)? = nil,
         clock: any Clock<Duration>
     ) {
         self.db = db
-        self.tmux = tmux
         self.clock = clock
         self.executor = executor
         self.captureSessionID = captureSessionID

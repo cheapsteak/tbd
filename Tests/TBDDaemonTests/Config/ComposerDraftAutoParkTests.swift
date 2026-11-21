@@ -44,9 +44,9 @@ struct ComposerDraftAutoParkTests {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+            startTime: Date(), actuationLog: makeTestActuationLog())
     }
 
     /// An active worktree whose park-on-merge override starts unset.

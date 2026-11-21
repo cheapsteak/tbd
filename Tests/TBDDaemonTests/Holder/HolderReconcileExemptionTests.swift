@@ -43,7 +43,7 @@ struct HolderReconcileExemptionTests {
     /// directory holds.
     private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         return lifecycle
     }
@@ -55,7 +55,7 @@ struct HolderReconcileExemptionTests {
             path: repoPath, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoPath,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoPath))
+            tmuxServer: TmuxServerName.forRepoPath(repoPath))
         return (repo, main)
     }
 

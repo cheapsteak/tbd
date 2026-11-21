@@ -38,10 +38,9 @@ struct ForkSwapTransportGateTests {
             lock.withLock { recorded }
         }
 
-        func scheduler(db: TBDDatabase, tmux: TmuxManager) -> SessionRecaptureScheduler {
+        func scheduler(db: TBDDatabase) -> SessionRecaptureScheduler {
             SessionRecaptureScheduler(
                 db: db,
-                tmux: tmux,
                 // `withLock` rather than `lock()`/`unlock()`: this closure is
                 // `async`, where the unscoped pair is unavailable.
                 captureSessionID: { [self] target in
@@ -54,26 +53,9 @@ struct ForkSwapTransportGateTests {
 
     // MARK: - Fixture
 
-    private final class TmuxArgvRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var argvs: [[String]] = []
-        func record(_ argv: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            argvs.append(argv)
-        }
-        var all: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return argvs
-        }
-        func count(_ subcommand: String) -> Int {
-            all.filter { $0.contains(subcommand) }.count
-        }
-    }
-
     private struct Fixture {
         let db: TBDDatabase
         let router: RPCRouter
-        let recorder: TmuxArgvRecorder
         let launch: FakeHolderLaunch
         let probe: RecaptureProbe
         /// The resume gate's probe (`TmuxResumeGate`), which answers `.running`
@@ -117,11 +99,6 @@ struct ForkSwapTransportGateTests {
             "PATH": "/usr/bin:/bin",
             "SHELL": "/bin/sh",
         ]
-        let recorder = TmuxArgvRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.record($0) },
-            dryRunCapturePane: { _, _ in "" })
         let db = try TBDDatabase(inMemory: true)
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "fork-swap-gate")
@@ -131,11 +108,11 @@ struct ForkSwapTransportGateTests {
         // that session would be refused.
         let tmuxProbe = RecordingLeftoverTmuxProbe { _ in .running }
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
             leftoverTmuxProbe: tmuxProbe.probe)
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: configDirManager,
             actuationLog: makeTestActuationLog())
         let launch = FakeHolderLaunch()
@@ -161,8 +138,8 @@ struct ForkSwapTransportGateTests {
         await router.hibernationCoordinator.setHolderProcessIsLive { _ in true }
         await router.hibernationCoordinator.setLeftoverTmuxProbe(tmuxProbe.probe)
         let probe = RecaptureProbe()
-        router.sessionRecaptureFactory = { db, tmux in
-            probe.scheduler(db: db, tmux: tmux)
+        router.sessionRecaptureFactory = { db in
+            probe.scheduler(db: db)
         }
 
         let repo = try await db.repos.create(
@@ -198,7 +175,7 @@ struct ForkSwapTransportGateTests {
         let source = try #require(try await db.terminals.get(id: created.id))
 
         return Fixture(
-            db: db, router: router, recorder: recorder, launch: launch, probe: probe,
+            db: db, router: router, launch: launch, probe: probe,
             tmuxProbe: tmuxProbe, environment: environment, worktree: worktree,
             source: source, home: home, worktreePath: worktreePath)
     }
@@ -232,9 +209,6 @@ struct ForkSwapTransportGateTests {
         #expect(forked.tmuxPaneID.isEmpty)
         #expect(forked.holderPID == launch.handle.holderPID)
         #expect(forked.childPID == launch.handle.childPID)
-        #expect(
-            fixture.recorder.count("new-window") == 0 && fixture.recorder.count("new-session") == 0,
-            "a holder fork opened tmux: \(fixture.recorder.all)")
 
         let landed = await waitUntil { !fixture.probe.targets.isEmpty }
         #expect(landed, "the fork scheduled no session recapture")
@@ -283,9 +257,6 @@ struct ForkSwapTransportGateTests {
         #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
         let rows = try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
         #expect(rows.map(\.id) == [fixture.source.id], "a refused fork left a row behind")
-        #expect(
-            fixture.recorder.count("new-window") == 0 && fixture.recorder.count("new-session") == 0,
-            "a refused fork opened tmux: \(fixture.recorder.all)")
         #expect(fixture.probe.targets.isEmpty, "a refused fork scheduled a recapture")
     }
 
@@ -305,12 +276,6 @@ struct ForkSwapTransportGateTests {
             "the fork did not take the holder path: \(response.error ?? "success")")
         let rows = try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
         #expect(rows.map(\.id) == [fixture.source.id], "a failed fork left a row behind")
-        #expect(
-            fixture.recorder.count("new-window") == 0,
-            "a failed holder fork fell through to tmux: \(fixture.recorder.all)")
-        #expect(
-            fixture.recorder.count("new-session") == 0,
-            "a holder fork started a tmux server: \(fixture.recorder.all)")
         #expect(fixture.probe.targets.isEmpty, "a fork that never spawned scheduled a recapture")
     }
 
@@ -344,8 +309,6 @@ struct ForkSwapTransportGateTests {
         #expect(
             response.error == HibernationCoordinator.holderNoReaderRefusal,
             "the swap failed for some other reason: \(response.error ?? "success")")
-        #expect(fixture.recorder.count("new-window") == 0)
-        #expect(fixture.recorder.count("respawn-window") == 0)
         #expect(fixture.launch.launches.isEmpty, "the in-place arm spawned before parking")
     }
 }

@@ -127,10 +127,6 @@ struct SpawnBaseEnvironmentTests {
 
         #expect(SpawnBaseEnvironment.inheriting(launcher)
             == Self.kept.merging(Self.pinned) { _, pin in pin })
-        // An existing tmux server's global copy is stripped too.
-        #expect(SpawnBaseEnvironment.serverRepairableMarkers.isSuperset(
-            of: ["TBD_SESSIONS_DIR", "TBD_MOD_FEATURES", "TBD_MOD_TOKEN", "TBD_MOD_SOCKET",
-                "TBD_TERMINAL_INCARNATION_ID"]))
     }
 
     @Test func anUnmarkedEnvironmentPassesThroughUnchanged() {
@@ -199,23 +195,6 @@ struct SpawnBaseEnvironmentTests {
         }
         #expect(groups.reduce(into: Set<String>()) { $0.formUnion($1) }
             == SpawnBaseEnvironment.enclosingSessionMarkers)
-    }
-
-    /// What an *existing* tmux server may have stripped in place is a strict
-    /// subset. Claude Code reads a marker as ambient only while the server's
-    /// global environment carries it, so removing the global copy would make a
-    /// `claude` started later in a pane that predates the repair — a pane
-    /// holding its own copy — read itself as a nested child. `TMUX` and
-    /// `TMUX_PANE` are the server's own.
-    @Test func serverRepairSparesClaudeCodesMarkersAndTheTmuxPanes() {
-        #expect(
-            SpawnBaseEnvironment.serverRepairableMarkers
-                == SpawnBaseEnvironment.tbdProcessMarkers
-                    .union(SpawnBaseEnvironment.codexSessionMarkers))
-        #expect(SpawnBaseEnvironment.serverRepairableMarkers
-            .isDisjoint(with: SpawnBaseEnvironment.claudeCodeSessionMarkers))
-        #expect(SpawnBaseEnvironment.serverRepairableMarkers
-            .isDisjoint(with: SpawnBaseEnvironment.tmuxPaneMarkers))
     }
 
     /// An empty value is not a config dir. Every reader of the name in this

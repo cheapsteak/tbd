@@ -156,7 +156,7 @@ extension WorktreeLifecycle {
             resolvedBranch = branch ?? "tbd/\(resolvedName)"
         }
         let worktreePath = (canonicalBase as NSString).appendingPathComponent(resolvedName)
-        let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
+        let tmuxServer = TmuxServerName.forRepoPath(repo.path)
 
         // Creating at this path is an explicit "track it again" — clear any
         // forget tombstone so reconcile resumes treating the path normally.
@@ -1639,11 +1639,11 @@ extension WorktreeLifecycle {
             codexLaunch = nil
         }
         // Resolve a usable size: prefer caller's value, otherwise fall back to
-        // TmuxManager's defaults. An 80x24 default would let Claude render into
-        // hard-wrapped scrollback that can never be reflowed when the user
-        // later attaches a wider view.
-        let resolvedCols = cols ?? TmuxManager.defaultCols
-        let resolvedRows = rows ?? TmuxManager.defaultRows
+        // `TerminalSpawnSize`'s defaults. An 80x24 default would let Claude
+        // render into hard-wrapped scrollback that can never be reflowed when
+        // the user later attaches a wider view.
+        let resolvedCols = cols ?? TerminalSpawnSize.defaultCols
+        let resolvedRows = rows ?? TerminalSpawnSize.defaultRows
 
         // The spawn gate, asked once here and then carried into every tab this
         // function opens — the primary, the setup-hook tab, the archived-

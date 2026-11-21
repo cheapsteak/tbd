@@ -45,7 +45,6 @@ struct MergedTransitionPrecedenceTests {
         let lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             subscriptions: subs,
             leftoverTmuxProbe: .absent
@@ -64,8 +63,7 @@ struct MergedTransitionPrecedenceTests {
         signaller.behaviors[Self.endedHolderPID] = .init(aliveInitially: false)
         signaller.behaviors[Self.endedChildPID] = .init(aliveInitially: false)
         let hibernation = HibernationCoordinator(
-            db: db, tmux: TmuxManager(dryRun: true),
-            subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(),
+            db: db, subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(),
             signaller: signaller,
             sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog(),
             leftoverTmuxProbe: .absent)
