@@ -238,7 +238,9 @@ extension AppState {
     /// then an empty mirror would answer "not found" for a session that may
     /// exist, and empty worktrees would miss its lane. The click waits in
     /// `pendingRemoteSessionLink`, and `drainPendingRemoteSessionLink`
-    /// replays it once they are in.
+    /// replays it once they are in, or drops it unanswered once it has been
+    /// held longer than `heldRemoteSessionLinkLifetime`. A click answered at
+    /// once replaces a held one too.
     ///
     /// The rule holds after a failed launch too. A launch that could not
     /// connect, or whose remote load failed, still sets
@@ -258,10 +260,15 @@ extension AppState {
         let link = RemoteSessionSelection(provider: provider, sessionID: sessionID)
         if !remoteSessionLinkCanBeAnswered(link) {
             pendingRemoteSessionLink = link
+            pendingRemoteSessionLinkHeldAt = now()
             pendingDeepLinkID = nil
             pendingDeepLinkTerminalID = nil
             return
         }
+        // This click is answered now, so it replaces any older one still
+        // held; the lane branch can re-select the selection already there,
+        // which `recordNavigation` does not count as a navigation.
+        pendingRemoteSessionLink = nil
         supersedeArchivedLookup()
 
         if let lane = activeLane(for: link) {
@@ -309,7 +316,8 @@ extension AppState {
 
     /// Replay the banner click `navigateToRemoteSession` held, once it can be
     /// answered (`remoteSessionLinkCanBeAnswered`). Until then this does
-    /// nothing and the click stays held.
+    /// nothing and the click stays held, unless it has expired
+    /// (`dropExpiredRemoteSessionLink`), when it is dropped unanswered.
     ///
     /// Called at the end of `connectAndLoadInitialState()`, at the end of
     /// every `refreshAll()`, and by every `refreshRemote()` that gets the
@@ -321,9 +329,28 @@ extension AppState {
     /// answers with the not-found toast.
     @MainActor
     func drainPendingRemoteSessionLink() {
-        guard let pending = pendingRemoteSessionLink, remoteSessionLinkCanBeAnswered(pending) else { return }
+        guard let pending = pendingRemoteSessionLink, !dropExpiredRemoteSessionLink(),
+              remoteSessionLinkCanBeAnswered(pending) else { return }
         pendingRemoteSessionLink = nil
         navigateToRemoteSession(provider: pending.provider, sessionID: pending.sessionID)
+    }
+
+    /// How long a banner click stays held. It covers the daemon starting up at
+    /// launch; a click older than that no longer matches what the user is doing.
+    static let heldRemoteSessionLinkLifetime: TimeInterval = 60
+
+    /// Drop a held click older than `heldRemoteSessionLinkLifetime`, unanswered
+    /// and with nothing shown, since a toast that late would confuse as much
+    /// as the replay. Returns whether it dropped one. Checked only when a drain
+    /// or a retry runs; nothing times the click.
+    @MainActor
+    func dropExpiredRemoteSessionLink() -> Bool {
+        guard let pending = pendingRemoteSessionLink, let heldAt = pendingRemoteSessionLinkHeldAt,
+              now().timeIntervalSince(heldAt) > Self.heldRemoteSessionLinkLifetime else { return false }
+        pendingRemoteSessionLink = nil
+        remoteLogger.info(
+            "Dropping an expired banner click for \(pending.provider, privacy: .public)/\(pending.sessionID, privacy: .public)")
+        return true
     }
 
     /// Retry the remote load while a banner click is held for it. A load that
@@ -331,12 +358,14 @@ extension AppState {
     /// `pollTickDidReconnect`, which runs only on a reconnect, so without
     /// this the click would wait for an unrelated `.remoteSessionsChanged`.
     /// The poll cycle calls it after its `refreshAll()`. It loads nothing
-    /// when no click is held or the mirror has loaded, so a daemon that
-    /// refuses `remote.*` is asked again only until the click is answered or
-    /// a later navigation drops it.
+    /// when no click is held or the mirror has loaded, and drops an expired
+    /// click instead of loading for it, so a daemon that refuses `remote.*`
+    /// is asked again only until the click is answered, dropped by a later
+    /// navigation, or expired.
     @MainActor
     func retryRemoteLoadForHeldClick() async {
         guard pendingRemoteSessionLink != nil, !remoteMirrorLoaded else { return }
+        if dropExpiredRemoteSessionLink() { return }
         await refreshRemote()
     }
 

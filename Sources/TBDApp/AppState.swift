@@ -711,7 +711,15 @@ final class AppState {
     /// replaces it (`navigateToRemoteSession`, `navigateToWorktree`), and any
     /// later navigation the user makes drops it, so the load cannot replay it
     /// over that navigation (`recordNavigation`, which lists the exceptions).
+    ///
+    /// A click held longer than `heldRemoteSessionLinkLifetime` is dropped
+    /// unanswered by the next drain or retry, so a load that succeeds much
+    /// later cannot move the selection or bring TBD forward.
     @ObservationIgnored var pendingRemoteSessionLink: RemoteSessionSelection?
+
+    /// When `navigateToRemoteSession` held `pendingRemoteSessionLink`, read
+    /// from `now`. Meaningful only while a click is held.
+    @ObservationIgnored var pendingRemoteSessionLinkHeldAt: Date?
 
     /// Profile IDs with an "Open login session" spawn currently in flight.
     /// Guards rapid repeat clicks: the first click spawns, subsequent clicks
@@ -1032,9 +1040,10 @@ final class AppState {
     /// (`ChangesListPoller`). Its host is this state, set in `init`.
     @ObservationIgnored let changesListPoller = ChangesListPoller()
     /// The current time, as `loadChangesSnapshot` stamps a load as it begins
-    /// and finishes and `changesSnapshotNeedsLoad` ages a cached one.
-    /// Injectable so a test can set how old a cached list is and the order
-    /// loads began in.
+    /// and finishes and `changesSnapshotNeedsLoad` ages a cached one, and as
+    /// a held banner click is stamped and aged
+    /// (`pendingRemoteSessionLinkHeldAt`). Injectable so a test can set how
+    /// old a cached list or a held click is and the order loads began in.
     @ObservationIgnored var now: @Sendable () -> Date = { Date() }
     /// How `loadChangesSnapshot` reads a worktree's Changes list, given the
     /// checkout and the default branch its branch diff compares against: git
@@ -3311,7 +3320,10 @@ final class AppState {
     ///
     /// No-op when:
     /// - `pendingDeepLinkID` or `pendingRemoteSessionLink` is set (a held
-    ///   deep link or banner click wins over persisted selection)
+    ///   deep link or banner click wins over persisted selection). After a
+    ///   launch that could not connect, a click held then means no later load
+    ///   restores the saved selection, and if the click expires unanswered
+    ///   nothing is selected.
     /// - the current selection is already non-empty
     /// - there are no valid IDs left after filtering stale ones
     ///

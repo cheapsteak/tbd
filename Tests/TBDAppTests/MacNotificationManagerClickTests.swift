@@ -902,6 +902,103 @@ private final class RemoteFetchCount {
     #expect(!appState.remoteMirrorLoaded)
 }
 
+/// Holds a banner click for `s1` at `dates`' current time, in a loaded app
+/// whose remote list has not loaded and whose selection is a local worktree.
+/// Returns that worktree.
+@MainActor
+private func holdRemoteClick(in appState: AppState, dates: TestDateSource) -> UUID {
+    appState.now = dates.provider
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    let selectedID = selectLocalWorktree(in: appState)
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    return selectedID
+}
+
+@MainActor
+@Test func heldRemoteClick_pastItsLifetime_isDroppedUnansweredByTheLoad() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let dates = TestDateSource()
+    let selectedID = holdRemoteClick(in: appState, dates: dates)
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    dates.advance(by: AppState.heldRemoteSessionLinkLifetime + 1)
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.selectedWorktreeIDs == [selectedID])
+    #expect(appState.selectedRemoteSession == nil)
+    #expect(appState.activeToast == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_withinItsLifetime_isStillAnswered() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let dates = TestDateSource()
+    _ = holdRemoteClick(in: appState, dates: dates)
+
+    dates.advance(by: AppState.heldRemoteSessionLinkLifetime - 1)
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+    #expect(appState.pendingRemoteSessionLink == nil)
+}
+
+@MainActor
+@Test func pollCycle_doesNotRetryTheRemoteLoadForAnExpiredClick() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let dates = TestDateSource()
+    _ = holdRemoteClick(in: appState, dates: dates)
+    let fetches = RemoteFetchCount()
+    appState.remoteProvidersFetcher = {
+        fetches.value += 1
+        return RemoteProvidersResult(providers: [])
+    }
+    appState.remoteSessionsFetcher = {
+        fetches.value += 1
+        return RemoteSessionsResult(sessions: [])
+    }
+    appState.retainedTranscriptsFetcher = { [] }
+
+    dates.advance(by: AppState.heldRemoteSessionLinkLifetime + 1)
+    await appState.retryRemoteLoadForHeldClick()
+
+    #expect(fetches.value == 0)
+    #expect(appState.pendingRemoteSessionLink == nil)
+}
+
+@MainActor
+@Test func handleClick_answeredByTheSelectedLane_replacesAnOlderHeldClick() async {
+    // B's lane is already selected, so answering B re-selects it, which
+    // `recordNavigation` does not count as a navigation.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    let repoID = UUID()
+    let laneB = Worktree(
+        repoID: repoID, name: "remote://acme/b", displayName: "lane b",
+        branch: "", path: "remote://acme/b", tmuxServer: "",
+        location: .remote(provider: "acme", sessionID: "b"))
+    appState.worktrees = [repoID: [laneB]]
+    appState.selectedWorktreeIDs = [laneB.id]
+    clickPostedRemoteBanner(appState, sessionID: "a")
+    #expect(appState.pendingRemoteSessionLink == RemoteSessionSelection(provider: "acme", sessionID: "a"))
+
+    clickPostedRemoteBanner(appState, sessionID: "b")
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "a"), remoteSession(sessionID: "b")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [laneB.id])
+}
+
 @MainActor
 @Test func heldRemoteClick_answeredByASecondLaunchsListLoad_keepsItsAnswerOverTheSavedSelection() async {
     // A first launch connected and loaded the remote list, but lost the
