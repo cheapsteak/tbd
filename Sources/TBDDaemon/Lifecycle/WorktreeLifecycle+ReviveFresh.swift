@@ -38,14 +38,17 @@ extension WorktreeLifecycle {
         let sourceTab = archived.archivedAgentTabs?.first { $0.identity == identity }
         // The resume gate a revive in place asks (`TmuxResumeGate`), for a
         // Codex thread, keyed by the thread id whether or not an archived tab
-        // names it: a thread a tmux row carries, or a deleted live tmux row
-        // carried, may still be running in that row's tmux server, and this
-        // resumes it again on a new branch. Asked before the fetch and before
-        // the new worktree exists. A Claude conversation is carried over with
+        // names it, and with the archived worktree's own tmux server: a thread
+        // a tmux row carries, or a deleted live tmux row carried, may still be
+        // running in that row's tmux server, an archive that marked nothing
+        // may have left it running in the worktree's own, and this resumes it
+        // again on a new branch. Asked before the fetch and before the new
+        // worktree exists. A Claude conversation is carried over with
         // `--fork-session`, which starts a new session id and never a second
         // agent on this one, so it asks nothing.
         if identity.agentKind == .codex,
-           let refusal = try await tmuxResumeRefusal(resuming: [sessionID]) {
+           let refusal = try await tmuxResumeRefusal(
+               resuming: [sessionID], worktreeServer: archived.tmuxServer) {
             throw refusal
         }
         let preparedCodexLaunch: CodexLaunchPreparation?

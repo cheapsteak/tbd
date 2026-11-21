@@ -643,13 +643,19 @@ extension WorktreeLifecycle {
         // History pane's preferred session, which the plan carries — may be
         // carried by a tmux row in another worktree, or have been
         // carried by a live tmux row TBD deleted, archive's own teardown
-        // included, and may still be running in that row's tmux server.
-        // Relaunching it would start a second agent on it, so the whole
+        // included, and may still be running in that row's tmux server. An
+        // archive by an earlier build marked nothing and could leave a tab's
+        // agent running in this worktree's own server, so the gate asks about
+        // that server too, whatever the records say. Relaunching a session
+        // still running would start a second agent on it, so the whole
         // revive is refused, leaving the record and the worktree as they
-        // were. With `skipClaude` no archived tab is relaunched, so there is
-        // nothing to ask about. Each relaunch asks again in `spawnTerminal`.
+        // were. A retry, which an adopted archived row takes as well, asks
+        // the same. With `skipClaude`, or when every archived tab already has
+        // its row, no tab is relaunched, so nothing is asked. Each relaunch
+        // asks again in `spawnTerminal`, by its session alone.
         if let refusal = try await tmuxResumeRefusal(
-            resuming: skipClaude ? [] : missingTabs.map(\.identity.sessionID)
+            resuming: skipClaude ? [] : missingTabs.map(\.identity.sessionID),
+            worktreeServer: worktree.tmuxServer
         ) {
             throw refusal
         }

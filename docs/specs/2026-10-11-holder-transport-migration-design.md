@@ -277,9 +277,11 @@ build's tmux hibernate recorded the park and signalled the agent before it
 respawned the window, and left the park in flight when the respawn failed, so
 the agent may still be running behind such a row. A parked tmux row with no
 park in flight is no reason to ask, since its session ended when it was parked.
-A session neither names starts without more: one read of each of two indexes,
-each holding only the rows it can match, which is all a wake of a parked holder
-row pays. For each server they name, the start asks the probe.
+Outside a revive, a session neither names starts without more: one read of each
+of two indexes, each holding only the rows it can match, which is all a wake of
+a parked holder row pays. For each server they name, the start asks the probe,
+and a revive that resumes a session asks about its worktree's own server as
+well (below).
 
 - **Running** – the start refuses with `terminalOnTmux` and the same ending
   advice, `tmux -L <server> kill-server` or a restart, then try again. Nothing
@@ -308,11 +310,13 @@ A request that writes before it reaches `spawnTerminal` asks before its first
 write as well:
 
 - **A revive in place** – keyed by every archived tab it would relaunch and the
-  History pane's preferred session, the whole revive refuses before it records
-  the restore plan or re-adds the checkout, and the worktree stays archived. A
-  revive that skips the agent tabs relaunches none, so it asks nothing.
+  History pane's preferred session, and asking about the worktree's own tmux
+  server as well, the whole revive refuses before it records the restore plan
+  or re-adds the checkout, and the worktree stays archived. A retry of a revive,
+  which an adopted archived row takes too, asks the same. A revive that skips
+  the agent tabs relaunches none, so it asks nothing.
 - **A fresh-branch revive of a Codex thread** – before the new worktree
-  exists.
+  exists, asking about the archived worktree's own tmux server as well.
 - **`terminal.create` resuming a session**, which `session.resume` reaches, and
   **a Closed Terminals reopen of a Claude entry** – before the trust seed, the
   transcript sync and the spawn record.
@@ -334,10 +338,26 @@ record every close writes. A marked entry sits outside the newest-50 cap on a
 worktree's Closed Terminals, since pruning it would drop the mark while the
 session may still be running.
 
-What the gate covers is a session an open tmux row names, and one whose row
-was closed with a mark: closing its tab, archiving its worktree or scratch
-space, and reconcile's archive. These leave a session that may still run in
-tmux with neither, and the gate lets a start of it through:
+What the gate covers is a session an open tmux row names, one whose row was
+closed with a mark — closing its tab, archiving its worktree or scratch space,
+and reconcile's archive — and every session a revive of an archived worktree
+resumes. An archive by an earlier build wrote no mark, and could leave a tab's
+agent running in the worktree's tmux server: it killed each tab's tmux window,
+but skipped the kill when it could not confirm the pane was the tab's own, and
+left the agent running when the kill failed and the pane's pid could not be
+read to signal it. No record names such a session. So a revive that resumes at
+least one session also asks the probe about the worktree's own server, once,
+whatever the rows and marks say, and is refused while that server may run: a
+revive in place, a retry of one, with the History pane's preferred session or
+without, and a fresh-branch revive of a Codex thread. A revive that resumes
+nothing asks no probe, and a fresh-branch revive of a Claude conversation forks
+the session and asks nothing. The cost is accepted: a repo's worktrees share one
+tmux server, so while a leftover server runs in a repo, every revive there that
+resumes a session is refused, until one `tmux -L <server> kill-server` or a
+restart ends it.
+
+Three cases leave a session that may still run in tmux with neither a row nor a
+mark, outside any revive, and the gate lets a start of it through:
 
 - **Removing a repo** – its main worktree's rows go with the worktree row
   (`WorktreeStore.deleteForRepo`) rather than through a close, so they get no
@@ -346,10 +366,6 @@ tmux with neither, and the gate lets a start of it through:
   entry the worktree had, a mark included (above).
 - **A row whose worktree the daemon has no local row for** – it names no
   server, so its close writes no mark (above).
-- **An archive by an older build** – it wrote no mark. It killed each tab's
-  tmux window, but skipped the kill when it could not confirm the pane was the
-  tab's own, and could leave the agent running when the kill failed and the
-  pane's pid could not be read to signal it.
 
 In each, a start of the session without the gate puts the same second agent on
 it: the gate neither adds these cases nor removes them.
@@ -362,13 +378,15 @@ live tmux rows, and like the rest of that pass it answers to the GC switch.
 Check Again is `terminal.recreateWindow`, which probes the row's server and
 parks the row once it is gone. A migration probes the row it is asked to move,
 and a start of an existing session the servers named by its marks and by the
-tmux rows whose session may still run.
+tmux rows whose session may still run, with a revive that resumes a session
+adding its worktree's own server.
 
 **This probe is a transition measure; on 2027-01-15 it is replaced by parking
 on sight.** No tmux server started before 2026-11-14 should still be running by
 then, so a live tmux row can be parked without asking. The resume gate goes the
-same day, for the same reason: no session a tmux row or a mark names can still
-be running, so such a session starts like any other.
+same day, with a revive's question about its worktree's server, for the same
+reason: no session a tmux row, a mark or an archived worktree's server names
+can still be running, so such a session starts like any other.
 
 ## What migrates, and what is skipped
 
@@ -607,13 +625,22 @@ never unlinks it, and nothing TBD runs creates one any more.
   keeps its mark, and the lookup returns each server marked for the given
   session ids, across worktrees.
 - Each start of an existing session refuses while a server its mark names may
-  run, spawns nothing and leaves every record as it was; goes ahead on the
-  holder once the server is gone; and asks no probe for a session that neither
-  a mark nor a tmux row names. That holds for a revive in place with and without
-  a preferred session, a fresh-branch revive of a Codex thread,
+  run, spawns nothing and leaves every record as it was, and goes ahead on the
+  holder once the server is gone. That holds for a revive in place with and
+  without a preferred session, a fresh-branch revive of a Codex thread,
   `session.resume`, a Closed Terminals reopen, `spawnTerminal` itself and a
-  wake. The RPCs answer `terminalOnTmux` and record `not-eligible`. A revive
-  that skips the agent tabs asks nothing.
+  wake. The RPCs answer `terminalOnTmux` and record `not-eligible`. Apart from
+  a revive, which also asks about its worktree's server (next), a start asks no
+  probe for a session that neither a mark nor a tmux row names. A revive that
+  skips the agent tabs asks nothing.
+- A revive of an archived worktree that no row and no mark names is refused
+  while the worktree's own server may run, leaving the record as it was, and
+  goes ahead once the server is gone, asking the probe once per revive. That
+  holds for a revive in place with and without the History pane's preferred
+  session, the retry after a revive that skipped the agent tabs, and a
+  fresh-branch revive of a Codex thread. A revive that skips the agent tabs
+  asks no probe, and a fresh-branch revive of a Claude conversation goes ahead
+  while the server may run.
 - `session.resume` and `terminal.create` resuming a session refuse the same
   way while an unparked tmux row in any worktree carries the session and that
   worktree's server may run, leaving the tmux row as it was, and go ahead once

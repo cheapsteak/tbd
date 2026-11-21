@@ -12,9 +12,13 @@ import Testing
 /// holder asks the probe about the server first — a revive, a revive with the
 /// History pane's preferred session, a fresh-branch revive of a Codex thread,
 /// and `spawnTerminal` itself. A spawn that forks the session asks nothing.
+/// A revive that resumes a session also asks about its worktree's own tmux
+/// server, whether or not anything marks the session, because an archive by
+/// an earlier build marked nothing and could leave an agent running there.
 ///
 /// Each archived fixture is a real git worktree with a holder Claude tab,
-/// spawned through the holder double, beside a seeded live tmux Claude row.
+/// spawned through the holder double, beside a seeded live tmux Claude row,
+/// or with no tmux row at all, the record an archive that marked nothing left.
 /// The probe is injected and records what it was asked, so no test runs tmux
 /// or asks a real socket. The RPC answers are `TmuxResumeGateRPCTests`.
 @Suite("Resume gate for sessions a closed tmux row carried")
@@ -25,9 +29,12 @@ struct TmuxResumeGateTests {
         let repo: Repo
         let worktree: Worktree
         let holder: FakeHolderLaunch
+        /// What the probe answers, switchable mid-test.
+        let server: ServerState
         let probe: RecordingLeftoverTmuxProbe
         let lifecycle: WorktreeLifecycle
-        /// The session id of the seeded tmux row.
+        /// The session id of the seeded tmux row; with no tmux row seeded,
+        /// one nothing names.
         let tmuxSessionID: String
 
         func tearDown() {
@@ -45,43 +52,64 @@ struct TmuxResumeGateTests {
         }
     }
 
+    /// What the injected probe answers, switchable mid-test.
+    final class ServerState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: LeftoverTmuxServerState
+
+        init(_ value: LeftoverTmuxServerState) { self.value = value }
+
+        var state: LeftoverTmuxServerState {
+            get { lock.withLock { value } }
+            set { lock.withLock { value = newValue } }
+        }
+    }
+
     /// An archived worktree whose tmux row was live, or parked when
-    /// `tmuxRowParked`, at archive, with a probe that answers `serverState`.
+    /// `tmuxRowParked`, at archive, with a probe that answers `serverState`
+    /// until a test changes `server`.
     /// With `closedBeforeArchive` the tmux row's tab is closed first, the way
     /// `terminal.delete` closes it, so the archive's record has no tab for its
-    /// session and only the Closed Terminals entry names it.
+    /// session and only the Closed Terminals entry names it. With `tmuxRow`
+    /// false no tmux row is seeded, so neither a row nor a mark names any
+    /// session, as an archive that marked nothing leaves it; with `agentTab`
+    /// false the worktree has no Claude tab either, so its archived record
+    /// names no session.
     func archivedFixture(
-        serverState: LeftoverTmuxServerState, tmuxRowParked: Bool = false,
-        closedBeforeArchive: Bool = false
+        serverState: LeftoverTmuxServerState, tmuxRow seedsTmuxRow: Bool = true,
+        tmuxRowParked: Bool = false, closedBeforeArchive: Bool = false, agentTab: Bool = true
     ) async throws -> Fixture {
         let (tempDir, repoDir) = try await createTestRepo()
         let db = try TBDDatabase(inMemory: true)
         let holder = FakeHolderLaunch()
-        let probe = RecordingLeftoverTmuxProbe { _ in serverState }
+        let server = ServerState(serverState)
+        let probe = RecordingLeftoverTmuxProbe { _ in server.state }
         var lifecycle = makeLifecycle(db: db, holder: holder)
         lifecycle.leftoverTmuxProbe = probe.probe
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
-        let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+        let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: !agentTab)
         let tmuxSessionID = UUID().uuidString.lowercased()
-        var tmuxRow = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@7", tmuxPaneID: "%7",
-            label: "Claude Code", claudeSessionID: tmuxSessionID, kind: .claude,
-            transport: .tmux)
-        if tmuxRowParked {
-            try await db.terminals.setSuspended(id: tmuxRow.id, sessionID: tmuxSessionID)
-            tmuxRow = try #require(try await db.terminals.get(id: tmuxRow.id))
-        }
-        if closedBeforeArchive {
-            try await WorktreeLifecycle.closeLeftoverTmuxRow(
-                tmuxRow, server: worktree.tmuxServer, history: db.terminalHistory)
-            try await db.terminals.delete(id: tmuxRow.id)
+        if seedsTmuxRow {
+            var tmuxRow = try await db.terminals.create(
+                worktreeID: worktree.id, tmuxWindowID: "@7", tmuxPaneID: "%7",
+                label: "Claude Code", claudeSessionID: tmuxSessionID, kind: .claude,
+                transport: .tmux)
+            if tmuxRowParked {
+                try await db.terminals.setSuspended(id: tmuxRow.id, sessionID: tmuxSessionID)
+                tmuxRow = try #require(try await db.terminals.get(id: tmuxRow.id))
+            }
+            if closedBeforeArchive {
+                try await WorktreeLifecycle.closeLeftoverTmuxRow(
+                    tmuxRow, server: worktree.tmuxServer, history: db.terminalHistory)
+                try await db.terminals.delete(id: tmuxRow.id)
+            }
         }
         try await lifecycle.archiveWorktree(worktreeID: worktree.id, force: true)
 
         return Fixture(
             tempDir: tempDir, db: db, repo: repo, worktree: worktree, holder: holder,
-            probe: probe, lifecycle: lifecycle, tmuxSessionID: tmuxSessionID)
+            server: server, probe: probe, lifecycle: lifecycle, tmuxSessionID: tmuxSessionID)
     }
 
     // MARK: - The mark
@@ -148,10 +176,12 @@ struct TmuxResumeGateTests {
         #expect(fixture.probe.servers.allSatisfy { $0 == fixture.worktree.tmuxServer })
     }
 
-    /// The probe answers `.running`, so a revive that asked it would refuse:
-    /// the success proves it was not asked.
-    @Test func aParkedTmuxRowsEntryIsUnmarkedAndRevivesWithoutTheProbe() async throws {
-        let fixture = try await archivedFixture(serverState: .running, tmuxRowParked: true)
+    /// A parked tmux row's entry is unmarked, so the relaunch of its session
+    /// asks nothing of its own in `spawnTerminal`. The one question is the
+    /// revive's, about the worktree's own server, which every revive that
+    /// resumes a session asks.
+    @Test func aParkedTmuxRowsEntryIsUnmarkedAndOnlyTheReviveAsks() async throws {
+        let fixture = try await archivedFixture(serverState: .absent, tmuxRowParked: true)
         defer { fixture.tearDown() }
 
         #expect(try await fixture.tmuxEntry().liveOnTmuxServer == nil)
@@ -163,7 +193,7 @@ struct TmuxResumeGateTests {
         let relaunched = try #require(terminals.first { $0.claudeSessionID == fixture.tmuxSessionID })
         #expect(relaunched.transport == .holder)
         #expect(fixture.holder.launches.contains { $0.terminalID == relaunched.id })
-        #expect(fixture.probe.servers.isEmpty)
+        #expect(fixture.probe.servers == [fixture.worktree.tmuxServer])
     }
 
     /// A revive that skips the agent tabs relaunches none of them, so a marked
@@ -205,6 +235,148 @@ struct TmuxResumeGateTests {
         #expect(try await fixture.archivedRow().archivedAgentTabs ?? [] == tabs)
         #expect(fixture.holder.launches.count == launchesBefore)
         #expect(fixture.probe.servers == [fixture.worktree.tmuxServer])
+    }
+
+    // MARK: - An archive that marked nothing
+
+    /// An archive by an earlier build marked nothing, and could leave a tab's
+    /// agent running in the worktree's tmux server, so no record names the
+    /// session. A revive that resumes it asks about the worktree's own server
+    /// whatever the records say: refused while it may run, with the record
+    /// and the worktree as they were, and relaunched on the holder once it is
+    /// gone. The probe is asked once per revive: the relaunch's own question
+    /// in `spawnTerminal` is keyed by its session alone, which nothing marks.
+    @Test func aReviveOfAnUnmarkedArchiveAsksAboutTheWorktreesServer() async throws {
+        let fixture = try await archivedFixture(serverState: .running, tmuxRow: false)
+        defer { fixture.tearDown() }
+        let server = fixture.worktree.tmuxServer
+        let before = try await fixture.archivedRow()
+        let sessions = try #require(before.archivedAgentTabs).map(\.identity.sessionID)
+        #expect(!sessions.isEmpty)
+        #expect(try await fixture.db.terminalHistory.liveOnTmuxServers(sessionIDs: sessions).isEmpty)
+        #expect(try await fixture.db.terminals.liveTmuxServers(sessionIDs: sessions).isEmpty)
+        let launchesBefore = fixture.holder.launches.count
+
+        await #expect(throws: TmuxResumeRefusal(server: server)) {
+            _ = try await fixture.lifecycle.reviveWorktree(
+                worktreeID: fixture.worktree.id, skipClaude: false)
+        }
+
+        let after = try await fixture.archivedRow()
+        #expect(after.status == .archived)
+        #expect(after.archivedAgentTabs == before.archivedAgentTabs)
+        #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
+        #expect(fixture.holder.launches.count == launchesBefore)
+        #expect(!FileManager.default.fileExists(atPath: fixture.worktree.localPath))
+        #expect(fixture.probe.servers == [server])
+
+        fixture.server.state = .absent
+        let revived = try await fixture.lifecycle.reviveWorktree(
+            worktreeID: fixture.worktree.id, skipClaude: false)
+
+        #expect(revived.status == .active)
+        let terminals = try await fixture.db.terminals.list(worktreeID: revived.id)
+        for session in sessions {
+            let relaunched = try #require(terminals.first { $0.claudeSessionID == session })
+            #expect(relaunched.transport == .holder)
+            #expect(fixture.holder.launches.contains { $0.terminalID == relaunched.id })
+        }
+        #expect(fixture.probe.servers == [server, server])
+    }
+
+    /// The History pane's Resume of a session in an archived worktree whose
+    /// record names none: the preferred session is the only one the revive
+    /// resumes, and it alone makes the revive ask about the worktree's own
+    /// server.
+    @Test func aHistoryResumeFromAnUnmarkedArchiveAsksAboutTheWorktreesServer() async throws {
+        let fixture = try await archivedFixture(
+            serverState: .running, tmuxRow: false, agentTab: false)
+        defer { fixture.tearDown() }
+        let server = fixture.worktree.tmuxServer
+        let identity = AgentSessionIdentity(
+            agentKind: .claude, sessionID: UUID().uuidString.lowercased())
+        try await fixture.db.localAgentSessions.upsert(LocalAgentSession(
+            worktreeID: fixture.worktree.id, identity: identity,
+            firstObservedAt: .distantPast, lastObservedAt: .distantPast))
+        #expect(try await fixture.archivedRow().archivedAgentTabs ?? [] == [])
+        let launchesBefore = fixture.holder.launches.count
+
+        await #expect(throws: TmuxResumeRefusal(server: server)) {
+            _ = try await fixture.lifecycle.reviveWorktree(
+                worktreeID: fixture.worktree.id, skipClaude: false, preferredSession: identity)
+        }
+
+        #expect(try await fixture.archivedRow().status == .archived)
+        #expect(fixture.holder.launches.count == launchesBefore)
+        #expect(fixture.probe.servers == [server])
+
+        fixture.server.state = .absent
+        let revived = try await fixture.lifecycle.reviveWorktree(
+            worktreeID: fixture.worktree.id, skipClaude: false, preferredSession: identity)
+
+        let resumed = try #require(try await fixture.db.terminals.list(worktreeID: revived.id)
+            .first { $0.claudeSessionID == identity.sessionID })
+        #expect(resumed.transport == .holder)
+        #expect(fixture.probe.servers == [server, server])
+    }
+
+    /// A fresh-branch revive of a Codex thread resumes the thread itself, so
+    /// it asks about the archived worktree's own server too, and is refused
+    /// before the new worktree exists though nothing names the thread. A
+    /// Claude conversation forks and asks nothing
+    /// (`WorktreeReviveFreshTests`).
+    @Test func aCodexFreshReviveFromAnUnmarkedArchiveAsksAboutTheWorktreesServer() async throws {
+        let fixture = try await archivedFixture(serverState: .running, tmuxRow: false)
+        defer { fixture.tearDown() }
+        let identity = AgentSessionIdentity(
+            agentKind: .codex, sessionID: UUID().uuidString.lowercased())
+        try await fixture.db.localAgentSessions.upsert(LocalAgentSession(
+            worktreeID: fixture.worktree.id, identity: identity,
+            firstObservedAt: .distantPast, lastObservedAt: .distantPast))
+        #expect(try await fixture.db.terminalHistory
+            .liveOnTmuxServers(sessionIDs: [identity.sessionID]).isEmpty)
+        let worktreesBefore = try await fixture.db.worktrees.list(repoID: fixture.repo.id).count
+
+        await #expect(throws: TmuxResumeRefusal(server: fixture.worktree.tmuxServer)) {
+            _ = try await fixture.lifecycle.reviveConversationOnFreshBranch(
+                archivedWorktreeID: fixture.worktree.id, sessionID: identity.sessionID,
+                identity: identity)
+        }
+
+        #expect(try await fixture.db.worktrees.list(repoID: fixture.repo.id).count == worktreesBefore)
+        #expect(fixture.probe.servers == [fixture.worktree.tmuxServer])
+    }
+
+    /// A revive that resumes no session asks no probe, whatever server its
+    /// worktree names: one that skips the agent tabs goes ahead while the
+    /// server may run. Its archived tabs stay for a later revive, and that
+    /// retry, the path an adopted archived row takes as well, resumes them,
+    /// so it asks and is refused.
+    @Test func aReviveThatResumesNothingAsksNoProbeAndItsRetryAsks() async throws {
+        let fixture = try await archivedFixture(serverState: .running, tmuxRow: false)
+        defer { fixture.tearDown() }
+        let server = fixture.worktree.tmuxServer
+        let sessions = try #require(try await fixture.archivedRow().archivedAgentTabs)
+            .map(\.identity.sessionID)
+        #expect(!sessions.isEmpty)
+
+        let revived = try await fixture.lifecycle.reviveWorktree(
+            worktreeID: fixture.worktree.id, skipClaude: true)
+
+        #expect(revived.status == .active)
+        #expect(fixture.probe.servers.isEmpty)
+        let launchesBefore = fixture.holder.launches.count
+
+        await #expect(throws: TmuxResumeRefusal(server: server)) {
+            _ = try await fixture.lifecycle.reviveWorktree(
+                worktreeID: fixture.worktree.id, skipClaude: false)
+        }
+
+        #expect(fixture.holder.launches.count == launchesBefore)
+        let resumed = try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
+            .compactMap(\.claudeSessionID).filter { sessions.contains($0) }
+        #expect(resumed.isEmpty)
+        #expect(fixture.probe.servers == [server])
     }
 
     // MARK: - Reconcile's archive

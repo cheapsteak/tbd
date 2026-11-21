@@ -204,12 +204,16 @@ extension WorktreeLifecycle {
     /// The resume gate (`TmuxResumeGate`) over this lifecycle's records and
     /// probe: the refusal when one of `sessionIDs` is carried by a tmux row
     /// whose session may still run, or was carried by a live tmux row TBD
-    /// deleted, and that row's tmux server may still be running it; nil
-    /// otherwise.
-    func tmuxResumeRefusal(resuming sessionIDs: [String]) async throws -> TmuxResumeRefusal? {
+    /// deleted, and that row's tmux server may still be running it, or when
+    /// `worktreeServer`, a revived worktree's own server, may still be
+    /// running; nil otherwise, and nil without a probe when `sessionIDs` is
+    /// empty.
+    func tmuxResumeRefusal(
+        resuming sessionIDs: [String], worktreeServer: String? = nil
+    ) async throws -> TmuxResumeRefusal? {
         try await TmuxResumeGate(
             history: db.terminalHistory, terminals: db.terminals, probe: leftoverTmuxProbe
-        ).refusal(resuming: sessionIDs)
+        ).refusal(resuming: sessionIDs, worktreeServer: worktreeServer)
     }
 }
 
@@ -242,10 +246,26 @@ extension WorktreeLifecycle {
 /// tab, a carryover and a fresh-branch revive of a Claude conversation start
 /// with, writes a new session id and never a second agent on this one.
 ///
-/// What it covers is a session an open tmux row names, and one whose row was
-/// closed with a mark: closing its tab, archiving its worktree or scratch
-/// space, reconcile's archive. These leave a session that may still run in
-/// tmux with neither, and this gate lets a start of it through:
+/// What it covers is a session an open tmux row names, one whose row was
+/// closed with a mark — closing its tab, archiving its worktree or scratch
+/// space, reconcile's archive — and every session a revive of an archived
+/// worktree resumes. An archive by an earlier build wrote no mark, and could
+/// leave a tab's agent running in the worktree's tmux server: it killed each
+/// tab's tmux window, but skipped the kill when it could not confirm the pane
+/// was the tab's own, and left the agent running when the kill failed and the
+/// pane's pid could not be read to signal it. No record names such a session.
+/// So a revive that resumes a session also asks about the worktree's own
+/// server (`worktreeServer`), whatever the records say, and is refused while
+/// that server may run: a revive in place, a retry of one (which an adopted
+/// archived row takes too), with the History pane's preferred session or
+/// without, and a fresh-branch revive of a Codex thread. A revive that
+/// resumes nothing asks no probe, and neither does a fresh-branch revive of a
+/// Claude conversation, which forks it. A repo's worktrees share one server,
+/// so while a leftover server runs, every such revive in its repo is refused;
+/// ending the server, or a restart, lets them through.
+///
+/// Three cases leave a session that may still run in tmux with neither a row
+/// nor a mark, outside any revive, and this gate lets a start of it through:
 ///
 /// - Removing a repo deletes its main worktree's rows with the worktree row
 ///   (`WorktreeStore.deleteForRepo`) rather than closing them, so they get
@@ -254,10 +274,6 @@ extension WorktreeLifecycle {
 ///   Terminals entry the worktree had, a mark included.
 /// - A row whose worktree the daemon has no local row for names no server, so
 ///   its close writes no mark (`closeLeftoverTmuxRow`).
-/// - An archive by an older build wrote no mark. It killed each tab's tmux
-///   window, but skipped the kill when it could not confirm the pane was the
-///   tab's own, and could leave the agent running when the kill failed and
-///   the pane's pid could not be read to signal it.
 ///
 /// In each, a start of the session without this gate puts the same second
 /// agent on it: the gate neither adds these cases nor removes them.
@@ -268,8 +284,10 @@ extension WorktreeLifecycle {
 /// tmux row or its mark may sit in any worktree. The lookup is one read of
 /// each of two partial indexes, the tmux rows' whose session may still run
 /// and the marked entries', across every worktree; the probe is asked only
-/// about a server they name, so a session neither names costs a start those
-/// two reads and nothing else. A refusal writes nothing.
+/// about a server they name and, on a revive, its worktree's server, so
+/// outside a revive a session neither names costs a start those two reads and
+/// nothing else. A start that resumes no session reads nothing. A refusal
+/// writes nothing.
 ///
 /// A transition measure, like the probe it asks: on 2027-01-15 parking on
 /// sight replaces it. See
@@ -280,17 +298,25 @@ struct TmuxResumeGate: Sendable {
     let terminals: TerminalStore
     let probe: LeftoverTmuxServerProbe
 
-    /// The refusal naming the first server, in name order, that a tmux row
-    /// whose session may still run or a mark of one of `sessionIDs` names and
-    /// the probe says may still be running; nil when neither names one or every named server is
-    /// gone. Throws when either record cannot be read, so a caller never
-    /// starts a session it could not check.
-    func refusal(resuming sessionIDs: [String]) async throws -> TmuxResumeRefusal? {
+    /// The refusal naming the first server, in name order, that the probe
+    /// says may still be running among those a tmux row whose session may
+    /// still run or a mark of one of `sessionIDs` names, and `worktreeServer`
+    /// when it is not empty; nil when every such server is gone or none is
+    /// named. Each server is asked once. With no `sessionIDs` nothing is
+    /// started, so nothing is read or asked, `worktreeServer` included.
+    /// Throws when either record cannot be read, so a caller never starts a
+    /// session it could not check.
+    func refusal(
+        resuming sessionIDs: [String], worktreeServer: String? = nil
+    ) async throws -> TmuxResumeRefusal? {
+        guard !sessionIDs.isEmpty else { return nil }
         let marked = try await history.liveOnTmuxServers(sessionIDs: sessionIDs)
         let live = try await terminals.liveTmuxServers(sessionIDs: sessionIDs)
-        for server in Set(marked).union(live).sorted() {
+        var servers = Set(marked).union(live)
+        if let worktreeServer, !worktreeServer.isEmpty { servers.insert(worktreeServer) }
+        for server in servers.sorted() {
             guard await probe.state(server) == .running else { continue }
-            logger.notice("resume refused: a tab on tmux carries this session, or a tab TBD closed on tmux carried it, and tmux server \(server, privacy: .public) may still be running it")
+            logger.notice("resume refused: tmux server \(server, privacy: .public) may still be running this session: a tab on tmux carries it, a tab TBD closed on tmux carried it, or the revived worktree's tabs ran in that server")
             return TmuxResumeRefusal(server: server)
         }
         return nil
@@ -300,8 +326,9 @@ struct TmuxResumeGate: Sendable {
 /// A start the resume gate refused (`TmuxResumeGate`): the session it would
 /// start is carried by a tmux row whose session may still run, or was carried
 /// by a live tmux row TBD deleted, and that row's tmux server may still be
-/// running it. Thrown
-/// before the caller writes anything, so every record is as it was.
+/// running it; or the start is a revive, and its worktree's own tmux server
+/// may still be running. Thrown before the caller writes anything, so every
+/// record is as it was.
 struct TmuxResumeRefusal: Error, Equatable, LocalizedError, CustomStringConvertible {
     /// The tmux server, as `tmux -L` takes it.
     let server: String

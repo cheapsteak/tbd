@@ -490,6 +490,55 @@ struct WorktreeReviveFreshTests {
         #expect(try await db.terminals.get(id: tmuxRow.id) == tmuxRow)
     }
 
+    /// An archived worktree that no tmux row and no mark names, as an archive
+    /// that marked nothing leaves it, with a probe that says its own tmux
+    /// server may run. A fresh-branch revive of a Codex thread resumes the
+    /// thread, so it asks about that server and is refused before any new
+    /// worktree exists. A Claude conversation is carried over with
+    /// `--fork-session`, so its revive asks nothing and goes ahead.
+    @Test func freshReviveAsksAboutTheArchivedWorktreesServerForACodexThreadOnly() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
+        var configured = makeReviveFreshLifecycle(db: db, holder: holder)
+        let probe = RecordingLeftoverTmuxProbe { _ in .running }
+        configured.leftoverTmuxProbe = probe.probe
+        let lifecycle = configured
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedSource(
+            db: db, repo: repo, tempDir: tempDir, sessions: ["A"],
+            archivedHeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        try writeSourceTranscript(sessionID: "A")
+        let codex = AgentSessionIdentity(agentKind: .codex, sessionID: "acme-thread")
+        try await db.localAgentSessions.upsert(LocalAgentSession(
+            worktreeID: archived.id, identity: codex,
+            firstObservedAt: operationDate, lastObservedAt: operationDate))
+        #expect(try await db.terminals.liveTmuxServers(sessionIDs: ["A", "acme-thread"]).isEmpty)
+        #expect(try await db.terminalHistory.liveOnTmuxServers(sessionIDs: ["A", "acme-thread"]).isEmpty)
+        let worktreesBefore = try await db.worktrees.list(repoID: repo.id).map(\.id)
+
+        await #expect(throws: TmuxResumeRefusal(server: archived.tmuxServer)) {
+            _ = try await lifecycle.reviveConversationOnFreshBranch(
+                archivedWorktreeID: archived.id, sessionID: codex.sessionID, identity: codex,
+                date: operationDate)
+        }
+        #expect(try await db.worktrees.list(repoID: repo.id).map(\.id) == worktreesBefore)
+        #expect(probe.servers == [archived.tmuxServer])
+
+        let outcome = try await lifecycle.reviveConversationOnFreshBranch(
+            archivedWorktreeID: archived.id, sessionID: "A", date: operationDate)
+        guard case .ready = outcome.completion else {
+            Issue.record("expected the fresh revive to complete synchronously")
+            return
+        }
+        let command = try #require(launchedCommand(holder, containing: "claude "))
+        #expect(command.contains("--fork-session"), "\(command)")
+        #expect(probe.servers == [archived.tmuxServer], "the fork asked the resume gate")
+    }
+
     @Test func fetchFailureCreatesFromLocalBaseAndReturnsStaleWarning() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
