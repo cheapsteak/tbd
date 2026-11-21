@@ -712,14 +712,24 @@ final class AppState {
     /// later navigation the user makes drops it, so the load cannot replay it
     /// over that navigation (`recordNavigation`, which lists the exceptions).
     ///
-    /// A click held longer than `heldRemoteSessionLinkLifetime` is dropped
-    /// unanswered by the next drain or retry, so a load that succeeds much
-    /// later cannot move the selection or bring TBD forward.
+    /// While a click is held, a progress toast says so
+    /// (`pendingRemoteSessionLinkToastID`). Every drop goes through
+    /// `dropHeldRemoteSessionLink`, which takes that toast down with the
+    /// click. A click held longer than `heldRemoteSessionLinkLifetime` is
+    /// dropped unanswered by the next poll tick, drain or retry, with an
+    /// error toast in place of its progress toast, so a load that succeeds
+    /// much later cannot move the selection or bring TBD forward.
     @ObservationIgnored var pendingRemoteSessionLink: RemoteSessionSelection?
 
     /// When `navigateToRemoteSession` held `pendingRemoteSessionLink`, read
     /// from `now`. Meaningful only while a click is held.
     @ObservationIgnored var pendingRemoteSessionLinkHeldAt: Date?
+
+    /// The ID of the progress toast `navigateToRemoteSession` showed when it
+    /// held `pendingRemoteSessionLink`, so dropping the click dismisses that
+    /// toast and never one that has replaced it
+    /// (`dropHeldRemoteSessionLink`). Meaningful only while a click is held.
+    @ObservationIgnored var pendingRemoteSessionLinkToastID: UUID?
 
     /// Profile IDs with an "Open login session" spawn currently in flight.
     /// Guards rapid repeat clicks: the first click spawns, subsequent clicks
@@ -4183,6 +4193,9 @@ final class AppState {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // First, and whatever the connection state: while the daemon
+                // cannot be reached, nothing else expires a held banner click.
+                self.pollTickDidFire()
                 // Whether this tick connected through `startDaemonAndConnect`,
                 // whose `connectAndLoadInitialState` sends a claim sweep of its
                 // own. This tick's sweep then stays out, so one tick never
