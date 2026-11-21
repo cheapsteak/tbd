@@ -357,7 +357,8 @@ extension AppState {
 
     /// Close one tab and clean up resources owned by that tab. This is shared
     /// by the tab bar close button and the Cmd-W menu shortcut. The tab closes
-    /// before this returns.
+    /// before this returns. A terminal the daemon refuses to delete comes back
+    /// as a tab of its own, with an alert (`settleTabClose`).
     func closeTab(worktreeID: UUID, index: Int) {
         guard var arr = tabs[worktreeID],
               arr.indices.contains(index) else { return }
@@ -398,6 +399,14 @@ extension AppState {
         // `terminalIDs(in:)` rather than `terminalIDsInTab`, because a
         // `.liveTranscript` tab — the composer's own home — is exactly the
         // shape `allTerminalIDs()` does not enumerate.
+        //
+        // The drafts of the terminals being deleted are held until the
+        // deletes answer, so one the daemon refuses gets its draft back
+        // (`settleTabClose`).
+        var draftsHeldForRefusal: [UUID: ComposerDraft] = [:]
+        for terminalID in terminalIDsInTab {
+            draftsHeldForRefusal[terminalID] = composerDrafts[.terminal(terminalID)]
+        }
         for terminalID in terminalIDs(in: tab) {
             forgetComposerState(for: terminalID)
         }
@@ -408,10 +417,16 @@ extension AppState {
         worktreeTabOrders[worktreeID] = arr.map(\.id)
         prunePaneHistories()
 
-        for terminalID in terminalIDsInTab {
-            Task {
-                await deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
+        closingTerminalIDs.formUnion(terminalIDsInTab)
+        let deletes: [(terminalID: UUID, outcome: Task<TerminalDeleteOutcome, Never>)] =
+            terminalIDsInTab.map { terminalID in
+                let outcome = Task {
+                    await deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
+                }
+                return (terminalID: terminalID, outcome: outcome)
             }
+        Task {
+            await settleTabClose(worktreeID: worktreeID, deletes: deletes, drafts: draftsHeldForRefusal)
         }
 
         if closingActiveTab {
@@ -433,6 +448,45 @@ extension AppState {
                 handleConnectionError(error)
             }
         }
+    }
+
+    /// Once a tab close's deletes have all answered, its terminals stop
+    /// being hidden from `reconcileTabs`. Each one the daemon refused to
+    /// delete — it answered with an error, so it kept the row — gets its
+    /// composer draft back and comes back as a tab of its own at the end of
+    /// the strip, and the close shows one alert carrying the daemon's
+    /// message. The order the close wrote lacks that tab, which leaves it at
+    /// the end on the next load, and the next close or reorder writes it in.
+    ///
+    /// A delete that failed any other way — a disconnect, a receive timeout,
+    /// a response cut off — says nothing certain about the terminal, so it
+    /// shows nothing, and the terminal, if the daemon kept it, comes back at
+    /// the next reconcile.
+    func settleTabClose(
+        worktreeID: UUID,
+        deletes: [(terminalID: UUID, outcome: Task<TerminalDeleteOutcome, Never>)],
+        drafts: [UUID: ComposerDraft]
+    ) async {
+        var refusals: [String] = []
+        for delete in deletes {
+            guard case .refused(let message) = await delete.outcome.value else { continue }
+            refusals.append(message)
+            if let draft = drafts[delete.terminalID],
+               composerDrafts[.terminal(delete.terminalID)]?.hasContent != true {
+                composerDrafts[.terminal(delete.terminalID)] = draft
+                if draft.hasContent { pushComposerDrafts() }
+            }
+        }
+        closingTerminalIDs.subtract(deletes.map { $0.terminalID })
+        guard let message = refusals.first else { return }
+        if let worktreeTerminals = terminals[worktreeID] {
+            reconcileTabs(worktreeID: worktreeID, terminals: worktreeTerminals)
+        }
+        showAlert(
+            refusals.count == 1
+                ? "Couldn't close terminal: \(message)"
+                : "Couldn't close \(refusals.count) terminals: \(message)",
+            isError: true)
     }
 
     /// `closeTab(worktreeID:index:)` for the tab with this ID.

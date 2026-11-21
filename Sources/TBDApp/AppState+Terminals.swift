@@ -505,14 +505,33 @@ extension AppState {
         }
     }
 
-    /// Delete a terminal (kills tmux window and removes from daemon DB).
-    func deleteTerminal(terminalID: UUID, worktreeID: UUID) async {
+    /// How a `terminal.delete` ended, for the tab close that sent it.
+    enum TerminalDeleteOutcome: Equatable, Sendable {
+        /// The daemon deleted the terminal, and the app has dropped it.
+        case deleted
+        /// The daemon answered with an error, so it kept the terminal: a tmux
+        /// row whose Closed Terminals mark cannot be written stays, for one.
+        /// Carries the daemon's message.
+        case refused(String)
+        /// Any other failure — a disconnect, a receive timeout, a response
+        /// cut off — which says nothing certain about the terminal.
+        case failed
+    }
+
+    /// Delete a terminal: the daemon ends its session and removes its row.
+    @discardableResult
+    func deleteTerminal(terminalID: UUID, worktreeID: UUID) async -> TerminalDeleteOutcome {
         do {
-            try await daemonClient.deleteTerminal(terminalID: terminalID)
+            try await terminalDeleter(terminalID)
             removeDeletedTerminalFromState(terminalID: terminalID, worktreeID: worktreeID)
+            return .deleted
         } catch {
             logger.error("Failed to delete terminal: \(error)")
             handleConnectionError(error)
+            if case .rpcError(let message, _)? = error as? DaemonClientError {
+                return .refused(message)
+            }
+            return .failed
         }
     }
 
