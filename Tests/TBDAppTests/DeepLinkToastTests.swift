@@ -36,24 +36,6 @@ struct DeepLinkToastTests {
         )
     }
 
-    /// Poll `cond` on the main actor until true or deadline. Returns success.
-    ///
-    /// The deadline is the shared saturated-pass budget rather than a literal —
-    /// it is a hang guard on a main-queue delivery, and in the fast parallel
-    /// pass a single scheduling hop can cost tens of seconds
-    /// (`Tests/CLAUDE.md`, "Population is the scheduler").
-    private func waitUntil(
-        deadline: Duration = TestDeadlines.saturatedPass, _ cond: @MainActor () -> Bool
-    ) async -> Bool {
-        let clock = ContinuousClock()
-        let start = clock.now
-        while !cond() {
-            if clock.now - start > deadline { return false }
-            try? await Task.sleep(for: .milliseconds(2))
-        }
-        return true
-    }
-
     // MARK: - showToast / dismissToast basics
 
     @Test func showToast_publishesToast() async {
@@ -168,8 +150,13 @@ struct DeepLinkToastTests {
 
             state.navigateToWorktree(UUID())
 
-            let looking = await waitUntil { state.activeToast?.style == .progress }
-            #expect(looking)
+            // A hang guard on a main-queue delivery, so the saturated-pass
+            // budget (`Tests/CLAUDE.md`, "Population is the scheduler").
+            let looking = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+                await MainActor.run { state.activeToast?.style == .progress }
+            }
+            #expect(looking != .timedOut, "the lookup's progress toast never showed")
+            guard looking == .satisfied else { return }
             #expect(state.activeToast?.message == "Looking for worktree…")
         }
     }
@@ -304,8 +291,10 @@ struct DeepLinkToastTests {
             return [wt]
         }
         state.navigateToWorktree(id)
-        let inFlight = await waitUntil { gate.isHolding }
-        #expect(inFlight)
+        let inFlight = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { gate.isHolding }
+        }
+        #expect(inFlight != .timedOut, "the archived lookup never reached its gate")
         #expect(state.activeToast?.style == .progress)
         return repoID
     }

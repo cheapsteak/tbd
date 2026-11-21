@@ -10,8 +10,19 @@ import TestSupport
 private func makeIsolatedAppState() -> (AppState, TestDefaultsSuite) {
     let suite = TestDefaultsSuite("com.tbd.tests.notificationclick")
     let defaults = suite.defaults
-    let state = AppState(userDefaults: defaults)
+    let state = AppState(userDefaults: defaults, daemonClient: unreachableDaemonClient())
     return (state, suite)
+}
+
+/// A client for a daemon that cannot exist: its sockets sit in a scratch
+/// directory nobody creates (`fencedScratchRoot`), so every RPC a test
+/// reaches fails at once, fenced run or not, instead of reaching the live
+/// daemon. The reconnect's preference and foreground pushes, the list loads
+/// of a real `refreshAll()` and the archived refresh `selectRepo` starts all
+/// go through it.
+private func unreachableDaemonClient() -> DaemonClient {
+    let root = fencedScratchRoot(prefix: "noclick")
+    return DaemonClient(socketPath: "\(root)/absent.sock", vendSocketPath: "\(root)/absent-vend.sock")
 }
 
 @MainActor
@@ -727,7 +738,7 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     let worktreeID = UUID()
     first.recordNavigation(.worktrees([worktreeID]))
 
-    let appState = AppState(userDefaults: suite.defaults)
+    let appState = AppState(userDefaults: suite.defaults, daemonClient: unreachableDaemonClient())
     appState.isInitialStateLoaded = true
     markListsLoaded(appState)
     let repoID = UUID()
