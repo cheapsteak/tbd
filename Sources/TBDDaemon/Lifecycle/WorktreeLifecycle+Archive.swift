@@ -230,8 +230,9 @@ extension WorktreeLifecycle {
         // What a refused archive leaves is the entries this pass wrote before
         // the throw: a parked row's, with the screen its park stored, and the
         // marks of the live rows closed ahead of the failing one. When every
-        // mark is written and the status write below fails, every row's entry
-        // stays the same way. Each names a tab that is still open, and Closed
+        // mark is written and the status write below fails, every tmux row's
+        // entry stays the same way; a holder row's entry is written only after
+        // the status flip. Each names a tab that is still open, and Closed
         // Terminals lists it beside that tab. A retry writes the same entries
         // again, one per terminal.
         for terminal in terminals where terminal.transport == .tmux {

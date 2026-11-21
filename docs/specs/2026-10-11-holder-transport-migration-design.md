@@ -229,8 +229,9 @@ the session to the resume gate (below) as the mark would. So the write throws
 (`LeftoverTmuxMarkUnwritable`) and nothing is deleted:
 
 - **Closing the tab** fails with the reason and records `transport-failed`.
-  The app, which removed the tab at once, puts it back where it was and shows
-  the reason, and writes no tab order until every delete has succeeded.
+  The app, which removed the tab at once, shows the reason and brings the kept
+  terminal back as a tab of its own at the end of the strip, with its composer
+  draft; a tab close shows one alert however many of its terminals were kept.
 - **Archiving a worktree or a scratch space** is refused with the worktree's
   status, its sessions and every row as they were. The tmux rows are closed
   ahead of the status flip and of every holder's disposal, since a row kept
@@ -238,9 +239,10 @@ the session to the resume gate (below) as the mark would. So the write throws
   refusal leaves is the Closed Terminals entries written for the tmux rows
   closed ahead of the failing one: a parked row's, with its screen, and the
   marks of live rows. A worktree archive whose marks are all written and whose
-  status write then fails leaves every row's entry the same way. Closed
-  Terminals lists each beside its open tab, and a retry writes the same
-  entries again, one per terminal.
+  status write then fails leaves every tmux row's entry the same way; a holder
+  row's entry is written only after the status flip. Closed Terminals lists
+  each beside its open tab, and a retry writes the same entries again, one per
+  terminal.
 - **Reconcile's archive** leaves the worktree for its next sweep, as it does a
   teardown it could not record, and records the failure on that row's
   dispose.
@@ -594,11 +596,13 @@ never unlinks it, and nothing TBD runs creates one any more.
   as they were. Reconcile's archive leaves the worktree, records the failure,
   and archives it on the next sweep that can write the mark. A hook tab keeps
   its row.
-- In the app, a `terminal.delete` that fails puts the closed tab back in its
-  place with its label and composer draft, keeps the selection, shows the
-  daemon's message and writes no tab order. One that succeeds writes the order
-  without the tab and drops the draft; one that cannot reach the daemon writes
-  no order and shows no alert.
+- In the app, a `terminal.delete` the daemon answers with an error brings the
+  terminal back as a tab of its own at the end of the strip, with its composer
+  draft, under one alert for the close that names the count when several were
+  kept. A refused pane of a split comes back alone, and the panes that were
+  deleted stay gone. While a split's panes answer one by one, none of them
+  shows as a tab. A disconnect, a receive timeout or a cut-off response shows
+  no alert.
 - A marked entry survives the newest-50 prune, a later save of the same entry
   keeps its mark, and the lookup returns each server marked for the given
   session ids, across worktrees.
