@@ -143,30 +143,41 @@ extension AppState {
         navigationIndex = snapshot.index
     }
 
-    /// Record a new navigation entry. No-op while navigating (back/forward in
-    /// progress) or when the entry equals the current head. Truncates any
-    /// forward history when the user navigates somewhere new mid-stack.
+    /// Record a new navigation entry. Does nothing while navigating
+    /// (back/forward in progress), and records nothing when the entry equals
+    /// the current head. Truncates any forward history when the user
+    /// navigates somewhere new mid-stack.
     ///
-    /// A new entry also drops a held banner click (`pendingRemoteSessionLink`):
-    /// this navigation came after the click, and the later action wins, so
-    /// the remote load that would answer the click must not replay it over
-    /// this one. Every navigation that makes a history entry passes here:
-    /// sidebar and dock row clicks, the jump menu, `selectRemoteSession`,
-    /// `selectRepo`, `navigateToActiveWorktree`. The paths that must keep the
-    /// click keep it: `restoreSavedSelection` does nothing while a click is
-    /// held, the drain clears the click before its own replay runs, history
-    /// entries are replayed with recording off (`navigateBack` and
-    /// `navigateForward` drop the click themselves), and an archived lookup
-    /// that resolves after the click puts it back
+    /// A navigation also drops a held banner click (`pendingRemoteSessionLink`):
+    /// it came after the click, and the later action wins, so the remote load
+    /// that would answer the click must not replay it over this one. That
+    /// holds when the entry equals the current head too: with a click held,
+    /// a relaunch restores the history but not the selection, so selecting the
+    /// head's worktree is a navigation that records nothing new.
+    ///
+    /// Every navigation that makes a history entry passes here: sidebar and
+    /// dock row clicks, the jump menu, `selectRemoteSession`, `selectRepo`,
+    /// `navigateToActiveWorktree`. `selectionChanged` is false when the
+    /// worktree selection's `didSet` re-fires with the set unchanged, as a
+    /// `remove` of an id that was not selected does when an unselected
+    /// worktree is archived; that is no navigation, and keeps the click.
+    ///
+    /// The paths that must keep the click keep it: `restoreSavedSelection`
+    /// does nothing while a click is held, the drain clears the click before
+    /// its own replay runs, history entries are replayed with recording off
+    /// (`navigateBack` and `navigateForward` drop the click themselves), and
+    /// an archived lookup that resolves after the click puts it back
     /// (`performArchivedNavigation`). A selection the app changes on its own
-    /// and that records an entry still drops it: a finished create swapping
-    /// its placeholder for the real row, or a pruned multi-selection.
-    func recordNavigation(_ entry: NavigationEntry) {
+    /// still drops it: a finished create swapping its placeholder for the
+    /// real row, or a pruned multi-selection.
+    func recordNavigation(_ entry: NavigationEntry, selectionChanged: Bool = true) {
         guard !isNavigating else { return }
+        if selectionChanged {
+            pendingRemoteSessionLink = nil
+        }
         if navigationIndex >= 0 && navigationIndex < navigationEntries.count {
             if navigationEntries[navigationIndex] == entry { return }
         }
-        pendingRemoteSessionLink = nil
         // Truncate forward history if we're not at the head.
         if navigationIndex < navigationEntries.count - 1 {
             navigationEntries.removeSubrange((navigationIndex + 1)...)

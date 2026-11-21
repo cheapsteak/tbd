@@ -295,6 +295,8 @@ struct DeepLinkToastTests {
     /// toast up. Returns the archived worktree's repo.
     private func startHeldArchivedLookup(_ state: AppState, gate: LookupGate) async -> UUID {
         state.isInitialStateLoaded = true
+        state.reposLoaded = true
+        state.worktreesLoaded = true
         let repoID = UUID()
         let id = UUID()
         state.archivedLookupOverride = { [wt = makeArchived(id: id, repoID: repoID)] _ in
@@ -432,6 +434,8 @@ struct DeepLinkToastTests {
     @Test func archivedLookupNotYetStarted_isSupersededByALaterRemoteBannerClick() async {
         await withState { state in
             state.isInitialStateLoaded = true
+            state.reposLoaded = true
+            state.worktreesLoaded = true
             state.remoteMirrorLoaded = true
             state.remoteSessions = [remoteSession("s1")]
             let repoID = UUID()

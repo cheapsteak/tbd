@@ -45,8 +45,9 @@ extension AppState {
     /// `loadHibernationConfig`'s keep-last-known-value semantics).
     ///
     /// The first two outcomes are the daemon's answer, so both set
-    /// `remoteMirrorLoaded` and replay a banner click held for it
-    /// (`drainPendingRemoteSessionLink`). A failure leaves a held click held.
+    /// `remoteMirrorLoaded` and replay a held banner click if the repos and
+    /// worktrees have loaded too (`drainPendingRemoteSessionLink`). A failure
+    /// leaves a held click held.
     func refreshRemote() async {
         do {
             let providers = try await remoteProvidersFetcher()
@@ -229,19 +230,19 @@ extension AppState {
     /// (`SidebarOutlineController.centerSelectionIfChanged`), so this asks
     /// for no scroll.
     ///
-    /// A click is held, not answered, until both lists it is checked against
-    /// are in: the worktrees, which `connectAndLoadInitialState` has loaded
-    /// once it sets `isInitialStateLoaded`, and the remote mirror, which a
-    /// `refreshRemote()` has loaded once it sets `remoteMirrorLoaded`. Until
-    /// then an empty mirror would answer "not found" for a session that may
-    /// exist. The click waits in `pendingRemoteSessionLink`, and
-    /// `drainPendingRemoteSessionLink` replays it once both are in.
+    /// A click is held, not answered, until every list it is checked against
+    /// has loaded (`remoteSessionLinkCanBeAnswered`): the repos and the
+    /// worktrees, which hold the lane and the section to expand, and the
+    /// remote mirror. Until then an empty mirror would answer "not found" for
+    /// a session that may exist, and empty worktrees would miss its lane. The
+    /// click waits in `pendingRemoteSessionLink`, and
+    /// `drainPendingRemoteSessionLink` replays it once all are in.
     ///
     /// The rule holds after a failed launch too. A launch that could not
     /// connect, or whose remote load failed, still sets
     /// `isInitialStateLoaded`, so a click that arrives after it is held as
-    /// well, in place of any click held before it, until a remote load
-    /// succeeds. Holding a click clears a held worktree deep link, and
+    /// well, in place of any click held before it, until the lists it lacks
+    /// have loaded. Holding a click clears a held worktree deep link, and
     /// `navigateToWorktree` clears a held click, so the later click wins.
     ///
     /// An answered click is newer than any archived lookup still in flight,
@@ -252,7 +253,7 @@ extension AppState {
     /// navigated yet; its replay does.
     @MainActor
     func navigateToRemoteSession(provider: String, sessionID: String) {
-        if !isInitialStateLoaded || !remoteMirrorLoaded {
+        if !remoteSessionLinkCanBeAnswered {
             pendingRemoteSessionLink = RemoteSessionSelection(provider: provider, sessionID: sessionID)
             pendingDeepLinkID = nil
             pendingDeepLinkTerminalID = nil
@@ -285,19 +286,30 @@ extension AppState {
         expandRepoContaining(remoteSession: session)
     }
 
+    /// Whether a banner click can be answered now: the initial load has
+    /// finished (`isInitialStateLoaded`), and the repos (`reposLoaded`), the
+    /// worktrees (`worktreesLoaded`) and the remote mirror
+    /// (`remoteMirrorLoaded`) have each loaded at least once. A launch that
+    /// could not connect sets the first with none of the lists loaded.
+    var remoteSessionLinkCanBeAnswered: Bool {
+        isInitialStateLoaded && reposLoaded && worktreesLoaded && remoteMirrorLoaded
+    }
+
     /// Replay the banner click `navigateToRemoteSession` held, once it can be
-    /// answered: the initial load has finished (`isInitialStateLoaded`) and a
-    /// remote load has succeeded (`remoteMirrorLoaded`). Until both hold this
-    /// does nothing and the click stays held.
+    /// answered (`remoteSessionLinkCanBeAnswered`). Until then this does
+    /// nothing and the click stays held.
     ///
-    /// Called at the end of `connectAndLoadInitialState()` and by every
-    /// `refreshRemote()` that gets the daemon's answer, so a click held across
-    /// a failed load is replayed by the next load that succeeds, whichever
-    /// caller runs it. A load that succeeds without the session still answers
-    /// with the not-found toast.
+    /// Called at the end of `connectAndLoadInitialState()`, at the end of
+    /// every `refreshAll()`, and by every `refreshRemote()` that gets the
+    /// daemon's answer. So a click held across a failed load is replayed once
+    /// the last list it lacked has loaded, whichever caller loads it: after a
+    /// launch that could not connect, the poll's reconnect loads the remote
+    /// mirror (`pollTickDidReconnect`) and that tick's `refreshAll()` the
+    /// repos and worktrees. A load that succeeds without the session still
+    /// answers with the not-found toast.
     @MainActor
     func drainPendingRemoteSessionLink() {
-        guard isInitialStateLoaded, remoteMirrorLoaded, let pending = pendingRemoteSessionLink else { return }
+        guard let pending = pendingRemoteSessionLink, remoteSessionLinkCanBeAnswered else { return }
         pendingRemoteSessionLink = nil
         navigateToRemoteSession(provider: pending.provider, sessionID: pending.sessionID)
     }

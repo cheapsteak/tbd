@@ -247,6 +247,7 @@ private func makeAppStateWithRemoteSession(
 ) -> (AppState, TestDefaultsSuite) {
     let (state, suite) = makeIsolatedAppState()
     state.isInitialStateLoaded = true
+    markListsLoaded(state)
     state.remoteMirrorLoaded = true
     state.remoteSessions = [
         remoteSession(sessionID: sessionID, resolvedRepoID: resolvedRepoID, dismissed: dismissed),
@@ -266,6 +267,14 @@ private func clickPostedRemoteBanner(
         terminalIDString: nil,
         remoteProvider: userInfo[MacNotificationManager.remoteProviderUserInfoKey],
         remoteSessionID: userInfo[MacNotificationManager.remoteSessionIDUserInfoKey])
+}
+
+/// Marks the repo and worktree lists loaded, as a successful `refreshAll()`
+/// does, for a test that sets those lists itself.
+@MainActor
+private func markListsLoaded(_ appState: AppState) {
+    appState.reposLoaded = true
+    appState.worktreesLoaded = true
 }
 
 /// A local worktree, selected, so a test can tell whether a click moved
@@ -368,6 +377,7 @@ private func selectLocalWorktree(in appState: AppState) -> UUID {
         branch: "", path: "remote://acme/s1", tmuxServer: "",
         location: .remote(provider: "acme", sessionID: "s1"))
     appState.worktrees = [repoID: [lane]]
+    markListsLoaded(appState)
     appState.remoteMirrorLoaded = true
     appState.remoteSessions = [remoteSession(sessionID: "s1", resolvedRepoID: repoID)]
 
@@ -449,9 +459,10 @@ private func selectLocalWorktree(in appState: AppState) -> UUID {
     #expect(appState.selectedRemoteSession == nil)
     #expect(appState.activeToast == nil)
 
-    // What `connectAndLoadInitialState` does: the first remote refresh fills
-    // the mirror but replays nothing, because the load has not finished;
-    // the load completes, and the held click is replayed.
+    // What `connectAndLoadInitialState` does: the lists load, then the first
+    // remote refresh fills the mirror but replays nothing, because the load
+    // has not finished; the load completes, and the held click is replayed.
+    markListsLoaded(appState)
     stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
     await appState.refreshRemote()
     #expect(appState.pendingRemoteSessionLink == expected)
@@ -516,6 +527,7 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     // `connectAndLoadInitialState`, connected, whose remote refresh fails:
     // the load completes, and the click stays held rather than being
     // answered "not found" against the empty mirror.
+    markListsLoaded(appState)
     stubRemoteLoad(appState, failure: .connectionFailed("acme down"))
     appState.restoreSavedSelection(validWorktreeIDs: appState.allWorktrees.map(\.id))
     await appState.refreshRemote()
@@ -559,7 +571,9 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     #expect(appState.selectedRemoteSession == nil)
     #expect(appState.activeToast == nil)
 
-    // The reconnect's remote load replays the later click.
+    // The reconnect loads the lists, and its remote load replays the later
+    // click.
+    markListsLoaded(appState)
     stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1"), remoteSession(sessionID: "s2")])
     await appState.refreshRemote()
 
@@ -574,6 +588,7 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     let (appState, suite) = makeIsolatedAppState()
     defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
     clickPostedRemoteBanner(appState, sessionID: "s1")
     #expect(appState.pendingRemoteSessionLink != nil)
 
@@ -593,6 +608,7 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     let (appState, suite) = makeIsolatedAppState()
     defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
     let worktreeID = addLocalWorktree(to: appState)
     clickPostedRemoteBanner(appState, sessionID: "s1")
     #expect(appState.pendingRemoteSessionLink != nil)
@@ -612,6 +628,7 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     let (appState, suite) = makeIsolatedAppState()
     defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
     let worktreeID = addLocalWorktree(to: appState)
     clickPostedRemoteBanner(appState, sessionID: "s1")
     #expect(appState.pendingRemoteSessionLink != nil)
@@ -633,6 +650,7 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     let (appState, suite) = makeIsolatedAppState()
     defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
     let first = addLocalWorktree(to: appState)
     let second = addLocalWorktree(to: appState)
     appState.selectedWorktreeIDs = [first]
@@ -657,6 +675,7 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     let (appState, suite) = makeIsolatedAppState()
     defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
 
     clickPostedRemoteBanner(appState, sessionID: "s1")
     appState.selectScratchSection()
@@ -672,6 +691,67 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     #expect(appState.selectedRemoteSession == nil)
 }
 
+@MainActor
+@Test func heldRemoteClick_isDroppedBySelectingTheRestoredHistoryHead() async {
+    // A relaunch with a click held restores the history but not the
+    // selection, so selecting the head's worktree records no new entry. It is
+    // still a navigation after the click.
+    let (first, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let worktreeID = UUID()
+    first.recordNavigation(.worktrees([worktreeID]))
+
+    let appState = AppState(userDefaults: suite.defaults)
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    let repoID = UUID()
+    appState.worktrees[repoID] = [
+        Worktree(id: worktreeID, repoID: repoID, name: "x", displayName: "X",
+                 branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x"),
+    ]
+    #expect(appState.navigationEntries == [.worktrees([worktreeID])])
+    #expect(appState.selectedWorktreeIDs.isEmpty)
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    // What the sidebar writes for a user's row click (`writeSelection`).
+    appState.selectedWorktreeIDs = [worktreeID]
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.navigationEntries == [.worktrees([worktreeID])])
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [worktreeID])
+    #expect(appState.selectedRemoteSession == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_survivesArchivingAWorktreeThatIsNotSelected() async {
+    // Control: archiving an unselected worktree, as an archive after a merge
+    // does, re-fires the selection's `didSet` with the set unchanged. That is
+    // no navigation, so the click stays held and is replayed.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    let selectedID = selectLocalWorktree(in: appState)
+    let archivedID = addLocalWorktree(to: appState)
+    let held = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(appState.pendingRemoteSessionLink == held)
+
+    appState.removeArchivedWorktreeFromState(id: archivedID)
+    #expect(appState.selectedWorktreeIDs == [selectedID])
+    #expect(appState.pendingRemoteSessionLink == held)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedRemoteSession == held)
+    #expect(appState.pendingRemoteSessionLink == nil)
+}
+
 /// Counts the remote fetches a `refreshRemote()` makes. A class, because
 /// the fetchers are escaping closures and cannot mutate a captured `var`.
 @MainActor
@@ -684,7 +764,9 @@ private final class RemoteFetchCount {
     let (appState, suite) = makeIsolatedAppState()
     defer { tearDown(suite) }
     clickPostedRemoteBanner(appState, sessionID: "s1")
-    // The launch completed without connecting, so nothing loaded the mirror.
+    // The launch loaded the lists but lost the daemon before its remote load,
+    // so nothing loaded the mirror.
+    markListsLoaded(appState)
     appState.isInitialStateLoaded = true
     appState.drainPendingRemoteSessionLink()
     stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
@@ -694,6 +776,45 @@ private final class RemoteFetchCount {
     #expect(appState.remoteMirrorLoaded)
     #expect(appState.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
     #expect(appState.pendingRemoteSessionLink == nil)
+}
+
+@MainActor
+@Test func pollTickReconnect_afterALaunchThatNeverLoaded_answersAHeldClickWithItsLane() async {
+    // The reconnect loads the remote mirror before the tick's `refreshAll()`
+    // loads the lists. Answered then, the click would find no lane and select
+    // the bare session; it waits for the lists, and the lane answers it.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let repoID = UUID()
+    // Shaped like `RemoteSessionAdopter` mints them.
+    let lane = Worktree(
+        repoID: repoID, name: "remote://acme/s1", displayName: "lane",
+        branch: "", path: "remote://acme/s1", tmuxServer: "",
+        location: .remote(provider: "acme", sessionID: "s1"))
+    let repo = Repo(id: repoID, path: "/tmp/x", displayName: "x", expanded: false)
+    appState.reposFetcher = { return [repo] }
+    appState.worktreesFetcher = { _ in [lane] }
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1", resolvedRepoID: repoID)])
+    let held = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    // The launch completed without connecting, so nothing loaded.
+    appState.isInitialStateLoaded = true
+    appState.drainPendingRemoteSessionLink()
+
+    await appState.pollTickDidReconnect()
+    #expect(appState.remoteMirrorLoaded)
+    #expect(appState.pendingRemoteSessionLink == held)
+    #expect(appState.selectedRemoteSession == nil)
+    #expect(appState.activeToast == nil)
+
+    // The same tick's poll cycle.
+    await appState.refreshAll()
+
+    #expect(appState.selectedWorktreeIDs == [lane.id])
+    #expect(appState.repos.first?.expanded == true)
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast == nil)
 }
 
 @MainActor
