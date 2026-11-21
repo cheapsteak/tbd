@@ -53,7 +53,7 @@ struct ScratchExclusionTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let scratch = try await db.worktrees.createScratch(
             name: "s", displayName: "s", path: "/tmp/scr-\(UUID().uuidString)", tmuxServer: "tbd-scratch")
@@ -77,7 +77,7 @@ struct ScratchExclusionTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let scratch = try await db.worktrees.createScratch(
             name: "s", displayName: "s", path: "/tmp/scr-\(UUID().uuidString)", tmuxServer: "tbd-scratch")
@@ -102,7 +102,7 @@ struct ScratchExclusionTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         let repo = try await db.repos.create(
             path: "/tmp/repo-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
@@ -127,9 +127,8 @@ struct ScratchExclusionTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
         // A fixed answer, so the pass never asks this machine's tmux servers.
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
+        let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent)
         let scratch = try await db.worktrees.createScratch(
             name: "s", displayName: "s", path: "/tmp/scr-\(UUID().uuidString)", tmuxServer: "tbd-scratch")
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)

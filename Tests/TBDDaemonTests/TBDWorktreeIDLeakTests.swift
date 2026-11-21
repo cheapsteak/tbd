@@ -61,7 +61,8 @@ private func makeHolderBackedRouter(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = registry
     let router = RPCRouter(
@@ -151,7 +152,8 @@ func testCreateWorktreeSetupTabExportsTBDIDs() async throws {
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver(globalHooksDir: hooksDir.path)
+        hooks: HookResolver(globalHooksDir: hooksDir.path),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
 

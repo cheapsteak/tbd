@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import Testing
 @testable import TBDDaemonLib
@@ -35,7 +36,8 @@ struct ActuationLogWiringTests {
             db: db,
             git: GitManager(),
             tmux: tmux,
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = registry
         let router = RPCRouter(

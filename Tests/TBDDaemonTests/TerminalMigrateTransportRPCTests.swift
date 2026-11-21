@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import Testing
 @testable import TBDDaemonLib
@@ -109,7 +110,8 @@ struct TerminalMigrateTransportRPCTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(),
-                tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             subscriptions: subs,
             actuationLog: ActuationLog(path: actuationLogPath))

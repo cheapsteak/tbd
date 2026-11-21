@@ -919,7 +919,8 @@ private final class GateFixture {
             // that turnaround off the production half-second, and the timeout is
             // a hang bound rather than a budget anything is expected to use.
             preSessionTimeout: 30,
-            preSessionPollInterval: 0.05)
+            preSessionPollInterval: 0.05,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),

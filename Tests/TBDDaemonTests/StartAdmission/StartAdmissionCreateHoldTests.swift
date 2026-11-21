@@ -44,7 +44,7 @@ struct StartAdmissionCreateHoldTests {
         // An admitted create spawns through the holder spawn double, so it
         // opens its sessions without starting a process.
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,

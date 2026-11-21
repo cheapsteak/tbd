@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import TestSupport
 import Testing
@@ -424,7 +425,8 @@ struct HookTabTransportGateTests {
                     captureCalls.increment()
                     return "hook output\n"
                 }),
-            hooks: HookResolver())
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
     }
 
     /// A holder hook tab is torn down through the holder, never through tmux.

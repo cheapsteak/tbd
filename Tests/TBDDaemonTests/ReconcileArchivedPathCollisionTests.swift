@@ -23,7 +23,8 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
 }
 

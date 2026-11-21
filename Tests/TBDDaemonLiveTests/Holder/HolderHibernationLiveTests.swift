@@ -1192,7 +1192,8 @@ private final class HibernationFixture {
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(),
             codexExecutableResolver: { "\(home)/bin/codex" },
-            codexHomeEnsurer: { URL(fileURLWithPath: home).appendingPathComponent("codex-shared") })
+            codexHomeEnsurer: { URL(fileURLWithPath: home).appendingPathComponent("codex-shared") },
+            leftoverTmuxProbe: .absent)
         await coordinator.setHolderRegistry(registry)
 
         return HibernationFixture(

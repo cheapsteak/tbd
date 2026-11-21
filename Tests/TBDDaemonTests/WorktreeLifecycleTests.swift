@@ -26,7 +26,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -63,7 +64,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -85,7 +87,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -117,7 +120,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
 
@@ -164,7 +168,8 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
-        modelProfileResolver: resolver
+        modelProfileResolver: resolver,
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -182,7 +187,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
 
     await #expect(throws: WorktreeLifecycleError.self) {
@@ -199,7 +205,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -226,7 +233,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -262,7 +270,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -287,7 +296,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
 
     await #expect(throws: WorktreeLifecycleError.self) {
@@ -304,7 +314,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -331,7 +342,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -352,7 +364,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -389,7 +402,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -431,7 +445,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -455,7 +470,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -478,7 +494,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -504,7 +521,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -543,7 +561,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -572,7 +591,8 @@ import Testing
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
@@ -645,7 +665,8 @@ import Testing
         // RESOLVED profile, so it is the only one whose spawn ensures a
         // per-profile config dir. Without the injection it lands in the real
         // ~/tbd/profiles.
-        configDirManager: makeIsolatedConfigDirManager(tag: "lifecycle")
+        configDirManager: makeIsolatedConfigDirManager(tag: "lifecycle"),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
 
@@ -697,9 +718,9 @@ private func seedTmuxShellTerminals(
 private func makeProbedLifecycle(
     db: TBDDatabase, state: LeftoverTmuxServerState
 ) -> WorktreeLifecycle {
-    var lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-    lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in state }
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in state })
     return lifecycle
 }
 
@@ -860,9 +881,9 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     let db = try TBDDatabase(inMemory: true)
     // The server reads as gone — the exact scenario the parking pass acts on.
     let probe = RecordingLeftoverTmuxProbe(answer: { _ in .absent })
-    var lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-    lifecycle.leftoverTmuxProbe = probe.probe
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        leftoverTmuxProbe: probe.probe)
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let serverName = TmuxManager.serverName(forRepoPath: repo.path)
@@ -969,7 +990,8 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        hooks: HookResolver(),
+        leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 

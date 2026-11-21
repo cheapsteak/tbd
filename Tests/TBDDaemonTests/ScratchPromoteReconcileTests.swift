@@ -38,7 +38,8 @@ struct ScratchPromoteReconcileTests {
     private func makeRouter(_ db: TBDDatabase, home: URL) -> RPCRouter {
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
@@ -113,9 +114,9 @@ struct ScratchPromoteReconcileTests {
         let probe = RecordingLeftoverTmuxProbe(answer: { server in
             server == canonical ? .absent : .running
         })
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = probe.probe
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: probe.probe)
         try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
 
         #expect(probe.servers == [promoted.scratch.tmuxServer],
@@ -145,9 +146,9 @@ struct ScratchPromoteReconcileTests {
         let probe = RecordingLeftoverTmuxProbe(answer: { server in
             server == canonical ? .running : .absent
         })
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = probe.probe
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: probe.probe)
         try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
 
         let mainAfter = try #require(try await db.worktrees.get(id: promoted.mainWorktree.id))

@@ -33,16 +33,16 @@ struct WorktreeReconcileOverlayCleanupTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        var lifecycle = WorktreeLifecycle(
+        let lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            // The row below is a live tmux row, and reconcile asks the probe about
+            // its server. A fixed answer keeps this machine's tmux servers out of
+            // the test.
+            leftoverTmuxProbe: .absent
         )
-        // The row below is a live tmux row, and reconcile asks the probe about
-        // its server. A fixed answer keeps this machine's tmux servers out of
-        // the test.
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "test", defaultBranch: "main"
         )

@@ -15,7 +15,8 @@ import TestSupport
                 db: db,
                 git: GitManager(),
                 tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()
+                hooks: HookResolver(),
+                leftoverTmuxProbe: .absent
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),

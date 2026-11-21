@@ -119,7 +119,8 @@ struct WorktreeArchiveUncommittedGuardTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(
-                globalHooksDir: tempDir.appendingPathComponent("no-global-hooks").path))
+                globalHooksDir: tempDir.appendingPathComponent("no-global-hooks").path),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -539,7 +540,8 @@ extension TBDHomeSerialized {
             let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
             var lifecycle = WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver())
+                hooks: HookResolver(),
+                leftoverTmuxProbe: .absent)
             lifecycle.holderRegistry = registry
             let router = RPCRouter(
                 db: db,

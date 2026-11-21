@@ -46,7 +46,8 @@ struct HolderStartupReconcileTests {
             tmux: TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true }),
             signaller: signaller,
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
+            actuationLog: makeTestActuationLog(),
+            leftoverTmuxProbe: .absent)
     }
 
     /// A parked holder row that names a child pid, with the identity anchor an

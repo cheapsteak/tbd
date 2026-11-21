@@ -51,7 +51,8 @@ import Testing
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: tmux,
             startTime: Date(), actuationLog: makeTestActuationLog())
     }
@@ -183,7 +184,8 @@ import Testing
         defer { fx.cleanup() }
         let recorder = RecordedTmuxArgs()
         let lifecycle = WorktreeLifecycle(
-            db: fx.db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver())
+            db: fx.db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
 
         await lifecycle.closeHookTerminal(
             worktree: fx.worktree,
@@ -232,7 +234,8 @@ import Testing
             id: fx.terminal.id, sessionID: "sess-abc", snapshot: snapshot)
         let recorder = RecordedTmuxArgs()
         let lifecycle = WorktreeLifecycle(
-            db: fx.db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver())
+            db: fx.db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
 
         _ = try await lifecycle.beginArchiveWorktree(worktreeID: fx.worktree.id)
 
@@ -254,7 +257,8 @@ import Testing
         defer { fx.cleanup() }
         let recorder = RecordedTmuxArgs()
         let lifecycle = WorktreeLifecycle(
-            db: fx.db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver())
+            db: fx.db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
 
         _ = try await lifecycle.beginArchiveWorktree(worktreeID: fx.worktree.id)
 
@@ -283,9 +287,9 @@ import Testing
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let recorder = RecordedTmuxArgs()
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: recordingTmux(recorder), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "test", defaultBranch: "main")
         let wt = try await db.worktrees.create(
@@ -458,7 +462,8 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: dir))
 
         let lifecycle = WorktreeLifecycle(
-            db: fx.db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+            db: fx.db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         try await lifecycle.forgetWorktree(worktreeID: fx.worktree.id)
 
         #expect(try await fx.db.worktrees.get(id: fx.worktree.id) == nil)

@@ -26,7 +26,8 @@ struct ArchivedBackfillDeferralTests {
         db: TBDDatabase, git: GitManager, tempDir: URL, repoDir: URL
     ) async throws -> BrokenRow {
         var lifecycle = WorktreeLifecycle(
-            db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+            db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -65,12 +66,12 @@ struct ArchivedBackfillDeferralTests {
         let git = GitManager()
         let broken = try await makeBrokenArchivedRow(
             db: db, git: git, tempDir: tempDir, repoDir: repoDir)
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            // A fixed answer, so reconciliation never asks this machine's tmux
+            // servers.
+            leftoverTmuxProbe: .absent
         )
-        // A fixed answer, so reconciliation never asks this machine's tmux
-        // servers.
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
 
         await Daemon().performStartupReconciliation(
             mockMode: nil, database: db, git: git, lifecycle: lifecycle,
@@ -314,7 +315,8 @@ struct ArchivedBackfillDeferralTests {
         let db = try TBDDatabase(inMemory: true)
         let git = GitManager()
         var lifecycle = WorktreeLifecycle(
-            db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+            db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)

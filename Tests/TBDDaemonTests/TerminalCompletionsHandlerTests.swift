@@ -41,7 +41,8 @@ struct TerminalCompletionsHandlerTests {
         return RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: tmux,
             configDirManager: configDirManager,
             completionInventory: CompletionInventoryService(

@@ -86,7 +86,8 @@ struct SessionStatesRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: tmux,
             startTime: Date(),
             now: now,

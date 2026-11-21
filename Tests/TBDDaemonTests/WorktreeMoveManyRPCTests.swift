@@ -29,7 +29,8 @@ import DaemonTestSupport
                 git: GitManager(),
                 tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
-                subscriptions: subs
+                subscriptions: subs,
+                leftoverTmuxProbe: .absent
             ),
             tmux: TmuxManager(dryRun: true),
             subscriptions: subs,

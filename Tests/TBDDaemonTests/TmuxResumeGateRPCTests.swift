@@ -71,9 +71,9 @@ struct TmuxResumeGateRPCTests {
             hostBaseDirectory: root.appendingPathComponent("claude"))
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: manager)
+            configDirManager: manager,
+            leftoverTmuxProbe: probe.probe)
         lifecycle.holderRegistry = registry
-        lifecycle.leftoverTmuxProbe = probe.probe
         let actuationPath = root.appendingPathComponent("actuations.jsonl").path
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, configDirManager: manager,

@@ -52,7 +52,8 @@ struct AutoHibernateOnMergeCoordinatorTests {
             subscriptions: subs, configDirManager: isolatedConfigDirManager(),
             signaller: signaller,
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: logPath.map { ActuationLog(path: $0) } ?? makeTestActuationLog())
+            actuationLog: logPath.map { ActuationLog(path: $0) } ?? makeTestActuationLog(),
+            leftoverTmuxProbe: .absent)
         await hibernation.setHolderRegistry(makeHolderRegistryDouble(launch: FakeHolderLaunch()))
         await hibernation.setHolderProcessIsLive { _ in false }
         let coord = AutoHibernateOnMergeCoordinator(

@@ -41,7 +41,8 @@ struct ArchiveRemovesSessionDirectoriesTests {
             var lifecycle = WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
                 configDirManager: makeIsolatedConfigDirManager(tag: "archmod"),
-                sessionsDir: sessionsDir)
+                sessionsDir: sessionsDir,
+                leftoverTmuxProbe: .absent)
             lifecycle.holderRegistry = registry
             return lifecycle
         }
@@ -334,7 +335,8 @@ struct ArchiveRemovesSessionDirectoriesTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "archrev"),
-            sessionsDir: sessionsDir)
+            sessionsDir: sessionsDir,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -394,15 +396,15 @@ struct ArchiveRemovesSessionDirectoriesTests {
         let db = try TBDDatabase(
             inMemory: true,
             terminalHistoryDir: home.appendingPathComponent("history", isDirectory: true).path)
-        var lifecycle = WorktreeLifecycle(
+        let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "archrec"),
-            sessionsDir: sessionsDir)
-        // The worktree the first sweep leaves active reaches the leftover-tmux
-        // arm too. A server that may still be running keeps that arm off its
-        // rows, so the only thing this test changes between sweeps is whether
-        // every teardown could be recorded.
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .running }
+            sessionsDir: sessionsDir,
+            // The worktree the first sweep leaves active reaches the leftover-tmux
+            // arm too. A server that may still be running keeps that arm off its
+            // rows, so the only thing this test changes between sweeps is whether
+            // every teardown could be recorded.
+            leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in .running })
         let repo = try await db.repos.create(
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         // A row whose path git does not list: the vanished checkout reconcile
@@ -466,7 +468,8 @@ struct ArchiveRemovesSessionDirectoriesTests {
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager,
-            sessionsDir: sessionsDir)
+            sessionsDir: sessionsDir,
+            leftoverTmuxProbe: .absent)
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager, sessionsDir: sessionsDir,

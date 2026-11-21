@@ -83,7 +83,8 @@ struct TerminalSpawnGateTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()),
+                hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(),
             actuationLog: makeTestActuationLog())
         router.holderRegistry = Self.registry(spawner: nil)
@@ -115,7 +116,8 @@ struct TerminalSpawnGateTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()),
+                hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(),
             actuationLog: makeTestActuationLog())
         router.holderRegistry = Self.registry(spawner: nil)
@@ -152,7 +154,8 @@ struct TerminalSpawnGateTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()),
+                hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(),
             actuationLog: makeTestActuationLog())
         router.holderRegistry = Self.registry(spawner: nil)
@@ -201,7 +204,8 @@ struct TerminalSpawnGateTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()),
+                hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(),
             actuationLog: makeTestActuationLog())
         router.holderRegistry = Self.registry(spawner: nil)
@@ -247,7 +251,8 @@ struct TerminalSpawnGateTests {
     @Test func aFirstReviveAsksTheSpawnGate() async throws {
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         let scratch = fencedScratchRoot(prefix: "tbdgate")
         defer { try? FileManager.default.removeItem(atPath: scratch) }
         let repo = try await db.repos.create(

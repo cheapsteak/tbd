@@ -47,7 +47,8 @@ struct MergedTransitionPrecedenceTests {
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
-            subscriptions: subs
+            subscriptions: subs,
+            leftoverTmuxProbe: .absent
         )
         let logDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-actuation-mtp-\(UUID().uuidString)", isDirectory: true)
@@ -66,7 +67,8 @@ struct MergedTransitionPrecedenceTests {
             db: db, tmux: TmuxManager(dryRun: true),
             subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(),
             signaller: signaller,
-            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog(),
+            leftoverTmuxProbe: .absent)
         await hibernation.setHolderRegistry(makeHolderRegistryDouble(launch: FakeHolderLaunch()))
         await hibernation.setHolderProcessIsLive { _ in false }
         let hibernate = AutoHibernateOnMergeCoordinator(db: db, hibernation: hibernation, subscriptions: subs)

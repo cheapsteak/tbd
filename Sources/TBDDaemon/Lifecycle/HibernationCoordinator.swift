@@ -365,10 +365,12 @@ public actor HibernationCoordinator {
 
     /// Whether a tmux server a Closed Terminals mark names is still running,
     /// for the resume gate a wake asks (`TmuxResumeGate`). Asked only when the
-    /// session being woken carries a mark. Production uses the real probe;
-    /// tests replace it through `setLeftoverTmuxProbe`, so no real socket or
-    /// process is asked. A transition measure, like the probe.
-    var leftoverTmuxProbe: LeftoverTmuxServerProbe = .production()
+    /// session being woken carries a mark. The initializer's
+    /// `leftoverTmuxProbe`, or the production probe when none is passed: the
+    /// router hands its lifecycle's, every test construction passes one, and
+    /// a test can replace it through `setLeftoverTmuxProbe`, so no test asks a
+    /// real socket or process. A transition measure, like the probe.
+    var leftoverTmuxProbe: LeftoverTmuxServerProbe
 
     /// How the holder park observes and ends a child process. Injected so a
     /// test can state "the job ignored SIGTERM" in one line instead of
@@ -423,9 +425,11 @@ public actor HibernationCoordinator {
         actuationLog: ActuationLog,
         programStatus: ProgramStatusStore? = nil,
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
-        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
+        leftoverTmuxProbe: LeftoverTmuxServerProbe? = nil
     ) {
         self.db = db
+        self.leftoverTmuxProbe = leftoverTmuxProbe ?? LeftoverTmuxServerProbe.production()
         self.modelProfileResolver = modelProfileResolver
         self.subscriptions = subscriptions
         self.configDirManager = configDirManager

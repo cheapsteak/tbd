@@ -32,7 +32,8 @@ import Testing
     let realTmux = TmuxManager()
     // The production probe, as the daemon builds it.
     let lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
+        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver(),
+        leftoverTmuxProbe: .production()
     )
 
     let repo = try await db.repos.create(

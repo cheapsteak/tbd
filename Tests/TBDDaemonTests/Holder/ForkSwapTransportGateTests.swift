@@ -125,15 +125,15 @@ struct ForkSwapTransportGateTests {
         let db = try TBDDatabase(inMemory: true)
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "fork-swap-gate")
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: configDirManager)
         // A fixed probe, so no test asks the real process table or a socket.
         // It answers `.running`: the source tab is a live tmux row on the
         // session the fork reads, so a start that asked the resume gate about
         // that session would be refused.
         let tmuxProbe = RecordingLeftoverTmuxProbe { _ in .running }
-        lifecycle.leftoverTmuxProbe = tmuxProbe.probe
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            configDirManager: configDirManager,
+            leftoverTmuxProbe: tmuxProbe.probe)
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,

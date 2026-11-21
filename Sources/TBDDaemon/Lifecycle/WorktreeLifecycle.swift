@@ -183,9 +183,10 @@ public struct WorktreeLifecycle: Sendable {
 
     /// Whether the tmux server behind a live tmux row is still running, read
     /// off its socket and the process table. A transition measure with a
-    /// replacement date; see `LeftoverTmuxServerProbe`. Tests replace it so no
-    /// real socket or process is asked.
-    var leftoverTmuxProbe: LeftoverTmuxServerProbe = .production()
+    /// replacement date; see `LeftoverTmuxServerProbe`. The initializer's
+    /// `leftoverTmuxProbe`, or the production probe when none is passed; every
+    /// test construction passes one, so no test asks a real socket or process.
+    var leftoverTmuxProbe: LeftoverTmuxServerProbe
 
     /// Runs between the two halves of `parkLeftoverTmuxRow(_:)` with the row's
     /// id; nil outside tests. A test-only seam: it opens the window a wake or
@@ -232,11 +233,13 @@ public struct WorktreeLifecycle: Sendable {
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         sessionsDir: URL = TBDConstants.sessionsDir(),
         now: @escaping @Sendable () -> Date = { Date() },
+        leftoverTmuxProbe: LeftoverTmuxServerProbe? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.now = now
         self.clock = clock
         self.sessionsDir = sessionsDir
+        self.leftoverTmuxProbe = leftoverTmuxProbe ?? LeftoverTmuxServerProbe.production()
         self.db = db
         self.git = git
         self.tmux = tmux

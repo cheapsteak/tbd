@@ -110,7 +110,8 @@ struct HolderInPlaceSwapTests {
         let configDirManager = makeIsolatedConfigDirManager(tag: "holder-in-place-swap")
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: configDirManager)
+            configDirManager: configDirManager,
+            leftoverTmuxProbe: .absent)
         let actuationLogPath = "\(home)/actuations.jsonl"
         let sessionsDir = URL(fileURLWithPath: "\(home)/sessions", isDirectory: true)
         let router = RPCRouter(

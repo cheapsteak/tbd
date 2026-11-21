@@ -66,6 +66,9 @@ func installPreSessionHook(
 /// pid. The double's pids name no process, so the default answers that every
 /// job the double started is still running — the hook only ends when the test
 /// writes its marker — and every other pid is gone.
+///
+/// `leftoverTmuxProbe` answers every tmux server as gone unless a suite passes
+/// its own, so no test built here asks a real socket or the process table.
 func makeLifecycle(
     db: TBDDatabase,
     recorder: PreSessionRecordedCommands? = nil,
@@ -73,7 +76,8 @@ func makeLifecycle(
     timeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
     windowIsDead: (@Sendable (String) -> Bool)? = nil,
     processSignaller: ProcessSignaller = ScriptedLivenessSignaller.doubleJobsRunning,
-    holder: FakeHolderLaunch = FakeHolderLaunch()
+    holder: FakeHolderLaunch = FakeHolderLaunch(),
+    leftoverTmuxProbe: LeftoverTmuxServerProbe = .absent
 ) -> WorktreeLifecycle {
     var dryRunRecorder: (@Sendable ([String]) -> Void)?
     if let recorder {
@@ -91,7 +95,8 @@ func makeLifecycle(
         subscriptions: subscriptions,
         preSessionTimeout: timeout,
         preSessionPollInterval: 0.05,
-        processSignaller: processSignaller
+        processSignaller: processSignaller,
+        leftoverTmuxProbe: leftoverTmuxProbe
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
     return lifecycle

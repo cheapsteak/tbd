@@ -585,7 +585,10 @@ public final class RPCRouter: Sendable {
             sessionsDir: sessionsDir,
             sessionTitles: lifecycle.sessionTitles,
             actuationLog: actuationLog, programStatus: resolvedProgramStatus,
-            codexExecutableResolver: codexExecutableResolver, codexHomeEnsurer: codexHomeEnsurer
+            codexExecutableResolver: codexExecutableResolver, codexHomeEnsurer: codexHomeEnsurer,
+            // One probe for the router: the wake gate asks the same one
+            // reconcile and the lifecycle's resume gate ask.
+            leftoverTmuxProbe: lifecycle.leftoverTmuxProbe
         )
         self.usageFetcher = usageFetcher
         // Captures the `db` / `prManager` parameters rather than `self`, so the

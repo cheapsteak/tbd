@@ -92,7 +92,8 @@ struct TerminalReviveTransportGateTests {
         let configDirManager = makeIsolatedConfigDirManager(tag: "terminal-revive-gate")
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: configDirManager)
+            configDirManager: configDirManager,
+            leftoverTmuxProbe: .absent)
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,

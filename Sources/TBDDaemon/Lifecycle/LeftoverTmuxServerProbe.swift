@@ -87,7 +87,18 @@ struct LeftoverTmuxServerSighting: Sendable, Equatable {
 /// environment, usually without `TMUX_TMPDIR`, from `/`. A server started under
 /// a `TMUX_TMPDIR` this daemon does not have is listening somewhere no
 /// candidate names. The process table does not depend on either.
-struct LeftoverTmuxServerProbe: Sendable {
+///
+/// **Tests never get this probe by default.** `WorktreeLifecycle` and
+/// `HibernationCoordinator` take one at construction and fall back to
+/// `production()` only when none is passed. A test that reached it would read
+/// the machine's process table, where a tmux process whose argv cannot be read
+/// counts as running. So every construction under `Tests/` names its probe,
+/// `.absent` from `DaemonTestSupport` when the suite does not exercise it, and
+/// `scripts/lint-test-leftover-tmux-probe.py` holds them to that; only the
+/// probe's own suite and the tier-3 reconcile test call `production()`. The
+/// type is public so those initializers can take it; its members are
+/// internal.
+public struct LeftoverTmuxServerProbe: Sendable {
     /// The state of the tmux server with this name (`tmux -L <name>`).
     let state: @Sendable (_ server: String) async -> LeftoverTmuxServerState
 

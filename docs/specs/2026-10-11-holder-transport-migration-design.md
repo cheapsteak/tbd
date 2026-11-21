@@ -655,6 +655,17 @@ never unlinks it, and nothing TBD runs creates one any more.
   vanished checkout followed by a History pane resume, and `terminal.delete`
   followed by `session.resume`, are refused end to end. The probe is injected,
   so no test runs tmux.
+- No suite reaches the production probe by default. `WorktreeLifecycle` and
+  `HibernationCoordinator` take the probe at construction and fall back to the
+  production one only when none is passed, and a router's coordinator gets its
+  lifecycle's. Every construction under `Tests/` names one: `.absent` from
+  `DaemonTestSupport` where the suite does not exercise the probe, its own
+  where it does. `scripts/lint-test-leftover-tmux-probe.py`, in the `lint` job
+  and the pre-push hook, fails a construction that names none, and a call to
+  `production()` outside the probe's own suite and the tier-3 reconcile test
+  that runs it against a real tmux server. Without it a suite could read the
+  runner's process table, where a tmux process whose argv cannot be read
+  counts as running.
 
 ## Rejected alternatives
 

@@ -50,7 +50,8 @@ struct HolderSpawnDoubleTests {
             tmux: TmuxManager(dryRun: true, dryRunRecorder: { tmuxRecorder.record($0) }),
             hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "holder-spawn-double"),
-            now: { spawnedAt })
+            now: { spawnedAt },
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let repo = try await db.repos.create(
             path: "/tmp/tbd-hsd-repo-\(UUID().uuidString)",

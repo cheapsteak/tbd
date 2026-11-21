@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import Testing
 
@@ -51,7 +52,7 @@ struct StartAdmissionRouterTests {
         // Spawns go through the holder spawn double, so an admitted
         // `terminal.create` opens a session without starting a process.
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,

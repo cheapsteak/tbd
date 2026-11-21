@@ -17,7 +17,7 @@ struct RepoAddScratchGuardTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         let scratchChild = TBDConstants.scratchDir.appendingPathComponent("some-project").path
@@ -37,7 +37,7 @@ struct RepoAddScratchGuardTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         // A temporary git repo with a commit, outside the scratch directory
@@ -58,7 +58,7 @@ struct RepoAddScratchGuardTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
 
         // Create a scratch child directory

@@ -69,12 +69,13 @@ struct HolderReconcileInventoryTests {
     ) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-            processSignaller: signaller, clock: clock)
+            processSignaller: signaller,
+            // Every tmux server reads as gone — the answer a holder row's worktree
+            // gets from a real socket, since a server that was never started has
+            // none — so a holder row that reached the tmux arm would be reclaimed.
+            leftoverTmuxProbe: .absent,
+            clock: clock)
         lifecycle.holderRegistry = registry
-        // Every tmux server reads as gone — the answer a holder row's worktree
-        // gets from a real socket, since a server that was never started has
-        // none — so a holder row that reached the tmux arm would be reclaimed.
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
         return lifecycle
     }
 

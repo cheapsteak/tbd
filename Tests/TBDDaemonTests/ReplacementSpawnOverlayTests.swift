@@ -212,7 +212,8 @@ extension TBDHomeSerialized {
         let coordinator = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             configDirManager: isolatedConfigDirManager(), sessionsDir: sessions,
-            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog(),
+            leftoverTmuxProbe: .absent)
         await coordinator.setHolderRegistry(registry)
         return await coordinator.wake(terminalID: terminal.id)
     }

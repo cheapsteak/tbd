@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import TestSupport
 import Testing
@@ -54,7 +55,7 @@ struct ActuationLogSweepWiringTests {
     }
 
     private func makeLifecycle(db: TBDDatabase, tmux: TmuxManager) -> WorktreeLifecycle {
-        WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
     }
 
     // MARK: - reconcile: a worktree that left disk

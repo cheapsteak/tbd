@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Darwin
 import Foundation
 import TestSupport
@@ -910,7 +911,8 @@ private final class SwapFixture {
                 .appendingPathComponent("claude", isDirectory: true))
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: configDirManager)
+            configDirManager: configDirManager,
+            leftoverTmuxProbe: .absent)
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,

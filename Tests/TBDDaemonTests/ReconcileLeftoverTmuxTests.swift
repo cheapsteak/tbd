@@ -51,9 +51,9 @@ struct ReconcileLeftoverTmuxTests {
     private func makeLifecycle(
         db: TBDDatabase, probe: RecordingLeftoverTmuxProbe
     ) -> WorktreeLifecycle {
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = probe.probe
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: probe.probe)
         return lifecycle
     }
 
@@ -201,7 +201,8 @@ struct ReconcileLeftoverTmuxTests {
             db: db, tmux: tmux,
             configDirManager: makeIsolatedConfigDirManager(tag: "reconcile-lift"),
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
+            actuationLog: makeTestActuationLog(),
+            leftoverTmuxProbe: .absent)
         await coordinator.reconcileOnStartup()
         try await lifecycle.reconcile(
             repoID: repo.id,
@@ -415,12 +416,12 @@ struct ReconcileLeftoverTmuxTests {
         let rows = try await seedTerminals(db: db, worktree: main)
         let claudeID = rows.claude.id
         let shellID = rows.shell.id
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in
-            await Self.migrateToHolder(db: db, claudeID: claudeID, shellID: shellID)
-            return .absent
-        }
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in
+                await Self.migrateToHolder(db: db, claudeID: claudeID, shellID: shellID)
+                return .absent
+            })
 
         try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
 

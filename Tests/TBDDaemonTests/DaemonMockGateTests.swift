@@ -22,7 +22,8 @@ struct DaemonMockGateTests {
             db: db,
             git: git,
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
 
         // Seed a repo whose path definitely does not exist.
@@ -52,13 +53,13 @@ struct DaemonMockGateTests {
         db: TBDDatabase, state: LeftoverTmuxServerState,
         pendingQuestions: PendingPromptStore = PendingPromptStore()
     ) -> WorktreeLifecycle {
-        var lifecycle = WorktreeLifecycle(
+        let lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
-            pendingQuestions: pendingQuestions)
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in state }
+            pendingQuestions: pendingQuestions,
+            leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in state })
         return lifecycle
     }
 
@@ -187,7 +188,8 @@ struct DaemonMockGateTests {
             db: db,
             git: git,
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
 
         let stalePath = "/tmp/tbd-mock-gate-nonexistent-\(UUID().uuidString)"

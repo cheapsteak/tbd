@@ -42,9 +42,9 @@ struct HolderReconcileExemptionTests {
     /// it keeps the fixture from depending on what the machine's tmux
     /// directory holds.
     private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = LeftoverTmuxServerProbe { _ in .absent }
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         return lifecycle
     }
 

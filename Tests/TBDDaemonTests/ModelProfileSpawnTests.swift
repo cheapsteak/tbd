@@ -77,7 +77,8 @@ struct ModelProfileSpawnTests {
         let registry = makeHolderRegistryDouble(launch: holder)
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: isolatedConfigDirManager())
+            configDirManager: isolatedConfigDirManager(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
@@ -439,7 +440,8 @@ struct ModelProfileSpawnTests {
             modelProfileResolver: resolver,
             configDirManager: isolatedConfigDirManager(),
             codexExecutableResolver: codexExecutableResolver,
-            codexHomeEnsurer: codexHomeEnsurer
+            codexHomeEnsurer: codexHomeEnsurer,
+            leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         return (lifecycle, db, holder)
@@ -1244,7 +1246,8 @@ struct ModelProfileSpawnTests {
         let logPath = logDir.appendingPathComponent("actuations.jsonl").path
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: isolatedConfigDirManager())
+            configDirManager: isolatedConfigDirManager(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
@@ -1315,7 +1318,8 @@ struct ModelProfileSpawnTests {
         defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: manager)
+            configDirManager: manager,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
@@ -1371,7 +1375,8 @@ struct ModelProfileSpawnTests {
         defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: manager)
+            configDirManager: manager,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
@@ -1835,7 +1840,8 @@ struct ModelProfileSpawnTests {
         defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: manager)
+            configDirManager: manager,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
@@ -2018,7 +2024,8 @@ struct ModelProfileSpawnTests {
         let registry = makeHolderRegistryDouble(launch: holder)
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: configDirManager)
+            configDirManager: configDirManager,
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,

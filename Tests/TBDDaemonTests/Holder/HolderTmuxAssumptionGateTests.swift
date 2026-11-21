@@ -263,7 +263,8 @@ struct HolderTmuxAssumptionGateTests {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             signaller: signaller, sessionsDir: sessionsDir, sessionTitles: sessionTitles,
-            actuationLog: makeTestActuationLog())
+            actuationLog: makeTestActuationLog(),
+            leftoverTmuxProbe: .absent)
         await coordinator.setHolderRegistry(registry)
         // A live holder, so the no-reader rail is what these rows reach;
         // the ended-session path has tests of its own.
@@ -314,9 +315,9 @@ struct HolderTmuxAssumptionGateTests {
         _ db: TBDDatabase, tmux: TmuxManager,
         probe: LeftoverTmuxServerProbe = LeftoverTmuxServerProbe { _ in .absent }
     ) -> RPCRouter {
-        var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
-        lifecycle.leftoverTmuxProbe = probe
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            leftoverTmuxProbe: probe)
         return RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -2734,7 +2735,8 @@ struct HolderTmuxAssumptionGateTests {
         _ db: TBDDatabase, tmux: TmuxManager, registry: HolderRegistry?
     ) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         return lifecycle
     }
@@ -3357,7 +3359,8 @@ struct HolderTmuxAssumptionGateTests {
             now: dates.provider,
             exitPollInterval: .milliseconds(1),
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: ActuationLog(path: logPath))
+            actuationLog: ActuationLog(path: logPath),
+            leftoverTmuxProbe: .absent)
         await coordinator.setHolderRegistry(registry)
         // A live holder, so the no-reader rail is what these rows reach;
         // the ended-session path has tests of its own.

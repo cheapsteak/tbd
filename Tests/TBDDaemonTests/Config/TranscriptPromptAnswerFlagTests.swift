@@ -95,7 +95,7 @@ struct TranscriptPromptAnswerFlagTests {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
         for value in [true, false] {
             let setRequest = try RPCRequest(

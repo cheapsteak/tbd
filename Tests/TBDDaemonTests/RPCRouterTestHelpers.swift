@@ -31,7 +31,8 @@ struct RPCRouterTests {
             db: db,
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = registry
         let router = RPCRouter(

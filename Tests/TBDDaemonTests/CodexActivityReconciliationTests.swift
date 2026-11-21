@@ -23,7 +23,8 @@ struct CodexActivityReconciliationTests {
                 db: db,
                 git: GitManager(),
                 tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()
+                hooks: HookResolver(),
+                leftoverTmuxProbe: .absent
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
@@ -37,7 +38,8 @@ struct CodexActivityReconciliationTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(),
-                tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+                tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             now: now,

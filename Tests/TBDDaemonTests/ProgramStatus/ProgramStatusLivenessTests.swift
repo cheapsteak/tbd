@@ -47,7 +47,8 @@ import TestSupport
             db: try TBDDatabase(inMemory: true), tmux: TmuxManager(dryRun: true),
             configDirManager: makeIsolatedConfigDirManager(tag: "program-status-liveness"),
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog(), programStatus: programStatus)
+            actuationLog: makeTestActuationLog(), programStatus: programStatus,
+            leftoverTmuxProbe: .absent)
     }
 
     private func seed(_ store: ProgramStatusStore, _ terminal: Terminal, at date: Date) async throws {

@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Foundation
 import TestSupport
 import Testing
@@ -56,7 +57,8 @@ struct ActuationLogTeardownWiringTests {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                leftoverTmuxProbe: .absent),
             tmux: tmux,
             startTime: Date(),
             actuationLog: ActuationLog(path: logPath))
@@ -601,7 +603,8 @@ struct ActuationLogTeardownWiringTests {
         // before the row is written, so the router has the holder spawn double.
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,

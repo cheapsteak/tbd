@@ -94,9 +94,9 @@ struct TerminalTransportMigratorTests {
         /// A lifecycle over this fixture's database whose socket probe is
         /// `probe`, so no socket is asked.
         func lifecycle(probe: RecordingLeftoverTmuxProbe) -> WorktreeLifecycle {
-            var lifecycle = WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
-            lifecycle.leftoverTmuxProbe = probe.probe
+            let lifecycle = WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                leftoverTmuxProbe: probe.probe)
             return lifecycle
         }
 
@@ -225,7 +225,8 @@ struct TerminalTransportMigratorTests {
             db: db, tmux: TmuxManager(dryRun: true),
             configDirManager: makeIsolatedConfigDirManager(tag: "transport-migration"),
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog(tag: "transport-migration"))
+            actuationLog: makeTestActuationLog(tag: "transport-migration"),
+            leftoverTmuxProbe: .absent)
         let registry: HolderRegistry
         if let holderLaunch {
             registry = makeHolderRegistryDouble(launch: holderLaunch)

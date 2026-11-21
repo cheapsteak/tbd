@@ -336,7 +336,8 @@ struct WorktreeConversationCarryoverTests {
                 hostBaseDirectory: claudeHome
             ),
             preSessionPollInterval: 0.05,
-            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning
+            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
+            leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         return lifecycle

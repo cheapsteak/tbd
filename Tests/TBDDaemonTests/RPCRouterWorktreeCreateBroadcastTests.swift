@@ -52,7 +52,8 @@ struct RPCRouterWorktreeCreateBroadcastTests {
             hooks: HookResolver(),
             subscriptions: subs,
             preSessionPollInterval: 0.05,
-            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning
+            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
+            leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = registry
         let router = RPCRouter(

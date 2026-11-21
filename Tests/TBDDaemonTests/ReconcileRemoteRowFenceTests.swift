@@ -18,7 +18,8 @@ import Foundation
             db: db,
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            leftoverTmuxProbe: .absent
         )
     }
 

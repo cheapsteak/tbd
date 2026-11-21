@@ -1108,13 +1108,15 @@ struct WorktreeReviveFreshTests {
 
     /// Every spawn goes through the holder spawn double `holder`, whose
     /// `launches` record what each tab was asked to run. Pass the same
-    /// registry to any router built over this lifecycle.
+    /// registry to any router built over this lifecycle. `leftoverTmuxProbe`
+    /// answers every tmux server as gone unless a test passes its own.
     private func makeReviveFreshLifecycle(
         db: TBDDatabase,
         holder: FakeHolderLaunch = FakeHolderLaunch(),
         subscriptions: StateSubscriptionManager? = nil,
         modelProfileResolver: ModelProfileResolver? = nil,
-        configDirManager: ClaudeProfileConfigDirManager? = nil
+        configDirManager: ClaudeProfileConfigDirManager? = nil,
+        leftoverTmuxProbe: LeftoverTmuxServerProbe = .absent
     ) -> WorktreeLifecycle {
         let claudeHome = TBDConstants.configDir
             .appendingPathComponent("claude-home", isDirectory: true)
@@ -1136,7 +1138,8 @@ struct WorktreeReviveFreshTests {
             // and the hook ends only when a test writes its marker.
             processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
             codexExecutableResolver: { "/usr/bin/true" },
-            codexHomeEnsurer: { TBDConstants.configDir.appendingPathComponent("codex") }
+            codexHomeEnsurer: { TBDConstants.configDir.appendingPathComponent("codex") },
+            leftoverTmuxProbe: leftoverTmuxProbe
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         return lifecycle
