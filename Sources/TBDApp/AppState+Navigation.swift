@@ -162,6 +162,17 @@ extension AppState {
     /// `remove` of an id that was not selected does when an unselected
     /// worktree is archived; that is no navigation, and keeps the click.
     ///
+    /// A user who picks again what is already selected leaves the set
+    /// unchanged too, and the `didSet` cannot tell that from the archive. So
+    /// the gestures that can pick the current selection again drop the click
+    /// themselves (`dropHeldRemoteSessionLink`): `navigateToActiveWorktree`
+    /// (a pinned-dock tap, among others), the jump menu
+    /// (`JumpMenuController.select`), and `selectRepo`, whose `didSet`
+    /// records nothing for the repo already selected. A deselection in the
+    /// sidebar or the dock records nothing at all, so it drops the click
+    /// where the outline and the dock write it. Every other drop goes through
+    /// that helper too.
+    ///
     /// The paths that must keep the click keep it: `restoreSavedSelection`
     /// does nothing while a click is held, the drain clears the click before
     /// its own replay runs, history entries are replayed with recording off
@@ -173,7 +184,7 @@ extension AppState {
     func recordNavigation(_ entry: NavigationEntry, selectionChanged: Bool = true) {
         guard !isNavigating else { return }
         if selectionChanged {
-            pendingRemoteSessionLink = nil
+            dropHeldRemoteSessionLink()
         }
         if navigationIndex >= 0 && navigationIndex < navigationEntries.count {
             if navigationEntries[navigationIndex] == entry { return }
@@ -209,7 +220,7 @@ extension AppState {
         navigationIndex = index
         // A user's navigation, which records no entry, so it drops a held
         // banner click here rather than in `recordNavigation`.
-        pendingRemoteSessionLink = nil
+        dropHeldRemoteSessionLink()
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
         navigationHistoryDidChange()
     }
@@ -226,7 +237,7 @@ extension AppState {
         }
         navigationIndex = index
         // As in navigateBack: a user's navigation drops a held banner click.
-        pendingRemoteSessionLink = nil
+        dropHeldRemoteSessionLink()
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
         navigationHistoryDidChange()
     }
@@ -402,7 +413,7 @@ extension AppState {
     /// A header click records no history entry, so it drops a held banner
     /// click here, as `recordNavigation` does for the navigations that do.
     func selectRemoteProvider(_ provider: String) {
-        pendingRemoteSessionLink = nil
+        dropHeldRemoteSessionLink()
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = nil

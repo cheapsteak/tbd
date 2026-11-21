@@ -1027,8 +1027,14 @@ extension AppState {
     /// Supersedes an archived lookup still in flight
     /// (`supersedeArchivedLookup`), so the lookup's late resolution cannot
     /// replace this selection with the archive view.
+    ///
+    /// Drops a held banner click: this is a later navigation, and when `id`
+    /// is selected already the selection's `didSet` records it as none (see
+    /// `recordNavigation`). A drain answering a click with its lane clears
+    /// the click before it calls this, so its answer is unaffected.
     @MainActor
     func navigateToActiveWorktree(_ id: UUID, terminalID: UUID? = nil) {
+        dropHeldRemoteSessionLink()
         supersedeArchivedLookup()
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = [id]
@@ -1199,7 +1205,7 @@ extension AppState {
         // whether it is held for the initial load or for a remote load that
         // has not yet succeeded. Otherwise that load would replay it over
         // this navigation.
-        pendingRemoteSessionLink = nil
+        dropHeldRemoteSessionLink()
         // Cold-start guard: a tbd:// click can arrive between AppState.init()
         // and the daemon RPC populating `worktrees`. If we fall through to
         // archived lookup now we'll miss real active worktrees. Buffer
@@ -1231,7 +1237,12 @@ extension AppState {
     }
 
     /// Select a repo to show its archived worktrees in the content pane.
+    ///
+    /// Drops a held banner click itself: a click on the header of the repo
+    /// already selected changes nothing, so its `didSet` records no
+    /// navigation (`recordNavigation`).
     func selectRepo(id: UUID) {
+        dropHeldRemoteSessionLink()
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = id
@@ -1266,7 +1277,7 @@ extension AppState {
     /// off). With no history entry, it drops a held banner click itself, as
     /// `recordNavigation` does for the navigations that make one.
     func selectScratchSection() {
-        pendingRemoteSessionLink = nil
+        dropHeldRemoteSessionLink()
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = nil

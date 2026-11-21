@@ -775,6 +775,67 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     #expect(appState.pendingRemoteSessionLink == nil)
 }
 
+// A user who picks again what is already selected leaves the selection as it
+// was, which the selection's `didSet` records as no navigation. It is still a
+// later action than the click, so the click is dropped.
+
+@MainActor
+@Test func heldRemoteClick_isDroppedByAJumpMenuJumpToTheSelectedWorktree() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let selectedID = holdRemoteClick(in: appState, dates: TestDateSource())
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    JumpMenuController.select(selectedID, in: appState)
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [selectedID])
+    #expect(appState.selectedRemoteSession == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_isDroppedByNavigatingToTheSelectedWorktree() async {
+    // As a pinned-dock tap on the selected worktree's terminal does.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let selectedID = holdRemoteClick(in: appState, dates: TestDateSource())
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    appState.navigateToActiveWorktree(selectedID)
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [selectedID])
+    #expect(appState.selectedRemoteSession == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_isDroppedByClickingTheSelectedRepoHeader() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    let repoID = UUID()
+    appState.repos = [Repo(id: repoID, path: "/tmp/x", displayName: "x", expanded: false)]
+    appState.selectRepo(id: repoID)
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    appState.selectRepo(id: repoID)
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedRepoID == repoID)
+    #expect(appState.selectedRemoteSession == nil)
+}
+
 /// Counts the remote fetches a `refreshRemote()` makes. A class, because
 /// the fetchers are escaping closures and cannot mutate a captured `var`.
 @MainActor

@@ -144,8 +144,17 @@ final class JumpMenuController {
             close()
             return
         }
-        appState.selectedWorktreeIDs = [row.id]
+        Self.select(row.id, in: appState)
         close()
+    }
+
+    /// Selects the worktree a submitted row names. A jump to the worktree
+    /// already selected leaves the selection as it was, which its `didSet`
+    /// does not count as a navigation, so a held banner click is dropped
+    /// here: the jump is the later action (`AppState.recordNavigation`).
+    static func select(_ worktreeID: UUID, in appState: AppState) {
+        appState.dropHeldRemoteSessionLink()
+        appState.selectedWorktreeIDs = [worktreeID]
     }
 
     /// Anchor the panel ~80pt below the top of the key TBD window,

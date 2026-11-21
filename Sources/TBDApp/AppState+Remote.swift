@@ -266,9 +266,9 @@ extension AppState {
             return
         }
         // This click is answered now, so it replaces any older one still
-        // held; the lane branch can re-select the selection already there,
-        // which `recordNavigation` does not count as a navigation.
-        pendingRemoteSessionLink = nil
+        // held, even when the answer is the not-found toast, which navigates
+        // nowhere.
+        dropHeldRemoteSessionLink()
         supersedeArchivedLookup()
 
         if let lane = activeLane(for: link) {
@@ -331,8 +331,17 @@ extension AppState {
     func drainPendingRemoteSessionLink() {
         guard let pending = pendingRemoteSessionLink, !dropExpiredRemoteSessionLink(),
               remoteSessionLinkCanBeAnswered(pending) else { return }
-        pendingRemoteSessionLink = nil
+        dropHeldRemoteSessionLink()
         navigateToRemoteSession(provider: pending.provider, sessionID: pending.sessionID)
+    }
+
+    /// Drop the held banner click, if any, so no later load replays it. Every
+    /// user action that comes after the click calls this, directly or through
+    /// `recordNavigation`, which lists them; so do a newer click, the drain
+    /// that takes the click to answer it, and its expiry.
+    @MainActor
+    func dropHeldRemoteSessionLink() {
+        pendingRemoteSessionLink = nil
     }
 
     /// How long a banner click stays held. It covers the daemon starting up at
@@ -347,7 +356,7 @@ extension AppState {
     func dropExpiredRemoteSessionLink() -> Bool {
         guard let pending = pendingRemoteSessionLink, let heldAt = pendingRemoteSessionLinkHeldAt,
               now().timeIntervalSince(heldAt) > Self.heldRemoteSessionLinkLifetime else { return false }
-        pendingRemoteSessionLink = nil
+        dropHeldRemoteSessionLink()
         remoteLogger.info(
             "Dropping an expired banner click for \(pending.provider, privacy: .public)/\(pending.sessionID, privacy: .public)")
         return true

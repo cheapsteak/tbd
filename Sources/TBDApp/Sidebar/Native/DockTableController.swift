@@ -568,6 +568,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             selected: selected, current: appState.selectedWorktreeIDs,
             extending: SidebarSelectionBridge.extendsSelection(selectionModifiers()),
             isShown: { shown.contains($0) })
+        // As in the outline: a deselection records no navigation, so it
+        // drops a held banner click here.
+        if ids.isEmpty { appState.dropHeldRemoteSessionLink() }
         writeSelection(ids)
         onUserSelection?()
         isApplyingModelSelection = true

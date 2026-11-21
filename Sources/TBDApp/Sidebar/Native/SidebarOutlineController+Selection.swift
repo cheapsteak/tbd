@@ -179,6 +179,10 @@ extension SidebarOutlineController {
                 guard let item = self.items.existing(id) else { return false }
                 return self.outline.row(forItem: item) >= 0
             })
+        // The selection's `didSet` records no navigation for an empty set,
+        // so a deselection drops a held banner click here: it is the later
+        // action (`AppState.recordNavigation`).
+        if ids.isEmpty { appState.dropHeldRemoteSessionLink() }
         writeSelection(ids)
         // Read back after the `didSet` has routed it.
         markSelectionShown()
