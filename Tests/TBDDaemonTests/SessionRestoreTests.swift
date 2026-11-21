@@ -101,11 +101,13 @@ struct SessionRestoreTests {
         // coordinator, the router and the lifecycle whose reconcile parks.
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), codexExecutableResolver: CodexLaunchTestStub.executableResolver, codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer, leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: makeIsolatedConfigDirManager(tag: "session-restore"),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             sessionsDir: directory.appendingPathComponent("sessions", isDirectory: true),
             actuationLog: ActuationLog(path: logPath), clock: clock)
         router.holderRegistry = registry

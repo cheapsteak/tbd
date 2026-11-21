@@ -444,14 +444,10 @@ public actor HibernationCoordinator {
         self.actuationLog = actuationLog
         self.programStatus = programStatus
         self.codexExecutableResolver = codexExecutableResolver ?? {
-            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
-            return try CodexExecutableResolver.resolve()
+            try CodexExecutableResolver.resolve()
         }
         self.codexHomeEnsurer = codexHomeEnsurer ?? {
-            if tmux.dryRun {
-                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
-            }
-            return try CodexHomeManager().ensureProfilePlugin()
+            try CodexHomeManager().ensureProfilePlugin()
         }
     }
 

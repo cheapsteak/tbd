@@ -70,12 +70,14 @@ struct ContinueInCodexRPCTests {
             git: GitManager(),
             tmux: tmux,
             hooks: HookResolver(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux, actuationLog: makeTestActuationLog())
+            tmux: tmux, codexExecutableResolver: CodexLaunchTestStub.executableResolver, codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer, actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         router.codexExecutableResolver = {
             recorder.event("resolve")

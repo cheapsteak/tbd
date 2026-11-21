@@ -687,14 +687,10 @@ public final class RPCRouter: Sendable {
         }
         self.claudeCloudLive = claudeCloudLive
         self.codexExecutableResolver = codexExecutableResolver ?? {
-            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
-            return try CodexExecutableResolver.resolve()
+            try CodexExecutableResolver.resolve()
         }
         self.codexHomeEnsurer = codexHomeEnsurer ?? {
-            if tmux.dryRun {
-                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
-            }
-            return try CodexHomeManager().ensureProfilePlugin()
+            try CodexHomeManager().ensureProfilePlugin()
         }
         // The poller is a timer and nothing else; the pass it drives is
         // `runPollPass`, which lives here because `pr.refresh` and the on-select

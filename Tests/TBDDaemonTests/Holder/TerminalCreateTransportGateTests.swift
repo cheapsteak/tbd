@@ -89,6 +89,8 @@ struct TerminalCreateTransportGateTests {
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
@@ -98,6 +100,8 @@ struct TerminalCreateTransportGateTests {
             loginSessions: LoginSessionCoordinator(delays: .init(
                 identityPollInterval: .milliseconds(5),
                 identityPollTimeout: .milliseconds(50))),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),

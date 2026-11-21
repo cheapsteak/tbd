@@ -981,6 +981,8 @@ struct WorktreeReviveFreshTests {
         let holder = FakeHolderLaunch()
         let lifecycle = makeReviveFreshLifecycle(db: db, holder: holder)
         let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: lifecycle.tmux,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = lifecycle.holderRegistry
         let admission = StubAdmission(.admit)
@@ -1173,6 +1175,8 @@ struct WorktreeReviveFreshTests {
             lifecycle: lifecycle,
             tmux: lifecycle.tmux,
             subscriptions: subscriptions,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog()
         )
         router.holderRegistry = lifecycle.holderRegistry

@@ -96,6 +96,8 @@ struct TerminalTransportMigratorTests {
         func lifecycle(probe: RecordingLeftoverTmuxProbe) -> WorktreeLifecycle {
             let lifecycle = WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+                codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
                 leftoverTmuxProbe: probe.probe)
             return lifecycle
         }
@@ -226,6 +228,8 @@ struct TerminalTransportMigratorTests {
             configDirManager: makeIsolatedConfigDirManager(tag: "transport-migration"),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "transport-migration"),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         let registry: HolderRegistry
         if let holderLaunch {

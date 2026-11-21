@@ -276,6 +276,8 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             configDirManager: configDirManager("lifecycle"),
             preSessionPollInterval: 0.05,
             processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -285,6 +287,8 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: configDirManager("router"),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             sessionsDir: scratch.appendingPathComponent("sessions", isDirectory: true),
             actuationLog: ActuationLog(path: actuationLogPath))
         router.holderRegistry = registry

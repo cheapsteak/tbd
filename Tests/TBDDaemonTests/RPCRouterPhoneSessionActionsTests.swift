@@ -44,6 +44,8 @@ struct RPCRouterPhoneSessionActionsTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             subscriptions: subs,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -52,6 +54,8 @@ struct RPCRouterPhoneSessionActionsTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: ActuationLog(path: logPath))
         router.holderRegistry = registry
         return Fixture(db: db, router: router, logPath: logPath)
@@ -544,11 +548,15 @@ struct RPCRouterPhoneSessionActionsTests {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
                 subscriptions: subs,
+                codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+                codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
                 leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
             remoteManager: manager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: ActuationLog(path: logPath))
         return RemoteFixture(
             router: router, manager: manager, invoker: invoker, logPath: logPath, registryURL: registryURL)

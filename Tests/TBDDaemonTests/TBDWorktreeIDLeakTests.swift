@@ -17,10 +17,8 @@ import TBDKernel
 ///     export `TBD_WORKTREE_ID` into every session they open, read here from
 ///     the launch the holder spawn double recorded.
 
-private let codexDryRunExecutable = "/opt/tbd-test/bin/codex"
-
 private func containsCodexProfileLaunch(_ body: String) -> Bool {
-    let executable = shellEscape(codexDryRunExecutable)
+    let executable = shellEscape(CodexLaunchTestStub.executablePath)
     return body.contains(
         "unset CODEX_CI CODEX_THREAD_ID; \(executable) --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox")
 }
@@ -62,6 +60,8 @@ private func makeHolderBackedRouter(
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = registry
@@ -69,6 +69,8 @@ private func makeHolderBackedRouter(
         db: db,
         lifecycle: lifecycle,
         tmux: TmuxManager(dryRun: true),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         actuationLog: makeTestActuationLog()
     )
     router.holderRegistry = registry
@@ -153,6 +155,8 @@ func testCreateWorktreeSetupTabExportsTBDIDs() async throws {
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(globalHooksDir: hooksDir.path),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)

@@ -78,6 +78,8 @@ struct ModelProfileSpawnTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: isolatedConfigDirManager(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -87,6 +89,8 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: isolatedConfigDirManager(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog()
         )
         router.holderRegistry = registry
@@ -1247,6 +1251,8 @@ struct ModelProfileSpawnTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: isolatedConfigDirManager(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -1256,6 +1262,8 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: isolatedConfigDirManager(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: ActuationLog(path: logPath))
         router.holderRegistry = registry
         let (_, wt) = try await seedRepoAndWorktree(db)
@@ -1319,6 +1327,8 @@ struct ModelProfileSpawnTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: manager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -1328,6 +1338,8 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         let (_, wt) = try await seedRepoAndWorktree(db)
@@ -1376,6 +1388,8 @@ struct ModelProfileSpawnTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: manager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -1385,6 +1399,8 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         let (_, wt) = try await seedRepoAndWorktree(db)
@@ -1841,6 +1857,8 @@ struct ModelProfileSpawnTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: manager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -1850,6 +1868,8 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         let (_, wt) = try await seedRepoAndWorktree(db)
@@ -2025,6 +2045,8 @@ struct ModelProfileSpawnTests {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -2039,6 +2061,8 @@ struct ModelProfileSpawnTests {
                 identityPollInterval: .milliseconds(50),
                 identityPollTimeout: identityPollTimeout
             )),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog()
         )
         router.holderRegistry = registry

@@ -24,7 +24,7 @@ struct SessionResumeRPCTests {
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         let manager = ClaudeProfileConfigDirManager(baseDirectory: root.appendingPathComponent("profiles"), hostBaseDirectory: root.appendingPathComponent("claude"))
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), configDirManager: manager, leftoverTmuxProbe: .absent)
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), configDirManager: manager, codexExecutableResolver: CodexLaunchTestStub.executableResolver, codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer, leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: tmux,
             codexExecutableResolver: { "/usr/bin/true" }, codexHomeEnsurer: { root.appendingPathComponent("codex") },

@@ -459,6 +459,8 @@ struct LocalAgentArchiveTests {
             tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             modelProfileResolver: ModelProfileResolver(profiles: db.modelProfiles, repos: db.repos, config: db.config),
             configDirManager: makeIsolatedConfigDirManager(tag: "archive-profiles"),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lc.holderRegistry = makeHolderRegistryDouble(launch: holder)
         let tabs = [

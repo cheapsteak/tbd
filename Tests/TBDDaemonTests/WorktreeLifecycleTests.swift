@@ -65,6 +65,8 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -88,6 +90,8 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -121,6 +125,8 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
@@ -169,6 +175,8 @@ import Testing
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         modelProfileResolver: resolver,
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -471,6 +479,8 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -495,6 +505,8 @@ import Testing
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
+        codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+        codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())

@@ -72,6 +72,8 @@ struct HibernationCoordinatorTests {
         HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
     }
 
@@ -169,6 +171,8 @@ struct HibernationCoordinatorTests {
             tmux: TmuxManager(dryRun: true),
             configDirManager: isolatedConfigDirManager(), clock: clock,
             sessionTitles: titles, actuationLog: makeTestActuationLog(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         let holder = await wireHolderDouble(coord)
         try await db.config.setComposerDraftEnabled(true)
@@ -220,6 +224,8 @@ struct HibernationCoordinatorTests {
             tmux: TmuxManager(dryRun: true),
             configDirManager: isolatedConfigDirManager(),
             sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         let holder = await wireHolderDouble(coord)
         guard case .respawnFailed = await coord.wake(terminalID: terminalID) else {
@@ -269,6 +275,7 @@ struct HibernationCoordinatorTests {
             configDirManager: isolatedConfigDirManager(),
             sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog(),
             codexExecutableResolver: { gate.record(["prepare-codex"]); return "/opt/acme/bin/codex" },
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         let registry = HolderRegistry(owner: HolderOwnerToken(rawValue: "acme"), listTerminals: { [] })
         await coord.setHolderRegistry(registry)

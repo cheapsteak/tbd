@@ -77,11 +77,12 @@ public struct WorktreeLifecycle: Sendable {
     public let preSessionPollInterval: TimeInterval
     /// Process-signal seam for the agent reaper. Injectable for tests.
     public let processSignaller: ProcessSignaller
-    /// Resolves the Codex CLI before lifecycle code creates tmux or DB state.
-    /// Stored as a seam so tests do not require Codex or ChatGPT.app installed.
+    /// Resolves the Codex CLI before lifecycle code starts a session or writes
+    /// DB state. Stored as a seam so tests do not require Codex or ChatGPT.app
+    /// installed; `CodexLaunchTestStub` is the one they pass.
     let codexExecutableResolver: @Sendable () throws -> String
     /// Prepares TBD's profile in the user's existing global Codex home before
-    /// lifecycle code creates tmux or terminal state.
+    /// lifecycle code starts a session or writes terminal state.
     let codexHomeEnsurer: @Sendable () throws -> URL
     /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
     /// An actor reference, so every copy of this struct shares one cache.
@@ -253,14 +254,10 @@ public struct WorktreeLifecycle: Sendable {
         self.processSignaller = processSignaller
         self.checkoutTemplates = checkoutTemplates
         self.codexExecutableResolver = codexExecutableResolver ?? {
-            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
-            return try CodexExecutableResolver.resolve()
+            try CodexExecutableResolver.resolve()
         }
         self.codexHomeEnsurer = codexHomeEnsurer ?? {
-            if tmux.dryRun {
-                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
-            }
-            return try CodexHomeManager().ensureProfilePlugin()
+            try CodexHomeManager().ensureProfilePlugin()
         }
     }
 

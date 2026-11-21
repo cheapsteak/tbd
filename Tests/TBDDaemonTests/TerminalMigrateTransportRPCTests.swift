@@ -1,9 +1,9 @@
-import DaemonTestSupport
 import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 import TestSupport
+import DaemonTestSupport
 
 /// `terminal.migrateTransport` — the wire surface over the transport migrator.
 ///
@@ -111,9 +111,13 @@ struct TerminalMigrateTransportRPCTests {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(),
                 tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+                codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
                 leftoverTmuxProbe: .absent),
             tmux: TmuxManager(dryRun: true),
             subscriptions: subs,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: ActuationLog(path: actuationLogPath))
         router.transportMigratorOperationsOverride = Self.operations(
             db: db, canSpawnHolder: canSpawnHolder, wakeResult: wakeResult)

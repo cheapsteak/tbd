@@ -920,6 +920,8 @@ private final class GateFixture {
             // a hang bound rather than a budget anything is expected to use.
             preSessionTimeout: 30,
             preSessionPollInterval: 0.05,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
@@ -931,6 +933,8 @@ private final class GateFixture {
             loginSessions: LoginSessionCoordinator(delays: .init(
                 identityPollInterval: .milliseconds(25),
                 identityPollTimeout: .milliseconds(50))),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         if let recapture {
