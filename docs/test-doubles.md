@@ -1,6 +1,6 @@
 # Test doubles: stand-ins for external dependencies and TBD's own state
 
-TBD's development loop leans on five fakes. Four replace something outside the
+TBD's development loop leans on four fakes. Three replace something outside the
 process under test — an external dependency, or a process TBD launches — and one
 replaces TBD's own state; each answers a different question, and picking the
 wrong one wastes an afternoon, so this is the index. Two test
@@ -28,12 +28,6 @@ real SwiftUI views where a test can measure and photograph them.
   JSON files in a temp directory: no network, no auth. Register it in
   `~/tbd/agent-providers.json` and hand-edit a session file to drive the
   remote-backend UI through states a real provider would take hours to reach.
-- **tmux executable fixture** — `Tests/DaemonTestSupport/TmuxExecutableTestFixture.swift`.
-  Fakes the `tmux` binary itself for Swift tests: a stub executable that
-  reports a known version and logs each invocation, plus a resolver pinned to
-  it. Reach for it when a test's behavior turns on the tmux version and must
-  not depend on the host's `PATH` or the developer's saved fallback — a live
-  tmux is the other tool, and slower.
 - **Holder spawn double** — `FakeHolderLaunch` and
   `makeHolderRegistryDouble(launch:)` in
   `Tests/TBDDaemonTests/HolderSpawnDoubleTestSupport.swift`. Fakes the

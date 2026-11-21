@@ -6,10 +6,6 @@ import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState")
-private let tmuxResolutionLogger = Logger(
-    subsystem: "com.tbd.app",
-    category: "tmux"
-)
 /// Dedicated channel for RPC/poll-cadence observability (storm diagnostics).
 /// Silent by default; activate with `log stream --level debug`.
 private let perfRPCLogger = Logger(subsystem: "com.tbd.app", category: "perf-rpc")
@@ -64,41 +60,6 @@ struct TerminalLimitHit: Equatable {
 struct RemoteAttachGeneration: Equatable {
     var generation: Int
     var startedAt: Date?
-}
-
-enum TmuxStartupResolutionDiagnostic: Equatable {
-    case path(String)
-    case savedFallback(String)
-    case unavailable
-
-    init(resolution: TmuxExecutableResolution?) {
-        switch resolution {
-        case .some(let resolution):
-            switch resolution.source {
-            case .path:
-                self = .path(resolution.path)
-            case .savedFallback:
-                self = .savedFallback(resolution.path)
-            }
-        case .none:
-            self = .unavailable
-        }
-    }
-
-    func log() {
-        switch self {
-        case .path(let path):
-            tmuxResolutionLogger.notice(
-                "startup resolution source=PATH path=\(path, privacy: .public)"
-            )
-        case .savedFallback(let path):
-            tmuxResolutionLogger.notice(
-                "startup resolution source=saved-fallback path=\(path, privacy: .public)"
-            )
-        case .unavailable:
-            tmuxResolutionLogger.error("startup resolution source=unavailable")
-        }
-    }
 }
 
 @MainActor
@@ -2087,15 +2048,9 @@ final class AppState {
     /// a later plain alert can never inherit buttons for an earlier file.
     var alertRevealPath: String? = nil
 
-    private(set) var tmuxExecutableResolution: TmuxExecutableResolution?
-    private(set) var savedTmuxExecutablePath: String?
-    private(set) var isTmuxLocationPromptPresented = false
-    @ObservationIgnored private var hasCheckedTmuxAvailabilityAtStartup = false
-
     let themeStore = ThemeStore()
 
     let daemonClient: DaemonClient
-    let tmuxExecutableResolver: TmuxExecutableResolver
     /// The app's own transcript reader. Constructed unconditionally — it costs
     /// nothing until a pane registers, and it stats no file until then.
     let transcriptSource = TranscriptSource()
@@ -2945,7 +2900,6 @@ final class AppState {
 
     init(
         userDefaults: UserDefaults = .standard,
-        tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
         onEngineNotice: @escaping @MainActor (TerminalEngineNotice) -> Void = TerminalEngineNotice.log,
         phoneRetryClock: any Clock<Duration> = ContinuousClock(),
         daemonClient: DaemonClient = DaemonClient()
@@ -2955,9 +2909,6 @@ final class AppState {
         self.onEngineNotice = onEngineNotice
         self.phoneRetryClock = phoneRetryClock
         self.windowChrome = WindowChromeState()
-        self.tmuxExecutableResolver = tmuxExecutableResolver
-        self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()
-        self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
         RetiredFilePanelDefaults.remove(from: userDefaults)
         restoreLayouts()
         restorePaneHistories()
@@ -3012,34 +2963,6 @@ final class AppState {
                 startPolling()
             }
         }
-    }
-
-    func refreshTmuxExecutableState() {
-        savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
-        tmuxExecutableResolution = tmuxExecutableResolver.resolve()
-    }
-
-    func checkTmuxAvailabilityAtStartup() {
-        guard !hasCheckedTmuxAvailabilityAtStartup else { return }
-        hasCheckedTmuxAvailabilityAtStartup = true
-        refreshTmuxExecutableState()
-        TmuxStartupResolutionDiagnostic(resolution: tmuxExecutableResolution).log()
-        isTmuxLocationPromptPresented = tmuxExecutableResolution == nil
-    }
-
-    func dismissTmuxLocationPrompt() {
-        isTmuxLocationPromptPresented = false
-    }
-
-    func saveTmuxExecutableFallback(_ path: String) throws {
-        try tmuxExecutableResolver.save(path)
-        refreshTmuxExecutableState()
-        isTmuxLocationPromptPresented = false
-    }
-
-    func clearTmuxExecutableFallback() throws {
-        try tmuxExecutableResolver.clear()
-        refreshTmuxExecutableState()
     }
 
     /// True when this process is a SwiftPM / XCTest test harness. Detected by

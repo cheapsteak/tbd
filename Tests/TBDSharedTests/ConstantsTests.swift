@@ -94,6 +94,14 @@ import Foundation
         #expect(TBDConstants.actuationLogPath(environment: env) == "/tmp/tbd-derived/actuations.jsonl")
     }
 
+    @Test func tmuxExecutablePathFileFollowsTBDHome() {
+        let file = TBDConstants.tmuxExecutablePathFile(
+            environment: ["TBD_HOME": "/tmp/acme-tbd-home"]
+        )
+
+        #expect(file.path == "/tmp/acme-tbd-home/tmux-executable-path")
+    }
+
     @Test func actuationLogPathFallsBackToHomeTbdWhenKeyAbsent() {
         let path = TBDConstants.actuationLogPath(environment: [:])
         #expect(path.hasSuffix("/tbd/actuations.jsonl"))

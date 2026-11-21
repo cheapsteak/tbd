@@ -104,8 +104,6 @@ struct LocalizedErrorPayloadTests {
             ("FDChannelError.sendFailed", FDChannelError.sendFailed(32)),
             ("FDChannelError.receiveFailed", FDChannelError.receiveFailed(54)),
             ("FDChannelError.peerClosed", FDChannelError.peerClosed),
-            ("TmuxExecutableResolverError.pathMustBeAbsolute", TmuxExecutableResolverError.pathMustBeAbsolute),
-            ("TmuxExecutableResolverError.pathIsNotExecutable", TmuxExecutableResolverError.pathIsNotExecutable),
             ("PanelOperationError.panelNotFound", PanelOperationError.panelNotFound(panelID)),
             (
                 "PanelOperationError.kindMismatch",

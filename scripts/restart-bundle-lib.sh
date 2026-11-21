@@ -1313,7 +1313,7 @@ seed_tmux_fallback() {
 }
 
 # True when <path> is absolute and, after following symlinks, a regular file
-# that is executable: the rule TmuxExecutableResolver applies to a saved path.
+# that is executable: what a saved tmux path has to name.
 _is_absolute_regular_executable() {
     case "${1-}" in /*) ;; *) return 1 ;; esac
     [ -f "$1" ] && [ -x "$1" ]

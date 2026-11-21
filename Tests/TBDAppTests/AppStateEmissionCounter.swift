@@ -204,9 +204,6 @@ final class AppStateEmissionTracker {
         _ = state.alertMessage
         _ = state.alertIsError
         _ = state.alertRevealPath
-        _ = state.tmuxExecutableResolution
-        _ = state.savedTmuxExecutablePath
-        _ = state.isTmuxLocationPromptPresented
         _ = state.daemonCapabilities
         _ = state.queuedPromptTarget
         _ = state.parkedPromptReadback
@@ -343,9 +340,6 @@ final class AppStateEmissionTracker {
         "alertMessage",
         "alertIsError",
         "alertRevealPath",
-        "tmuxExecutableResolution",
-        "savedTmuxExecutablePath",
-        "isTmuxLocationPromptPresented",
         "daemonCapabilities",
         "queuedPromptTarget",
         "parkedPromptReadback",
