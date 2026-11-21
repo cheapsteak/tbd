@@ -150,10 +150,11 @@ final class JumpMenuController {
 
     /// Selects the worktree a submitted row names. A jump to the worktree
     /// already selected leaves the selection as it was, which its `didSet`
-    /// does not count as a navigation, so a held banner click is dropped
-    /// here: the jump is the later action (`AppState.recordNavigation`).
+    /// does not count as a navigation, so the jump says it is one here
+    /// (`AppState.userDidNavigate`): it drops a held banner click and
+    /// supersedes an archived lookup in flight.
     static func select(_ worktreeID: UUID, in appState: AppState) {
-        appState.dropHeldRemoteSessionLink()
+        appState.userDidNavigate()
         appState.selectedWorktreeIDs = [worktreeID]
     }
 

@@ -394,6 +394,54 @@ struct DeepLinkToastTests {
         }
     }
 
+    /// A row the user selects in the sidebar or the dock is a later
+    /// navigation than the link, so it supersedes the lookup: the lookup's
+    /// progress toast goes at once, and its late answer is dropped.
+    @Test func archivedLookupInFlight_isSupersededByALaterSidebarSelection() async {
+        await withState { state in
+            let gate = LookupGate()
+            let archivedRepoID = await startHeldArchivedLookup(state, gate: gate)
+            let activeRepoID = UUID()
+            let activeID = UUID()
+            var active = makeArchived(id: activeID, repoID: activeRepoID)
+            active.status = .active
+            state.worktrees = [activeRepoID: [active]]
+
+            // What the sidebar outline and the dock write for a row click.
+            state.selectedWorktreeIDs = [activeID]
+            #expect(state.activeToast == nil)
+
+            gate.release()
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedWorktreeIDs == [activeID])
+            #expect(state.selectedRepoID == nil)
+            #expect(state.highlightedArchivedWorktreeID == nil)
+            #expect(state.archivedWorktrees[archivedRepoID] == nil)
+            #expect(state.activeToast == nil)
+        }
+    }
+
+    @Test func archivedLookupInFlight_isSupersededByALaterRemoteSessionSelection() async {
+        await withState { state in
+            let gate = LookupGate()
+            let repoID = await startHeldArchivedLookup(state, gate: gate)
+            let expected = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+
+            state.selectRemoteSession(provider: "acme", sessionID: "s1")
+            #expect(state.activeToast == nil)
+
+            gate.release()
+            await state.archivedLookupTask?.value
+
+            #expect(state.selectedRemoteSession == expected)
+            #expect(state.selectedRepoID == nil)
+            #expect(state.highlightedArchivedWorktreeID == nil)
+            #expect(state.archivedWorktrees[repoID] == nil)
+            #expect(state.activeToast == nil)
+        }
+    }
+
     /// A click held for the remote mirror has not navigated, so the lookup
     /// keeps its navigation. The lookup lands a link followed before the
     /// click, so the click, the later action, stays held through it and is

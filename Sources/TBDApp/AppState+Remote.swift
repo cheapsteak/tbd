@@ -260,11 +260,10 @@ extension AppState {
     /// `navigateToWorktree` clears a held click, so the later click wins.
     ///
     /// An answered click is newer than any archived lookup still in flight,
-    /// so each of the three outcomes first supersedes it
-    /// (`supersedeArchivedLookup`): the lookup's late resolution then cannot
-    /// replace the session's selection or the not-found toast with the
-    /// archive view. A held click supersedes nothing, since nothing has
-    /// navigated yet; its replay does.
+    /// so each of the three outcomes first supersedes it (`userDidNavigate`):
+    /// the lookup's late resolution then cannot replace the session's
+    /// selection or the not-found toast with the archive view. A held click
+    /// supersedes nothing, since nothing has navigated yet; its replay does.
     @MainActor
     func navigateToRemoteSession(provider: String, sessionID: String) {
         let link = RemoteSessionSelection(provider: provider, sessionID: sessionID)
@@ -285,10 +284,9 @@ extension AppState {
             return
         }
         // This click is answered now, so it replaces any older one still
-        // held, even when the answer is the not-found toast, which navigates
-        // nowhere.
-        dropHeldRemoteSessionLink()
-        supersedeArchivedLookup()
+        // held, and supersedes an archived lookup in flight, even when the
+        // answer is the not-found toast, which navigates nowhere.
+        userDidNavigate()
 
         if let lane = activeLane(for: link) {
             navigateToActiveWorktree(lane.id)
@@ -359,9 +357,9 @@ extension AppState {
     /// Drop the held banner click, if any, so no later load replays it, and
     /// dismiss the progress toast its hold showed if that toast is still the
     /// one on screen; a toast that has replaced it is left alone. Every user
-    /// action that comes after the click calls this, directly or through
-    /// `recordNavigation`, which lists them; so do a newer click, the drain
-    /// that takes the click to answer it, and its expiry.
+    /// navigation that comes after the click calls this through
+    /// `userDidNavigate`, and `recordNavigation` lists them; the drain that
+    /// takes the click to answer it and its expiry call it directly.
     @MainActor
     func dropHeldRemoteSessionLink() {
         guard pendingRemoteSessionLink != nil else { return }
