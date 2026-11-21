@@ -196,6 +196,21 @@ struct SelectionPersistenceTests {
         }
     }
 
+    @Test("restoreSavedSelection is no-op when a remote banner click is held")
+    func restoreSkippedForHeldRemoteBannerClick() {
+        withIsolatedDefaults { defaults in
+            let id1 = UUID()
+            writeSavedSelection([id1], to: defaults)
+
+            let state = AppState(userDefaults: defaults)
+            state.pendingRemoteSessionLink = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+            state.restoreSavedSelection(validWorktreeIDs: [id1])
+
+            #expect(state.selectionOrder.isEmpty)
+            #expect(state.selectedWorktreeIDs.isEmpty)
+        }
+    }
+
     @Test("restoreSavedSelection is no-op when selection is already non-empty")
     func restoreSkippedWhenSelectionExists() {
         withIsolatedDefaults { defaults in

@@ -168,7 +168,8 @@ extension AppState {
     /// and that's intentional.
     func handleRemoteSessionAttentionDelta(_ delta: RemoteSessionAttentionDelta) {
         macNotificationManager.postRemoteAttention(
-            identifier: "remote:\(delta.provider):\(delta.sessionID)",
+            provider: delta.provider,
+            sessionID: delta.sessionID,
             title: AppState.remoteAttentionTitle(delta),
             body: AppState.remoteAttentionBody(delta)
         )
@@ -196,6 +197,77 @@ extension AppState {
         } else {
             unreadByRemoteSession[selection] = incoming
         }
+    }
+
+    // MARK: - Opening a session from its banner
+
+    /// Open the remote session a banner names, as a worktree banner click
+    /// opens its worktree (`navigateToWorktree`). Three outcomes:
+    ///
+    ///  - **An adopted lane stands for it:** an active worktree whose
+    ///    `providerBinding` names this session. Its row is the session's only
+    ///    sidebar row, so it is selected (`navigateToActiveWorktree`), and the
+    ///    selection's `didSet` puts the remote surface up and clears unread.
+    ///  - **The mirror reports it** (and it is not dismissed, the rule
+    ///    back/forward applies in `usableEntryIndex`): select its row
+    ///    (`selectRemoteSession`, which records a navigation entry and clears
+    ///    unread), expand the repo section that holds the row
+    ///    (`expandRepoContaining(remoteSession:)`), and foreground the app.
+    ///  - **Neither:** the selection is left alone, and an error toast says so.
+    ///
+    /// The sidebar centres the selected row itself
+    /// (`SidebarOutlineController.centerSelectionIfChanged`), so this asks
+    /// for no scroll.
+    ///
+    /// Cold start: a click can arrive before `connectAndLoadInitialState` has
+    /// loaded the worktrees and the remote mirror, which it does before
+    /// setting `isInitialStateLoaded`. Until then the click is held in
+    /// `pendingRemoteSessionLink` and replayed at the end of that load, so a
+    /// launch click is not answered with "not found" just because the mirror
+    /// was still empty. Holding it clears a held worktree deep link, and
+    /// `navigateToWorktree` clears this one, so the later click wins.
+    @MainActor
+    func navigateToRemoteSession(provider: String, sessionID: String) {
+        if !isInitialStateLoaded {
+            pendingRemoteSessionLink = RemoteSessionSelection(provider: provider, sessionID: sessionID)
+            pendingDeepLinkID = nil
+            pendingDeepLinkTerminalID = nil
+            return
+        }
+
+        if let lane = allWorktrees.first(where: { worktree in
+            guard worktree.status == .active, let binding = worktree.providerBinding else { return false }
+            return binding.provider == provider && !binding.sessionID.isEmpty && binding.sessionID == sessionID
+        }) {
+            navigateToActiveWorktree(lane.id)
+            return
+        }
+
+        // Foreground before either outcome, so the error toast is seen too.
+        // Guarded: `NSApp` is nil under unit tests.
+        if NSApplication.shared.isRunning {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+        guard let session = remoteSessions.first(where: {
+            $0.provider == provider && $0.payload.id == sessionID && !$0.dismissed
+        }) else {
+            remoteLogger.warning(
+                "Banner names an unknown remote session \(provider, privacy: .public)/\(sessionID, privacy: .public)")
+            showErrorToast("Remote session not found — it may have ended.")
+            return
+        }
+        selectRemoteSession(provider: provider, sessionID: sessionID)
+        expandRepoContaining(remoteSession: session)
+    }
+
+    /// Replay the banner click `navigateToRemoteSession` held during the
+    /// initial load. Called at the end of `connectAndLoadInitialState()`,
+    /// once `isInitialStateLoaded` is set, so the replay is not held again.
+    @MainActor
+    func drainPendingRemoteSessionLink() {
+        guard let pending = pendingRemoteSessionLink else { return }
+        pendingRemoteSessionLink = nil
+        navigateToRemoteSession(provider: pending.provider, sessionID: pending.sessionID)
     }
 
     // MARK: - Rename push (docs/remote-provider-contract.md § `rename`)
