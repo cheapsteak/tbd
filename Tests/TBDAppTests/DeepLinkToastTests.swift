@@ -393,7 +393,9 @@ struct DeepLinkToastTests {
     }
 
     /// A click held for the remote mirror has not navigated, so the lookup
-    /// keeps its navigation, and the click stays held for its own replay.
+    /// keeps its navigation. The lookup lands a link followed before the
+    /// click, so the click, the later action, stays held through it and is
+    /// replayed once the remote list loads.
     @Test func archivedLookupInFlight_isNotSupersededByAClickThatIsOnlyHeld() async {
         await withState { state in
             let gate = LookupGate()
@@ -410,6 +412,17 @@ struct DeepLinkToastTests {
 
             #expect(state.selectedRepoID == repoID)
             #expect(state.pendingRemoteSessionLink == held)
+
+            state.remoteProvidersFetcher = { RemoteProvidersResult(providers: []) }
+            state.remoteSessionsFetcher = { [session = remoteSession("s1")] in
+                RemoteSessionsResult(sessions: [session])
+            }
+            state.retainedTranscriptsFetcher = { [] }
+            await state.refreshRemote()
+
+            #expect(state.selectedRemoteSession == held)
+            #expect(state.selectedRepoID == nil)
+            #expect(state.pendingRemoteSessionLink == nil)
         }
     }
 

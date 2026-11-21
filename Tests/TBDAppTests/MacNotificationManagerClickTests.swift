@@ -608,6 +608,116 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
 }
 
 @MainActor
+@Test func heldRemoteClick_isDroppedByALaterSidebarSelection() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    let worktreeID = addLocalWorktree(to: appState)
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    // What the sidebar outline and the dock write for a user's row click
+    // (`writeSelection`).
+    appState.selectedWorktreeIDs = [worktreeID]
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [worktreeID])
+    #expect(appState.selectedRemoteSession == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_isDroppedByALaterBackNavigation() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    let first = addLocalWorktree(to: appState)
+    let second = addLocalWorktree(to: appState)
+    appState.selectedWorktreeIDs = [first]
+    appState.selectedWorktreeIDs = [second]
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    appState.navigateBack()
+    #expect(appState.selectedWorktreeIDs == [first])
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [first])
+    #expect(appState.selectedRemoteSession == nil)
+}
+
+@MainActor
+@Test func heldRemoteClick_isDroppedByALaterHeaderClick() async {
+    // The Scratch and provider headers record no history entry.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    appState.selectScratchSection()
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    appState.selectRemoteProvider("acme")
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedRemoteSession == nil)
+}
+
+/// Counts the remote fetches a `refreshRemote()` makes. A class, because
+/// the fetchers are escaping closures and cannot mutate a captured `var`.
+@MainActor
+private final class RemoteFetchCount {
+    var value = 0
+}
+
+@MainActor
+@Test func pollTickReconnect_loadsTheRemoteListAndAnswersAHeldClick() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    // The launch completed without connecting, so nothing loaded the mirror.
+    appState.isInitialStateLoaded = true
+    appState.drainPendingRemoteSessionLink()
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+
+    await appState.pollTickDidReconnect()
+
+    #expect(appState.remoteMirrorLoaded)
+    #expect(appState.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+    #expect(appState.pendingRemoteSessionLink == nil)
+}
+
+@MainActor
+@Test func pollTickReconnect_leavesALoadedRemoteListToItsUsualRefresh() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.remoteMirrorLoaded = true
+    let fetches = RemoteFetchCount()
+    appState.remoteProvidersFetcher = {
+        fetches.value += 1
+        return RemoteProvidersResult(providers: [])
+    }
+    appState.remoteSessionsFetcher = {
+        fetches.value += 1
+        return RemoteSessionsResult(sessions: [])
+    }
+    appState.retainedTranscriptsFetcher = { [] }
+
+    await appState.pollTickDidReconnect()
+
+    #expect(fetches.value == 0)
+}
+
+@MainActor
 @Test func heldClicksBeforeInitialLoad_theLaterOneWins() async {
     let (appState, suite) = makeIsolatedAppState()
     defer { tearDown(suite) }

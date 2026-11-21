@@ -696,7 +696,9 @@ final class AppState {
     /// `connectAndLoadInitialState()` run or any other caller runs it. While
     /// it is held, `restoreSavedSelection` does not restore the saved
     /// selection over it. Holds one click; a later one, of either kind,
-    /// replaces it (`navigateToRemoteSession`, `navigateToWorktree`).
+    /// replaces it (`navigateToRemoteSession`, `navigateToWorktree`), and any
+    /// later navigation the user makes drops it, so the load cannot replay it
+    /// over that navigation (`recordNavigation`, which lists the exceptions).
     @ObservationIgnored var pendingRemoteSessionLink: RemoteSessionSelection?
 
     /// Profile IDs with an "Open login session" spawn currently in flight.
@@ -4132,11 +4134,19 @@ final class AppState {
     /// tick's own sweep follows), the spawn preferences and foreground state
     /// go to the daemon, which may be a new one, and the phone status is read
     /// again in a task of its own.
+    ///
+    /// When no remote load has succeeded yet (`remoteMirrorLoaded`), as after
+    /// a launch that never connected, the remote list is loaded here too, so
+    /// a banner click held for it is answered now rather than on the next
+    /// unrelated `.remoteSessionsChanged`.
     func pollTickDidReconnect() async {
         await holderClaimSweepDidConnect(sweepNow: false)
         pushClaudeSpawnPreferences()
         pushForegroundState()
         refreshPhoneAtConnect()
+        if !remoteMirrorLoaded {
+            await refreshRemote()
+        }
     }
 
     /// Poll daemon for state changes every 2 seconds.

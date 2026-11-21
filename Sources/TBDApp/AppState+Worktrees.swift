@@ -1137,11 +1137,16 @@ extension AppState {
     /// flash-highlight the target. Runs immediately once the lookup resolves.
     @MainActor
     private func performArchivedNavigation(worktreeID: UUID, repoID: UUID, archived: [Worktree]) {
+        // This lands a link followed before any banner click still held, so
+        // that click is the later action and stays held, though selecting the
+        // repo records a navigation (`recordNavigation` drops a held click).
+        let heldClick = pendingRemoteSessionLink
         selectedWorktreeIDs = []
         selectedRepoID = repoID
         selectedScratchSection = false
         selectedRemoteProvider = nil
         selectedRemoteSession = nil
+        pendingRemoteSessionLink = heldClick
         archivedWorktrees[repoID] = archived.filter { $0.repoID == repoID }
         archivedWorktreesHasMore[repoID] = false
         highlightedArchivedWorktreeID = worktreeID
@@ -1258,8 +1263,10 @@ extension AppState {
     /// `selectRepo(id:)`; no `NavigationEntry`/back-forward integration for v1
     /// (documented scope cut — the Scratch section header has no natural UUID
     /// identity for the navigation history's worktree/repo entries to key
-    /// off).
+    /// off). With no history entry, it drops a held banner click itself, as
+    /// `recordNavigation` does for the navigations that make one.
     func selectScratchSection() {
+        pendingRemoteSessionLink = nil
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = nil
