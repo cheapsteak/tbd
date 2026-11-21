@@ -40,10 +40,14 @@ struct TmuxWakeBackstopTests {
         let worktree = try await db.worktrees.create(
             repoID: repo.id, name: "wt", branch: "tbd/wt",
             path: wtPath, tmuxServer: "tbd-backstop-test")
+        // The Codex stub, so a refusal that came later than it should resolves
+        // the stub rather than the machine's own `codex`.
         let coordinator = HibernationCoordinator(
             db: db, configDirManager: makeIsolatedConfigDirManager(tag: "tmux-backstop"),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "tmux-backstop"),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         let holder = FakeHolderLaunch()
         await coordinator.setHolderRegistry(makeHolderRegistryDouble(launch: holder))
@@ -91,10 +95,14 @@ struct TmuxWakeBackstopTests {
         let registry = makeHolderRegistryDouble(launch: f.holder)
         var lifecycle = WorktreeLifecycle(
             db: f.db, git: GitManager(), hooks: HookResolver(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: f.db, lifecycle: lifecycle, configDirManager: makeIsolatedConfigDirManager(tag: "tmux-backstop-router"),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog(tag: "tmux-backstop-router"))
         router.holderRegistry = registry
         await router.hibernationCoordinator.setHolderRegistry(registry)

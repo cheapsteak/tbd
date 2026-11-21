@@ -11,18 +11,26 @@ struct TerminalSessionEventHandlerTests {
     let db: TBDDatabase
     let router: RPCRouter
 
+    /// Every router here holds the Codex stub, lifecycle and coordinator
+    /// included, so a Codex start a test expects refused cannot resolve the
+    /// machine's own `codex` if the refusal ever comes later.
+    private static func lifecycle(_ db: TBDDatabase) -> WorktreeLifecycle {
+        WorktreeLifecycle(
+            db: db, git: GitManager(), hooks: HookResolver(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
+            leftoverTmuxProbe: .absent)
+    }
+
     init() throws {
         let db = try TBDDatabase(inMemory: true)
         self.db = db
         self.router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db,
-                git: GitManager(),
-                hooks: HookResolver(),
-                leftoverTmuxProbe: .absent
-            ),
+            lifecycle: Self.lifecycle(db),
             startTime: Date(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog()
         )
     }
@@ -30,13 +38,10 @@ struct TerminalSessionEventHandlerTests {
     private func makeRouter(now: @escaping @Sendable () -> Date) -> RPCRouter {
         RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db,
-                git: GitManager(),
-                hooks: HookResolver(),
-                leftoverTmuxProbe: .absent
-            ),
+            lifecycle: Self.lifecycle(db),
             startTime: Date(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             now: now,
             actuationLog: makeTestActuationLog()
         )
@@ -45,13 +50,10 @@ struct TerminalSessionEventHandlerTests {
     private func makeRouter(sessionsDir: URL) -> RPCRouter {
         RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db,
-                git: GitManager(),
-                hooks: HookResolver(),
-                leftoverTmuxProbe: .absent
-            ),
+            lifecycle: Self.lifecycle(db),
             startTime: Date(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             sessionsDir: sessionsDir,
             actuationLog: makeTestActuationLog()
         )
@@ -962,12 +964,10 @@ struct TerminalSessionEventHandlerTests {
         let isolatedDB = try TBDDatabase(path: directory.appendingPathComponent("state.db").path)
         let isolatedRouter = RPCRouter(
             db: isolatedDB,
-            lifecycle: WorktreeLifecycle(
-                db: isolatedDB,
-                git: GitManager(),
-                hooks: HookResolver(),
-                leftoverTmuxProbe: .absent),
+            lifecycle: Self.lifecycle(isolatedDB),
             startTime: Date(),
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             actuationLog: makeTestActuationLog())
         let repo = try await isolatedDB.repos.create(
             path: directory.appendingPathComponent("repo").path,
