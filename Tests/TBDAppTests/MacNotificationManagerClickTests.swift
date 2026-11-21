@@ -839,6 +839,34 @@ private func addLocalWorktree(to appState: AppState) -> UUID {
     #expect(appState.selectedRemoteSession == nil)
 }
 
+@MainActor
+@Test func heldRemoteClick_isDroppedByTheShortcutForTheSelectedWorktree() async {
+    // ⌘1 on the worktree already selected.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    markListsLoaded(appState)
+    let repoID = UUID()
+    let worktree = Worktree(repoID: repoID, name: "x", displayName: "X",
+                            branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x")
+    appState.repos = [Repo(id: repoID, path: "/tmp/x", displayName: "x", expanded: true)]
+    appState.worktrees = [repoID: [worktree]]
+    appState.selectedWorktreeIDs = [worktree.id]
+    let selectedID = worktree.id
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(appState.allWorktreesOrdered.map { $0.id } == [selectedID])
+    #expect(appState.pendingRemoteSessionLink != nil)
+
+    appState.selectWorktreeByIndex(0)
+    #expect(appState.pendingRemoteSessionLink == nil)
+
+    stubRemoteLoad(appState, sessions: [remoteSession(sessionID: "s1")])
+    await appState.refreshRemote()
+
+    #expect(appState.selectedWorktreeIDs == [selectedID])
+    #expect(appState.selectedRemoteSession == nil)
+}
+
 /// Counts the remote fetches a `refreshRemote()` makes. A class, because
 /// the fetchers are escaping closures and cannot mutate a captured `var`.
 @MainActor
@@ -980,7 +1008,7 @@ private func holdRemoteClick(in appState: AppState, dates: TestDateSource) -> UU
 }
 
 /// The error toast that replaces a held click's progress toast when it expires.
-private let heldClickExpiredMessage = "Couldn't open the remote session: the session list didn't load."
+private let heldClickExpiredMessage = "Couldn't open the remote session: TBD couldn't load in time."
 
 /// Whether the toast on screen is the progress toast the held click's hold
 /// showed, by its ID as well as its look.
@@ -1068,6 +1096,38 @@ private func showsHeldClickToast(_ appState: AppState) -> Bool {
 
     dates.advance(by: 2)
     appState.pollTickDidFire()
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast?.style == .error)
+    #expect(appState.activeToast?.message == heldClickExpiredMessage)
+}
+
+@MainActor
+@Test func heldRemoteClick_expiry_leavesAToastThatReplacedItsProgressToast() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let dates = TestDateSource()
+    _ = holdRemoteClick(in: appState, dates: dates)
+    appState.showTransientToast("Something else happened", style: .notice)
+
+    dates.advance(by: AppState.heldRemoteSessionLinkLifetime + 1)
+    appState.pollTickDidFire()
+
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast?.message == "Something else happened")
+}
+
+@MainActor
+@Test func heldRemoteClick_expiry_showsItsErrorWhenNoToastIsUp() async {
+    // Its progress toast was replaced, and the replacement has gone.
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let dates = TestDateSource()
+    _ = holdRemoteClick(in: appState, dates: dates)
+    appState.dismissToast()
+
+    dates.advance(by: AppState.heldRemoteSessionLinkLifetime + 1)
+    appState.pollTickDidFire()
+
     #expect(appState.pendingRemoteSessionLink == nil)
     #expect(appState.activeToast?.style == .error)
     #expect(appState.activeToast?.message == heldClickExpiredMessage)

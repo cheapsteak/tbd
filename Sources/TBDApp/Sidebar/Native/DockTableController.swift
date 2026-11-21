@@ -829,9 +829,24 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// The table's click action: a click on a worktree row's PR glyph opens
     /// the pull request. Row clicks otherwise select through the table.
     @objc func tableClicked(_ sender: Any?) {
-        guard let event = NSApp.currentEvent,
-              event.type == .leftMouseUp || event.type == .leftMouseDown else { return }
-        openPullRequestIfClickedGlyph(row: table.clickedRow, at: table.convert(event.locationInWindow, from: nil))
+        var point: NSPoint?
+        if let event = NSApp.currentEvent, event.type == .leftMouseUp || event.type == .leftMouseDown {
+            point = table.convert(event.locationInWindow, from: nil)
+        }
+        handleClick(row: table.clickedRow, at: point)
+    }
+
+    /// A click on a row: on a worktree row's PR glyph it opens the pull
+    /// request. Anywhere else the row selects through the table, and the
+    /// click drops a held banner click: on the row already selected it
+    /// changes no selection, so its `didSet` records no navigation, but it is
+    /// one (`AppState.recordNavigation`).
+    /// - Parameter point: where the click landed, in the table's
+    ///   coordinates, when it came from the pointer.
+    func handleClick(row index: Int, at point: NSPoint? = nil) {
+        guard rows.indices.contains(index) else { return }
+        if let point, openPullRequestIfClickedGlyph(row: index, at: point) { return }
+        appState.dropHeldRemoteSessionLink()
     }
 
     /// - Parameter point: the click, in the table's coordinates.

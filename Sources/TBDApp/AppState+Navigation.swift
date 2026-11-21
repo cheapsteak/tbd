@@ -156,22 +156,32 @@ extension AppState {
     /// head's worktree is a navigation that records nothing new.
     ///
     /// Every navigation that makes a history entry passes here: sidebar and
-    /// dock row clicks, the jump menu, `selectRemoteSession`, `selectRepo`,
-    /// `navigateToActiveWorktree`. `selectionChanged` is false when the
-    /// worktree selection's `didSet` re-fires with the set unchanged, as a
-    /// `remove` of an id that was not selected does when an unselected
-    /// worktree is archived; that is no navigation, and keeps the click.
+    /// dock row clicks, the jump menu, ⌘1–9, `selectRemoteSession`,
+    /// `selectRepo`, `navigateToActiveWorktree`. `selectionChanged` is false
+    /// when the worktree selection's `didSet` re-fires with the set
+    /// unchanged, as a `remove` of an id that was not selected does when an
+    /// unselected worktree is archived; that is no navigation, and keeps the
+    /// click.
     ///
     /// A user who picks again what is already selected leaves the set
     /// unchanged too, and the `didSet` cannot tell that from the archive. So
-    /// the gestures that can pick the current selection again drop the click
-    /// themselves (`dropHeldRemoteSessionLink`): `navigateToActiveWorktree`
-    /// (a pinned-dock tap, among others), the jump menu
-    /// (`JumpMenuController.select`), and `selectRepo`, whose `didSet`
-    /// records nothing for the repo already selected. A deselection in the
-    /// sidebar or the dock records nothing at all, so it drops the click
-    /// where the outline and the dock write it. Every other drop goes through
-    /// that helper too.
+    /// every drop other than this one is made where it happens, through
+    /// `dropHeldRemoteSessionLink`, and these are all of them:
+    ///
+    ///  - **Gestures that can pick the current selection again:**
+    ///    `navigateToActiveWorktree` (a pinned-dock tap, among others), the
+    ///    jump menu (`JumpMenuController.select`), ⌘1–9
+    ///    (`selectWorktreeByIndex`), a click on a row in the sidebar outline
+    ///    or the dock (their `handleClick(row:at:)`), and `selectRepo`, whose
+    ///    `didSet` records nothing for the repo already selected.
+    ///  - **Navigations that record no entry:** a deselection in the outline
+    ///    or the dock (where they write the selection), `navigateBack`,
+    ///    `navigateForward`, `selectScratchSection` and
+    ///    `selectRemoteProvider`.
+    ///  - **Newer clicks:** `navigateToWorktree`, and a banner click
+    ///    `navigateToRemoteSession` answers at once.
+    ///  - **The click's own end:** the drain that takes it to answer it, and
+    ///    its expiry (`dropExpiredRemoteSessionLink`).
     ///
     /// The paths that must keep the click keep it: `restoreSavedSelection`
     /// does nothing while a click is held, the drain clears the click before

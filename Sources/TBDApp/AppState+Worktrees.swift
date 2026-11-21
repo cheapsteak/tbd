@@ -1868,10 +1868,15 @@ extension AppState {
         startArchive(archiveShortcutRoute())
     }
 
-    /// Select a worktree by its index in the sidebar order.
+    /// Select a worktree by its index in the sidebar order (⌘1–9).
+    ///
+    /// Drops a held banner click itself: the shortcut for the worktree
+    /// already selected changes nothing, so its `didSet` records no
+    /// navigation (`recordNavigation`).
     func selectWorktreeByIndex(_ index: Int) {
         let ordered = allWorktreesOrdered
         guard index >= 0, index < ordered.count else { return }
+        dropHeldRemoteSessionLink()
         selectedWorktreeIDs = [ordered[index].id]
     }
 

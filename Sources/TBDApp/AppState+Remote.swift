@@ -271,8 +271,9 @@ extension AppState {
         if !remoteSessionLinkCanBeAnswered(link) {
             pendingRemoteSessionLink = link
             pendingRemoteSessionLinkHeldAt = now()
-            // Foreground so the progress toast is seen, as an answer does.
-            // Guarded: `NSApp` is nil under unit tests.
+            // Foreground so the progress toast is seen, as an answer does,
+            // but only while the app's run loop runs: under unit tests it
+            // does not.
             if NSApplication.shared.isRunning {
                 NSApplication.shared.activate(ignoringOtherApps: true)
             }
@@ -376,7 +377,10 @@ extension AppState {
 
     /// Drop a held click older than `heldRemoteSessionLinkLifetime`,
     /// unanswered, and put an error toast in place of its progress toast: the
-    /// user saw the session being opened, so they are told it was not.
+    /// user saw the session being opened, so they are told it was not. The
+    /// error shows only while that progress toast is still up or no toast is,
+    /// never over a toast that has replaced it. Its wording holds whatever
+    /// kept the click held: the lists, the remote list, or no daemon at all.
     /// Returns whether it dropped one. Checked by every poll tick, connected
     /// or not (`pollTickDidFire`), and by every drain and retry; nothing else
     /// times the click.
@@ -385,8 +389,11 @@ extension AppState {
     func dropExpiredRemoteSessionLink() -> Bool {
         guard let pending = pendingRemoteSessionLink, let heldAt = pendingRemoteSessionLinkHeldAt,
               now().timeIntervalSince(heldAt) > Self.heldRemoteSessionLinkLifetime else { return false }
+        let replacesNoOtherToast = activeToast == nil || activeToast?.id == pendingRemoteSessionLinkToastID
         dropHeldRemoteSessionLink()
-        showErrorToast("Couldn't open the remote session: the session list didn't load.")
+        if replacesNoOtherToast {
+            showErrorToast("Couldn't open the remote session: TBD couldn't load in time.")
+        }
         remoteLogger.info(
             "Dropping an expired banner click for \(pending.provider, privacy: .public)/\(pending.sessionID, privacy: .public)")
         return true

@@ -528,6 +528,32 @@ struct DockTableControllerTests {
         #expect(clip.bounds.minY < 0.5, "A click in the dock scrolled the outline to \(clip.bounds.minY)")
     }
 
+    /// A click on the dock row already selected changes no selection, so
+    /// the selection's `didSet` records no navigation. It is one all the
+    /// same, so it drops a banner click held from before it.
+    @Test func clickOnTheSelectedDockRowDropsAHeldBannerClick() throws {
+        let h = DockHarness("selectedRowClick")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let pin = Self.pinned("pin", repo, order: 0, pinOrder: 0)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [pin]]
+        h.state.selectedWorktreeIDs = [pin.id]
+        h.mount()
+        try #require(h.row(.worktree(pin.id)) >= 0)
+        h.state.isInitialStateLoaded = true
+        h.state.reposLoaded = true
+        h.state.worktreesLoaded = true
+        // The remote list has not loaded, so the click is held.
+        h.state.navigateToRemoteSession(provider: "acme", sessionID: "s1")
+        try #require(h.state.pendingRemoteSessionLink != nil)
+
+        h.dock.handleClick(row: h.row(.worktree(pin.id)))
+
+        #expect(h.state.pendingRemoteSessionLink == nil)
+        #expect(h.state.selectedWorktreeIDs == [pin.id])
+    }
+
     // MARK: Pasteboard types
 
     @Test func dockRejectsSidebarPayload() throws {

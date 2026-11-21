@@ -8,7 +8,8 @@ extension SidebarOutlineController {
     /// The outline's click action: a section header selects its section, a
     /// group header toggles, the scratch prompt starts a scratch space, and a
     /// click on a worktree row's PR glyph opens the pull request.
-    /// Row clicks otherwise select through the outline and need nothing here.
+    /// Row clicks otherwise select through the outline; here they only drop
+    /// a held banner click.
     @objc func outlineClicked(_ sender: Any?) {
         // A click is not a drag: a press recorded as a drag's origin that
         // never became one must not outlive it.
@@ -36,7 +37,13 @@ extension SidebarOutlineController {
             appState.toggleSidebarGroup(groupID)
         case .scratchPrompt:
             appState.createScratch()
-        case .worktree, .remoteSession, .addRepository:
+        case .worktree, .remoteSession:
+            // The row selects through the outline. A click on the row already
+            // selected changes no selection, so its `didSet` records no
+            // navigation, but it is one, later than any held banner click
+            // (`AppState.recordNavigation`).
+            appState.dropHeldRemoteSessionLink()
+        case .addRepository:
             // The Add Repository row's own buttons run its actions; a click
             // beside them does nothing.
             break
