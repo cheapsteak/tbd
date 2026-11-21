@@ -90,6 +90,24 @@ extension AppState {
         repos[repoIdx].expanded = true
         Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
     }
+
+    /// Expand the repo section holding `session`'s row (if collapsed), the
+    /// remote-session twin of `expandRepoContaining(worktreeID:)`. A session
+    /// renders in a repo section when its `resolvedRepoID` names a repo
+    /// `SidebarSessionPlacement.knownRepoIDs` counts; otherwise it renders
+    /// under its provider's header, which never collapses, and this is a
+    /// no-op. Groups inside the section (Remote, Exited, Ended) are opened by
+    /// the sidebar's own selection reveal, not here.
+    @MainActor
+    func expandRepoContaining(remoteSession session: RemoteSessionInfo) {
+        guard let repoID = session.resolvedRepoID,
+              SidebarSessionPlacement.knownRepoIDs(repos: repos, repoFilter: repoFilter).contains(repoID),
+              let repoIdx = repos.firstIndex(where: { $0.id == repoID }),
+              !repos[repoIdx].expanded
+        else { return }
+        repos[repoIdx].expanded = true
+        Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
+    }
 }
 
 extension AppState {

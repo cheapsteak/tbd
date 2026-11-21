@@ -667,6 +667,13 @@ final class AppState {
     /// outside the AppState extension that consumes it.
     @ObservationIgnored var pendingDeepLinkTerminalID: UUID?
 
+    /// Buffers a remote session's banner click that arrives before the initial
+    /// state load completes, when neither the worktrees nor the remote mirror
+    /// are loaded yet. Drained at the end of `connectAndLoadInitialState()`,
+    /// after `refreshRemote()` has run. Holds one click; a later one, of
+    /// either kind, replaces it (`navigateToRemoteSession`).
+    @ObservationIgnored var pendingRemoteSessionLink: RemoteSessionSelection?
+
     /// Profile IDs with an "Open login session" spawn currently in flight.
     /// Guards rapid repeat clicks: the first click spawns, subsequent clicks
     /// during the RPC are dropped, and once the terminal lands in state the
@@ -3264,14 +3271,15 @@ final class AppState {
     /// still present in `validWorktreeIDs` and preserving their saved order.
     ///
     /// No-op when:
-    /// - `pendingDeepLinkID` is set (deep links win over persisted selection)
+    /// - `pendingDeepLinkID` or `pendingRemoteSessionLink` is set (a held
+    ///   deep link or banner click wins over persisted selection)
     /// - the current selection is already non-empty
     /// - there are no valid IDs left after filtering stale ones
     ///
     /// Call this from `connectAndLoadInitialState()` after `refreshAll()` so
     /// the UI reflects the real restored selection.
     func restoreSavedSelection(validWorktreeIDs: [UUID]) {
-        guard selectedWorktreeIDs.isEmpty, pendingDeepLinkID == nil else { return }
+        guard selectedWorktreeIDs.isEmpty, pendingDeepLinkID == nil, pendingRemoteSessionLink == nil else { return }
         guard let data = userDefaults.data(forKey: Self.selectionOrderKey),
               let savedStrings = try? JSONDecoder().decode([String].self, from: data) else { return }
         let savedIDs = savedStrings.compactMap { UUID(uuidString: $0) }
@@ -4233,6 +4241,7 @@ final class AppState {
             pendingDeepLinkTerminalID = nil
             navigateToWorktree(pendingID, terminalID: pendingTerminalID)
         }
+        drainPendingRemoteSessionLink()
         if didConnect {
             Task { [weak self] in
                 guard let self else { return }

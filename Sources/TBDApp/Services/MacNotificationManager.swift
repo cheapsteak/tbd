@@ -119,14 +119,39 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// The prefix every remote-session banner's request identifier starts
+    /// with. A click whose identifier starts with it is routed to the remote
+    /// session, never parsed as a worktree UUID.
+    nonisolated static let remoteIdentifierPrefix = "remote:"
+
+    /// The userInfo keys a remote-session banner carries its provider name
+    /// and session ID under, so the click handler reads them whole instead of
+    /// splitting the identifier.
+    nonisolated static let remoteProviderUserInfoKey = "remoteProvider"
+    nonisolated static let remoteSessionIDUserInfoKey = "remoteSessionID"
+
+    /// A remote session's banner request identifier,
+    /// `remote:<provider>:<sessionID>`. One identifier per session, so a
+    /// re-post replaces that session's outstanding banner rather than
+    /// stacking a second one.
+    nonisolated static func remoteBannerIdentifier(provider: String, sessionID: String) -> String {
+        "\(remoteIdentifierPrefix)\(provider):\(sessionID)"
+    }
+
+    /// The userInfo `postRemoteAttention` attaches to a remote session's
+    /// banner. Pure seam, as `bannerTitle` is, because the post itself
+    /// returns early unbundled.
+    nonisolated static func remoteBannerUserInfo(provider: String, sessionID: String) -> [String: String] {
+        [remoteProviderUserInfoKey: provider, remoteSessionIDUserInfoKey: sessionID]
+    }
+
     /// Post a banner for a remote session crossing a notify-worthy agent-state
     /// edge (→ waiting_input or → exited). Remote sessions have no worktree,
-    /// so this deliberately bypasses `postIfEnabled`'s worktree-keyed
-    /// identifier and click-routing: `identifier` is a synthetic
-    /// provider/session key, not a worktree UUID, so a click on this banner
-    /// safely no-ops through `handleClick`'s UUID-parse guard instead of
-    /// attempting to focus a tab or select a worktree.
-    func postRemoteAttention(identifier: String, title: String, body: String) {
+    /// so this bypasses `postIfEnabled`'s worktree-keyed identifier: the
+    /// request is keyed by `remoteBannerIdentifier` and carries the provider
+    /// and session ID in userInfo (`remoteBannerUserInfo`). A click on it
+    /// opens that session (`handleClick(identifier:terminalIDString:remoteProvider:remoteSessionID:)`).
+    func postRemoteAttention(provider: String, sessionID: String, title: String, body: String) {
         guard Self.shouldPost(enabled: enabled, isAvailable: isAvailable, mockActive: MockMode.isActive()) else { return }
         requestPermissionIfNeeded()
 
@@ -134,8 +159,13 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         content.title = title
         content.body = body
         content.sound = nil
+        content.userInfo = Self.remoteBannerUserInfo(provider: provider, sessionID: sessionID)
 
-        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        let request = UNNotificationRequest(
+            identifier: Self.remoteBannerIdentifier(provider: provider, sessionID: sessionID),
+            content: content,
+            trigger: nil
+        )
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
                 logger.error("Post error: \(error)")
@@ -164,18 +194,31 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
     }
 
-    /// Parse a notification request identifier and navigate to the matching worktree.
-    /// Factored out of the delegate method so it's testable without faking
-    /// `UNNotificationResponse` (which has no public initializer).
+    /// Parse a notification request identifier and navigate to the matching
+    /// worktree or remote session. Factored out of the delegate method so
+    /// it's testable without faking `UNNotificationResponse` (which has no
+    /// public initializer).
     func handleClick(identifier: String) {
         handleClick(identifier: identifier, terminalIDString: nil)
     }
 
     /// Same as `handleClick(identifier:)` but also routes to a specific
-    /// terminal tab when `terminalIDString` is a valid UUID string. Both
-    /// parameters are strings to mirror the on-the-wire shapes the
+    /// terminal tab when `terminalIDString` is a valid UUID string. Every
+    /// parameter is a string to mirror the on-the-wire shapes the
     /// `UNNotificationResponse` exposes (request identifier + userInfo dict).
-    func handleClick(identifier: String, terminalIDString: String?) {
+    ///
+    /// An identifier starting with `remoteIdentifierPrefix` is a remote
+    /// session's banner and goes to `handleRemoteClick`, with the provider
+    /// and session ID its userInfo carried (nil when absent). Any other
+    /// identifier is a worktree UUID.
+    func handleClick(
+        identifier: String, terminalIDString: String?,
+        remoteProvider: String? = nil, remoteSessionID: String? = nil
+    ) {
+        if identifier.hasPrefix(Self.remoteIdentifierPrefix) {
+            handleRemoteClick(identifier: identifier, provider: remoteProvider, sessionID: remoteSessionID)
+            return
+        }
         guard let worktreeID = UUID(uuidString: identifier) else {
             logger.error("Banner click identifier is not a UUID: \(identifier, privacy: .public)")
             return
@@ -202,22 +245,77 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         appState.navigateToWorktree(worktreeID, terminalID: terminalID)
     }
 
-    /// Banner click → focus the worktree the notification was about.
-    /// `nonisolated` to satisfy the protocol's isolation requirement, matching
-    /// `willPresent` above. Hops back to the main actor to invoke `handleClick`.
+    /// A remote session's banner click: resolve the session it names
+    /// (`remoteClickTarget`) and open it (`AppState.navigateToRemoteSession`).
+    /// An identifier that names no session is logged and ignored.
+    func handleRemoteClick(identifier: String, provider: String?, sessionID: String?) {
+        guard let target = Self.remoteClickTarget(
+            identifier: identifier, provider: provider, sessionID: sessionID)
+        else {
+            logger.error("Remote banner click names no session: \(identifier, privacy: .public)")
+            return
+        }
+        guard let appState else {
+            logger.error("Banner click ignored: appState not configured")
+            return
+        }
+        appState.navigateToRemoteSession(provider: target.provider, sessionID: target.sessionID)
+    }
+
+    /// The session a remote banner names: the provider and session ID from
+    /// its userInfo when both are present and non-empty, otherwise parsed from
+    /// the identifier. The identifier is the only source for a banner posted
+    /// without that userInfo, which Notification Center can still hold.
+    ///
+    /// The parse drops `remoteIdentifierPrefix` and splits at the FIRST `:`.
+    /// A session ID is an opaque provider string and may contain `:`, so
+    /// everything after that colon is the session ID. A provider name may
+    /// contain `:` too — the registry (`RemoteProviderRegistry.loadEntries`)
+    /// requires only a non-empty name — and the identifier alone cannot tell
+    /// that colon from the separator, so such a name parses wrong here. The
+    /// userInfo keys exist so a banner never depends on this parse.
+    ///
+    /// Nil when the identifier lacks the prefix or yields an empty provider
+    /// or session ID.
+    nonisolated static func remoteClickTarget(
+        identifier: String, provider: String?, sessionID: String?
+    ) -> RemoteSessionSelection? {
+        if let provider, let sessionID, !provider.isEmpty, !sessionID.isEmpty {
+            return RemoteSessionSelection(provider: provider, sessionID: sessionID)
+        }
+        guard identifier.hasPrefix(remoteIdentifierPrefix) else { return nil }
+        let rest = identifier.dropFirst(remoteIdentifierPrefix.count)
+        guard let separator = rest.firstIndex(of: ":") else { return nil }
+        let parsedProvider = String(rest[..<separator])
+        let parsedSessionID = String(rest[rest.index(after: separator)...])
+        guard !parsedProvider.isEmpty, !parsedSessionID.isEmpty else { return nil }
+        return RemoteSessionSelection(provider: parsedProvider, sessionID: parsedSessionID)
+    }
+
+    /// Banner click → focus the worktree or remote session the notification
+    /// was about. `nonisolated` to satisfy the protocol's isolation
+    /// requirement, matching `willPresent` above. Hops back to the main actor
+    /// to invoke `handleClick`.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        // Read everything the click needs as Strings here: neither the
+        // response nor its userInfo is Sendable, so neither may cross the
+        // hop to the main actor below.
         let identifier = response.notification.request.identifier
-        let terminalIDString = response.notification.request.content
-            .userInfo["terminalID"] as? String
+        let userInfo = response.notification.request.content.userInfo
+        let terminalIDString = userInfo["terminalID"] as? String
+        let remoteProvider = userInfo[Self.remoteProviderUserInfoKey] as? String
+        let remoteSessionID = userInfo[Self.remoteSessionIDUserInfoKey] as? String
         // Call the completion handler synchronously to satisfy its
         // non-Sendable isolation, then hop to the main actor for navigation.
         completionHandler()
         Task { @MainActor in
-            self.handleClick(identifier: identifier, terminalIDString: terminalIDString)
+            self.handleClick(
+                identifier: identifier, terminalIDString: terminalIDString,
+                remoteProvider: remoteProvider, remoteSessionID: remoteSessionID)
         }
     }
 }

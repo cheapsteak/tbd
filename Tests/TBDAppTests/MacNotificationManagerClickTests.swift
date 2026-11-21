@@ -228,3 +228,248 @@ private func makeAppStateWithTabs(
 
     #expect(appState.activeTabIndices[worktreeID] == 1)
 }
+
+// MARK: - Remote session banner tests
+
+private func remoteSession(
+    provider: String = "acme", sessionID: String,
+    resolvedRepoID: UUID? = nil, dismissed: Bool = false
+) -> RemoteSessionInfo {
+    RemoteSessionInfo(
+        provider: provider, payload: RemoteSessionPayload(id: sessionID, state: .running),
+        gone: false, dismissed: dismissed, lastSeen: Date(), resolvedRepoID: resolvedRepoID)
+}
+
+/// A loaded appState whose remote mirror reports `acme`/`sessionID`.
+@MainActor
+private func makeAppStateWithRemoteSession(
+    sessionID: String = "s1", resolvedRepoID: UUID? = nil, dismissed: Bool = false
+) -> (AppState, TestDefaultsSuite) {
+    let (state, suite) = makeIsolatedAppState()
+    state.isInitialStateLoaded = true
+    state.remoteSessions = [
+        remoteSession(sessionID: sessionID, resolvedRepoID: resolvedRepoID, dismissed: dismissed),
+    ]
+    return (state, suite)
+}
+
+/// Clicks a banner the way the delegate does for one posted by
+/// `postRemoteAttention`: its identifier and its userInfo, read as strings.
+@MainActor
+private func clickPostedRemoteBanner(
+    _ appState: AppState, provider: String = "acme", sessionID: String
+) {
+    let userInfo = MacNotificationManager.remoteBannerUserInfo(provider: provider, sessionID: sessionID)
+    appState.macNotificationManager.handleClick(
+        identifier: MacNotificationManager.remoteBannerIdentifier(provider: provider, sessionID: sessionID),
+        terminalIDString: nil,
+        remoteProvider: userInfo[MacNotificationManager.remoteProviderUserInfoKey],
+        remoteSessionID: userInfo[MacNotificationManager.remoteSessionIDUserInfoKey])
+}
+
+/// A local worktree, selected, so a test can tell whether a click moved
+/// the selection off it.
+@MainActor
+private func selectLocalWorktree(in appState: AppState) -> UUID {
+    let id = UUID()
+    let repoID = UUID()
+    appState.worktrees[repoID] = [
+        Worktree(id: id, repoID: repoID, name: "x", displayName: "X",
+                 branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x"),
+    ]
+    appState.selectedWorktreeIDs = [id]
+    return id
+}
+
+@Test func remoteBanner_requestCarriesProviderAndSessionID() {
+    #expect(MacNotificationManager.remoteBannerIdentifier(provider: "acme", sessionID: "s1")
+        == "remote:acme:s1")
+    #expect(MacNotificationManager.remoteBannerUserInfo(provider: "acme", sessionID: "s1") == [
+        MacNotificationManager.remoteProviderUserInfoKey: "acme",
+        MacNotificationManager.remoteSessionIDUserInfoKey: "s1",
+    ])
+}
+
+@Test func remoteClickTarget_prefersUserInfoOverTheIdentifier() {
+    // A provider name may contain `:`; only userInfo carries it intact.
+    let identifier = MacNotificationManager.remoteBannerIdentifier(provider: "acme:eu", sessionID: "s1")
+    #expect(MacNotificationManager.remoteClickTarget(
+        identifier: identifier, provider: "acme:eu", sessionID: "s1")
+        == RemoteSessionSelection(provider: "acme:eu", sessionID: "s1"))
+}
+
+@Test func remoteClickTarget_parsesTheIdentifierAtTheFirstColon() {
+    #expect(MacNotificationManager.remoteClickTarget(
+        identifier: "remote:acme:run:42:a", provider: nil, sessionID: nil)
+        == RemoteSessionSelection(provider: "acme", sessionID: "run:42:a"))
+    // Present but empty userInfo values fall back to the identifier too.
+    #expect(MacNotificationManager.remoteClickTarget(
+        identifier: "remote:acme:s1", provider: "", sessionID: "")
+        == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+}
+
+@Test func remoteClickTarget_isNilForAMalformedIdentifier() {
+    for identifier in ["remote:", "remote:acme", "remote::s1", "remote:acme:", "acme:s1"] {
+        #expect(MacNotificationManager.remoteClickTarget(
+            identifier: identifier, provider: nil, sessionID: nil) == nil)
+    }
+}
+
+@MainActor
+@Test func handleClick_remoteWithUserInfo_selectsSession() async {
+    let (appState, suite) = makeAppStateWithRemoteSession()
+    defer { tearDown(suite) }
+    _ = selectLocalWorktree(in: appState)
+
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+
+    let expected = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+    #expect(appState.selectedRemoteSession == expected)
+    #expect(appState.selectedWorktreeIDs.isEmpty)
+    #expect(appState.navigationEntries.last == NavigationEntry.remoteSession(expected))
+}
+
+@MainActor
+@Test func handleClick_remoteIdentifierOnly_selectsSession() async {
+    // A banner posted without the userInfo keys: the identifier is parsed.
+    let (appState, suite) = makeAppStateWithRemoteSession()
+    defer { tearDown(suite) }
+
+    appState.macNotificationManager.handleClick(identifier: "remote:acme:s1")
+
+    let expected = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+    #expect(appState.selectedRemoteSession == expected)
+    #expect(appState.selectedWorktreeIDs.isEmpty)
+    #expect(appState.navigationEntries == [.remoteSession(expected)])
+}
+
+@MainActor
+@Test func handleClick_remoteSessionIDWithColons_roundTripsThroughUserInfo() async {
+    let sessionID = "run:2026:abc"
+    let (appState, suite) = makeAppStateWithRemoteSession(sessionID: sessionID)
+    defer { tearDown(suite) }
+
+    clickPostedRemoteBanner(appState, sessionID: sessionID)
+
+    #expect(appState.selectedRemoteSession
+        == RemoteSessionSelection(provider: "acme", sessionID: sessionID))
+}
+
+@MainActor
+@Test func handleClick_remoteAdoptedLane_selectsTheLaneRow() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    let repoID = UUID()
+    // Shaped like `RemoteSessionAdopter` mints them.
+    let lane = Worktree(
+        repoID: repoID, name: "remote://acme/s1", displayName: "lane",
+        branch: "", path: "remote://acme/s1", tmuxServer: "",
+        location: .remote(provider: "acme", sessionID: "s1"))
+    appState.worktrees = [repoID: [lane]]
+    appState.remoteSessions = [remoteSession(sessionID: "s1", resolvedRepoID: repoID)]
+
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+
+    #expect(appState.selectedWorktreeIDs == [lane.id])
+    #expect(appState.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+}
+
+@MainActor
+@Test func handleClick_remoteUnknownSession_leavesSelectionAndShowsErrorToast() async {
+    let (appState, suite) = makeAppStateWithRemoteSession()
+    defer { tearDown(suite) }
+    let worktreeID = selectLocalWorktree(in: appState)
+    let entriesBefore = appState.navigationEntries
+
+    clickPostedRemoteBanner(appState, sessionID: "missing")
+
+    #expect(appState.selectedWorktreeIDs == [worktreeID])
+    #expect(appState.selectedRemoteSession == nil)
+    #expect(appState.navigationEntries == entriesBefore)
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast?.style == .error)
+    #expect(appState.activeToast?.message == "Remote session not found — it may have ended.")
+}
+
+@MainActor
+@Test func handleClick_remoteDismissedSession_isTreatedAsUnknown() async {
+    // Back/forward skips a dismissed session; a banner click does too.
+    let (appState, suite) = makeAppStateWithRemoteSession(dismissed: true)
+    defer { tearDown(suite) }
+
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+
+    #expect(appState.selectedRemoteSession == nil)
+    #expect(appState.activeToast?.style == .error)
+}
+
+@MainActor
+@Test func handleClick_remoteMalformedIdentifier_changesNothing() async {
+    let (appState, suite) = makeAppStateWithRemoteSession()
+    defer { tearDown(suite) }
+    let worktreeID = selectLocalWorktree(in: appState)
+    let entriesBefore = appState.navigationEntries
+
+    for identifier in ["remote:", "remote:acme", "remote::s1"] {
+        appState.macNotificationManager.handleClick(identifier: identifier)
+    }
+
+    #expect(appState.selectedWorktreeIDs == [worktreeID])
+    #expect(appState.selectedRemoteSession == nil)
+    #expect(appState.navigationEntries == entriesBefore)
+    #expect(appState.activeToast == nil)
+}
+
+@MainActor
+@Test func handleClick_remoteSessionInCollapsedRepo_expandsTheRepo() async {
+    let repoID = UUID()
+    let (appState, suite) = makeAppStateWithRemoteSession(resolvedRepoID: repoID)
+    defer { tearDown(suite) }
+    appState.repos = [Repo(id: repoID, path: "/tmp/x", displayName: "x", expanded: false)]
+
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+
+    #expect(appState.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+    #expect(appState.repos.first?.expanded == true)
+}
+
+@MainActor
+@Test func handleClick_remoteBeforeInitialLoad_selectsOnceTheMirrorLoads() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    // Default: isInitialStateLoaded == false and the mirror is empty.
+
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+
+    let expected = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+    #expect(appState.pendingRemoteSessionLink == expected)
+    #expect(appState.selectedRemoteSession == nil)
+    #expect(appState.activeToast == nil)
+
+    // What `connectAndLoadInitialState` does: the first remote refresh fills
+    // the mirror, the load completes, and the held click is replayed.
+    appState.remoteSessions = [remoteSession(sessionID: "s1")]
+    appState.isInitialStateLoaded = true
+    appState.drainPendingRemoteSessionLink()
+
+    #expect(appState.selectedRemoteSession == expected)
+    #expect(appState.pendingRemoteSessionLink == nil)
+    #expect(appState.activeToast == nil)
+}
+
+@MainActor
+@Test func heldClicksBeforeInitialLoad_theLaterOneWins() async {
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    let worktreeID = UUID()
+
+    appState.navigateToWorktree(worktreeID)
+    clickPostedRemoteBanner(appState, sessionID: "s1")
+    #expect(appState.pendingDeepLinkID == nil)
+    #expect(appState.pendingRemoteSessionLink == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
+
+    appState.navigateToWorktree(worktreeID)
+    #expect(appState.pendingDeepLinkID == worktreeID)
+    #expect(appState.pendingRemoteSessionLink == nil)
+}

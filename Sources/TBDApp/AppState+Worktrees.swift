@@ -1154,10 +1154,12 @@ extension AppState {
         // Cold-start guard: a tbd:// click can arrive between AppState.init()
         // and the daemon RPC populating `worktrees`. If we fall through to
         // archived lookup now we'll miss real active worktrees. Buffer
-        // instead and let connectAndLoadInitialState drain at the end.
+        // instead and let connectAndLoadInitialState drain at the end. The
+        // later click wins, so a held remote-session click is dropped.
         if !isInitialStateLoaded {
             pendingDeepLinkID = id
             pendingDeepLinkTerminalID = terminalID
+            pendingRemoteSessionLink = nil
             return
         }
 
