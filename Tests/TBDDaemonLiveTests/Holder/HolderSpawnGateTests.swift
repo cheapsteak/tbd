@@ -896,7 +896,7 @@ private final class GateFixture {
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let worktree = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
 
         // The Claude spawn branches — the primary's and `terminal.create`'s —
         // seed folder trust and resolve a projects root through this manager.

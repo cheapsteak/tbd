@@ -5357,15 +5357,15 @@ final class AppState {
         }
     }
 
-    /// Convert the current `mainAreaSize` (pixels) into tmux cell dimensions
-    /// using SwiftTerm's font metrics. Floors at the tmux minimum (80x24) so
-    /// degenerate window sizes during launch never produce a too-small pane.
+    /// Convert the current `mainAreaSize` (pixels) into cell dimensions
+    /// using SwiftTerm's font metrics. Floors at 80x24 so degenerate window
+    /// sizes during launch never produce a too-small session.
     /// Returns `(nil, nil)` when the auto-resize feature flag is off so the
-    /// daemon's `cols ?? TmuxManager.defaultCols` / `rows ?? defaultRows`
+    /// daemon's `cols ?? TerminalSpawnSize.defaultCols` / `rows ?? defaultRows`
     /// fallback fires (220×50). Returning `(0, 0)` would NOT trigger the
-    /// fallback — `Optional.some(0)` is non-nil — and tmux would drop back
-    /// to its own 80×24 default with the un-reflowable hard-wrapped
-    /// scrollback that #73 introduced these defaults to prevent.
+    /// fallback — `Optional.some(0)` is non-nil — and the session would open
+    /// at whatever size `(0, 0)` comes to rather than at the default that
+    /// spares an agent un-reflowable hard-wrapped scrollback.
     func mainAreaTerminalSize() -> (cols: Int?, rows: Int?) {
         guard terminalAutoResizeEnabled else { return (nil, nil) }
         // Use the user's current font so initial pane dimensions match what

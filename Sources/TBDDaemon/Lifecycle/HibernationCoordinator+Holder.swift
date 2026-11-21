@@ -997,8 +997,8 @@ extension HibernationCoordinator {
                     // is off.
                     sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
                     workingDirectory: worktree.path,
-                    cols: cols ?? TmuxManager.defaultCols,
-                    rows: rows ?? TmuxManager.defaultRows,
+                    cols: cols ?? TerminalSpawnSize.defaultCols,
+                    rows: rows ?? TerminalSpawnSize.defaultRows,
                     environment: registry.environment))
         } catch {
             // The row stays parked, so the next focus or menu retry can wake it.

@@ -154,7 +154,7 @@ struct ActuationLogSweepWiringTests {
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
@@ -192,7 +192,7 @@ struct ActuationLogSweepWiringTests {
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
@@ -228,7 +228,7 @@ struct ActuationLogSweepWiringTests {
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
@@ -267,7 +267,7 @@ struct ActuationLogSweepWiringTests {
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)

@@ -62,7 +62,7 @@ struct ReconcileLeftoverTmuxTests {
             path: repoPath, displayName: "acme", defaultBranch: "main")
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoPath,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoPath))
+            tmuxServer: TmuxServerName.forRepoPath(repoPath))
         return (repo, main)
     }
 

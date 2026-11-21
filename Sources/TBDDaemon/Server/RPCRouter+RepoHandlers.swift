@@ -33,7 +33,7 @@ extension RPCRouter {
             // Ensure main worktree exists (may be missing if repo was added via reconciliation)
             let mainWts = try await db.worktrees.list(repoID: existing.id, status: .main)
             if mainWts.isEmpty {
-                let serverName = TmuxManager.serverName(forRepoPath: existing.path)
+                let serverName = TmuxServerName.forRepoPath(existing.path)
                 _ = try await db.worktrees.createMain(
                     repoID: existing.id,
                     name: existing.defaultBranch,
@@ -57,7 +57,7 @@ extension RPCRouter {
         let displayName = displayNameOverride ?? (path as NSString).lastPathComponent
         let repo = try await db.repos.create(path: path, displayName: displayName,
                                              defaultBranch: defaultBranch, remoteURL: remoteURL)
-        let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
+        let tmuxServer = TmuxServerName.forRepoPath(repo.path)
         _ = try await db.worktrees.createMain(repoID: repo.id, name: defaultBranch,
                                               branch: defaultBranch, path: path, tmuxServer: tmuxServer)
         try? await lifecycle.reconcile(

@@ -105,7 +105,7 @@ struct ScratchPromoteReconcileTests {
 
         // Sanity: the inherited scratch server is NOT the canonical name for
         // the promoted repo path — otherwise this test proves nothing.
-        let canonical = TmuxManager.serverName(forRepoPath: promoted.dest)
+        let canonical = TmuxServerName.forRepoPath(promoted.dest)
         #expect(promoted.mainWorktree.tmuxServer != canonical)
         #expect(promoted.mainWorktree.tmuxServer == promoted.scratch.tmuxServer)
 
@@ -142,7 +142,7 @@ struct ScratchPromoteReconcileTests {
         // The inherited server is gone: reconcile must park the resumable
         // Claude terminal and delete the shell row, and still leave the stored
         // server name as it was.
-        let canonical = TmuxManager.serverName(forRepoPath: promoted.dest)
+        let canonical = TmuxServerName.forRepoPath(promoted.dest)
         let probe = RecordingLeftoverTmuxProbe(answer: { server in
             server == canonical ? .running : .absent
         })

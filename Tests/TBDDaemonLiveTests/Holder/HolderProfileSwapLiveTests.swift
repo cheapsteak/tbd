@@ -925,7 +925,7 @@ private final class SwapFixture {
             path: repoDir.path, displayName: "acme", defaultBranch: "main")
         let worktree = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let dest = try await db.modelProfiles.create(name: "Dest", kind: .oauth)
 
         return SwapFixture(

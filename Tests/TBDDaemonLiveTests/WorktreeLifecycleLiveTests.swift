@@ -39,7 +39,7 @@ import Testing
     let repo = try await db.repos.create(
         path: repoDir.path, displayName: "acme", defaultBranch: "main"
     )
-    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
+    let serverName = TmuxServerName.forRepoPath(repo.path)
 
     // A worktree whose path == the repo path is reported by `git worktree
     // list`, so reconcile will not archive it as missing.

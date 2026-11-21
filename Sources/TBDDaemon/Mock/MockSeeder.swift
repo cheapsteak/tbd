@@ -87,7 +87,7 @@ public struct MockSeeder: Sendable {
         }
         logger.debug("MockSeeder: created repo '\(repo.displayName, privacy: .public)'")
 
-        let tmuxServer = TmuxManager.serverName(forRepoPath: repoSeed.path)
+        let tmuxServer = TmuxServerName.forRepoPath(repoSeed.path)
         // Maps worktree name → id so parentName references can be resolved.
         var nameToID: [String: UUID] = [:]
 

@@ -184,8 +184,8 @@ extension RPCRouter {
         let terminalID = UUID()
         var env = operations.commandEnvironment(server: server, worktree: worktree, repoPath: repoPath)
         env["TBD_TERMINAL_ID"] = terminalID.uuidString
-        let cols = TmuxManager.defaultCols
-        let rows = TmuxManager.defaultRows
+        let cols = TerminalSpawnSize.defaultCols
+        let rows = TerminalSpawnSize.defaultRows
         let serverName = server.name
         let spawnEnv = env
         let current = try await WorktreeLifecycle.worktreeForSpawn(

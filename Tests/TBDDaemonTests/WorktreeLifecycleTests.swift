@@ -704,7 +704,7 @@ private func seedTmuxShellTerminals(
 ) async throws -> Worktree {
     let main = try await db.worktrees.createMain(
         repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-        tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+        tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
     for index in 1...2 {
         _ = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "@\(index)", tmuxPaneID: "%\(index)",
@@ -730,7 +730,7 @@ private func makeReconcileFixture(
     tempDir: URL, repoDir: URL, serverState: LeftoverTmuxServerState
 ) async throws -> (TBDDatabase, WorktreeLifecycle, Repo, Terminal) {
     let db = try TBDDatabase(inMemory: true)
-    let server = TmuxManager.serverName(forRepoPath: repoDir.path)
+    let server = TmuxServerName.forRepoPath(repoDir.path)
     let lifecycle = makeProbedLifecycle(db: db, state: serverState)
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let main = try await db.worktrees.createMain(
@@ -886,7 +886,7 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
         leftoverTmuxProbe: probe.probe)
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
+    let serverName = TmuxServerName.forRepoPath(repo.path)
     // A worktree at the repo path so `git worktree list` reports it and
     // reconcile doesn't archive it as missing.
     let wt = try await db.worktrees.create(

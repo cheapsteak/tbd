@@ -2865,7 +2865,7 @@ struct HolderTmuxAssumptionGateTests {
         let wt = try await db.worktrees.create(
             repoID: repo.id, name: "gone", branch: "gone-branch",
             path: tempDir.appendingPathComponent("vanished").path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .holder, childPID: 0)
         let registry = try await armedRegistry(listing: [terminal], for: terminal.id)

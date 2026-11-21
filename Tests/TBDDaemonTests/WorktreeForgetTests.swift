@@ -100,7 +100,7 @@ import Testing
         name: "main",
         branch: "main",
         path: repoDir.path,
-        tmuxServer: TmuxManager.serverName(forRepoPath: repo.path)
+        tmuxServer: TmuxServerName.forRepoPath(repo.path)
     )
 
     await #expect(throws: WorktreeLifecycleError.self) {

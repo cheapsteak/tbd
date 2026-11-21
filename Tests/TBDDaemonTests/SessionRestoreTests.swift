@@ -249,7 +249,7 @@ struct SessionRestoreTests {
             path: repoDir.path, displayName: "acme-repo", defaultBranch: "main")
         let main = try await fixture.db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
-            tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+            tmuxServer: TmuxServerName.forRepoPath(repoDir.path))
         let terminal = try await fixture.db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude,
@@ -977,8 +977,8 @@ struct SessionRestoreTests {
 
         #expect(summary == SessionRestoreSummary(selected: 1, woken: 1))
         let launch = try #require(fixture.holder.launch(for: row))
-        #expect(launch.request.columns == UInt16(TmuxManager.defaultCols))
-        #expect(launch.request.rows == UInt16(TmuxManager.defaultRows))
+        #expect(launch.request.columns == UInt16(TerminalSpawnSize.defaultCols))
+        #expect(launch.request.rows == UInt16(TerminalSpawnSize.defaultRows))
     }
 
     /// A registry with no spawner in place of the fixture's double: the row was

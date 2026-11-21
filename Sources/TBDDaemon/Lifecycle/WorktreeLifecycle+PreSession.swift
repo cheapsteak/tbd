@@ -166,8 +166,8 @@ extension WorktreeLifecycle {
         }
 
         let worktreeID = worktree.id
-        let resolvedCols = cols ?? TmuxManager.defaultCols
-        let resolvedRows = rows ?? TmuxManager.defaultRows
+        let resolvedCols = cols ?? TerminalSpawnSize.defaultCols
+        let resolvedRows = rows ?? TerminalSpawnSize.defaultRows
 
         let terminalID = UUID()
         let markerPath = Self.preSessionMarkerPath(worktreeID: worktreeID)

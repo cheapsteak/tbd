@@ -746,8 +746,8 @@ public actor HibernationCoordinator {
                     // no resume argv.
                     sensitiveEnv: [:],
                     workingDirectory: worktree.path,
-                    cols: TmuxManager.defaultCols,
-                    rows: TmuxManager.defaultRows,
+                    cols: TerminalSpawnSize.defaultCols,
+                    rows: TerminalSpawnSize.defaultRows,
                     environment: spawnEnvironment))
         } catch {
             // Not a spawn that failed: a spawn the registry DECLINED because
