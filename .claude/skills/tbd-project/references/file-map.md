@@ -65,6 +65,8 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `ShellEscape.swift` — `shellEscape(_:)`, which single-quotes a string for a shell command line
 - `GatedIntervalSleep.swift` — `sleepThroughGatedInterval`, which sleeps in ticks until an interval it re-reads every tick has elapsed; the git fetch, git status and PR poll loops wait through it
 - `ClaudeUsageBucketScope.swift` — whether a Claude usage bucket is model-scoped rather than a plan-wide limit; the usage parser and the snapshot store both drop such buckets
+- `TerminalSpawnSize.swift` — the cell dimensions a session spawns at when the app sends none (220×50), and the floor a resize must clear (80×24)
+- `TmuxServerName.swift` — `TmuxServerName.forRepoPath`, the djb2 hash of a repo path that names its tmux server; the leftover-tmux probe and notice name a server this way
 
 ### Claude/
 - `ClaudeSpawnCommandBuilder.swift` — pure builder for the `claude` spawn command; appends `--plugin-dir`/`--settings`, returns auth/routing `sensitiveEnv`
@@ -135,10 +137,10 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
 - `SocketServer.swift` — NIO Unix-socket RPC server
 - `RepoSerializer.swift` — repo serialization for RPC results
+- `PacedKeySender.swift` — types a `terminal.send --keys` sequence one key at a time, 150 ms apart, through a send closure the terminal handlers supply
 
-### Git/ Tmux/ SSH/ Keychain/ AskUserQuestion/
+### Git/ SSH/ Keychain/ AskUserQuestion/
 - `Git/GitManager.swift` — all git operations
-- `Tmux/TmuxManager.swift` — per-repo tmux server names; TBD opens no tmux window and closes a tmux row without running tmux
 - `SSH/SSHAgentResolver.swift` — `~/.ssh/tbd-agent.sock` symlink maintenance
 - `Keychain/ModelProfileKeychain.swift` — stores apiKey profile secrets (0600 token files)
 - `AskUserQuestion/PendingPromptStore.swift` — in-memory store of open Claude Code dialogs: AskUserQuestion captures from the pre-tool hook, and the prompts the session mod reports open for answering from the transcript

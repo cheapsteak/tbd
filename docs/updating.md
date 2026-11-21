@@ -108,9 +108,9 @@ these steps in order.
 - **Seeds the saved tmux fallback** on a manual run, with or without
   `--no-app`; an `--auto` run skips this step. When
   `~/tbd/tmux-executable-path` is missing or names no usable executable, the
-  update writes the tmux its shell finds on `PATH` there. A login relaunch
-  ignores the bundle's recorded `PATH`, and this file is how that launch still
-  finds a package-manager tmux. A valid saved path is never replaced. An
+  update writes the tmux its shell finds on `PATH` there. The leftover-tmux
+  probe reads this file to recognize a tmux server by the name of the binary
+  it runs from. A valid saved path is never replaced. An
   `--auto` run's `PATH` is the daemon's plus fixed Homebrew directories, so a
   tmux it found would be a guess rather than your shell's choice. See
   [the design](specs/2026-09-22-tmux-fallback-install-seeding-design.md).
