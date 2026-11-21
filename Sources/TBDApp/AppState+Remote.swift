@@ -243,6 +243,13 @@ extension AppState {
     /// well, in place of any click held before it, until a remote load
     /// succeeds. Holding a click clears a held worktree deep link, and
     /// `navigateToWorktree` clears a held click, so the later click wins.
+    ///
+    /// An answered click is newer than any archived lookup still in flight,
+    /// so each of the three outcomes first supersedes it
+    /// (`supersedeArchivedLookup`): the lookup's late resolution then cannot
+    /// replace the session's selection or the not-found toast with the
+    /// archive view. A held click supersedes nothing, since nothing has
+    /// navigated yet; its replay does.
     @MainActor
     func navigateToRemoteSession(provider: String, sessionID: String) {
         if !isInitialStateLoaded || !remoteMirrorLoaded {
@@ -251,6 +258,7 @@ extension AppState {
             pendingDeepLinkTerminalID = nil
             return
         }
+        supersedeArchivedLookup()
 
         if let lane = allWorktrees.first(where: { worktree in
             guard worktree.status == .active, let binding = worktree.providerBinding else { return false }

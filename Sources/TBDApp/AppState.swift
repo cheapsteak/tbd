@@ -587,10 +587,19 @@ final class AppState {
     @ObservationIgnored var toastDismissTask: Task<Void, Never>?
 
     /// Request-generation token for archived deep-link lookups. Stamped fresh
-    /// at the start of every `navigateToArchivedWorktree(_:)`; a lookup that
-    /// resolves after a newer deep link superseded it is dropped. Guards
-    /// out-of-order RPC resolution (deep link A then B, A resolves late).
+    /// for every lookup (by `navigateToWorktree`, or by
+    /// `navigateToArchivedWorktree(_:requestID:)` when called without one); a
+    /// lookup that resolves after a newer deep link superseded it is dropped.
+    /// Guards out-of-order RPC resolution (deep link A then B, A resolves
+    /// late). Any other navigation supersedes a lookup by clearing it
+    /// (`supersedeArchivedLookup`).
     @ObservationIgnored var deepLinkRequestID: UUID?
+
+    /// The task running the archived lookup `navigateToWorktree` started
+    /// last. Nothing in the app reads it; a test awaits it to know that
+    /// lookup has resolved, since a superseded resolution changes nothing a
+    /// test could wait on instead.
+    @ObservationIgnored var archivedLookupTask: Task<Void, Never>?
 
     /// Set briefly when external navigation (notification click, deep link,
     /// jump menu) lands on an active worktree. `SidebarView` observes this
