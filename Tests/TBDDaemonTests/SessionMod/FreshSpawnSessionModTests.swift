@@ -191,9 +191,6 @@ struct FreshSpawnSessionModTests {
         try FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: worktreePath, withIntermediateDirectories: true)
 
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunCapturePane: { _, _ in "" })
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(
@@ -205,20 +202,19 @@ struct FreshSpawnSessionModTests {
         // A fork of a real conversation schedules a session-id recapture. This
         // one runs at once and finds nothing, so no task outlives the test and
         // nothing reads a session file at a process-wide path.
-        let inertRecapture: @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler = {
-            db, tmux in
+        let inertRecapture: @Sendable (TBDDatabase) -> SessionRecaptureScheduler = { db in
             SessionRecaptureScheduler(
-                db: db, tmux: tmux, captureSessionID: { _ in nil }, clock: ImmediateClock())
+                db: db, captureSessionID: { _ in nil }, clock: ImmediateClock())
         }
         let configDirManager = makeIsolatedConfigDirManager(tag: "fresh-spawn-mod")
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
             sessionsDir: sessionsDir,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: configDirManager,
             sessionsDir: sessionsDir,
             actuationLog: makeTestActuationLog())

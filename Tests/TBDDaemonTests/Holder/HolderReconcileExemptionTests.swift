@@ -43,7 +43,7 @@ struct HolderReconcileExemptionTests {
     /// directory holds.
     private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         return lifecycle
     }

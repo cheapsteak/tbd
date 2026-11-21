@@ -32,9 +32,8 @@ struct MixedReviveSelectionTests {
         defer { try? FileManager.default.removeItem(at: temp) }
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
-        let recorder = PreSessionRecordedCommands()
         let helper = LocalAgentArchiveTests()
-        let lc = helper.lifecycle(db, recorder, home: home)
+        let lc = helper.lifecycle(db, home: home)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
@@ -42,7 +41,7 @@ struct MixedReviveSelectionTests {
         try await db.localAgentSessions.upsert(.init(worktreeID: wt.id,
             identity: .init(agentKind: .codex, sessionID: "codex-C"),
             firstObservedAt: .distantPast, lastObservedAt: .distantPast))
-        let router = RPCRouter(db: db, lifecycle: lc, tmux: TmuxManager(dryRun: true), startTime: Date(),
+        let router = RPCRouter(db: db, lifecycle: lc, startTime: Date(),
             actuationLog: ActuationLog(path: home.appendingPathComponent("actuations.jsonl").path))
         router.holderRegistry = lc.holderRegistry
         let admission = StubAdmission(.admit)

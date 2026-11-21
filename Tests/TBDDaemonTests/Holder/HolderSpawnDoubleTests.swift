@@ -21,25 +21,16 @@ struct HolderSpawnDoubleTests {
 
     // MARK: - Fixture
 
-    private final class TmuxArgvRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var argvs: [[String]] = []
-        func record(_ argv: [String]) { lock.withLock { argvs.append(argv) } }
-        var all: [[String]] { lock.withLock { argvs } }
-    }
-
     private struct Fixture {
         let db: TBDDatabase
         let lifecycle: WorktreeLifecycle
         let launch: FakeHolderLaunch
         let registry: HolderRegistry
-        let tmux: TmuxArgvRecorder
         let worktree: Worktree
         let spawnedAt: Date
     }
 
     private static func makeFixture() async throws -> Fixture {
-        let tmuxRecorder = TmuxArgvRecorder()
         let db = try TBDDatabase(inMemory: true)
         // Whole seconds, so the stamp survives the database round trip exactly.
         let spawnedAt = Date(timeIntervalSince1970: 1_800_000_000)
@@ -47,7 +38,6 @@ struct HolderSpawnDoubleTests {
         let registry = makeHolderRegistryDouble(launch: launch)
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(),
-            tmux: TmuxManager(dryRun: true, dryRunRecorder: { tmuxRecorder.record($0) }),
             hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "holder-spawn-double"),
             now: { spawnedAt },
@@ -62,7 +52,7 @@ struct HolderSpawnDoubleTests {
             path: "/tmp/tbd-hsd-wt-\(UUID().uuidString)", tmuxServer: "tbd-hsd-test")
         return Fixture(
             db: db, lifecycle: lifecycle, launch: launch, registry: registry,
-            tmux: tmuxRecorder, worktree: worktree, spawnedAt: spawnedAt)
+            worktree: worktree, spawnedAt: spawnedAt)
     }
 
     /// A shell spawn whose transport the production gate grants.
@@ -133,7 +123,6 @@ struct HolderSpawnDoubleTests {
         // observable here, so it is stated instead: the double's registry has
         // no `HolderSpawner` (`spawner: nil`), so `spawn` has nothing to
         // `posix_spawn` with and runs the fabricator in its place.
-        #expect(fixture.tmux.all.isEmpty, "a holder spawn reached tmux: \(fixture.tmux.all)")
         #expect(await fixture.registry.reader(for: id) == nil)
         #expect(await fixture.registry.adoptedProcess(for: id) == nil)
         #expect(await fixture.registry.lastKnownStatus(for: id) == nil)
@@ -182,7 +171,6 @@ struct HolderSpawnDoubleTests {
         let row = try #require(try await fixture.db.terminals.get(id: id))
         #expect(row.transport == .tmux)
         #expect(row.holderPID == nil)
-        #expect(fixture.tmux.all.isEmpty, "the cleanup fell through to tmux: \(fixture.tmux.all)")
     }
 
     @Test("a failed launch writes no row and abandons nothing")
@@ -199,7 +187,6 @@ struct HolderSpawnDoubleTests {
         #expect(fixture.launch.launches.isEmpty)
         #expect(fixture.launch.abandonments.isEmpty)
         #expect(try await fixture.db.terminals.get(id: id) == nil)
-        #expect(fixture.tmux.all.isEmpty, "a failed holder spawn fell through to tmux")
 
         // One scripted failure fails one spawn, and the failed spawn did not
         // leave its terminal id claimed: the retry goes through.

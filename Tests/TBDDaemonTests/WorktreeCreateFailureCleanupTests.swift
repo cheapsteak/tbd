@@ -6,7 +6,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 (real git subprocesses, real filesystem, no tmux — `dryRun: true`).
+/// Tier 2 (real git subprocesses, real filesystem, no tmux).
 ///
 /// Covers what a *failed* `git worktree add` leaves behind, and how the create
 /// path decides whether retrying can help. `GitManager` is a concrete struct,
@@ -90,7 +90,7 @@ import Testing
     /// `git worktree add` opens its tabs without starting a process.
     private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -237,7 +237,6 @@ import Testing
         var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(subprocessTimeout: .milliseconds(1)),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
@@ -901,7 +900,7 @@ import Testing
         let db = try TBDDatabase(inMemory: true)
         // No registry: nothing to spawn with.
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let branchesBefore = try await localBranches(repoDir)

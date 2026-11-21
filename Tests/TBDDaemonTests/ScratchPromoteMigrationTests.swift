@@ -41,13 +41,12 @@ struct ScratchPromoteMigrationTests {
     ) -> RPCRouter {
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subscriptions,
             configDirManager: ClaudeProfileConfigDirManager(
@@ -299,9 +298,8 @@ struct WakePathGuardTests {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )
@@ -397,13 +395,12 @@ struct TerminalCreateResumeSyncWiringTests {
         // The resumed session opens on the holder, through the spawn double.
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),

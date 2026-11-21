@@ -53,10 +53,8 @@ private struct PRBindingRPCHarness {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             // `ghRunner` is required by the injecting init and must never be
             // reached from these paths; failing loudly is the assertion that it

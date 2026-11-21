@@ -121,7 +121,7 @@ struct GitManagerTimeoutTests {
     @Test func runDrainsStdoutLargerThanPipeBuffer() async throws {
         // A macOS pipe buffer is 64KB. If stdout were read only after the child
         // exited (the naive waitUntilExit-then-read shape that deadlocked the
-        // hibernate-path `ps` call, fixed for TmuxManager in f1d67f44), a child
+        // hibernate-path `ps` call, fixed for the tmux runner in f1d67f44), a child
         // emitting more would block writing to the full pipe, never exit, and
         // surface as a spurious GitTimeoutError. `GitManager.run` drains
         // incrementally via readabilityHandler + PipeDataAccumulator; lock down

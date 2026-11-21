@@ -211,16 +211,14 @@ struct SwapTranscriptCarryTests {
         let manager = ClaudeProfileConfigDirManager(baseDirectory: baseDir, hostBaseDirectory: hostDir)
 
         let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(dryRun: true)
         // The fork opens its new tab on the holder, through the spawn double.
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent)
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,

@@ -2986,8 +2986,8 @@ extension RPCRouter {
         target: SessionRecaptureTarget,
         expectedIncarnationID: UUID?
     ) {
-        let scheduler = sessionRecaptureFactory?(db, tmux)
-            ?? SessionRecaptureScheduler(db: db, tmux: tmux)
+        let scheduler = sessionRecaptureFactory?(db)
+            ?? SessionRecaptureScheduler(db: db)
         scheduler.schedule(
             terminalID: terminalID,
             target: target,

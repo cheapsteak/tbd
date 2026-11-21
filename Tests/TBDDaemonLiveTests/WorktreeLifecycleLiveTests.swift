@@ -6,11 +6,44 @@ import Testing
 @testable import TBDShared
 
 // Tier 3 (docs/specs/2026-07-24-test-hardening-design.md §3): the reconcile
-// test below builds a REAL-mode `TmuxManager` and calls `ensureServer`, so it
-// starts an actual tmux server on a unique socket. That external process is
-// what makes it tier 3 — the rest of `WorktreeLifecycleTests` stays in
-// `TBDDaemonTests` because it injects the leftover-tmux probe and touches
-// nothing outside the process.
+// test below runs the `tmux` on PATH to start an actual tmux server on a unique
+// socket, as an earlier build of TBD did. That external process is what makes
+// it tier 3 — the rest of `WorktreeLifecycleTests` stays in `TBDDaemonTests`
+// because it injects the leftover-tmux probe and touches nothing outside the
+// process.
+
+/// Runs one `tmux -L <server>` command through `/usr/bin/env`, so the binary
+/// comes from PATH, and returns its stdout. Throws on a non-zero exit.
+private func tmux(_ server: String, _ arguments: [String]) async throws -> String {
+    let outcome = try await runBoundedProcess(
+        executable: "/usr/bin/env",
+        arguments: ["tmux", "-L", server] + arguments,
+        currentDirectory: nil,
+        timeout: .seconds(15))
+    guard case .completed(let status, let stdout, _) = outcome, status == 0 else {
+        throw TmuxCommandFailed(arguments: arguments, outcome: "\(outcome)")
+    }
+    return String(decoding: stdout, as: UTF8.self)
+}
+
+/// Whether a tmux server answers on `server`'s socket.
+private func tmuxServerIsRunning(_ server: String) async -> Bool {
+    (try? await tmux(server, ["has-session"])) != nil
+}
+
+/// Parses `#{window_id} #{pane_id}` output into the IDs an earlier build
+/// recorded on a terminal row.
+private func tmuxWindow(fromFormatOutput output: String) throws -> (windowID: String, paneID: String) {
+    let fields = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+    guard fields.count == 2 else { throw TmuxCommandFailed(arguments: [], outcome: output) }
+    return (String(fields[0]), String(fields[1]))
+}
+
+private struct TmuxCommandFailed: Error, CustomStringConvertible {
+    let arguments: [String]
+    let outcome: String
+    var description: String { "tmux \(arguments) failed: \(outcome)" }
+}
 
 /// A tmux server an earlier build started, judged end to end through
 /// `reconcile(repoID:)` and the production socket probe
@@ -29,10 +62,9 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let realTmux = TmuxManager()
     // The production probe, as the daemon builds it.
     let lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver(),
+        db: db, git: GitManager(), hooks: HookResolver(),
         leftoverTmuxProbe: .production()
     )
 
@@ -50,13 +82,22 @@ import Testing
 
     // Start a real server + two real windows, recording their actual IDs so the
     // terminal rows look exactly like a session an earlier build left running.
-    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
-    let claudeWindow = try await realTmux.createWindow(
-        server: serverName, session: "main", cwd: repoDir.path, shellCommand: "sleep 60"
-    )
-    let shellWindow = try await realTmux.createWindow(
-        server: serverName, session: "main", cwd: repoDir.path, shellCommand: "sleep 60"
-    )
+    let format = "#{window_id} #{pane_id}"
+    let sessionOutput = try await tmux(serverName, [
+        "new-session", "-d", "-s", "main", "-c", repoDir.path, "-P", "-F", format, "sleep 60",
+    ])
+    let claudeWindow: (windowID: String, paneID: String)
+    let shellWindow: (windowID: String, paneID: String)
+    do {
+        claudeWindow = try tmuxWindow(fromFormatOutput: sessionOutput)
+        let windowOutput = try await tmux(serverName, [
+            "new-window", "-t", "main", "-c", repoDir.path, "-P", "-F", format, "sleep 60",
+        ])
+        shellWindow = try tmuxWindow(fromFormatOutput: windowOutput)
+    } catch {
+        _ = try? await tmux(serverName, ["kill-server"])
+        throw error
+    }
 
     let sessionID = UUID().uuidString
     let claudeTerminal = try await db.terminals.create(
@@ -73,7 +114,7 @@ import Testing
     do {
         try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
     } catch {
-        try? await realTmux.killServer(server: serverName)
+        _ = try? await tmux(serverName, ["kill-server"])
         throw error
     }
     let claudeWhileRunning = try await db.terminals.get(id: claudeTerminal.id)
@@ -85,22 +126,22 @@ import Testing
 
     // Simulate the reboot: the whole server is gone. tmux leaves its socket
     // file behind, so the probe reads a refused connect, not a missing path.
-    try await realTmux.killServer(server: serverName)
-    let aliveAfterKill = await realTmux.serverExists(server: serverName)
+    _ = try await tmux(serverName, ["kill-server"])
+    let aliveAfterKill = await tmuxServerIsRunning(serverName)
     #expect(!aliveAfterKill, "precondition: server must be gone to model a reboot")
 
     do {
         try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
     } catch {
-        try? await realTmux.killServer(server: serverName)
+        _ = try? await tmux(serverName, ["kill-server"])
         throw error
     }
 
     let claudeAfter = try await db.terminals.get(id: claudeTerminal.id)
     let shellAfter = try await db.terminals.get(id: shellTerminal.id)
     // Was the dead server resurrected by an eager recreate? (The bug.)
-    let serverAliveAfter = await realTmux.serverExists(server: serverName)
-    try? await realTmux.killServer(server: serverName)
+    let serverAliveAfter = await tmuxServerIsRunning(serverName)
+    _ = try? await tmux(serverName, ["kill-server"])
 
     // Resumable Claude session: parked, not recreated, not deleted.
     #expect(claudeAfter != nil, "claude terminal must NOT be deleted on reboot")

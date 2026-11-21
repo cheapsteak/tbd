@@ -70,10 +70,9 @@ struct RPCRouterRemoteExchangeTests: ~Copyable {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 subscriptions: subs,
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
             remoteManager: manager, actuationLog: makeTestActuationLog())

@@ -58,7 +58,6 @@ private func makeHolderBackedRouter(
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         codexExecutableResolver: CodexLaunchTestStub.executableResolver,
         codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
@@ -68,7 +67,6 @@ private func makeHolderBackedRouter(
     let router = RPCRouter(
         db: db,
         lifecycle: lifecycle,
-        tmux: TmuxManager(dryRun: true),
         codexExecutableResolver: CodexLaunchTestStub.executableResolver,
         codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
         actuationLog: makeTestActuationLog()
@@ -153,7 +151,6 @@ func testCreateWorktreeSetupTabExportsTBDIDs() async throws {
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(globalHooksDir: hooksDir.path),
         codexExecutableResolver: CodexLaunchTestStub.executableResolver,
         codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,

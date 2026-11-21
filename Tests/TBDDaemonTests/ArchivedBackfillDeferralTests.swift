@@ -26,7 +26,7 @@ struct ArchivedBackfillDeferralTests {
         db: TBDDatabase, git: GitManager, tempDir: URL, repoDir: URL
     ) async throws -> BrokenRow {
         var lifecycle = WorktreeLifecycle(
-            db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: git, hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -67,7 +67,7 @@ struct ArchivedBackfillDeferralTests {
         let broken = try await makeBrokenArchivedRow(
             db: db, git: git, tempDir: tempDir, repoDir: repoDir)
         let lifecycle = WorktreeLifecycle(
-            db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: git, hooks: HookResolver(),
             // A fixed answer, so reconciliation never asks this machine's tmux
             // servers.
             leftoverTmuxProbe: .absent
@@ -315,7 +315,7 @@ struct ArchivedBackfillDeferralTests {
         let db = try TBDDatabase(inMemory: true)
         let git = GitManager()
         var lifecycle = WorktreeLifecycle(
-            db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: git, hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())

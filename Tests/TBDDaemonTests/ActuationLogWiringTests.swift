@@ -4,7 +4,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 — dry-run tmux plus a real (temp-directory) actuation log.
+/// Tier 2 — a real (temp-directory) actuation log.
 ///
 /// These prove the wiring rather than the writer: that each surface appends
 /// exactly one request row naming the right kind, method and actor, that the
@@ -28,14 +28,12 @@ struct ActuationLogWiringTests {
         let path = logPath ?? directory.appendingPathComponent("actuations.jsonl").path
 
         let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(dryRun: true)
         // Spawns go through the holder spawn double, so `terminal.create`
         // opens a session without starting a process.
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: tmux,
             hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
@@ -43,7 +41,6 @@ struct ActuationLogWiringTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             actuationLog: ActuationLog(path: path)
         )

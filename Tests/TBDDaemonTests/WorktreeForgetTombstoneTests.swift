@@ -26,7 +26,6 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         // A fixed answer, so reconcile never asks this machine's tmux servers.
         leftoverTmuxProbe: .absent

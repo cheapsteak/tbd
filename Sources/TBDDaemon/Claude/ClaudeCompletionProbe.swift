@@ -164,7 +164,7 @@ enum ClaudeCompletionProbe {
     ///
     /// The spawn, the one-shot stdin payload, the incremental drain of both
     /// output pipes and the deadline all belong to `runBoundedProcess`, the
-    /// runner `GitManager`, `TmuxManager` and `ProviderRunner` already share.
+    /// runner `GitManager` and `ProviderRunner` already share.
     /// Re-implementing them here would re-acquire, one at a time, the failures
     /// that file documents: a reader parked on a GCD worker while the pool is
     /// saturated by a parallel test run, an undrained stderr deadlocking a

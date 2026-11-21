@@ -43,21 +43,6 @@ struct RunningShellTransportMoveTests {
         }
     }
 
-    /// Every tmux argv the dry-run manager was handed. The move reaches only
-    /// rows whose tmux server is gone, so it must hand tmux nothing at all.
-    private final class TmuxArgvRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var argvs: [[String]] = []
-        func record(_ argv: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            argvs.append(argv)
-        }
-        var all: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return argvs
-        }
-    }
-
     /// The pids the oracle's handle reports. Deliberately far above any pid
     /// darwin will issue, so nothing in these tests can name a real process
     /// even if a future change signalled what it was handed.
@@ -73,7 +58,6 @@ struct RunningShellTransportMoveTests {
         let db: TBDDatabase
         let home: String
         let worktree: Worktree
-        let tmuxArgv: TmuxArgvRecorder
         let coordinator: HibernationCoordinator
         let spawns: SpawnRecorder
 
@@ -119,10 +103,6 @@ struct RunningShellTransportMoveTests {
         try FileManager.default.createDirectory(
             atPath: home, withIntermediateDirectories: true)
         let db = try TBDDatabase(inMemory: true)
-        let tmuxArgv = TmuxArgvRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { tmuxArgv.record($0) })
 
         let repoPath = "\(home)/repo"
         try FileManager.default.createDirectory(
@@ -137,8 +117,7 @@ struct RunningShellTransportMoveTests {
             path: worktreePath, tmuxServer: "tbd-rstm-test")
 
         let coordinator = HibernationCoordinator(
-            db: db, tmux: tmux,
-            configDirManager: makeIsolatedConfigDirManager(tag: "running-shell-move"),
+            db: db, configDirManager: makeIsolatedConfigDirManager(tag: "running-shell-move"),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "running-shell-move"),
             leftoverTmuxProbe: .absent)
@@ -173,8 +152,7 @@ struct RunningShellTransportMoveTests {
         }
 
         return Fixture(
-            db: db, home: home, worktree: worktree, tmuxArgv: tmuxArgv,
-            coordinator: coordinator, spawns: spawns)
+            db: db, home: home, worktree: worktree, coordinator: coordinator, spawns: spawns)
     }
 
     /// A live tmux row with no conversation to resume: a shell. Pinned and
@@ -253,9 +231,6 @@ struct RunningShellTransportMoveTests {
         let row = try await Self.runningShell(fixture)
 
         #expect(await fixture.coordinator.moveRunningShellToHolder(terminal: row) == .moved)
-
-        #expect(fixture.tmuxArgv.all.isEmpty,
-                "the move invoked tmux: \(fixture.tmuxArgv.all)")
     }
 
     /// "The same working directory" is the worktree's path, which is where a
@@ -329,8 +304,6 @@ struct RunningShellTransportMoveTests {
 
         #expect(outcome == .refused(
             reason: TerminalTransportMigrator.holderUnspawnableRefusal))
-        #expect(fixture.tmuxArgv.all.isEmpty,
-                "a refused move invoked tmux: \(fixture.tmuxArgv.all)")
         #expect(try await fixture.db.terminals.get(id: row.id) == row,
                 "a refused move changed the row")
     }
@@ -348,8 +321,6 @@ struct RunningShellTransportMoveTests {
 
         #expect(outcome == .refused(
             reason: TerminalTransportMigrator.holderUnspawnableRefusal))
-        #expect(fixture.tmuxArgv.all.isEmpty,
-                "a refused move invoked tmux: \(fixture.tmuxArgv.all)")
         #expect(await fixture.launches.isEmpty)
         #expect(try await fixture.db.terminals.get(id: row.id) == row,
                 "a refused move changed the row")

@@ -17,18 +17,16 @@ struct SessionTitleSyncRPCTests {
     private let holder: FakeHolderLaunch
 
     init() throws {
-        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )

@@ -20,7 +20,7 @@ extension RPCRouter {
         DevServerOperations(
             db: db,
             tabInspector: devServerTabInspector ?? ProductionDevServerTabInspector(
-                tmux: lifecycle.tmux, holderRegistry: holderRegistry, signaller: processSignaller),
+                holderRegistry: holderRegistry, signaller: processSignaller),
             commandRunner: devServerCommandRunner,
             stopper: devServerStopper,
             runningFiles: devServerRunningFiles,

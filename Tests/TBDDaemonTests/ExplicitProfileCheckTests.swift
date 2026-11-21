@@ -120,7 +120,7 @@ extension TBDHomeSerialized {
 /// `worktree.create` with `profileID` and `terminal.create` with
 /// `overrideProfileID`: an unusable profile is refused before anything of the
 /// create exists, a usable one is used and skips balancing. Tier 2: an
-/// in-memory database, a dry-run tmux, the holder spawn double, a real git
+/// in-memory database, the holder spawn double, a real git
 /// repo and a scratch directory; no process is started.
 @Suite("An explicit model profile is checked before a create")
 struct ExplicitProfileRPCTests {
@@ -282,7 +282,6 @@ struct ExplicitProfileRPCTests {
 
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
-        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
         let claudeBase = scratch.appendingPathComponent("claude", isDirectory: true)
         let configDirManager = ClaudeProfileConfigDirManager(
@@ -308,7 +307,7 @@ struct ExplicitProfileRPCTests {
                 }),
             reservations: ProfilePickReservations())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             modelProfileResolver: resolver,
             configDirManager: configDirManager,
             preSessionPollInterval: 0.05,
@@ -317,7 +316,6 @@ struct ExplicitProfileRPCTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             modelProfileResolver: resolver,

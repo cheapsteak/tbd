@@ -4,7 +4,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 — in-memory database, dry-run tmux, a scripted fake provider, and a
+/// Tier 2 — in-memory database, a scripted fake provider, and a
 /// real actuation log in a temp directory. No `TBD_HOME`, no subprocesses.
 ///
 /// `worktree.archive` on a remote lane

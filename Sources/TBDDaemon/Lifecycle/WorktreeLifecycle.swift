@@ -55,12 +55,11 @@ public enum WorktreeLifecycleError: LocalizedError, CustomStringConvertible {
 
 /// Orchestrates the full lifecycle of worktrees: create, archive, revive, and reconcile.
 ///
-/// Coordinates between git, the database, tmux, and hooks to provide
+/// Coordinates between git, the database, the pty holder, and hooks to provide
 /// high-level operations that maintain consistency across all subsystems.
 public struct WorktreeLifecycle: Sendable {
     public let db: TBDDatabase
     public let git: GitManager
-    public let tmux: TmuxManager
     public let hooks: HookResolver
     public let subscriptions: StateSubscriptionManager?
     public let modelProfileResolver: ModelProfileResolver?
@@ -220,7 +219,6 @@ public struct WorktreeLifecycle: Sendable {
     public init(
         db: TBDDatabase,
         git: GitManager,
-        tmux: TmuxManager,
         hooks: HookResolver,
         subscriptions: StateSubscriptionManager? = nil,
         modelProfileResolver: ModelProfileResolver? = nil,
@@ -243,7 +241,6 @@ public struct WorktreeLifecycle: Sendable {
         self.leftoverTmuxProbe = leftoverTmuxProbe ?? LeftoverTmuxServerProbe.production()
         self.db = db
         self.git = git
-        self.tmux = tmux
         self.hooks = hooks
         self.subscriptions = subscriptions
         self.modelProfileResolver = modelProfileResolver

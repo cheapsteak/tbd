@@ -6,7 +6,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 — dry-run tmux, the holder spawn double, an in-memory database, an
+/// Tier 2 — the holder spawn double, an in-memory database, an
 /// `EventDrivenTestClock` for the readiness ceiling and the settle.
 ///
 /// `docs/specs/2026-08-10-queued-prompt-on-create-design.md`: a parked prompt
@@ -72,8 +72,8 @@ struct QueuedPromptDeliveryTests {
         }
     }
 
-    /// "Has this happened before?", answered once. For dry-run tmux hooks,
-    /// which are synchronous and fire for every window a spawn creates.
+    /// "Has this happened before?", answered once, from a `@Sendable`
+    /// delivery closure that fires for every prompt.
     private final class FirstTime: @unchecked Sendable {
         private let lock = NSLock()
         private var seen = false
@@ -270,9 +270,6 @@ struct QueuedPromptDeliveryTests {
         gate: Gate? = nil
     ) async throws -> SpawnFixture {
         let holder = FakeHolderLaunch()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) })
         let db = try TBDDatabase(inMemory: true)
         let sends = SendRecorder()
         let repo = try await db.repos.create(
@@ -294,7 +291,7 @@ struct QueuedPromptDeliveryTests {
             return delivered
         }
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             modelProfileResolver: ModelProfileResolver(
                 profiles: db.modelProfiles, repos: db.repos, config: db.config),
             configDirManager: isolatedConfigDirManager(),
@@ -353,17 +350,15 @@ struct QueuedPromptDeliveryTests {
             .appendingPathComponent("tbd-qp-send-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let pastes = PasteRecorder()
-        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
         let actuationLogPath = directory.appendingPathComponent("actuations.jsonl").path
         let transcriptPath = directory.appendingPathComponent("transcript.jsonl").path
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 configDirManager: isolatedConfigDirManager(),
                 leftoverTmuxProbe: .absent),
-            tmux: tmux,
             startTime: Date(),
             configDirManager: isolatedConfigDirManager(),
             actuationLog: ActuationLog(path: actuationLogPath))

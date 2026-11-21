@@ -40,7 +40,7 @@ import Testing
 @Suite("ClaudeStateDetector session-file path")
 struct ClaudeStateDetectorSessionPathTests {
     private func detector(environment: [String: String]) -> ClaudeStateDetector {
-        ClaudeStateDetector(tmux: TmuxManager(dryRun: true), environment: environment)
+        ClaudeStateDetector(environment: environment)
     }
 
     @Test("an override relocates the session file to the fenced host store")
@@ -157,7 +157,6 @@ struct ClaudeStateDetectorTargetTests {
         ])
         defer { try? FileManager.default.removeItem(at: host) }
         let detector = ClaudeStateDetector(
-            tmux: TmuxManager(dryRun: true),
             environment: ["TBD_CLAUDE_HOST_HOME": host.path])
 
         #expect(await detector.captureSessionID(target: .holderChild(pid: 424242))
@@ -173,7 +172,6 @@ struct ClaudeStateDetectorTargetTests {
         let host = try Self.makeHostStore(sessions: [(pid: 424242, sessionID: "holder-child-session")])
         defer { try? FileManager.default.removeItem(at: host) }
         let detector = ClaudeStateDetector(
-            tmux: TmuxManager(dryRun: true),
             environment: ["TBD_CLAUDE_HOST_HOME": host.path])
 
         // A pid no process on this machine has: the `pgrep -P` fallback finds

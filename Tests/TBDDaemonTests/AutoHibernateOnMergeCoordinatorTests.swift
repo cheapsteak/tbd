@@ -48,8 +48,7 @@ struct AutoHibernateOnMergeCoordinatorTests {
             signaller.behaviors[pid] = .init(aliveInitially: false)
         }
         let hibernation = HibernationCoordinator(
-            db: db, tmux: TmuxManager(dryRun: true),
-            subscriptions: subs, configDirManager: isolatedConfigDirManager(),
+            db: db, subscriptions: subs, configDirManager: isolatedConfigDirManager(),
             signaller: signaller,
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: logPath.map { ActuationLog(path: $0) } ?? makeTestActuationLog(),

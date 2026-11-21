@@ -11,11 +11,10 @@ import TestSupport
 struct AgentBackgroundRouterTests {
 
     private func makeRouter(_ db: TBDDatabase, fake: FakeProcessPriority) -> RPCRouter {
-        let tmux = TmuxManager(dryRun: true)
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), leftoverTmuxProbe: .absent),
-            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), leftoverTmuxProbe: .absent),
+            startTime: Date(), actuationLog: makeTestActuationLog())
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-agent-background-\(UUID().uuidString).json").path
         router.agentBackground = AgentBackgroundController(

@@ -19,11 +19,9 @@ struct TerminalSessionEventHandlerTests {
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )
@@ -35,11 +33,9 @@ struct TerminalSessionEventHandlerTests {
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             now: now,
             actuationLog: makeTestActuationLog()
@@ -52,11 +48,9 @@ struct TerminalSessionEventHandlerTests {
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             sessionsDir: sessionsDir,
             actuationLog: makeTestActuationLog()
@@ -971,10 +965,8 @@ struct TerminalSessionEventHandlerTests {
             lifecycle: WorktreeLifecycle(
                 db: isolatedDB,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog())
         let repo = try await isolatedDB.repos.create(

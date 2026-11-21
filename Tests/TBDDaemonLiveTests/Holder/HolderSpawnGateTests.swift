@@ -71,13 +71,6 @@ struct HolderSpawnGateTests {
         // is opened for a bare shell — and no tmux server or window was ever
         // asked for.
         #expect(created.count == 1)
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("new-window") }),
-            "the holder path created a tmux window: \(issued)")
-        #expect(
-            !issued.contains(where: { $0.contains("new-session") }),
-            "the holder path started a tmux server: \(issued)")
     }
 
     /// A spawned session's drain loop is counted exactly like an adopted
@@ -144,10 +137,6 @@ struct HolderSpawnGateTests {
         }
 
         #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("new-window") || $0.contains("new-session") }),
-            "a refused spawn reached tmux: \(issued)")
     }
 
     // MARK: - Extra terminals
@@ -184,14 +173,6 @@ struct HolderSpawnGateTests {
             FileManager.default.fileExists(atPath: socketPath),
             "no holder rendezvous at \(socketPath) for a holder-transport extra terminal")
         #expect(await fixture.registry.reader(for: row.id) != nil)
-
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("new-window") }),
-            "the holder path created a tmux window: \(issued)")
-        #expect(
-            !issued.contains(where: { $0.contains("new-session") }),
-            "the holder path started a tmux server: \(issued)")
     }
 
     /// An extra Claude terminal takes the holder exactly as a primary session
@@ -257,14 +238,7 @@ struct HolderSpawnGateTests {
 
     // MARK: - The read
 
-    /// `terminal.output` on a holder row renders the daemon's emulator, and
-    /// `capture-pane` is never reached.
-    ///
-    /// The negative half is asserted two ways on purpose. The call counter
-    /// catches a handler that captured a pane and threw the result away; the
-    /// poisoned capture text catches one that captured a pane and *returned*
-    /// it, which a counter alone would report as a pass if the count assertion
-    /// were ever relaxed.
+    /// `terminal.output` on a holder row renders the daemon's emulator.
     @Test func terminalOutputReadsTheHolderEmulator() async throws {
         let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
@@ -278,10 +252,6 @@ struct HolderSpawnGateTests {
         }
         let rendered = try await fixture.terminalOutput(terminalID: terminalID)
         #expect(output, "rendered: \(rendered.debugDescription)")
-        #expect(!rendered.contains(GateFixture.poisonedPaneText))
-        #expect(
-            fixture.capturePaneCalls() == 0,
-            "terminal.output shelled out to tmux capture-pane for a holder session")
     }
 
     // MARK: - Archived-session restores
@@ -319,14 +289,6 @@ struct HolderSpawnGateTests {
         #expect(holderProcessIsAlive(childPID))
         #expect(restored.tmuxWindowID.isEmpty)
         #expect(restored.tmuxPaneID.isEmpty)
-
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("new-session") }),
-            "the restore started a tmux server it does not need: \(issued)")
-        #expect(
-            !issued.contains(where: { $0.contains("new-window") }),
-            "the restore created a tmux window: \(issued)")
     }
 
     // MARK: - Revive from history
@@ -355,14 +317,6 @@ struct HolderSpawnGateTests {
         #expect(
             FileManager.default.fileExists(atPath: socketPath),
             "no holder rendezvous at \(socketPath) for a revived holder tab")
-
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("new-window") }),
-            "the revive created a tmux window: \(issued)")
-        #expect(
-            !issued.contains(where: { $0.contains("new-session") }),
-            "the revive started a tmux server: \(issued)")
     }
 
     // MARK: - Profile login tab
@@ -426,14 +380,6 @@ struct HolderSpawnGateTests {
         #expect(
             FileManager.default.fileExists(atPath: socketPath),
             "no holder rendezvous at \(socketPath) for a holder-transport login tab")
-
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("new-window") }),
-            "the login tab created a tmux window: \(issued)")
-        #expect(
-            !issued.contains(where: { $0.contains("new-session") }),
-            "the login tab started a tmux server: \(issued)")
 
         #expect(
             courierWrites.writes.isEmpty,
@@ -511,14 +457,6 @@ struct HolderSpawnGateTests {
         #expect(row.tmuxWindowID.isEmpty)
         #expect(row.tmuxPaneID.isEmpty)
         #expect(row.label == TerminalLabel.preSession)
-
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("new-session") }),
-            "the pre-session hook tab started a tmux server: \(issued)")
-        #expect(
-            !issued.contains(where: { $0.contains("new-window") }),
-            "the pre-session hook tab created a tmux window: \(issued)")
     }
 
     /// With a setup hook installed, the setup tab is a holder row beside the
@@ -551,14 +489,6 @@ struct HolderSpawnGateTests {
         let primary = try #require(try await fixture.db.terminals.get(id: created[0].id))
         #expect(primary.transport == .holder)
         #expect(primary.holderPID != setup.holderPID, "both tabs share one holder")
-
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("new-session") }),
-            "the setup hook tab started a tmux server: \(issued)")
-        #expect(
-            !issued.contains(where: { $0.contains("new-window") }),
-            "the setup hook tab created a tmux window: \(issued)")
     }
 
     /// Setup auto-close on the holder: the tab closes, and closing it reclaims
@@ -599,17 +529,6 @@ struct HolderSpawnGateTests {
         #expect(
             FileManager.default.fileExists(atPath: socketPath),
             "no holder rendezvous at \(socketPath) for an auto-closing setup tab")
-
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("remain-on-exit") }),
-            "the holder setup tab asked tmux to keep a pane it never had: \(issued)")
-        #expect(
-            !issued.contains(where: { $0.contains("new-window") }),
-            "the auto-closing setup tab created a tmux window: \(issued)")
-        #expect(
-            !issued.contains(where: { $0.contains("new-session") }),
-            "the auto-closing setup tab started a tmux server: \(issued)")
 
         // Stand in for the hook's clean exit: the job is the pinned gate shell,
         // which ignores the wrapper's argv, so the marker never lands on its
@@ -681,10 +600,6 @@ struct HolderSpawnGateTests {
         #expect(
             remaining.isEmpty,
             "phase 3 spawned terminals into a worktree that no longer exists")
-        let issued = fixture.tmuxCommands()
-        #expect(
-            !issued.contains(where: { $0.contains("kill-window") }),
-            "the holder hook tab was torn down through tmux: \(issued)")
 
         let jobGone = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             !holderProcessIsAlive(childPID)
@@ -713,8 +628,8 @@ struct HolderSpawnGateTests {
 ///
 /// Two things it deliberately does not do. It never reaches
 /// `ClaudeStateDetector`, which would read a session file at a **process-wide**
-/// path (`$TBD_CLAUDE_HOST_HOME/sessions/<pane pid>.json`, and a dry-run pane
-/// PID is always `0`) — a file every other create-path suite's recapture would
+/// path (`$TBD_CLAUDE_HOST_HOME/sessions/<pid>.json`) — a file every other
+/// create-path suite's recapture would
 /// read too, which is a cross-suite coupling, not a fixture. And it runs on
 /// `ImmediateClock`, so the branch is asserted without waiting out the
 /// production five seconds.
@@ -729,10 +644,9 @@ private final class RecaptureProbe: @unchecked Sendable {
         lock.withLock { recorded }
     }
 
-    func scheduler(db: TBDDatabase, tmux: TmuxManager) -> SessionRecaptureScheduler {
+    func scheduler(db: TBDDatabase) -> SessionRecaptureScheduler {
         SessionRecaptureScheduler(
             db: db,
-            tmux: tmux,
             // `withLock` rather than `lock()`/`unlock()`: this closure is
             // `async`, where the unscoped pair is unavailable.
             captureSessionID: { [self] target in
@@ -757,11 +671,6 @@ private final class RecaptureProbe: @unchecked Sendable {
 ///   3. **Every holder and every job is killed in teardown.** Holder death is
 ///      not child death, so both are named.
 private final class GateFixture {
-    /// What a dry-run `capture-pane` answers. Deliberately a string no holder
-    /// emulator could produce, so a read that went through tmux is visible in
-    /// the returned text and not only in a counter.
-    static let poisonedPaneText = "TMUX-CAPTURE-PANE-WAS-CALLED"
-
     let db: TBDDatabase
     let router: RPCRouter
     let registry: HolderRegistry
@@ -770,39 +679,9 @@ private final class GateFixture {
     let repo: Repo
     private let home: String
     private let tempDir: URL
-    private let capturePaneCounter: Counter
-    private let recordedCommands: CommandLog
     private var torndown = false
     private let rememberedLock = NSLock()
     private var remembered: [(holderPID: Int32?, childPID: Int32?)] = []
-
-    /// A thread-safe tally. The dry-run hooks are `@Sendable` closures called
-    /// from whatever executor the handler happens to be on.
-    final class Counter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = 0
-        func increment() {
-            lock.lock(); defer { lock.unlock() }
-            value += 1
-        }
-        var count: Int {
-            lock.lock(); defer { lock.unlock() }
-            return value
-        }
-    }
-
-    final class CommandLog: @unchecked Sendable {
-        private let lock = NSLock()
-        private var entries: [String] = []
-        func append(_ argv: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            entries.append(argv.joined(separator: " "))
-        }
-        var all: [String] {
-            lock.lock(); defer { lock.unlock() }
-            return entries
-        }
-    }
 
     /// A short scratch root under the run root `scripts/test.sh` reclaims: the
     /// rendezvous socket lives under it and `sun_path` is 104 bytes, so a
@@ -864,16 +743,6 @@ private final class GateFixture {
             "SHELL": shell,
         ]
 
-        let capturePaneCounter = Counter()
-        let recordedCommands = CommandLog()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { argv in recordedCommands.append(argv) },
-            dryRunCapturePane: { _, _ in
-                capturePaneCounter.increment()
-                return poisonedPaneText
-            })
-
         let db = try TBDDatabase(inMemory: true)
 
         let spawner: HolderSpawner?
@@ -910,7 +779,7 @@ private final class GateFixture {
             hostBaseDirectory: URL(fileURLWithPath: home)
                 .appendingPathComponent("claude", isDirectory: true))
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
             // The hook-tab waits this fixture arms are polled, not slept
             // through: the setup auto-close watcher has to see a marker written
@@ -925,7 +794,7 @@ private final class GateFixture {
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: configDirManager,
             // The login-tab tests arm the identity watcher. On the router's
             // shipped delays that is half an hour of polling outliving the
@@ -940,8 +809,8 @@ private final class GateFixture {
         if let recapture {
             // The router builds its own scheduler for the fork swap, the one
             // path that schedules a recapture.
-            router.sessionRecaptureFactory = { db, tmux in
-                recapture.scheduler(db: db, tmux: tmux)
+            router.sessionRecaptureFactory = { db in
+                recapture.scheduler(db: db)
             }
         }
         // Codex is never launched here: the job is the pinned gate shell,
@@ -955,15 +824,13 @@ private final class GateFixture {
 
         return GateFixture(
             db: db, router: router, registry: registry, environment: environment,
-            worktree: worktree, repo: repo, home: home, tempDir: tempDir,
-            capturePaneCounter: capturePaneCounter, recordedCommands: recordedCommands)
+            worktree: worktree, repo: repo, home: home, tempDir: tempDir)
     }
 
     private init(
         db: TBDDatabase, router: RPCRouter, registry: HolderRegistry,
         environment: [String: String], worktree: Worktree, repo: Repo,
-        home: String, tempDir: URL,
-        capturePaneCounter: Counter, recordedCommands: CommandLog
+        home: String, tempDir: URL
     ) {
         self.db = db
         self.router = router
@@ -973,8 +840,6 @@ private final class GateFixture {
         self.repo = repo
         self.home = home
         self.tempDir = tempDir
-        self.capturePaneCounter = capturePaneCounter
-        self.recordedCommands = recordedCommands
     }
 
     /// The production spawn path, entered exactly as `worktree.create` enters
@@ -1055,9 +920,6 @@ private final class GateFixture {
         return try JSONDecoder()
             .decode(TerminalOutputResult.self, from: Data(result.utf8)).output
     }
-
-    func capturePaneCalls() -> Int { capturePaneCounter.count }
-    func tmuxCommands() -> [String] { recordedCommands.all }
 
     /// Installs an executable `.worktree-hooks/<event>` in the worktree's
     /// checkout. `HookResolver` only looks at the filesystem, and this fixture's

@@ -6,53 +6,6 @@ import TBDKernel
 
 @Suite("Dev server tab inspection")
 struct DevServerTabInspectorTests {
-    @Test func aLivePaneParsesAsRunning() {
-        #expect(TmuxManager.parsePaneExitState("%3|0||1234\n%4|0||99", paneID: "%3") == .running(pid: 1234))
-    }
-
-    /// tmux keeps a dead pane's `pane_pid`, and a respawn changes it: the
-    /// pid tells one run of a respawned server tab from the next.
-    @Test func aDeadPaneCarriesItsStatusAndPID() {
-        #expect(TmuxManager.parsePaneExitState("%4|0||99\n%3|1|127|1234", paneID: "%3")
-            == .dead(status: 127, pid: 1234))
-        #expect(TmuxManager.parsePaneExitState("%3|1|1|", paneID: "%3") == .dead(status: 1, pid: nil))
-    }
-
-    @Test func aMissingPaneIsGone() {
-        #expect(TmuxManager.parsePaneExitState("%4|0||99", paneID: "%3") == .gone)
-        #expect(TmuxManager.parsePaneExitState("", paneID: "%3") == .gone)
-    }
-
-    /// Only tmux's own "not there" answer makes a tab gone; a timeout or an
-    /// unrecognised failure is ignorance, and must never read as stopped.
-    @Test func aFailedQueryIsGoneOnlyWhenTmuxSaysThePaneIsAbsent() {
-        let absentPane = TmuxError.commandFailed(command: "tmux list-panes", status: 1, output: "can't find pane: %3")
-        let noServer = TmuxError.commandFailed(
-            command: "tmux list-panes", status: 1, output: "no server running on /tmp/tmux-501/tbd-x")
-        #expect(TmuxManager.paneExitState(forFailure: absentPane) == .gone)
-        #expect(TmuxManager.paneExitState(forFailure: noServer) == .gone)
-        let timedOut = TmuxError.timedOut(command: "tmux list-panes", timeout: .seconds(15))
-        let unrecognised = TmuxError.commandFailed(command: "tmux list-panes", status: 1, output: "lost server")
-        let noBinary = TmuxError.commandFailed(
-            command: "tmux list-panes", status: 127, output: "tmux executable is unavailable")
-        for error in [timedOut, unrecognised, noBinary] {
-            guard case .unknown = TmuxManager.paneExitState(forFailure: error) else {
-                Issue.record("\(error) did not read as unknown")
-                continue
-            }
-        }
-    }
-
-    @Test func dryRunReadsAPaneAsGone() async {
-        #expect(await TmuxManager(dryRun: true).paneExitState(server: "tbd-x", paneID: "%3") == .gone)
-    }
-
-    @Test func theQueryNamesThePane() {
-        #expect(TmuxManager.paneExitStateQuery(server: "tbd-x", paneID: "%3")
-            == ["-L", "tbd-x", "list-panes", "-t", "%3", "-F",
-                "#{pane_id}|#{pane_dead}|#{pane_dead_status}|#{pane_pid}"])
-    }
-
     /// A server tab still on tmux reads unknown, so a start refuses rather
     /// than open a second tab beside a command that may still run there.
     @Test func aTmuxTabIsUnknown() async {
@@ -72,7 +25,7 @@ struct DevServerTabInspectorTests {
         terminal.serverName = "web"
         await registry.recordStatusForTesting(.exited(code: 3), for: terminal.id)
         let inspector = ProductionDevServerTabInspector(
-            tmux: TmuxManager(dryRun: true), holderRegistry: registry, signaller: ProductionProcessSignaller())
+            holderRegistry: registry, signaller: ProductionProcessSignaller())
         #expect(await inspector.status(of: terminal, tmuxServer: "unused") == .exited(code: 3))
     }
     private func holderRegistry() -> HolderRegistry {
@@ -85,7 +38,7 @@ struct DevServerTabInspectorTests {
     private func holderInspector(_ registry: HolderRegistry? = nil) -> ProductionDevServerTabInspector {
         let registry = registry ?? holderRegistry()
         return ProductionDevServerTabInspector(
-            tmux: TmuxManager(dryRun: true), holderRegistry: registry, signaller: ProductionProcessSignaller())
+            holderRegistry: registry, signaller: ProductionProcessSignaller())
     }
 
     /// A live holder child with no recorded start time and no adopted

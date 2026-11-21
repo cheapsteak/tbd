@@ -56,9 +56,8 @@ struct HookCallerGuardHandlerTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             prManager: PRStatusManager(ghRunner: { _, _ in
                 Issue.record("pr.attach must not spawn gh")

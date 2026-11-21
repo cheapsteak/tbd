@@ -38,13 +38,12 @@ struct ScratchPromoteReconcileTests {
     private func makeRouter(_ db: TBDDatabase, home: URL) -> RPCRouter {
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
@@ -115,7 +114,7 @@ struct ScratchPromoteReconcileTests {
             server == canonical ? .absent : .running
         })
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: probe.probe)
         try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
 
@@ -147,7 +146,7 @@ struct ScratchPromoteReconcileTests {
             server == canonical ? .running : .absent
         })
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: probe.probe)
         try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
 

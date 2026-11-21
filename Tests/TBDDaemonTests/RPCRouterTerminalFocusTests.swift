@@ -13,7 +13,7 @@ private final class CaptureBox<T>: @unchecked Sendable {
     var count: Int { values.count }
 }
 
-// Uses the shared RPCRouterTests fixture (db + router, in-memory, dryRun tmux).
+// Uses the shared RPCRouterTests fixture (db + router, in-memory).
 extension RPCRouterTests {
 
     private func seedTerminal() async throws -> (worktreeID: UUID, terminalID: UUID) {

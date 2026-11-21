@@ -410,7 +410,6 @@ public actor HibernationCoordinator {
 
     public init(
         db: TBDDatabase,
-        tmux: TmuxManager,
         modelProfileResolver: ModelProfileResolver? = nil,
         subscriptions: StateSubscriptionManager? = nil,
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),

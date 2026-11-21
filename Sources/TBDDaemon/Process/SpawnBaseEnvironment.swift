@@ -1,8 +1,8 @@
 import Foundation
 import TBDShared
 
-/// The base environment any process the daemon spawns starts from: a holder
-/// job, or a tmux server.
+/// The base environment a process the daemon spawns starts from: a holder job,
+/// a Claude Cloud child, or the trust seeder's view of a session's environment.
 ///
 /// A daemon's environment describes the program that launched the daemon as
 /// much as it describes the machine. `scripts/restart.sh` is usually run from
@@ -36,13 +36,8 @@ import TBDShared
 /// session's — so it is ignored. That probe is why the tmux path never showed
 /// the Claude-side symptom, and the holder transport, having no tmux server for
 /// the probe to ask, showed it immediately. TBD's own incarnation guard has no
-/// such probe, so the tmux server needs the scrub too, for TBD's markers.
-/// Stripping Claude's from the server as well costs nothing *on a server the
-/// daemon creates*: no pane predates that spawn, so it leaves panes with no
-/// marker at all, which is what the probe was there to simulate. It is not free
-/// on a server repaired in place, where panes already hold their own copy — see
-/// `serverRepairableMarkers`. Removing the markers at the source is what makes
-/// the two transports behave alike.
+/// such probe. Removing the markers at the source leaves a holder job with no
+/// marker at all, which is what the tmux probe was there to simulate.
 ///
 /// **What belongs in the set.** One criterion across all four groups: the
 /// identity of the process that launched the daemon — its session, its
@@ -75,10 +70,9 @@ import TBDShared
 ///
 /// **TERM is pinned rather than inherited**, for a related but distinct reason:
 /// it describes the terminal a job draws into, not the program that launched
-/// the daemon. The tmux path does not inherit it either, because
-/// `TmuxManager.ensureServer` sets `default-terminal xterm-256color` on every
-/// server and so every pane gets that value. The holder transport pins the same
-/// one: otherwise a daemon restarted from another terminal emulator hands the
+/// the daemon. The holder transport pins `xterm-256color`, the value a tmux
+/// pane gets from its server's `default-terminal`: otherwise a daemon restarted
+/// from another terminal emulator hands the
 /// job that emulator's TERM — a terminfo the holder's reader may not implement —
 /// and a daemon the app launched itself has no TERM at all. Two sibling helpers
 /// pin the same value: `TerminalPanelView.makeViewerEnvironment` strips
@@ -172,25 +166,8 @@ enum SpawnBaseEnvironment {
         .union(codexSessionMarkers)
         .union(tmuxPaneMarkers)
 
-    /// The subset an *existing* tmux server's global environment may have
-    /// stripped in place, rather than only on a server the daemon creates.
-    ///
-    /// Claude Code's markers are deliberately absent. A marker in the server's
-    /// global environment is what makes the copy a running pane already holds
-    /// read as ambient rather than as this session's, so removing the global
-    /// copy would make a `claude` started later in a pane that predates the
-    /// repair conclude it is a nested child — the very failure the scrub
-    /// exists to prevent. Those markers therefore stay until the server is
-    /// recycled, by which time no pane predates the scrub. `TMUX` and
-    /// `TMUX_PANE` are absent because the server sets them itself for every
-    /// pane it creates, so they are the server's own rather than a launcher's
-    /// identity baked in at spawn.
-    static var serverRepairableMarkers: Set<String> {
-        tbdProcessMarkers.union(codexSessionMarkers)
-    }
-
-    /// The terminal type every pane gets on the tmux path, which
-    /// `TmuxManager.ensureServer` sets as the server's `default-terminal`.
+    /// The terminal type every holder job gets: what a tmux server's
+    /// `default-terminal` gives a pane.
     private static let pinnedTerm = "xterm-256color"
 
     /// `base` with the enclosing session's markers removed, a TBD-minted
@@ -221,10 +198,8 @@ enum SpawnBaseEnvironment {
     /// standardized paths; the filesystem is never consulted, since the
     /// directory may not exist yet and a spawn must not wait on a stat.
     ///
-    /// Internal rather than private because the same by-value judgment is made
-    /// in two other places: `Daemon.scrubInheritedTBDEnv` against the daemon's
-    /// own environment, and `TmuxManager.configDirRepairNeeded` against what an
-    /// existing tmux server reports for its global environment.
+    /// Internal rather than private because `Daemon.scrubInheritedTBDEnv` makes
+    /// the same by-value judgment against the daemon's own environment.
     static func isTBDMintedProfileDir(_ value: String, base: [String: String]) -> Bool {
         guard !value.isEmpty else { return false }
         let profilesRoot = TBDConstants.configDir(environment: base)

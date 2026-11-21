@@ -43,7 +43,7 @@ struct BoundedProcessClaudeSpawner: ClaudeCloudSpawning {
     let executable: String
 
     /// Behavior seam for the subprocess deadline (`Tests/CLAUDE.md`, "Clock and
-    /// date seams"), matching `GitManager`/`TmuxManager.runExternalCommand`.
+    /// date seams"), matching `GitManager`.
     /// Tests pass a `TestClock` to drive `runBoundedProcess`'s deadline in
     /// virtual time instead of racing a real one on a loaded runner.
     let clock: any Clock<Duration>

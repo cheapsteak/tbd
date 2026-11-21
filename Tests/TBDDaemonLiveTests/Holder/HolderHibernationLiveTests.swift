@@ -1164,11 +1164,6 @@ private final class HibernationFixture {
 
         let coordinator = HibernationCoordinator(
             db: db,
-            // Dry-run and never reached: both branches under test fork away
-            // from tmux before the first call. A recorder is not needed here —
-            // `HolderTmuxAssumptionGateTests` asserts the "no tmux was touched"
-            // half without spawning anything.
-            tmux: TmuxManager(dryRun: true),
             // The profile/host stores the wake preamble seeds folder trust and
             // resolves a projects root through, kept inside this fixture's own
             // scratch root.

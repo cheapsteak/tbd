@@ -314,14 +314,13 @@ enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
 /// Runs an external command with a hard timeout, draining stdout/stderr, and
 /// resolves to `.completed(status, stdout, stderr)`, `.signaled(signal, stdout,
 /// stderr)` or `.timedOut` — or throws
-/// the spawn error if `Process.run()` fails. Shared by
-/// `TmuxManager.runExternalCommand`, `GitManager.run`, and `ProviderRunner.run`,
-/// which map the outcome to their own error types (`TmuxError` / `GitError` /
-/// `GitTimeoutError` / `ProviderRunError`).
+/// the spawn error if `Process.run()` fails. Shared by `GitManager.run` and
+/// `ProviderRunner.run`, which map the outcome to their own error types
+/// (`GitError` / `GitTimeoutError` / `ProviderRunError`).
 ///
 /// `environment` and `stdin` are optional and default to `nil`, which
-/// preserves the exact behavior existing callers (`GitManager`, `TmuxManager`,
-/// `GCDiskUsage`, `OrphanGC`) already depend on: an unset `environment` leaves
+/// preserves the exact behavior existing callers (`GitManager`, `GCDiskUsage`,
+/// `OrphanGC`) already depend on: an unset `environment` leaves
 /// `Process.environment` untouched (inherits the parent's), and no `stdin`
 /// leaves `Process.standardInput` untouched (inherits the parent's), rather
 /// than wiring up a pipe. When `environment` IS provided, it REPLACES the
@@ -357,8 +356,8 @@ enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
 ///    **Every step of that path is non-blocking, and that is a property of the
 ///    mechanism rather than of any one call.** One thread fires every bounded
 ///    deadline in the daemon, so work that can wait on something there does not
-///    delay one call — it stops `GitManager`, `TmuxManager`, `ProviderRunner`
-///    and every completion probe from ever seeing their deadlines, and it stops
+///    delay one call — it stops `GitManager`, `ProviderRunner` and every
+///    completion probe from ever seeing their deadlines, and it stops
 ///    the SIGKILL escalation this action just queued behind itself, which is the
 ///    very thing that would have unblocked it. The snapshot is the one step that
 ///    can wait: it acquires the accumulator lock, which a drain worker holds

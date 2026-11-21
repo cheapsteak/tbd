@@ -20,14 +20,12 @@ struct SessionResumeRPCTests {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("session-resume-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(dryRun: true)
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         let manager = ClaudeProfileConfigDirManager(baseDirectory: root.appendingPathComponent("profiles"), hostBaseDirectory: root.appendingPathComponent("claude"))
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), configDirManager: manager, codexExecutableResolver: CodexLaunchTestStub.executableResolver, codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer, leftoverTmuxProbe: .absent)
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), configDirManager: manager, codexExecutableResolver: CodexLaunchTestStub.executableResolver, codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer, leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
-        let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: tmux,
-            codexExecutableResolver: { "/usr/bin/true" }, codexHomeEnsurer: { root.appendingPathComponent("codex") },
+        let router = RPCRouter(db: db, lifecycle: lifecycle, codexExecutableResolver: { "/usr/bin/true" }, codexHomeEnsurer: { root.appendingPathComponent("codex") },
             actuationLog: ActuationLog(path: root.appendingPathComponent("actuations.jsonl").path))
         router.holderRegistry = registry
         let admission = StubAdmission(.admit)

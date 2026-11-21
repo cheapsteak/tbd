@@ -14,7 +14,6 @@ struct SessionRecaptureSchedulerTests {
         let detectedSessionID = UUID().uuidString
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
-            tmux: TmuxManager(dryRun: true),
             captureSessionID: { target in
                 guard target == .holderChild(pid: 7) else { return nil }
                 return detectedSessionID
@@ -40,7 +39,6 @@ struct SessionRecaptureSchedulerTests {
         let clock = EventDrivenTestClock()
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
-            tmux: TmuxManager(dryRun: true),
             captureSessionID: { _ in nil },
             executor: GateExecutor.shared,
             clock: clock
@@ -64,7 +62,6 @@ struct SessionRecaptureSchedulerTests {
         let capture = BlockingSessionCapture(result: "stale-captured-session")
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
-            tmux: TmuxManager(dryRun: true),
             captureSessionID: { _ in capture.capture() },
             executor: GateExecutor.shared,
             clock: clock)
@@ -102,7 +99,6 @@ struct SessionRecaptureSchedulerTests {
         let capture = BlockingSessionCapture(result: "stale-captured-session")
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
-            tmux: TmuxManager(dryRun: true),
             captureSessionID: { _ in capture.capture() },
             executor: GateExecutor.shared,
             clock: clock)
@@ -146,7 +142,6 @@ struct SessionRecaptureSchedulerTests {
         let seen = ObservedTargets()
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
-            tmux: TmuxManager(dryRun: true),
             captureSessionID: { target in
                 seen.append(target)
                 seen.recordCurrentThread()

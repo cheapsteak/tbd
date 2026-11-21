@@ -132,14 +132,13 @@ struct RepoRemoveCascadeTests {
             return true
         }
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent)
         if let gate {
             lifecycle.onWorktreeRemoved = { _, path, _ in await gate.wait(path) }
         }
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: TmuxManager(dryRun: true),
-            subscriptions: subs, actuationLog: makeTestActuationLog())
+            db: db, lifecycle: lifecycle, subscriptions: subs, actuationLog: makeTestActuationLog())
         return (router, deltas)
     }
 

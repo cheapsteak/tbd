@@ -61,7 +61,6 @@ struct TmuxResumeGateRPCTests {
             .appendingPathComponent("tmux-resume-gate-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(dryRun: true)
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         let server = ServerState()
@@ -70,13 +69,15 @@ struct TmuxResumeGateRPCTests {
             baseDirectory: root.appendingPathComponent("profiles"),
             hostBaseDirectory: root.appendingPathComponent("claude"))
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: manager,
+            codexExecutableResolver: CodexLaunchTestStub.executableResolver,
+            codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: probe.probe)
         lifecycle.holderRegistry = registry
         let actuationPath = root.appendingPathComponent("actuations.jsonl").path
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, configDirManager: manager,
+            db: db, lifecycle: lifecycle, configDirManager: manager,
             codexExecutableResolver: { "/usr/bin/true" },
             codexHomeEnsurer: { root.appendingPathComponent("codex") },
             actuationLog: ActuationLog(path: actuationPath))

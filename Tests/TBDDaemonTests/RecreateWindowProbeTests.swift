@@ -8,7 +8,7 @@ import Testing
 /// `terminal.recreateWindow` — the app's Check Again — and the leftover-tmux
 /// server probe it decides on.
 ///
-/// TBD no longer drives tmux, so for a live tmux agent row — Claude, or Codex
+/// TBD runs no tmux command, so for a live tmux agent row — Claude, or Codex
 /// with a recorded thread — the handler asks only whether the row's tmux server
 /// is still listening. While it is, the session may still be running there and
 /// the row is left alone, with the advice that ends it. Once the server is
@@ -69,15 +69,14 @@ struct RecreateWindowProbeTests {
     }
 
     private func router(
-        _ db: TBDDatabase, tmux: TmuxManager, server: LeftoverTmuxServerState
+        _ db: TBDDatabase, server: LeftoverTmuxServerState
     ) -> RPCRouter {
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in server })
         return RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
     }
@@ -112,21 +111,19 @@ struct RecreateWindowProbeTests {
     private func run(
         server: LeftoverTmuxServerState, agent: Agent = .claude
     ) async throws -> (response: RPCResponse, before: RowFingerprint,
-                       after: RowFingerprint, tmuxCalls: [[String]], terminalID: UUID) {
+                       after: RowFingerprint, terminalID: UUID) {
         let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxArgs()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
         let terminal = try await seedTerminal(db, worktreeID: wt.id, agent: agent)
         let before = RowFingerprint(terminal)
 
-        let response = await router(db, tmux: tmux, server: server).handle(try RPCRequest(
+        let response = await router(db, server: server).handle(try RPCRequest(
             method: RPCMethod.terminalRecreateWindow,
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
         let after = try #require(try await db.terminals.get(id: terminal.id))
-        return (response, before, RowFingerprint(after), recorded.snapshot(), terminal.id)
+        return (response, before, RowFingerprint(after), terminal.id)
     }
 
     /// A server still listening means the session may still be running in
@@ -143,7 +140,6 @@ struct RecreateWindowProbeTests {
         #expect(run.after == run.before,
                 "a refused recreate mutated the row it was supposed to leave alone")
         #expect(run.after.hibernatedAt == nil, "a row still running in tmux was parked")
-        #expect(run.tmuxCalls.isEmpty, "recreateWindow reached tmux: \(run.tmuxCalls)")
     }
 
     /// A server positively gone parks. The row stays on tmux and keeps
@@ -167,7 +163,6 @@ struct RecreateWindowProbeTests {
                 "the park discarded the recorded Codex launch options")
         #expect(run.after.transport == .tmux,
                 "the park moved the row off tmux without a migration")
-        #expect(run.tmuxCalls.isEmpty, "recreateWindow reached tmux: \(run.tmuxCalls)")
     }
 
     /// A shell has no conversation, so there is nothing a park could keep.
@@ -179,8 +174,6 @@ struct RecreateWindowProbeTests {
           arguments: [LeftoverTmuxServerState.running, .absent])
     func aRowWithNothingToResume(server: LeftoverTmuxServerState) async throws {
         let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxArgs()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
         let terminal = try await db.terminals.create(
@@ -188,7 +181,7 @@ struct RecreateWindowProbeTests {
             kind: .shell, transport: .tmux)
         let before = RowFingerprint(terminal)
 
-        let response = await router(db, tmux: tmux, server: server).handle(try RPCRequest(
+        let response = await router(db, server: server).handle(try RPCRequest(
             method: RPCMethod.terminalRecreateWindow,
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
@@ -204,7 +197,6 @@ struct RecreateWindowProbeTests {
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
                 "a refused recreate mutated the row it was supposed to leave alone")
-        #expect(recorded.snapshot().isEmpty, "recreateWindow reached tmux: \(recorded.snapshot())")
     }
 
     /// A row already parked has nothing running to look for: the request is
@@ -212,8 +204,6 @@ struct RecreateWindowProbeTests {
     @Test("a parked tmux row is returned unchanged without asking the probe")
     func parkedRowIsReturnedUnchanged() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxArgs()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
         let seeded = try await seedTerminal(db, worktreeID: wt.id, agent: .claude)
@@ -222,14 +212,13 @@ struct RecreateWindowProbeTests {
         let before = RowFingerprint(terminal)
 
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in
                 Issue.record("a parked row must not be probed")
                 return .running
             })
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux,
-            configDirManager: isolatedConfigDirManager(),
+            db: db, lifecycle: lifecycle, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalRecreateWindow,
@@ -239,6 +228,5 @@ struct RecreateWindowProbeTests {
         #expect(try response.decodeResult(TBDShared.Terminal.self).id == terminal.id)
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before)
-        #expect(recorded.snapshot().isEmpty)
     }
 }

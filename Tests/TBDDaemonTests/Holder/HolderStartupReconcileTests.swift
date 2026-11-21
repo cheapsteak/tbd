@@ -40,10 +40,6 @@ struct HolderStartupReconcileTests {
     ) -> HibernationCoordinator {
         HibernationCoordinator(
             db: db,
-            // Every window dead, which is what a holder row's empty coordinate
-            // gets from a real server. The holder branch must not consult it at
-            // all, and the tmux parity test below relies on this answer.
-            tmux: TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true }),
             signaller: signaller,
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(),

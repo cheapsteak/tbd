@@ -16,11 +16,11 @@ import Testing
 /// natural completion, and `terminationHandler` reports a clean success for a
 /// call that blew its deadline by 300x.
 ///
-/// These tests reproduce that deterministically by drowning the default-QoS
+/// The test reproduces that deterministically by drowning the default-QoS
 /// global pool in blocking work items, then asserting the bounded runner STILL
-/// times out. On the pre-fix code they fail with "returned instead of timing
-/// out"; the fix (dedicated watchdog Thread + authoritative deadline decision)
-/// makes them pass.
+/// times out, through `GitManager`. On the pre-fix code it fails with "returned
+/// instead of timing out"; the fix (dedicated watchdog Thread + authoritative
+/// deadline decision) makes it pass.
 ///
 /// BLAST RADIUS: all test targets compile into one process and Swift Testing
 /// runs suites in parallel across targets, so a saturated global pool stalls
@@ -29,7 +29,7 @@ import Testing
 /// releases every parked work item in a path that runs regardless of the
 /// call's outcome. Never leave the pool parked past the end of a test.
 ///
-/// WHY THESE TESTS PASS AN `EventDrivenTestClock` THEY NEVER ADVANCE — and it is the
+/// WHY THE TEST PASSES AN `EventDrivenTestClock` IT NEVER ADVANCES — and it is the
 /// opposite of virtualizing the deadline. `runBoundedProcess` arms its deadline
 /// twice: on the `SubprocessWatchdog` thread and on the injected clock. The
 /// clock armer sleeps on the *cooperative* executor, a different pool from the
@@ -45,7 +45,7 @@ import Testing
 /// child runs to natural completion and the authority check then reports
 /// `.timedOut` on its own — so the assertion is satisfied without the watchdog
 /// participating at all. Measured, against the previous `sleep 3`: deleting the
-/// watchdog armer left both tests PASSING, in 8.03s instead of 5.15s (the extra
+/// watchdog armer left the tests PASSING, in 8.03s instead of 5.15s (the extra
 /// ~2.9s being the child running out).
 ///
 /// That was true from the moment the authority check landed — it shipped in the
@@ -62,7 +62,7 @@ import Testing
 /// **Both parts are required.** `sleep 90` alone changes nothing without the
 /// time limit (the authority path would simply take 90s and pass), and the time
 /// limit alone changes nothing with a 3s child. Verified by mutation: deleting
-/// the watchdog armer turns both tests RED.
+/// the watchdog armer turns the test RED.
 ///
 /// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`. Do not
 /// "tidy" this back to the shared trait — the two halves below are why.
@@ -72,7 +72,7 @@ import Testing
 ///    SIGKILL and the 90 s child that a broken watchdog leaves running. Inherit
 ///    `.clockDriven`'s 300 s and the `sleep 90` child finishes comfortably
 ///    inside the limit, the authority check reports `.timedOut` on its own, and
-///    both tests go green with the watchdog armer deleted. The proof silently
+///    the test goes green with the watchdog armer deleted. The proof silently
 ///    disarms; nothing goes red to tell you.
 /// 2. **It does not need the larger budget.** `.clockDriven` is 5 minutes to
 ///    absorb the arming latency of the fast parallel pass, whose population of
@@ -167,32 +167,6 @@ struct SubprocessTimeoutStarvationTests {
         while drained.current < Self.floodCount, ContinuousClock.now < drainDeadline {
             gate.signal()
             try? await Task.sleep(for: .milliseconds(20))
-        }
-    }
-
-    @Test func tmuxRunExternalCommandTimesOutEvenWhenPoolSaturated() async {
-        // `sleep 3` (not 30) so the pre-fix broken behavior — child runs to
-        // natural completion, terminationHandler resumes a clean success — is
-        // observed in bounded time. With the fix the 100ms deadline fires on
-        // the dedicated watchdog thread regardless of pool state.
-        await withSaturatedGlobalPool {
-            do {
-                _ = try await TmuxManager.runExternalCommand(
-                    executable: "/bin/sleep",
-                    arguments: ["90"],
-                    label: "starvation-test",
-                    timeout: .milliseconds(100),
-                    clock: EventDrivenTestClock()  // never advanced — isolates the watchdog; see suite doc
-                )
-                Issue.record("expected runExternalCommand to time out under pool saturation, but it returned")
-            } catch let error as TmuxError {
-                guard case .timedOut = error else {
-                    Issue.record("expected TmuxError.timedOut, got \(error)")
-                    return
-                }
-            } catch {
-                Issue.record("expected TmuxError.timedOut, got \(error)")
-            }
         }
     }
 

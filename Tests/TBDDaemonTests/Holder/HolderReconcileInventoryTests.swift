@@ -68,7 +68,7 @@ struct HolderReconcileInventoryTests {
         clock: any Clock<Duration> = ContinuousClock()
     ) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             processSignaller: signaller,
             // Every tmux server reads as gone — the answer a holder row's worktree
             // gets from a real socket, since a server that was never started has

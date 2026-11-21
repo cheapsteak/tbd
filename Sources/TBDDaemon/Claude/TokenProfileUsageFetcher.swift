@@ -138,7 +138,7 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
 
     /// Upper bound on the response-body slice a failure reason keeps.
     ///
-    /// 500 characters, matching `TmuxError.truncate` — long enough for the
+    /// 500 characters — long enough for the
     /// messages this endpoint actually emits
     /// (`{"error":{"message":"anthropic-version: header is required"}}`) and
     /// short enough that the snapshot's status line stays one readable record

@@ -53,30 +53,15 @@ extension TBDHomeSerialized {
 struct ModelProfileSpawnTests {
     private struct ExpectedCodexPreparationFailure: Error {}
 
-    /// Recorder for tmux argv lists invoked during dryRun.
-    final class TmuxRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _calls: [[String]] = []
-        var calls: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return _calls
-        }
-        func record(_ args: [String]) {
-            lock.withLock { _calls.append(args) }
-        }
-        var joinedAll: String { calls.map { $0.joined(separator: " ") }.joined(separator: "\n") }
-    }
-
     /// A router and its lifecycle wired to one holder spawn double, so every
     /// session the test opens is recorded in the returned `FakeHolderLaunch`
     /// instead of started.
     private func makeFixture() -> (RPCRouter, TBDDatabase, FakeHolderLaunch) {
-        let tmux = TmuxManager(dryRun: true)
         let db = try! TBDDatabase(inMemory: true)
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: isolatedConfigDirManager(),
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
@@ -85,7 +70,6 @@ struct ModelProfileSpawnTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: isolatedConfigDirManager(),
@@ -433,14 +417,13 @@ struct ModelProfileSpawnTests {
                 "tbd-test-codex-home-\(UUID().uuidString)", isDirectory: true)
         }
     ) -> (WorktreeLifecycle, TBDDatabase, FakeHolderLaunch) {
-        let tmux = TmuxManager(dryRun: true)
         let db = try! TBDDatabase(inMemory: true)
         let holder = FakeHolderLaunch()
         let resolver = ModelProfileResolver(
             profiles: db.modelProfiles, repos: db.repos, config: db.config
         )
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             modelProfileResolver: resolver,
             configDirManager: isolatedConfigDirManager(),
             codexExecutableResolver: codexExecutableResolver,
@@ -1239,7 +1222,6 @@ struct ModelProfileSpawnTests {
     /// creates no row, and is recorded as a refused actuation.
     @Test("fork over a missing transcript: refused, nothing spawned, no row, refusal recorded")
     func forkOverMissingTranscriptIsRefused() async throws {
-        let tmux = TmuxManager(dryRun: true)
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
@@ -1249,7 +1231,7 @@ struct ModelProfileSpawnTests {
         defer { try? FileManager.default.removeItem(at: logDir) }
         let logPath = logDir.appendingPathComponent("actuations.jsonl").path
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: isolatedConfigDirManager(),
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
@@ -1258,7 +1240,6 @@ struct ModelProfileSpawnTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: isolatedConfigDirManager(),
@@ -1317,7 +1298,6 @@ struct ModelProfileSpawnTests {
     /// fork resumes it with `--fork-session`.
     @Test("fork: transcript found only under the source config dir is resumed, not refused")
     func forkFindsTranscriptUnderSourceConfigDir() async throws {
-        let tmux = TmuxManager(dryRun: true)
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
@@ -1325,7 +1305,7 @@ struct ModelProfileSpawnTests {
         let manager = isolatedConfigDirManager()
         defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: manager,
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
@@ -1334,7 +1314,6 @@ struct ModelProfileSpawnTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
@@ -1378,7 +1357,6 @@ struct ModelProfileSpawnTests {
     @Test("fork: transcript under a stale slug or behind a cached miss is resumed, not refused",
           arguments: [false, true])
     func forkFindsTranscriptTheSlugLookupMisses(cachedMiss: Bool) async throws {
-        let tmux = TmuxManager(dryRun: true)
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
@@ -1386,7 +1364,7 @@ struct ModelProfileSpawnTests {
         let manager = isolatedConfigDirManager()
         defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: manager,
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
@@ -1395,7 +1373,6 @@ struct ModelProfileSpawnTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
@@ -1847,7 +1824,6 @@ struct ModelProfileSpawnTests {
         // One config-dir manager for the router and the lifecycle, so the
         // test can look inside profile B's config dir for the carried
         // transcript (as `forkFindsTranscriptUnderSourceConfigDir` does).
-        let tmux = TmuxManager(dryRun: true)
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
@@ -1855,7 +1831,7 @@ struct ModelProfileSpawnTests {
         let manager = isolatedConfigDirManager()
         defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: manager,
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
@@ -1864,7 +1840,6 @@ struct ModelProfileSpawnTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
@@ -1953,24 +1928,6 @@ struct ModelProfileSpawnTests {
 
     // MARK: - Login sessions (Settings → "Open login session")
 
-    /// Pane text mimicking Claude's interactive, logged-out idle state — the
-    /// screen a tab that typed `/login` for the person would have acted on.
-    static let readyPaneText = "Not logged in · Run /login\n❯"
-
-    /// Counts every pane capture the dry-run tmux serves.
-    final class CaptureCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _count = 0
-        var count: Int {
-            lock.lock(); defer { lock.unlock() }
-            return _count
-        }
-        func record() {
-            lock.lock(); defer { lock.unlock() }
-            _count += 1
-        }
-    }
-
     /// Every delta the router broadcast, decoded.
     final class DeltaRecorder: @unchecked Sendable {
         private let lock = NSLock()
@@ -1992,8 +1949,6 @@ struct ModelProfileSpawnTests {
         let router: RPCRouter
         let db: TBDDatabase
         let holder: FakeHolderLaunch
-        let tmux: TmuxRecorder
-        let captures: CaptureCounter
         let deltas: DeltaRecorder
         let configDirManager: ClaudeProfileConfigDirManager
     }
@@ -2011,25 +1966,13 @@ struct ModelProfileSpawnTests {
 
     /// Fixture whose identity watcher is test-tuned (50 ms poll, bounded life
     /// so tests don't leave 30-minute poll tasks behind), whose sessions open
-    /// on a holder spawn double, whose dry-run tmux serves a pane that is
-    /// ready for `/login` and counts every capture of it, and whose broadcasts
-    /// are recorded.
+    /// on a holder spawn double, and whose broadcasts are recorded.
     ///
     /// `identityPollTimeout` is short by default: only the badge test needs the
     /// watcher alive long enough to see a credential appear.
     private func makeLoginFixture(
         identityPollTimeout: Duration = .milliseconds(250)
     ) -> LoginFixture {
-        let recorder = TmuxRecorder()
-        let captures = CaptureCounter()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { args in recorder.record(args) },
-            dryRunCapturePane: { _, _ in
-                captures.record()
-                return Self.readyPaneText
-            }
-        )
         let db = try! TBDDatabase(inMemory: true)
         let configDirManager = isolatedConfigDirManager()
         let subscriptions = StateSubscriptionManager()
@@ -2043,7 +1986,7 @@ struct ModelProfileSpawnTests {
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
@@ -2052,7 +1995,6 @@ struct ModelProfileSpawnTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             subscriptions: subscriptions,
             usageFetcher: StubClaudeUsageFetcher(),
@@ -2067,8 +2009,7 @@ struct ModelProfileSpawnTests {
         )
         router.holderRegistry = registry
         return LoginFixture(
-            router: router, db: db, holder: holder, tmux: recorder, captures: captures,
-            deltas: deltas, configDirManager: configDirManager)
+            router: router, db: db, holder: holder, deltas: deltas, configDirManager: configDirManager)
     }
 
     /// Carries the observed count on the primary failure line
@@ -2229,53 +2170,6 @@ struct ModelProfileSpawnTests {
         ))
         #expect(!resp.success)
         #expect(resp.error?.contains("require a profile") == true)
-    }
-
-    /// A login tab is left to the person: the daemon neither reads the pane
-    /// nor types into it, even when the pane already shows the logged-out
-    /// footer hint. The badge-flip test below is the positive leg — the same
-    /// spawn does arm the identity watcher.
-    @Test("login session: the pane is never read and nothing is typed into it")
-    func loginSessionTypesNothing() async throws {
-        let fixture = makeLoginFixture()
-        defer { Task { await cleanup(fixture.db) } }
-        let (_, wt) = try await seedRepoAndWorktree(fixture.db)
-        let profile = try await seedOAuthProfile(fixture.db, name: "Manual")
-
-        let resp = await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(
-                worktreeID: wt.id, type: .claude,
-                overrideProfileID: profile.id, loginSession: true
-            )
-        ))
-        #expect(resp.success, "\(resp.error ?? "")")
-        let term = try resp.decodeResult(Terminal.self)
-        #expect(term.label == TerminalLabel.login)
-
-        // Anything armed by the spawn has had the whole window to act on a
-        // pane that is ready for it. Three seconds is sized against the pump
-        // this replaces, whose first read came after a 2 s settle and whose
-        // poll cadence was 1 s: a pump of that shape restored on the spawn path
-        // would read and type inside this window. Wall time rather than a
-        // virtual clock because nothing on the spawn path now sleeps for a
-        // test to advance past — a clock-driven window would only cover a
-        // restored pump that happened to sleep on the same clock.
-        //
-        // `pollUntilTrue` bounds the window by reading `ContinuousClock`, so
-        // it lasts three seconds of wall time however late each poll sleep
-        // resumes under load. A cancelled wait still read the condition
-        // fresh, so only `.satisfied` means the pane was touched.
-        let touched = await pollUntilTrue(timeout: .seconds(3), pollInterval: .milliseconds(50)) {
-            fixture.captures.count > 0
-                || fixture.tmux.calls.contains { $0.contains("send-keys") || $0.contains("paste-buffer") }
-        }
-        #expect(touched != .satisfied, "the login pane was read or typed into: \(fixture.tmux.calls)")
-        #expect(fixture.captures.count == 0, "the login pane was read")
-        #expect(
-            !fixture.tmux.calls.contains { $0.contains("send-keys") },
-            "keys were sent into the login pane: \(fixture.tmux.calls)")
-        #expect(!fixture.tmux.joinedAll.contains("/login"))
     }
 
     /// The identity watcher is what a login tab still arms: once the profile's

@@ -25,26 +25,9 @@ struct HolderInPlaceSwapTests {
 
     // MARK: - Fixture
 
-    private final class TmuxArgvRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var argvs: [[String]] = []
-        func record(_ argv: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            argvs.append(argv)
-        }
-        var all: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return argvs
-        }
-        func count(_ subcommand: String) -> Int {
-            all.filter { $0.contains(subcommand) }.count
-        }
-    }
-
     private struct Fixture {
         let db: TBDDatabase
         let router: RPCRouter
-        let recorder: TmuxArgvRecorder
         let worktree: Worktree
         let destProfileID: UUID
         let home: String
@@ -100,22 +83,17 @@ struct HolderInPlaceSwapTests {
         let home = fencedScratchRoot(prefix: "tbdhis")
         try FileManager.default.createDirectory(
             atPath: home, withIntermediateDirectories: true)
-        let recorder = TmuxArgvRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.record($0) },
-            dryRunCapturePane: { _, _ in "" })
         let db = try TBDDatabase(inMemory: true)
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "holder-in-place-swap")
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
             leftoverTmuxProbe: .absent)
         let actuationLogPath = "\(home)/actuations.jsonl"
         let sessionsDir = URL(fileURLWithPath: "\(home)/sessions", isDirectory: true)
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: configDirManager,
             sessionsDir: sessionsDir,
             actuationLog: ActuationLog(path: actuationLogPath))
@@ -148,7 +126,7 @@ struct HolderInPlaceSwapTests {
         let dest = try await db.modelProfiles.create(name: "Dest", kind: .oauth)
 
         return Fixture(
-            db: db, router: router, recorder: recorder, worktree: worktree,
+            db: db, router: router, worktree: worktree,
             destProfileID: dest.id, home: home, actuationLogPath: actuationLogPath,
             sessionsDir: sessionsDir)
     }
@@ -215,8 +193,6 @@ struct HolderInPlaceSwapTests {
                 "the cold path reached the wake's replacement reservation")
         #expect(after.holderPID == nil && after.childPID == nil,
                 "the cold path recorded processes for a session it must not have started")
-        #expect(fixture.recorder.count("respawn-window") == 0,
-                "the cold path reached tmux: \(fixture.recorder.all)")
         let rows = try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
         #expect(rows.count == 1, "the cold path created a second row")
     }

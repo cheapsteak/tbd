@@ -17,7 +17,7 @@
 Base, Diagnostics, Keychain, SSH, Update
 AskUserQuestion, Database, SessionMod
 Actuation, ModChannel, ModelProfile, PanelSurface, Process, ProgramStatus
-Codex, Git, Holder, StartAdmission, Tmux
+Codex, Git, Holder, StartAdmission
 Claude, DevServers, Mock
 Hooks, Remote
 Lifecycle

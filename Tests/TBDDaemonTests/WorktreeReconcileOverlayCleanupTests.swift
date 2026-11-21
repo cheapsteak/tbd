@@ -36,7 +36,6 @@ struct WorktreeReconcileOverlayCleanupTests {
         let lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             // The row below is a live tmux row, and reconcile asks the probe about
             // its server. A fixed answer keeps this machine's tmux servers out of

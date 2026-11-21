@@ -69,15 +69,13 @@ struct DeliveryVerificationWiringTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let logPath = directory.appendingPathComponent("actuations.jsonl").path
         let pastes = PasteRecorder()
-        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
         let log = ActuationLog(path: logPath)
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: tmux,
             startTime: Date(),
             actuationLog: log)
         router.holderInjectionCourier = HolderInjectionCourier(

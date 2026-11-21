@@ -54,7 +54,7 @@ func installPreSessionHook(
     try await installHook(named: "preSession", repoDir: repoDir, script: script)
 }
 
-/// A lifecycle over dry-run tmux whose spawns go to the holder spawn double.
+/// A lifecycle whose spawns go to the holder spawn double.
 ///
 /// Every session opens on a pty holder, so the lifecycle is wired with a
 /// registry built on `holder` (`makeHolderRegistryDouble`): pass your own
@@ -71,26 +71,15 @@ func installPreSessionHook(
 /// its own, so no test built here asks a real socket or the process table.
 func makeLifecycle(
     db: TBDDatabase,
-    recorder: PreSessionRecordedCommands? = nil,
     subscriptions: StateSubscriptionManager? = nil,
     timeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
-    windowIsDead: (@Sendable (String) -> Bool)? = nil,
     processSignaller: ProcessSignaller = ScriptedLivenessSignaller.doubleJobsRunning,
     holder: FakeHolderLaunch = FakeHolderLaunch(),
     leftoverTmuxProbe: LeftoverTmuxServerProbe = .absent
 ) -> WorktreeLifecycle {
-    var dryRunRecorder: (@Sendable ([String]) -> Void)?
-    if let recorder {
-        dryRunRecorder = { args in recorder.append(args) }
-    }
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(
-            dryRun: true,
-            dryRunRecorder: dryRunRecorder,
-            dryRunWindowIsDead: windowIsDead
-        ),
         hooks: HookResolver(),
         subscriptions: subscriptions,
         preSessionTimeout: timeout,
@@ -112,8 +101,7 @@ struct ScriptedLivenessSignaller: ProcessSignaller {
     let probe: @Sendable (Int32) -> Bool
 
     /// Every job the holder spawn double started reads as running; every other
-    /// pid — including the `0` a dry-run tmux answers for a pane's pid — reads
-    /// as gone.
+    /// pid reads as gone.
     static let doubleJobsRunning = ScriptedLivenessSignaller(probe: {
         $0 > FakeHolderLaunch.pidFloor
     })
@@ -156,24 +144,4 @@ func writeMarker(worktreeID: UUID, exitCode: Int) throws {
         withIntermediateDirectories: true
     )
     try "\(exitCode)\n".write(toFile: path, atomically: true, encoding: .utf8)
-}
-
-/// Thread-safe collector for TmuxManager dryRun recorded args. Shared because
-/// several suites assert that a path issued, or did not issue, a tmux command.
-/// Named distinctly from other files' file-private `RecordedCommands` types
-/// (e.g. `TBDWorktreeIDLeakTests.swift`) since this one must be visible
-/// module-wide to be shared.
-final class PreSessionRecordedCommands: @unchecked Sendable {
-    private let lock = NSLock()
-    private var commands: [[String]] = []
-
-    func append(_ args: [String]) {
-        lock.lock(); defer { lock.unlock() }
-        commands.append(args)
-    }
-
-    func snapshot() -> [[String]] {
-        lock.lock(); defer { lock.unlock() }
-        return commands
-    }
 }

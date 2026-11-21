@@ -324,29 +324,24 @@ public final class Daemon: Sendable {
     }
 
     /// Remove the identity of whatever launched the daemon from the daemon's
-    /// own process environment. Called at startup before any tmux server is spawned.
+    /// own process environment. Called at startup before any session is spawned.
     ///
     /// This is the daemon-level layer of the scrub `SpawnBaseEnvironment`
     /// defines — one list, two layers. Here, `unsetenv` covers every child the
-    /// daemon ever spawns through plain inheritance (git, hooks, one-shot tmux
-    /// clients): a name that is no longer in the daemon's environment cannot
-    /// reach any of them. `SpawnBaseEnvironment.inheriting` covers the two
-    /// long-lived spawn seams explicitly — the holder job and the tmux server —
-    /// so they stay correct even when handed an environment that was injected
-    /// rather than inherited, and can be tested without touching the test
-    /// process's environment.
+    /// daemon ever spawns through plain inheritance (git, hooks): a name that
+    /// is not in the daemon's environment cannot reach any of them.
+    /// `SpawnBaseEnvironment.inheriting` covers the long-lived spawn seam — the
+    /// holder job — explicitly, so it stays correct even when handed an
+    /// environment that was injected rather than inherited, and can be tested
+    /// without touching the test process's environment.
     ///
-    /// Rationale: tmux servers persist the env they were spawned with as their
-    /// global environment, and that env is then injected into every new window
-    /// (including reboot-recovery recreations). If the daemon inherits e.g.
-    /// `TBD_WORKTREE_ID=<main-uuid>` or `CODEX_CI=1` from a managed launcher
-    /// shell, every recreated pane would inherit stale routing/noninteractive
-    /// state.
+    /// Rationale: if the daemon inherits e.g. `TBD_WORKTREE_ID=<main-uuid>` or
+    /// `CODEX_CI=1` from a managed launcher shell, every session it starts
+    /// would inherit stale routing/noninteractive state.
     /// `TBD_HANDOVER_FROM_PID` is scrubbed here too, and the ordering matters:
     /// `start()` reads it at the single-instance gate, several steps before
-    /// this runs. A tmux server bakes its spawn environment into every window
-    /// it later creates, so a variable left set would be handed to every pane
-    /// and to whatever those panes launch — including another daemon.
+    /// this runs. A variable left set would be handed to every session and to
+    /// whatever those sessions launch — including another daemon.
     public static func scrubInheritedTBDEnv() {
         // Sorted so the sequence of calls is determined by the set's contents
         // rather than by a hash ordering that varies run to run.
@@ -366,14 +361,13 @@ public final class Daemon: Sendable {
         }
     }
 
-    /// Raise the process's `RLIMIT_NOFILE` soft limit so every tmux server the
+    /// Raise the process's `RLIMIT_NOFILE` soft limit so every process the
     /// daemon spawns inherits a generous file-descriptor budget. Called at
-    /// startup before any tmux server is created.
+    /// startup before any session is spawned.
     ///
     /// Rationale: macOS hands LaunchServices-spawned apps a 256-fd soft limit.
-    /// The daemon inherits it from the App, and tmux inherits it from the
-    /// daemon. A tmux server hosting dozens of pty panes can exhaust 256
-    /// descriptors and `exit(1)`, taking every session with it.
+    /// The daemon inherits it from the App, and every holder and job it starts
+    /// inherits it from the daemon.
     ///
     /// Modern macOS shells default to 524,288. Large monorepos (e.g. Elastic
     /// Path's commerce-manager with ~18k directories) cause Claude CLI to walk
@@ -844,7 +838,7 @@ public final class Daemon: Sendable {
     /// Start the daemon: create config directory, clean up stale state,
     /// initialize database and all managers, reconcile worktrees, then start servers.
     public func start() async throws {
-        // 0. Raise the file-descriptor limit before any tmux server is spawned.
+        // 0. Raise the file-descriptor limit before any session is spawned.
         Self.raiseFileDescriptorLimit()
         // The libghostty engine logs under this process's subsystem. Set before
         // the holder registry can build a reader with a libghostty terminal.
@@ -922,13 +916,12 @@ public final class Daemon: Sendable {
         // even before any new terminal spawn path runs.
         RuntimeIntegrationRefresher.production().refresh()
 
-        // 4a. Scrub inherited TBD_* env vars before any tmux server is spawned.
+        // 4a. Scrub inherited TBD_* env vars before any session is spawned.
         // The daemon may have been launched from inside a TBD-spawned shell (e.g.
         // `scripts/restart.sh` run from a terminal pane), which exports per-worktree
-        // TBD_* vars. Without this scrub, the first `tmux new-session` bakes those
-        // vars into the tmux server's global env, poisoning every recreated pane
-        // (notifications from sub-worktrees would route to whichever worktree the
-        // daemon was last restarted from).
+        // TBD_* vars. Without this scrub, every session the daemon starts inherits
+        // them (notifications from sub-worktrees would route to whichever worktree
+        // the daemon was last restarted from).
         Daemon.scrubInheritedTBDEnv()
 
         // 4b. Resolve SSH agent symlink and update daemon's own environment.
@@ -1025,7 +1018,6 @@ public final class Daemon: Sendable {
 
         // 7. Initialize managers
         let git = GitManager()
-        let tmux = TmuxManager()
         let hooks = HookResolver()
         let configDirManager = ClaudeProfileConfigDirManager()
         let profilePoolCandidateSource = ProfilePoolCandidateSource(
@@ -1167,7 +1159,7 @@ public final class Daemon: Sendable {
         }
 
         var lifecycle = WorktreeLifecycle(
-            db: database, git: git, tmux: tmux, hooks: hooks,
+            db: database, git: git, hooks: hooks,
             subscriptions: subs,
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions
@@ -1197,7 +1189,7 @@ public final class Daemon: Sendable {
         // below, so archive stops servers through the same collaborators
         // `server.stop` uses. Skipped in mock mode.
         let devServerTabInspector = ProductionDevServerTabInspector(
-            tmux: tmux, holderRegistry: holderRegistry, signaller: ProductionProcessSignaller())
+            holderRegistry: holderRegistry, signaller: ProductionProcessSignaller())
         if mockMode == nil {
             lifecycle.devServerOperations = DevServerOperations(
                 db: database, tabInspector: devServerTabInspector,
@@ -1314,7 +1306,6 @@ public final class Daemon: Sendable {
         let rpcRouter = RPCRouter(
             db: database,
             lifecycle: lifecycle,
-            tmux: tmux,
             git: git,
             startTime: startTime,
             subscriptions: subs,
@@ -1785,7 +1776,7 @@ public final class Daemon: Sendable {
             // cannot overwrite the saved state first.
             let backgroundPriority = ProductionProcessPriority()
             let backgroundRoots = AgentBackgroundRoots(
-                database: database, tmux: tmux, priority: backgroundPriority)
+                database: database, priority: backgroundPriority)
             let backgroundController = AgentBackgroundController(
                 priority: backgroundPriority, roots: { await backgroundRoots.resolve() })
             self.agentBackgroundController = backgroundController

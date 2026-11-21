@@ -4,22 +4,16 @@ import Foundation
 /// `export KEY='value'; ` prefix that carries the `env` map, and the
 /// `$SHELL <flags> <command>` argv that runs it.
 ///
-/// Transport-neutral on purpose. The tmux spawn builders
-/// (`TmuxManager.newWindowCommand`, `TmuxManager.respawnWindowCommand`) and
-/// the pty-holder launch (`WorktreeLifecycle.holderLaunch`) all compose
-/// through here, so the two transports start the *same* program in the
-/// *same* shell, and the per-shell flag choice cannot fork between them.
+/// The pty-holder launch (`WorktreeLifecycle.holderLaunch`) composes through
+/// here, so every spawn path starts its program in the same shell with the
+/// same per-shell flags.
 enum ShellLaunchComposer {
     /// Prefix `shellCommand` with one `export KEY='value'; ` per `env` entry,
     /// sorted by key, single-quoting each value with the standard `'\''`
     /// escape for an embedded quote.
     ///
-    /// Shared by every spawn path deliberately.
-    /// `TmuxManager.resolvePaneTerminalID` reads a pane's identity back out of
-    /// exactly this text, anchored on `TmuxManager.terminalIDExportAnchor`,
-    /// and that anchor is only safe while every spawn path emits the
-    /// identical shape. Two independently maintained copies could drift and
-    /// reopen the forgery hole on one path.
+    /// Shared by every spawn path deliberately: two independently maintained
+    /// copies of the quoting could drift apart.
     static func envExportPrefixed(_ shellCommand: String, env: [String: String]) -> String {
         var envPrefix = ""
         for (key, value) in env.sorted(by: { $0.key < $1.key }) {

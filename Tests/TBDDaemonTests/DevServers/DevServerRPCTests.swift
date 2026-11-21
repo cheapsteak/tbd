@@ -75,7 +75,6 @@ struct DevServerRPCTests {
         holderCanSpawn: Bool = true
     ) async throws -> Fixture {
         let home = fencedScratchRoot(prefix: "tbdsrv")
-        let tmux = TmuxManager(dryRun: true)
         let spawns = HookedHolderLaunch()
         // With `holderCanSpawn` false the registry has neither a spawner nor
         // the double: a daemon whose `TBDHolder` binary has gone.
@@ -90,11 +89,11 @@ struct DevServerRPCTests {
         let db = try TBDDatabase(inMemory: true, terminalHistoryDir: home + "/terminal-history")
         let configDirManager = makeIsolatedConfigDirManager(tag: "dev-server-rpc")
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), configDirManager: configDirManager,
+            db: db, git: GitManager(), hooks: HookResolver(), configDirManager: configDirManager,
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: configDirManager, actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         let worktreePath = FileManager.default.temporaryDirectory

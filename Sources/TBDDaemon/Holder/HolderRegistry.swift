@@ -1191,12 +1191,9 @@ actor HolderRegistry {
     /// attempted.
     ///
     /// **Every teardown path that deletes terminal rows must call this for a
-    /// holder row, and the `killWindow` beside it is not an adequate
-    /// substitute.** A holder row's `tmuxWindowID` is the empty string by
-    /// construction, so that kill is not merely a no-op for this transport — it
-    /// IS the leak: it addresses a coordinate naming nothing while the holder
-    /// process, the job it forked, and the socket and lock files at its
-    /// rendezvous all outlive the row. The row was the only record of those
+    /// holder row.** Deleting the row alone is the leak: the holder process,
+    /// the job it forked, and the socket and lock files at its rendezvous all
+    /// outlive the row. The row was the only record of those
     /// pids, so the moment before it is deleted is the last moment anything can
     /// reclaim them; until Milestone B's holder reconciler lands, no sweep will
     /// ever find them again.

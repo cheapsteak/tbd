@@ -45,7 +45,7 @@ private actor WakeLatch {
     }
 }
 
-/// The startup restore pass through the real router: real stores, dry-run tmux,
+/// The startup restore pass through the real router: real stores,
 /// a real actuation log in a temp directory, and every wake through the real
 /// `terminal.wake` handler. Each wake outcome comes from the production path
 /// that produces it, so nothing here stubs the wake; the one double is the
@@ -81,7 +81,6 @@ struct SessionRestoreTests {
 
     private func makeFixture(
         flag: Bool? = true,
-        tmux: TmuxManager = TmuxManager(dryRun: true),
         unwritableLog: Bool = false
     ) async throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory
@@ -101,10 +100,10 @@ struct SessionRestoreTests {
         // coordinator, the router and the lifecycle whose reconcile parks.
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
-        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(), codexExecutableResolver: CodexLaunchTestStub.executableResolver, codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer, leftoverTmuxProbe: .absent)
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), codexExecutableResolver: CodexLaunchTestStub.executableResolver, codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer, leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            db: db, lifecycle: lifecycle, startTime: Date(),
             configDirManager: makeIsolatedConfigDirManager(tag: "session-restore"),
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
@@ -917,9 +916,7 @@ struct SessionRestoreTests {
 
     @Test("a wake whose condition is not met starts nothing and changes nothing")
     func unmetConditionTouchesNothing() async throws {
-        let recorded = RecordedTmuxArgs()
-        let fixture = try await makeFixture(tmux: TmuxManager(
-            dryRun: true, dryRunRecorder: { recorded.append($0) }))
+        let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
         let row = try await park(in: fixture, reason: .manual)
         let before = try #require(try await fixture.db.terminals.get(id: row))
@@ -929,7 +926,6 @@ struct SessionRestoreTests {
 
         #expect(result == .conditionNotMet)
         #expect(fixture.holder.launches.isEmpty, "the wake started a holder")
-        #expect(recorded.snapshot().isEmpty, "the wake reached tmux: \(recorded.snapshot())")
         let after = try #require(try await fixture.db.terminals.get(id: row))
         #expect(after == before)
     }
@@ -988,9 +984,7 @@ struct SessionRestoreTests {
     /// reaching no tmux on the way.
     @Test("a holder row is selected and wakes on the holder path")
     func holderRowWakesOnTheHolderPath() async throws {
-        let recorded = RecordedTmuxArgs()
-        let fixture = try await makeFixture(tmux: TmuxManager(
-            dryRun: true, dryRunRecorder: { recorded.append($0) }))
+        let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
         let sessionID = "session-holder"
         let terminal = try await fixture.db.terminals.create(
@@ -1009,7 +1003,6 @@ struct SessionRestoreTests {
         let summary = await fixture.router.restoreSessionsAfterStartup(parkedSince: Self.thisStartup)
 
         #expect(summary == SessionRestoreSummary(selected: 1, failed: 1))
-        #expect(recorded.snapshot().isEmpty, "the holder wake reached tmux: \(recorded.snapshot())")
         let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(row.isParked)
         #expect(row.hibernateReason == .recovery)

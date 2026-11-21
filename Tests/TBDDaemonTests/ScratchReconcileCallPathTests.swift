@@ -28,7 +28,7 @@ struct ScratchReconcileCallPathTests {
         let server = "scratch-shared"
         let probe = RecordingLeftoverTmuxProbe(answer: { _ in .absent })
         let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: probe.probe)
         let scratch = try await db.worktrees.createScratch(
             name: "scratch-stale", displayName: "Scratch Stale",
@@ -45,7 +45,6 @@ struct ScratchReconcileCallPathTests {
         RPCRouter(
             db: fixture.db,
             lifecycle: fixture.lifecycle,
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog())
     }

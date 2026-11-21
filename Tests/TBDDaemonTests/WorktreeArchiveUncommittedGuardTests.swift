@@ -6,7 +6,7 @@ import TestSupport
 @testable import TBDShared
 
 /// Tier 2 — real git repositories and worktrees in a temp directory, an
-/// in-memory database, dry-run tmux, and a real actuation log beside them.
+/// in-memory database and a real actuation log beside them.
 ///
 /// Archiving a local worktree deletes its folder, and a revive restores only
 /// the branch, so `WorktreeLifecycle.beginArchiveWorktree` refuses a worktree
@@ -117,8 +117,7 @@ struct WorktreeArchiveUncommittedGuardTests {
         // hook that can resolve is one a test installs in the worktree.
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver(
+            db: db, git: GitManager(), hooks: HookResolver(
                 globalHooksDir: tempDir.appendingPathComponent("no-global-hooks").path),
             leftoverTmuxProbe: .absent)
         lifecycle.holderRegistry = registry
@@ -129,8 +128,7 @@ struct WorktreeArchiveUncommittedGuardTests {
             .appendingPathComponent("actuations.jsonl").path
         let actuationLog = ActuationLog(path: actuationLogPath)
         let router = RPCRouter(
-            db: db, lifecycle: lifecycle, tmux: TmuxManager(dryRun: true),
-            subscriptions: StateSubscriptionManager(), actuationLog: actuationLog)
+            db: db, lifecycle: lifecycle, subscriptions: StateSubscriptionManager(), actuationLog: actuationLog)
         router.holderRegistry = registry
         return Fixture(
             tempDir: tempDir, db: db, lifecycle: lifecycle, router: router,
@@ -539,14 +537,12 @@ extension TBDHomeSerialized {
             // archive under test has no session to close.
             let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
             var lifecycle = WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent)
             lifecycle.holderRegistry = registry
             let router = RPCRouter(
                 db: db,
                 lifecycle: lifecycle,
-                tmux: TmuxManager(dryRun: true),
                 subscriptions: StateSubscriptionManager(), actuationLog: makeTestActuationLog())
             router.holderRegistry = registry
             let created = await router.handle(try RPCRequest(

@@ -21,7 +21,6 @@ struct DaemonMockGateTests {
         let lifecycle = WorktreeLifecycle(
             db: db,
             git: git,
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
@@ -56,7 +55,6 @@ struct DaemonMockGateTests {
         let lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             pendingQuestions: pendingQuestions,
             leftoverTmuxProbe: LeftoverTmuxServerProbe { _ in state })
@@ -187,7 +185,6 @@ struct DaemonMockGateTests {
         let lifecycle = WorktreeLifecycle(
             db: db,
             git: git,
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )

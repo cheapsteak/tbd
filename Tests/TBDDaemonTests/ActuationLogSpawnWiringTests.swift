@@ -9,7 +9,7 @@ import Testing
 // `TBDConstants.scratchDir` and `worktree.create` resolves hooks under
 // TBD_HOME, so these redirect it to a temp dir (see TBDHomeSerializedSuites).
 extension TBDHomeSerialized {
-/// Tier 2 — dry-run tmux, a real (temp-directory) actuation log, real git for
+/// Tier 2 — a real (temp-directory) actuation log, real git for
 /// the `worktree.create` fixture.
 ///
 /// The three surfaces that end in the lifecycle's own terminal spawn:
@@ -66,7 +66,6 @@ struct ActuationLogSpawnWiringTests {
         var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
@@ -74,7 +73,6 @@ struct ActuationLogSpawnWiringTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: ActuationLog(path: logPath)
         )
@@ -260,7 +258,6 @@ struct ActuationLogSpawnWiringTests {
         signaller.behaviors[Self.endedChildPID] = .init(aliveInitially: false)
         let coordinator = HibernationCoordinator(
             db: db,
-            tmux: TmuxManager(dryRun: true),
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)),

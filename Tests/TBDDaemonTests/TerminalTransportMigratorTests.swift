@@ -95,7 +95,7 @@ struct TerminalTransportMigratorTests {
         /// `probe`, so no socket is asked.
         func lifecycle(probe: RecordingLeftoverTmuxProbe) -> WorktreeLifecycle {
             let lifecycle = WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 codexExecutableResolver: CodexLaunchTestStub.executableResolver,
                 codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
                 leftoverTmuxProbe: probe.probe)
@@ -224,8 +224,7 @@ struct TerminalTransportMigratorTests {
             path: worktreePath, tmuxServer: server)
 
         let coordinator = HibernationCoordinator(
-            db: db, tmux: TmuxManager(dryRun: true),
-            configDirManager: makeIsolatedConfigDirManager(tag: "transport-migration"),
+            db: db, configDirManager: makeIsolatedConfigDirManager(tag: "transport-migration"),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "transport-migration"),
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,

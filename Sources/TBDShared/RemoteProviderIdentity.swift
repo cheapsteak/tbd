@@ -186,8 +186,7 @@ public enum ProviderIdentityRedaction {
     /// from a leak. What this line is for — telling two registrations apart —
     /// the registry key already does, and "which backend is this pointed at"
     /// is `describe.identity`'s job, so the argv display is a convenience and
-    /// a leak is its only real cost. `TmuxManager.redactedArguments` takes the
-    /// same stance for tmux argv: a structural rule, never a scan for shapes.
+    /// a leak is its only real cost: a structural rule, never a scan for shapes.
     ///
     /// The first argument is judged by one exhaustive rule, never by what
     /// its content looks like:

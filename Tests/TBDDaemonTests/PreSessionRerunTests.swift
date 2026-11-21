@@ -117,7 +117,7 @@ struct PreSessionRerunTests {
 
         let holder = FakeHolderLaunch()
         let lifecycle = makeLifecycle(db: db, timeout: 2, holder: holder)
-        let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: TmuxManager(dryRun: true), actuationLog: makeTestActuationLog())
+        let router = RPCRouter(db: db, lifecycle: lifecycle, actuationLog: makeTestActuationLog())
         let params = try JSONEncoder().encode(
             WorktreeRerunPreSessionParams(worktreeID: worktree.id, cols: 180, rows: 45)
         )
@@ -149,7 +149,7 @@ struct PreSessionRerunTests {
         try await installPreSessionHook(repoDir: repoDir, script: "#!/bin/sh\nexit 0\n")
 
         let lifecycle = makeLifecycle(db: db, timeout: 2)
-        let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: TmuxManager(dryRun: true), actuationLog: makeTestActuationLog())
+        let router = RPCRouter(db: db, lifecycle: lifecycle, actuationLog: makeTestActuationLog())
         let params = try JSONEncoder().encode(
             WorktreeRerunPreSessionParams(worktreeID: worktree.id)
         )

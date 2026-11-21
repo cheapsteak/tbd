@@ -20,8 +20,7 @@ public struct ClaudeStateDetector: Sendable {
         return parsed.sessionId
     }
 
-    // MARK: - Instance Methods (require TmuxManager)
-    private let tmux: TmuxManager
+    // MARK: - Instance Methods
     private let environment: [String: String]
 
     /// - Parameter environment: the environment the host Claude store is
@@ -29,8 +28,7 @@ public struct ClaudeStateDetector: Sendable {
     ///   can assert BOTH branches of that resolution with an explicit
     ///   dictionary instead of mutating the process-global variable, which
     ///   would hand every concurrently running suite the real `~/.claude`.
-    public init(tmux: TmuxManager, environment: [String: String] = ProcessInfo.processInfo.environment) {
-        self.tmux = tmux
+    public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.environment = environment
     }
 

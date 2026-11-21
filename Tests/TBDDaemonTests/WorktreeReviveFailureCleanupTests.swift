@@ -5,7 +5,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 (real git subprocesses, real filesystem, no tmux — `dryRun: true`).
+/// Tier 2 (real git subprocesses, real filesystem, no tmux).
 ///
 /// Covers what a *failed* revive leaves behind. Revive re-adds the git worktree
 /// two ways, and only one of them creates a branch:
@@ -49,7 +49,7 @@ import Testing
     /// their tabs without starting a process.
     private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             leftoverTmuxProbe: .absent
         )
         lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())

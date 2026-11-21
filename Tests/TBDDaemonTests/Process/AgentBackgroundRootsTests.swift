@@ -51,7 +51,7 @@ struct AgentBackgroundRootsTests {
             db, fake, worktree: worktree, index: 5, kind: .claude, parked: true)
 
         let roots = AgentBackgroundRoots(
-            database: db, tmux: TmuxManager(dryRun: true), priority: fake)
+            database: db, priority: fake)
         let resolved = await roots.resolve()
 
         #expect(Set(resolved) == [claude, codex, legacy])
@@ -75,7 +75,7 @@ struct AgentBackgroundRootsTests {
             kind: .claude, transport: .tmux)
 
         let roots = AgentBackgroundRoots(
-            database: db, tmux: TmuxManager(dryRun: true), priority: fake)
+            database: db, priority: fake)
 
         #expect(await roots.resolve() == [claude])
     }

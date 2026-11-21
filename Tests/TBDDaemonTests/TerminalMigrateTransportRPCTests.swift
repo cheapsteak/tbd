@@ -110,11 +110,10 @@ struct TerminalMigrateTransportRPCTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(),
-                tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                hooks: HookResolver(),
                 codexExecutableResolver: CodexLaunchTestStub.executableResolver,
                 codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             subscriptions: subs,
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,

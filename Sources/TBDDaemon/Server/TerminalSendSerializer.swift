@@ -3,9 +3,9 @@ import Foundation
 /// Serializes `terminal.send` per terminal, so two payloads can never interleave
 /// in one composer.
 ///
-/// A send is not one tmux command: it is a `load-buffer`, a `paste-buffer`, and
-/// often a separate `Enter`. Two of those sequences overlapping in one pane
-/// splices one caller's text into another's — a transport bug, since neither
+/// A send is not one write: it is the text and often a separate `Enter`. Two of
+/// those sequences overlapping in one composer splices one caller's text into
+/// another's — a transport bug, since neither
 /// caller asked for the message that arrives. So a second send **queues behind**
 /// the first rather than being refused: the caller asked for delivery, and
 /// delivery a moment later is still delivery. (`RefusedReason.inFlight` names
@@ -19,10 +19,9 @@ import Foundation
 /// its errors back to the caller, because an RPC handler's response is the
 /// thing being serialized.
 ///
-/// No timeout. Every step inside a send is already bounded by
-/// `TmuxManager.commandTimeout`, so a lane can be held for a bounded interval by
-/// a wedged tmux and no longer; a timeout here would only add a second, worse
-/// deadline that abandons a half-typed payload.
+/// No timeout. Every step inside a send carries its own bound, so a lane is held
+/// for a bounded interval and no longer; a timeout here would only add a second,
+/// worse deadline that abandons a half-typed payload.
 actor TerminalSendSerializer {
     private var lanes: [UUID: Task<Void, Never>] = [:]
 

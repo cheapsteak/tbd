@@ -19,8 +19,8 @@ struct PromptAnswerPluginSyncTests {
         let db = try TBDDatabase(inMemory: true)
         return RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(), leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), hooks: HookResolver(), leftoverTmuxProbe: .absent),
+            startTime: Date(), actuationLog: makeTestActuationLog())
     }
 
     /// Turning the flag on adds `.promptAnswer`; off removes it. A composer

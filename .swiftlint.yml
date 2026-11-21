@@ -231,12 +231,6 @@ custom_rules:
       # the branch that owns `GitManager.swift` lands, move `LocalizedError`
       # onto the declarations, delete the sidecar, and delete this entry.
       - "Sources/TBDDaemon/Git/GitManager\\.swift"
-      # `TmuxManager.swift` — `TmuxError` is genuinely unconverted, and its fix
-      # belongs to the branch that owns the file rather than being duplicated
-      # here. This exclusion is real lost coverage, not a formality: it hides a
-      # type the rule would rightly fire on. Delete the entry when that branch
-      # lands with the conformance on the declaration.
-      - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"
     # THE DEFECT THIS FENCES, because the failure is silent and reads as a
     # framework bug rather than a missing conformance. A bare `Error` bridges to
     # NSError, and `localizedDescription` on that bridge renders
@@ -522,11 +516,10 @@ custom_rules:
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
       - "Sources/.*\\.swift"
-    excluded:
-      # The allowlist. Capturing pane text is legitimate ONLY as verbatim pass-through
-      # (display / transport / snapshot). Adding a file here draws High-severity review
-      # scrutiny — see CLAUDE.md "No TUI screen-scraping".
-      - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                     # defines the capture API
+    # No file is allowlisted: TBD captures no pane text. Capturing pane text is
+    # legitimate ONLY as verbatim pass-through (display / transport / snapshot),
+    # and allowlisting a file for it draws High-severity review scrutiny — see
+    # CLAUDE.md "No TUI screen-scraping".
     regex: 'capturePane\w*\s*\(|capture-pane'
     match_kinds:
       - identifier
@@ -552,7 +545,6 @@ custom_rules:
       # still has to read those files. What it does catch is the shape the
       # misses actually took: a primitive called from a file that had never
       # actuated before.
-      - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                          # defines the primitives; the implementation, not a caller
       - "Sources/TBDDaemon/Server/RPCRouter\\+DevServerHandlers\\.swift"      # server.start / server.stop; one worktree-named row per call, written before any spawn, respawn or tab close
       # The shared lifecycle internals and phases. They stay deliberately
       # silent — `worktree.archive` and the reconcile sweep both reach them, and
@@ -562,11 +554,10 @@ custom_rules:
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+SpawnTerminal\\.swift" # the one spawn-and-record step every spawn path calls; covered by the caller's row: terminal.create / terminal.continueInCodex / worktree.create / scratch.create / revive
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Reconcile\\.swift"   # the reconcile rail; one row per act at its own entry point
     # Call sites only, which decides the odd-looking piece of this regex:
-    # `(?<!func )` skips DECLARATIONS. TmuxManager's `public func killWindow`
-    # and TerminalStore's `setHibernated` are the primitives being defined, not
-    # acts being performed — and skipping them keeps TerminalStore.swift (a DB layer
-    # that must never actuate) fully covered instead of allowlisted for a
-    # declaration.
+    # `(?<!func )` skips DECLARATIONS. TerminalStore's `setHibernated` is a
+    # primitive being defined, not an act being performed — and skipping it
+    # keeps TerminalStore.swift (a DB layer that must never actuate) fully
+    # covered instead of allowlisted for a declaration.
     #
     # Raw `kill(` is deliberately NOT in this list: no regex can separate a
     # signal sent to a session's process from ordinary subprocess reaping, and a
@@ -578,8 +569,8 @@ custom_rules:
     # is matched here; both are covered by the manual audit.
     regex: '(?<!func )\b(?:killWindow|killServer|respawnWindow|createWindow|pasteText|sendKeys|sendKey|setHibernated)\s*\('
     # Code only. Several doc comments name these primitives while explaining the
-    # boundary (`ClaudeSpawnCommandBuilder` points at `createWindow(sensitiveEnv:)`),
-    # and firing on the prose that documents the rule is how a rule gets disabled.
+    # boundary, and firing on the prose that documents the rule is how a rule
+    # gets disabled.
     match_kinds:
       - identifier
     message: "Acts that touch a session's process, pty or lifecycle must be recorded by exactly one actuation row — written by the RPC handler the request came through, or by the entry point of the rail that started it — so calling one of these primitives from a file outside the audited set means the act would go unrecorded. Read Sources/TBDDaemon/Actuation/ActuationSurface.swift for the boundary rule and the wiring pattern, wire the row, then add the file to this allowlist in the same commit."

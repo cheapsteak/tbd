@@ -27,12 +27,10 @@ import DaemonTestSupport
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 subscriptions: subs,
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             subscriptions: subs,
             actuationLog: makeTestActuationLog()
         )

@@ -17,7 +17,7 @@ struct PreSessionHookTests {
     // MARK: - Helpers
     //
     // isolateTBDHome / installHook / installPreSessionHook / makeLifecycle /
-    // makeWorktreeFixture / writeMarker / PreSessionRecordedCommands live in
+    // makeWorktreeFixture / writeMarker live in
     // PreSessionTestSupport.swift, shared with PreSessionRerunTests.
 
     // MARK: - HookEvent + resolution

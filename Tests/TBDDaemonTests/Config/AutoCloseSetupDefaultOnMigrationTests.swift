@@ -145,9 +145,9 @@ struct AutoCloseSetupDefaultOnMigrationTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+            startTime: Date(), actuationLog: makeTestActuationLog())
 
         let untouched = try await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
             .decodeResult(DaemonCapabilitiesResult.self)

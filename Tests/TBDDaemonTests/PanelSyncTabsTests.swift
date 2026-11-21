@@ -30,11 +30,9 @@ struct PanelSyncTabsTests {
             lifecycle: WorktreeLifecycle(
                 db: db,
                 git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
                 hooks: HookResolver(),
                 leftoverTmuxProbe: .absent
             ),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
             actuationLog: makeTestActuationLog()

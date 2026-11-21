@@ -31,7 +31,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -98,7 +97,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -159,7 +157,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -226,7 +223,6 @@ import Testing
     var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
@@ -282,7 +278,7 @@ import Testing
 
     let db = try TBDDatabase(inMemory: true)
     var lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        db: db, git: GitManager(), hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -310,7 +306,7 @@ import Testing
 
     let db = try TBDDatabase(inMemory: true)
     var lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        db: db, git: GitManager(), hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
@@ -338,7 +334,7 @@ import Testing
 
     let db = try TBDDatabase(inMemory: true)
     var lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+        db: db, git: GitManager(), hooks: HookResolver(),
         leftoverTmuxProbe: .absent
     )
     lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())

@@ -16,9 +16,9 @@ import Foundation
 /// closes the parent's read end, so nothing outlives the call.
 ///
 /// Package-internal (not `private`). Its only direct user is
-/// `BoundedProcessRunner`; `TmuxManager.runExternalCommand` reaches it through
-/// `runBoundedProcess`, so every caller gets the same fix for the >64KB drain
-/// deadlock and the grandchild-holds-write-end leak.
+/// `BoundedProcessRunner`; every caller reaches it through `runBoundedProcess`,
+/// so each gets the same fix for the >64KB drain deadlock and the
+/// grandchild-holds-write-end leak.
 final class PipeDataAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()

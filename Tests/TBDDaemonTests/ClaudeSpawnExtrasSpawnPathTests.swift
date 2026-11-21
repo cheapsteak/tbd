@@ -257,7 +257,6 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             at: actuationDirectory, withIntermediateDirectories: true)
         let actuationLogPath = actuationDirectory.appendingPathComponent("actuations.jsonl").path
 
-        let tmux = TmuxManager(dryRun: true)
         let holder = FakeHolderLaunch()
         let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
@@ -272,7 +271,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         // that every job the double started is running, so the hook ends only
         // when the test writes its marker.
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager("lifecycle"),
             preSessionPollInterval: 0.05,
             processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
@@ -283,7 +282,6 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: configDirManager("router"),

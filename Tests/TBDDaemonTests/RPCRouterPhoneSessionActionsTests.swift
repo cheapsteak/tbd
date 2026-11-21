@@ -11,7 +11,7 @@ import TestSupport
 /// bridge makes it, so each test proves the conformance reaches the core it
 /// names with the phone's identity and nothing else.
 ///
-/// Tier 2: in-memory GRDB, a dry-run tmux and a real actuation log under the
+/// Tier 2: in-memory GRDB and a real actuation log under the
 /// run's fenced scratch dir.
 @Suite("RPCRouter PhoneSessionActions")
 struct RPCRouterPhoneSessionActionsTests {
@@ -42,7 +42,7 @@ struct RPCRouterPhoneSessionActionsTests {
         let subs = StateSubscriptionManager()
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            db: db, git: GitManager(), hooks: HookResolver(),
             subscriptions: subs,
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
@@ -51,7 +51,6 @@ struct RPCRouterPhoneSessionActionsTests {
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
@@ -546,12 +545,11 @@ struct RPCRouterPhoneSessionActionsTests {
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                db: db, git: GitManager(), hooks: HookResolver(),
                 subscriptions: subs,
                 codexExecutableResolver: CodexLaunchTestStub.executableResolver,
                 codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
                 leftoverTmuxProbe: .absent),
-            tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
             remoteManager: manager,

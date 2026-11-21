@@ -35,7 +35,7 @@
 #
 # The prefix is `tbdnightly-probe-`, NOT `tbd-probe-`: this box already carries
 # 43 sockets named `tbd-probe-<HEX>` left by unrelated tooling, and TBD's own
-# servers are `tbd-<8 hex>` (TmuxManager.serverName). A cleanup — or a leak
+# servers are `tbd-<8 hex>` (TmuxServerName.forRepoPath). A cleanup — or a leak
 # CHECK — written against `tbd-probe-*` reaches into a namespace that is not
 # ours. That is the cross-worktree hazard arriving through the checking layer
 # instead of through a kill, and this file hit it before the rename.
