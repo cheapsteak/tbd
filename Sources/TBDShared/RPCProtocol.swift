@@ -394,6 +394,10 @@ public enum RPCMethod {
     public static let repoRename = "repo.rename"
     public static let repoSetHidden = "repo.setHidden"
     public static let repoSetExpanded = "repo.setExpanded"
+    /// `repo.setRegistryRemoteHidden` – sets whether the repo's lists, the
+    /// Mac sidebar and the phone's Sessions list, hide registry-provider
+    /// sessions (`Repo.registryRemoteHidden`).
+    public static let repoSetRegistryRemoteHidden = "repo.setRegistryRemoteHidden"
     public static let sessionList = "session.list"
     public static let sessionResume = "session.resume"
     public static let sessionMessages = "session.messages"
@@ -1649,6 +1653,14 @@ public struct RepoSetExpandedParams: Codable, Sendable {
     public let expanded: Bool
     public init(repoID: UUID, expanded: Bool) {
         self.repoID = repoID; self.expanded = expanded
+    }
+}
+
+public struct RepoSetRegistryRemoteHiddenParams: Codable, Sendable, Equatable {
+    public let repoID: UUID
+    public let hidden: Bool
+    public init(repoID: UUID, hidden: Bool) {
+        self.repoID = repoID; self.hidden = hidden
     }
 }
 

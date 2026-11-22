@@ -206,6 +206,33 @@ export const GLYPHS: Readonly<Record<GlyphName, ReadonlyArray<Child>>> = {
   ],
 };
 
+/**
+ * Glyphs the app draws that the mock's sprite has not got, for parts designed after it, in the
+ * same form. Their names never repeat a sprite symbol's.
+ * - `filter`, `filter-on` – a repo header's filter chip, off and on (the funnel of the design in
+ *   `docs/specs/2026-11-22-phone-remote-session-filter-design.md`).
+ */
+export type AppGlyphName = 'filter' | 'filter-on';
+
+const FUNNEL = 'M3 5h18l-7 8.2V19l-4 2v-7.8L3 5Z';
+
+export const APP_GLYPHS: Readonly<Record<AppGlyphName, ReadonlyArray<Child>>> = {
+  filter: [
+    ['path', { d: FUNNEL }],
+  ],
+  'filter-on': [
+    ['path', { d: FUNNEL, fill: 'currentColor' }],
+  ],
+};
+
+/** Every glyph `Icon` draws: the sprite's and the app's own. */
+export type IconName = GlyphName | AppGlyphName;
+
+/** The children of glyph `name`, from the sprite or from the app's own. */
+export function glyph(name: IconName): ReadonlyArray<Child> {
+  return Object.hasOwn(GLYPHS, name) ? GLYPHS[name as GlyphName] : APP_GLYPHS[name as AppGlyphName];
+}
+
 /** The SVG attributes the glyph data may use, by the name React wants. */
 const REACT_ATTRS: Readonly<Record<string, string>> = {
   d: 'd', cx: 'cx', cy: 'cy', r: 'r', x: 'x', y: 'y', rx: 'rx', ry: 'ry',

@@ -1,12 +1,14 @@
 // Tests sessionsView.ts: rows and groups sort newest first with ties in layout order, a row
 // shows and opens its most urgent session, empty repo groups come last while empty scratch
-// and provider groups go, and a placement whose row has not arrived is skipped.
+// and provider groups go, and a placement whose row has not arrived is skipped. Then the
+// registry-provider filter: which rows a filtered repo hides and keeps, the selected row's
+// exception, and when its header's chip shows, with what count and providers.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PhoneGroupKind, PhoneGroupLayout, PhoneRow, PhoneSession, PhoneStatusChip } from '../protocol/types.ts';
 import { applySessionsChanged, applySnapshot } from './sessionsData.ts';
-import { bestSession, repoIDOf, sessionsView } from './sessionsView.ts';
+import { bestSession, CLOUD_PROVIDER, isRegistryRow, repoIDOf, sessionsView } from './sessionsView.ts';
 import type { GroupView } from './sessionsView.ts';
 import type { SessionsData } from './store.ts';
 
@@ -162,4 +164,147 @@ test('a row the layout does not place is not shown', () => {
 
 test('an empty list shows nothing', () => {
   assert.deepEqual(sessionsView(list([], [])), []);
+});
+
+// MARK: - The registry-provider filter
+
+const BOX = 'acme-box';
+
+/** A remote session of `provider`, idle, changed at `changedAt`. */
+function rs(provider: string, changedAt: number): PhoneSession {
+  return {
+    ref: { kind: 'remote', provider, sessionID: `S${++terminals}` }, agent: 'remote', tabName: provider,
+    status: { chip: 'idle', changedAt },
+    capabilities: { transcript: CAN, send: CAN, answer: CAN, switchProfile: CAN, fork: CAN, model: CAN },
+  };
+}
+
+/** A remote lane's worktree row: a worktree whose sessions are `provider`'s remote sessions. */
+function lane(id: string, at: number, provider = BOX): PhoneRow {
+  return { id, kind: 'worktree', name: id, remote: true, statusChangedAt: at, sessions: [rs(provider, at)] };
+}
+
+/** A loose remote session's row, `remote:<provider>/<sessionID>` as the daemon makes it. */
+function loose(provider: string, at: number): PhoneRow {
+  const session = rs(provider, at);
+  const id = session.ref.kind === 'remote' ? `remote:${provider}/${session.ref.sessionID}` : '';
+  return { id, kind: 'remoteSession', name: id, remote: true, statusChangedAt: at, sessions: [session] };
+}
+
+/** Repo group `id` with the filter on when `on` is set, as the daemon writes it: `remoteFilterOn` present only when on. */
+function repo(id: string, rowIDs: string[], on = false): PhoneGroupLayout {
+  const g = group(id, rowIDs);
+  return on ? { ...g, remoteFilterOn: true } : g;
+}
+
+test('isRegistryRow: every session remote, and none of them the cloud provider', () => {
+  assert.equal(CLOUD_PROVIDER, 'claude-cloud');
+  assert.equal(isRegistryRow(lane('l1', 1)), true);
+  assert.equal(isRegistryRow(loose(BOX, 1)), true);
+  assert.equal(isRegistryRow(loose(CLOUD_PROVIDER, 1)), false);
+  assert.equal(isRegistryRow(rowAt('local', 1)), false);
+  // A row that mixes in a local or a cloud session is not one, nor is a row with no sessions.
+  assert.equal(isRegistryRow(row([rs(BOX, 1), s('idle', 2)])), false);
+  assert.equal(isRegistryRow(row([rs(BOX, 1), rs(CLOUD_PROVIDER, 2)])), false);
+  assert.equal(isRegistryRow({ id: 'bare', kind: 'worktree', name: 'bare', remote: true, statusChangedAt: 1, sessions: [] }), false);
+});
+
+test("a filtered repo hides its remote lane and loose registry rows, and keeps its local and cloud rows", () => {
+  const boxLane = lane('box-lane', 50);
+  const boxLoose = loose(BOX, 40);
+  const cloud = loose(CLOUD_PROVIDER, 30);
+  const rows = [rowAt('local', 20), boxLane, boxLoose, cloud, row([rs(BOX, 10), s('idle', 10)], 'mixed')];
+  const ids = rows.map((r) => r.id);
+  const off = sessionsView(list([repo('repo:A', ids)], rows));
+  assert.deepEqual(outline(off), [['repo:A', ['box-lane', boxLoose.id, cloud.id, 'local', 'mixed']]]);
+  assert.deepEqual(off[0]!.filter, { on: false, count: 2, providers: [BOX] });
+
+  const on = sessionsView(list([repo('repo:A', ids, true)], rows));
+  assert.deepEqual(outline(on), [['repo:A', [cloud.id, 'local', 'mixed']]]);
+  assert.deepEqual(on[0]!.filter, { on: true, count: 2, providers: [BOX] });
+  // The group's time is its newest shown row's.
+  assert.equal(on[0]!.newestAt, 30);
+});
+
+test('the selected row is kept; the count drops by one and the chip stays', () => {
+  const rows = [rowAt('local', 5), lane('l1', 30), lane('l2', 20)];
+  const d = list([repo('repo:A', ['local', 'l1', 'l2'], true)], rows);
+  const view = sessionsView(d, { lastRowID: 'l2' });
+  assert.deepEqual(outline(view), [['repo:A', ['l2', 'local']]]);
+  assert.deepEqual(view[0]!.filter, { on: true, count: 1, providers: [BOX] });
+  // When the only registry row is the selected one, the chip still shows, with nothing hidden.
+  const one = sessionsView(list([repo('repo:A', ['local', 'l1'], true)], rows), { lastRowID: 'l1' });
+  assert.deepEqual(outline(one), [['repo:A', ['l1', 'local']]]);
+  assert.deepEqual(one[0]!.filter, { on: true, count: 0, providers: [BOX] });
+  // Selecting a local row changes nothing.
+  assert.deepEqual(sessionsView(d, { lastRowID: 'local' })[0]!.filter, { on: true, count: 2, providers: [BOX] });
+});
+
+test('an unfiltered repo, the scratch group and provider groups are unchanged; only repo groups get a chip', () => {
+  const rows = [lane('a1', 9), lane('s1', 8), loose(BOX, 7), lane('b1', 6)];
+  const p1 = rows[2]!.id;
+  const d = list([
+    // Even marked on, a scratch or provider group is never filtered.
+    { ...group('scratch', ['s1'], 'scratch'), remoteFilterOn: true },
+    { ...group(`provider:${BOX}`, [p1], 'provider'), remoteFilterOn: true },
+    repo('repo:A', ['a1']),
+    repo('repo:B', ['b1'], true),
+  ], rows);
+  const view = sessionsView(d);
+  assert.deepEqual(outline(view), [['repo:A', ['a1']], ['scratch', ['s1']], [`provider:${BOX}`, [p1]], ['repo:B', []]]);
+  assert.deepEqual(view.map((g) => g.filter), [
+    { on: false, count: 1, providers: [BOX] }, null, null, { on: true, count: 1, providers: [BOX] },
+  ]);
+});
+
+test('a repo the filter empties keeps its header, among the empty repo groups', () => {
+  const rows = [lane('a1', 9), rowAt('b1', 1)];
+  const view = sessionsView(list([repo('repo:A', ['a1'], true), repo('repo:B', ['b1']), repo('repo:E', [])], rows));
+  assert.deepEqual(outline(view), [['repo:B', ['b1']], ['repo:A', []], ['repo:E', []]]);
+  assert.equal(view[1]!.newestAt, 0);
+  assert.deepEqual(view[1]!.filter, { on: true, count: 1, providers: [BOX] });
+});
+
+test('the chip shows only while the repo has a registry row', () => {
+  const chip = (layout: PhoneGroupLayout, rows: PhoneRow[]) => sessionsView(list([layout], rows))[0]!.filter;
+  // None with local rows only, or with cloud rows only, on or off.
+  assert.equal(chip(repo('repo:A', ['a1']), [rowAt('a1', 1)]), null);
+  const cloud = loose(CLOUD_PROVIDER, 1);
+  assert.equal(chip(repo('repo:A', [cloud.id]), [cloud]), null);
+  assert.equal(chip(repo('repo:A', [cloud.id], true), [cloud]), null);
+  // Off, with one registry row.
+  assert.deepEqual(chip(repo('repo:A', ['l1']), [lane('l1', 1)]), { on: false, count: 1, providers: [BOX] });
+  // On, with nothing left to hide: the chip goes, though the setting stays on.
+  assert.equal(chip(repo('repo:A', ['a1'], true), [rowAt('a1', 1)]), null);
+  // A registry row whose placement has not arrived counts for nothing yet.
+  assert.equal(chip(repo('repo:A', ['a1', 'l1']), [rowAt('a1', 1)]), null);
+});
+
+test('the chip lists each registry provider once, sorted', () => {
+  const rows = [lane('l1', 4, 'acme-zeta'), lane('l2', 3), loose(BOX, 2), loose(CLOUD_PROVIDER, 1)];
+  const view = sessionsView(list([repo('repo:A', rows.map((r) => r.id))], rows));
+  assert.deepEqual(view[0]!.filter, { on: false, count: 3, providers: [BOX, 'acme-zeta'] });
+});
+
+test("the phone's pending value wins over the layout's, in both directions, for its repo alone", () => {
+  const rows = [lane('a1', 4), rowAt('a2', 3), lane('b1', 2), rowAt('b2', 1)];
+  const d = list([repo('repo:A', ['a1', 'a2']), repo('repo:B', ['b1', 'b2'], true)], rows);
+  const flipped = sessionsView(d, { pending: { A: true, B: false } });
+  assert.deepEqual(outline(flipped), [['repo:A', ['a2']], ['repo:B', ['b1', 'b2']]]);
+  assert.deepEqual(flipped.map((g) => g.filter?.on), [true, false]);
+  // A pending value for another repo changes nothing here.
+  const other = sessionsView(d, { pending: { C: true } });
+  assert.deepEqual(outline(other), [['repo:A', ['a1', 'a2']], ['repo:B', ['b2']]]);
+  // An inherited member is no pending value: the layout's value stands.
+  const inherited = sessionsView(list([repo('repo:constructor', ['a1'], true)], rows), { pending: {} });
+  assert.deepEqual(outline(inherited), [['repo:constructor', []]]);
+  assert.equal(inherited[0]!.filter?.on, true);
+});
+
+test('the filter changes only the view: the list keeps every row', () => {
+  const rows = [lane('a1', 2), rowAt('a2', 1)];
+  const d = list([repo('repo:A', ['a1', 'a2'], true)], rows);
+  sessionsView(d);
+  assert.deepEqual(Object.keys(d.rows).sort(), ['a1', 'a2']);
+  assert.deepEqual(d.layout[0]!.rows.map((r) => r.id), ['a1', 'a2']);
 });

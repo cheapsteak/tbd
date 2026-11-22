@@ -15,7 +15,7 @@
 
 // MARK: - Names
 
-/** The 14 requests, by their wire names (`PhoneAppMethod`). */
+/** The 15 requests, by their wire names (`PhoneAppMethod`). */
 export type Method =
   | 'sessions.subscribe'
   | 'transcript.open'
@@ -30,7 +30,8 @@ export type Method =
   | 'session.setModel'
   | 'worktree.create'
   | 'remote.providers'
-  | 'remote.create';
+  | 'remote.create'
+  | 'repo.setRemoteFilter';
 
 /** The 5 events, by their wire names (`PhoneAppEventName`). */
 export type EventName = 'sessions.changed' | 'transcript.append' | 'transcript.update' | 'transcript.reset' | 'prompt.changed';
@@ -130,7 +131,18 @@ export type PhoneRowPlacement = { id: string; depth: number };
 export type PhoneGroupKind = 'scratch' | 'repo' | 'provider';
 
 /** One group of the laptop sidebar, with its rows in order. */
-export type PhoneGroupLayout = { id: string; kind: PhoneGroupKind; name: string; rows: PhoneRowPlacement[] };
+export type PhoneGroupLayout = {
+  id: string;
+  kind: PhoneGroupKind;
+  name: string;
+  rows: PhoneRowPlacement[];
+  /**
+   * Set on a repo group whose filter for registry-provider sessions is on, the setting the laptop
+   * sidebar shares. The daemon leaves it out when the filter is off, and on every other group, so
+   * it is never `false`.
+   */
+  remoteFilterOn?: true;
+};
 
 // MARK: - sessions.subscribe and sessions.changed
 
@@ -401,6 +413,9 @@ export type PhoneRemoteCreateParams = {
   bools: Record<string, boolean>;
 };
 
+/** Turns a repo's filter for registry-provider sessions on (`hidden: true`) or off. */
+export type RepoSetRemoteFilterParams = { repoID: string; hidden: boolean };
+
 // MARK: - Methods and events
 
 /** Each request's params and result, as `PhoneAppMessages.swift` pairs them. */
@@ -419,6 +434,7 @@ export interface MethodShapes {
   'worktree.create': { params: PhoneWorktreeCreateParams; result: PhoneWorktreeCreateResult };
   'remote.providers': { params: PhoneRemoteProvidersParams; result: PhoneRemoteProvidersResult };
   'remote.create': { params: PhoneRemoteCreateParams; result: SessionRefResult };
+  'repo.setRemoteFilter': { params: RepoSetRemoteFilterParams; result: PhoneEmpty };
 }
 
 /** Each event's data. */

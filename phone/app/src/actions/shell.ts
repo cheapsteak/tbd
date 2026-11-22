@@ -1,7 +1,8 @@
 /**
- * The shell's actions: the channel and the subscription, navigation, sheets, menus, toasts
- * and links. `main.tsx` wires the client to three of them, `onEvent`, `onChannelUp` and
- * `onChannelDown`, and the loader's route messages to a fourth, `onRoute`.
+ * The shell's actions: the channel and the subscription, navigation, sheets, menus, toasts,
+ * the sessions list's folding and filter chips, and links. `main.tsx` wires the client to three
+ * of them, `onEvent`, `onChannelUp` and `onChannelDown`, and the loader's route messages to a
+ * fourth, `onRoute`.
  *
  * Navigation keeps the history entries the loader holds for the app (`ctx.entries`) in step
  * with the route, so the phone's back button steps back through the worktrees the user moved
@@ -18,15 +19,25 @@
 import { AppError } from '../client/client.ts';
 import type { AppEvent, PhoneSessionRef, SessionsSubscribeParams, SessionsSubscribeResult } from '../protocol/types.ts';
 import { applyEvent, applySessions, withPendingOpen } from '../state/events.ts';
+import { shownFilterOn, tapFailed, tapTaken, withTap } from '../state/remoteFilter.ts';
 import { findSession, restoreRef, sameRoute } from '../state/route.ts';
 import { decodeRoute } from '../state/routeState.ts';
 import { applySnapshot, isComplete } from '../state/sessionsData.ts';
 import { emptyRecord, nextToast, SESSIONS_ROUTE } from '../state/store.ts';
 import type { AppState, MenuState, PendingOpen, Route, SessionsData, SheetState, UIState } from '../state/store.ts';
 import type { ActionContext, Actions } from './index.ts';
+import { errorText } from './sheets.ts';
 
 export function shellActions(ctx: ActionContext, self: () => Actions) {
   const { store } = ctx;
+  /** The number of the last tap on a filter chip, so a reply settles only its own tap (`state/remoteFilter.ts`). */
+  let filterTaps = 0;
+  /**
+   * Per repo ID, a promise that settles once the repo's last `repo.setRemoteFilter` has, success
+   * or failure: the tail of its chain of sends (`toggleRemoteFilter`). A repo has an entry only
+   * from a send until the reply to its last send has been handled.
+   */
+  const filterChains = new Map<string, Promise<void>>();
 
   function setUI(fn: (ui: UIState) => UIState): void {
     store.update((s) => {
@@ -312,6 +323,54 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
         if (!Object.hasOwn(ui.collapsed, groupID)) collapsed[groupID] = true;
         return { ...ui, collapsed };
       });
+    },
+
+    /**
+     * A tap on repo `repoID`'s filter chip. The chip flips at once: the phone holds the flipped
+     * value for the repo (`withTap`) and sends it in `repo.setRemoteFilter`. The laptop's list
+     * settles it (`followLayout` in `state/remoteFilter.ts`); a failure flips it back and toasts
+     * the laptop's reason, unless a newer tap on the chip followed. A repo the list does not show
+     * sends nothing. It resolves once the reply has settled.
+     *
+     * A repo's requests go one at a time. The client posts them in the order they were made, even
+     * across a drop, but the laptop runs each request on its own, so two in flight together can be
+     * written in either order, and on, then off, could end on. So a tap's request goes at once
+     * when none of the repo's is unanswered, and otherwise once the one before it has settled,
+     * whether it succeeded or failed (`filterChains`). It carries the value of its own tap, so the
+     * last tap's value is the last one written. Another repo's taps never wait on this one's.
+     *
+     * One the client could not confirm after a drop fails as `not_confirmed`, and the chip flips
+     * back; the laptop's next layout shows what it holds.
+     */
+    async toggleRemoteFilter(repoID: string): Promise<void> {
+      const seq = ++filterTaps;
+      const sent: { hidden: boolean | null } = { hidden: null };
+      store.update((s) => {
+        const shown = shownFilterOn(s.ui, s.sessions, repoID);
+        if (shown === null) return s;
+        sent.hidden = !shown;
+        return { ...s, ui: withTap(s.ui, repoID, !shown, seq) };
+      });
+      const hidden = sent.hidden;
+      if (hidden === null) return;
+      const post = () => ctx.client.request('repo.setRemoteFilter', { repoID, hidden });
+      const before = filterChains.get(repoID);
+      const reply = before === undefined ? post() : before.then(post);
+      const settled = reply.then(() => {}, () => {});
+      filterChains.set(repoID, settled);
+      try {
+        await reply;
+        store.update((s) => {
+          const ui = tapTaken(s.ui, s.sessions, repoID, seq);
+          return ui === s.ui ? s : { ...s, ui };
+        });
+      } catch (error) {
+        const text = errorText(error);
+        setUI((ui) => tapFailed(ui, repoID, seq, text));
+      } finally {
+        // No later tap queued behind this one: the repo's chain is idle.
+        if (filterChains.get(repoID) === settled) filterChains.delete(repoID);
+      }
     },
 
     /** Asks the loader to open `url`, behind its own sheet. */

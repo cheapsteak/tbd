@@ -28,6 +28,10 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// scope), keyed by the provider's own field names. Nil/absent means no
     /// opinion at this level — resolution falls through to `config`.
     var remote_create_defaults: String?
+    /// Whether the repo's lists hide registry-provider sessions: NULL when
+    /// nobody has chosen (read as off), 0 off, 1 on. No SQL default, so NULL
+    /// stays distinct from a deliberate off.
+    var registry_remote_hidden: Bool?
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -46,6 +50,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.expanded = repo.expanded
         self.env_overrides = EnvOverridesCoding.encode(repo.envOverrides)
         self.remote_create_defaults = EnvOverridesCoding.encode(repo.remoteCreateDefaults)
+        self.registry_remote_hidden = repo.registryRemoteHidden
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -72,7 +77,8 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             hidden: hidden,
             expanded: expanded,
             envOverrides: EnvOverridesCoding.decode(env_overrides),
-            remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults)
+            remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
+            registryRemoteHidden: registry_remote_hidden
         )
     }
 }
@@ -216,6 +222,18 @@ public struct RepoStore: Sendable {
             try db.execute(
                 sql: "UPDATE repo SET expanded = ? WHERE id = ?",
                 arguments: [expanded, id.uuidString]
+            )
+        }
+    }
+
+    /// Set whether the repo's lists hide registry-provider sessions, on the
+    /// Mac sidebar and the phone alike. Writes 0 or 1; nothing writes NULL
+    /// back, so once somebody has chosen, the choice stays a choice.
+    public func setRegistryRemoteHidden(id: UUID, hidden: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET registry_remote_hidden = ? WHERE id = ?",
+                arguments: [hidden, id.uuidString]
             )
         }
     }

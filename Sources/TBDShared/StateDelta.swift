@@ -96,6 +96,11 @@ public enum StateDelta: Codable, Sendable {
     /// `.devServersChanged`) — subscribers refetch via `phone.status` and
     /// `phone.devices`. An older app drops the line.
     case phoneStatusChanged
+    /// A repo's registry-provider filter was set (`repo.setRegistryRemoteHidden`),
+    /// from the Mac or from a phone. A running phone sessions list gathers
+    /// again on it. An older app drops the line, and a current one reads the
+    /// new value at its next repo refresh.
+    case repoRegistryRemoteHiddenChanged(RepoRegistryRemoteHiddenDelta)
 }
 
 /// Identifies the remote session a `.remoteSessionReconnectRequested` names.
@@ -546,6 +551,15 @@ public struct RepoExpandedDelta: Codable, Sendable {
     public let expanded: Bool
     public init(repoID: UUID, expanded: Bool) {
         self.repoID = repoID; self.expanded = expanded
+    }
+}
+
+/// Delta payload for a repo's registry-provider filter: the value written.
+public struct RepoRegistryRemoteHiddenDelta: Codable, Sendable, Equatable {
+    public let repoID: UUID
+    public let hidden: Bool
+    public init(repoID: UUID, hidden: Bool) {
+        self.repoID = repoID; self.hidden = hidden
     }
 }
 

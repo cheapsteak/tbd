@@ -32,6 +32,9 @@ final class OutlineHarness {
          clock: any Clock<Duration> = ContinuousClock()) {
         suite = TestDefaultsSuite("SidebarOutlineControllerTests.\(label)")
         state = AppState(userDefaults: suite.defaults)
+        // A registry filter toggle's call succeeds at once, so no test that
+        // awaits sees it fail against a missing daemon and flip back.
+        state.registryRemoteHiddenSender = { _, _ in }
         controller = SidebarOutlineController(
             appState: state, defaults: suite.defaults, scratchDirectoryProbe: scratchDirectoryProbe, clock: clock)
     }

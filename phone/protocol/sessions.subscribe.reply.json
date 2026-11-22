@@ -33,6 +33,7 @@
         "id": "repo:21E6C65F-4179-57BB-9FCC-80C3FE6C812E",
         "kind": "repo",
         "name": "acme-api",
+        "remoteFilterOn": true,
         "rows": [
           {
             "depth": 0,

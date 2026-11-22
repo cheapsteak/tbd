@@ -792,6 +792,10 @@ actor PhoneAppService: PhoneAppHandling {
             return Self.typed(PhoneRemoteCreateParams.self) { [self] params, context in
                 try await self.remoteCreate(params, context)
             }
+        case .repoSetRemoteFilter:
+            return Self.typed(PhoneRepoSetRemoteFilterParams.self) { [self] params, context in
+                try await self.repoSetRemoteFilter(params, context)
+            }
         case .transcriptOpen:
             return { [self] body, context in
                 let params = try PhoneAppCoding.params(TranscriptOpenParams.self, from: body)
@@ -833,9 +837,11 @@ actor PhoneAppService: PhoneAppHandling {
 
     /// Whether `method`'s replies go through the request memory.
     ///
-    /// Only the methods that act on a session or create something do, so a
-    /// resend of one of them acts once. That narrows spec section 4.4, which
-    /// says every request; the rest run again on a resend, which is safe:
+    /// Only the methods that act on a session, create something or change a
+    /// setting do, so a resend of one of them acts once: a resend of a filter
+    /// change that lost its reply cannot undo a later tap. That narrows spec
+    /// section 4.4, which says every request; the rest run again on a resend,
+    /// which is safe:
     /// - **The pure reads** (`transcript.page`, `transcript.detail`,
     ///   `profiles.list`, `remote.providers`) only read again. Their replies
     ///   can be about 60 KB, and keeping them could crowd an action's entry
@@ -847,7 +853,7 @@ actor PhoneAppService: PhoneAppHandling {
     static func remembersReplies(of method: PhoneAppMethod) -> Bool {
         switch method {
         case .messageSend, .promptAnswer, .sessionSwitchProfile, .sessionFork, .sessionSetModel,
-             .worktreeCreate, .remoteCreate:
+             .worktreeCreate, .remoteCreate, .repoSetRemoteFilter:
             return true
         case .sessionsSubscribe, .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose,
              .profilesList, .remoteProviders:
@@ -890,6 +896,9 @@ actor PhoneAppService: PhoneAppHandling {
         case .remoteCreate:
             let params = try PhoneAppCoding.params(PhoneRemoteCreateParams.self, from: body)
             target = "provider:\(params.provider)"
+        case .repoSetRemoteFilter:
+            let params = try PhoneAppCoding.params(PhoneRepoSetRemoteFilterParams.self, from: body)
+            target = "repo:\(params.repoID.uuidString)"
         case .transcriptPage, .transcriptDetail, .profilesList, .remoteProviders:
             return nil
         }

@@ -1,0 +1,9 @@
+{
+  "kind": "request",
+  "method": "repo.setRemoteFilter",
+  "params": {
+    "hidden": true,
+    "repoID": "16E7737E-5C20-548E-81FC-5DD3F9A51D36"
+  },
+  "requestID": "75358943-59EA-5414-A2D8-3A188F4055F4"
+}

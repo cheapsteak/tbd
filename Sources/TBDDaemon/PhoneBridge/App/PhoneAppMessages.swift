@@ -20,6 +20,7 @@ import TBDShared
 // - `worktree.create` – PhoneWorktreeCreateParams, PhoneWorktreeCreateResult
 // - `remote.providers` – PhoneRemoteProvidersParams, PhoneRemoteProvidersResult
 // - `remote.create` – PhoneRemoteCreateParams, SessionRefResult
+// - `repo.setRemoteFilter` – PhoneRepoSetRemoteFilterParams, PhoneEmpty
 //
 // Events, with their data:
 // - `sessions.changed` – SessionsChangedData
@@ -180,6 +181,19 @@ struct PhoneGroupLayout: Codable, Equatable, Sendable {
     let kind: String
     let name: String
     let rows: [PhoneRowPlacement]
+    /// `true` on a `repo` group whose registry-provider filter is on
+    /// (`Repo.registryRemoteHidden`), and absent otherwise, never `false`:
+    /// the phone hides that repo's registry rows itself. Every row stays in
+    /// the list, so a hidden session can still be opened.
+    let remoteFilterOn: Bool?
+
+    init(id: String, kind: String, name: String, rows: [PhoneRowPlacement], remoteFilterOn: Bool? = nil) {
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.rows = rows
+        self.remoteFilterOn = remoteFilterOn
+    }
 }
 
 // MARK: - sessions.subscribe and sessions.changed
@@ -577,4 +591,13 @@ struct PhoneRemoteCreateParams: Codable, Equatable, Sendable {
     let message: String
     let strings: [String: String]
     let bools: [String: Bool]
+}
+
+// MARK: - repo.setRemoteFilter
+
+/// Turns a repo's registry-provider filter on or off, the setting the laptop
+/// sidebar shares (`repo.setRegistryRemoteHidden`). The result is `{}`.
+struct PhoneRepoSetRemoteFilterParams: Codable, Equatable, Sendable {
+    let repoID: UUID
+    let hidden: Bool
 }

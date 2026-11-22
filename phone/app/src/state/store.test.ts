@@ -21,7 +21,7 @@ test('the initial state', () => {
   assert.equal(s.ui.nav, 0);
   assert.equal(s.ui.lastRowID, null);
   assert.deepEqual(s.sessions.layout, []);
-  for (const record of [s.sessions.rows, s.ui.collapsed, s.ui.refusal, s.ui.drafts]) {
+  for (const record of [s.sessions.rows, s.ui.collapsed, s.ui.refusal, s.ui.drafts, s.ui.remoteFilterPending]) {
     assert.deepEqual(Object.keys(record), []);
     assert.equal(Object.getPrototypeOf(record), null);
   }

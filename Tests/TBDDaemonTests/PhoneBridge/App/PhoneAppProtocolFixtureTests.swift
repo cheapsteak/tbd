@@ -29,7 +29,7 @@ struct PhoneAppProtocolFixtureTests {
             .union(["error.reply.json"])
         let actual = try Set(fixtureNames())
         #expect(actual == expected)
-        #expect(expected.count == 34)
+        #expect(expected.count == 36)
     }
 
     /// No `null`, the envelope's `kind`, `method` and `event` match the file
@@ -146,6 +146,29 @@ struct PhoneAppProtocolFixtureTests {
             return
         }
         #expect(!message.isEmpty)
+    }
+
+    /// The sessions fixtures carry `remoteFilterOn` on one repo group, and
+    /// only as `true`: absent everywhere else, never `false`, and never on a
+    /// scratch or provider group.
+    @Test func sessionsFixturesCarryTheRemoteFilter() throws {
+        let subscribeReply = try decodeFixture(
+            PhoneReplyEnvelope<SessionsSubscribeResult>.self, "sessions.subscribe.reply.json")
+        let changed = try decodeFixture(
+            PhoneEventEnvelope<SessionsChangedData>.self, "sessions.changed.event.json")
+        let subscribeLayout = try #require(subscribeReply.result.layout)
+        let changedLayout = try #require(changed.data.layout)
+        for layout in [subscribeLayout, changedLayout] {
+            let filtered = layout.filter { $0.remoteFilterOn != nil }
+            let onRepoGroupsOnly = filtered.allSatisfy { $0.kind == "repo" && $0.remoteFilterOn == true }
+            #expect(filtered.count == 1)
+            #expect(onRepoGroupsOnly)
+        }
+
+        let request = try decodeFixture(
+            PhoneRequestEnvelope<PhoneRepoSetRemoteFilterParams>.self, "repo.setRemoteFilter.request.json")
+        let repoGroupIDs = subscribeLayout.filter { $0.kind == "repo" }.map(\.id)
+        #expect(repoGroupIDs.contains("repo:\(request.params.repoID.uuidString)"))
     }
 
     @Test func errorReplyFixtureIsARefusal() throws {
@@ -313,6 +336,7 @@ private struct MethodCodecs {
         case .worktreeCreate: self.init(PhoneWorktreeCreateParams.self, PhoneWorktreeCreateResult.self)
         case .remoteProviders: self.init(PhoneRemoteProvidersParams.self, PhoneRemoteProvidersResult.self)
         case .remoteCreate: self.init(PhoneRemoteCreateParams.self, SessionRefResult.self)
+        case .repoSetRemoteFilter: self.init(PhoneRepoSetRemoteFilterParams.self, PhoneEmpty.self)
         }
     }
 }

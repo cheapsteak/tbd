@@ -70,13 +70,13 @@ export const MESSAGE_PREVIEW_BYTES = 4_096;
 const METHODS = new Set([
   'sessions.subscribe', 'transcript.open', 'transcript.page', 'transcript.detail', 'transcript.close',
   'message.send', 'prompt.answer', 'profiles.list', 'session.switchProfile', 'session.fork',
-  'session.setModel', 'worktree.create', 'remote.providers', 'remote.create',
+  'session.setModel', 'worktree.create', 'remote.providers', 'remote.create', 'repo.setRemoteFilter',
 ]);
 const EVENTS = new Set(['sessions.changed', 'transcript.append', 'transcript.update', 'transcript.reset', 'prompt.changed']);
 /** The methods whose replies the daemon remembers (`PhoneAppService.remembersReplies(of:)`). */
 const ACTING = new Set([
   'message.send', 'prompt.answer', 'session.switchProfile', 'session.fork', 'session.setModel',
-  'worktree.create', 'remote.create',
+  'worktree.create', 'remote.create', 'repo.setRemoteFilter',
 ]);
 const SCENARIO_KEYS = new Set(['layout', 'rows', 'transcripts', 'details', 'prompts', 'profiles', 'repoProfiles', 'providers']);
 /** Item kinds a transcript leaves out unless `showDetails` is set. */
@@ -787,6 +787,26 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       };
       addRow(group, row, ref, message);
       reply(request, { result: { session: ref } });
+    },
+
+    // Sets the repo group's `remoteFilterOn`, present only when on, and announces the new layout
+    // when it changed, as the daemon's sessions publisher does.
+    'repo.setRemoteFilter': (request) => {
+      const { repoID, hidden } = request.params;
+      const group = repoGroup(repoID);
+      if (group === null) {
+        reply(request, failure('not_found', TEXT.noSuchRepo));
+        return;
+      }
+      if (typeof hidden !== 'boolean') {
+        reply(request, failure('bad_request', TEXT.badParams));
+        return;
+      }
+      const changed = (group.remoteFilterOn === true) !== hidden;
+      if (hidden) group.remoteFilterOn = true;
+      else delete group.remoteFilterOn;
+      reply(request, { result: {} });
+      if (changed) sendEvent('sessions.changed', { layout: structuredClone(state.layout), rows: [], removedRowIDs: [] });
     },
   };
 

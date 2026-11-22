@@ -325,6 +325,9 @@ Requests:
   (`profileID`). The reply carries the new session's reference.
 - **`remote.providers`** – registered providers, with their `create_params`.
 - **`remote.create`** – a provider and the filled form.
+- **`repo.setRemoteFilter`** – turns a repo's registry-provider filter on or off. The setting is
+  the one the laptop sidebar uses, and each repo group in the snapshot says whether it is on
+  (`remoteFilterOn`). The design: [phone remote-session filter](2026-11-22-phone-remote-session-filter-design.md).
 
 **Open prompts** for the open session arrive as `prompt.changed` events. Each carries the prompt ID,
 its kind (question or permission), the tool name, a summary of the input, and the questions with
@@ -677,6 +680,9 @@ These come from the laptop's bundle.
     badge.
   - Each repo's header row has a "+" that opens the New sheet for that repo. Tapping the repo's
     name collapses or expands its rows. The list updates live.
+  - A repo with sessions from a registry provider shows a chip after its name that hides those
+    rows, shared with the laptop sidebar's filter. The design:
+    [phone remote-session filter](2026-11-22-phone-remote-session-filter-design.md).
 - **Session.**
   - **Header** – back and the worktree's name, with a line below: the status in words, the time
     since the last status change, the account and the model. A remote session shows its provider

@@ -60,6 +60,11 @@ struct PhoneSnapshot: Equatable, Sendable {
 ///
 /// Archived rows and dismissed sessions never appear.
 ///
+/// **The registry filter.** A repo group whose `Repo.registryRemoteHidden` is
+/// `true` carries `remoteFilterOn: true`; every other group leaves it out.
+/// The builder still lists that repo's every row: the phone hides its
+/// registry rows itself, so it can count them and keep the one it has open.
+///
 /// **Rows.** A local worktree row has one session per agent tab, in tab
 /// order; shell tabs are hidden. A remote lane's row has its one remote
 /// session. A remote session no worktree row stands for is a `remoteSession`
@@ -192,6 +197,8 @@ enum PhoneSnapshotBuilder {
         /// A repo's group stays when it has no rows, as its header does in
         /// the sidebar; the scratch and provider groups go.
         let keptWhenEmpty: Bool
+        /// `true` on a repo group whose registry filter is on, nil otherwise.
+        var remoteFilterOn: Bool?
     }
 
     private struct Entry {
@@ -256,7 +263,8 @@ enum PhoneSnapshotBuilder {
         }
         for repo in input.repos where !repo.hidden {
             groups.append(Group(
-                id: repoGroupID(repo), kind: "repo", name: PhoneText.capped(repo.displayName), keptWhenEmpty: true))
+                id: repoGroupID(repo), kind: "repo", name: PhoneText.capped(repo.displayName), keptWhenEmpty: true,
+                remoteFilterOn: repo.registryRemoteHidden == true ? true : nil))
             let group = groups.count - 1
             let repoWorktrees = byRepo[repo.id] ?? []
             for step in SidebarOrder.walk(repoWorktrees: repoWorktrees, children: children, order: .parentsFirst) {
@@ -293,7 +301,9 @@ enum PhoneSnapshotBuilder {
         }
         var result: [PhoneGroupLayout] = []
         for (index, group) in groups.enumerated() where group.keptWhenEmpty || !placements[index].isEmpty {
-            result.append(PhoneGroupLayout(id: group.id, kind: group.kind, name: group.name, rows: placements[index]))
+            result.append(PhoneGroupLayout(
+                id: group.id, kind: group.kind, name: group.name, rows: placements[index],
+                remoteFilterOn: group.remoteFilterOn))
         }
         return result
     }

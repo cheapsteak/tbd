@@ -604,6 +604,7 @@ test('every acting method is held to the horizon, and no read or queued request 
     () => h.c.request('session.setModel', { session: REF, model: 'opus' }),
     () => h.c.request('worktree.create', { repoID: 'R1', message: 'Fix the login loop.' }),
     () => h.c.request('remote.create', { provider: 'acme-cloud', repoID: 'R1', message: 'hi', strings: {}, bools: {} }),
+    () => h.c.request('repo.setRemoteFilter', { repoID: 'R1', hidden: true }),
   );
   const outcomes = acting.map((make) => track(make()));
   const reads = [
@@ -618,7 +619,7 @@ test('every acting method is held to the horizon, and no read or queued request 
   const mark = h.posted.length;
   h.up();
   await flush();
-  assert.deepEqual(outcomes.map((o) => o.state), Array(7).fill('rejected'));
+  assert.deepEqual(outcomes.map((o) => o.state), Array(8).fill('rejected'));
   assert.deepEqual(reads.map((o) => o.state), Array(4).fill('pending'));
   assert.equal(queued.state, 'pending');
   assert.deepEqual(h.posted.slice(mark).map((b) => b.method),

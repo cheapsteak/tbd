@@ -6,6 +6,7 @@
 
 import type { AppEvent } from '../protocol/types.ts';
 import { applyPromptChanged, clearStaleRefusals } from './prompts.ts';
+import { followLayout } from './remoteFilter.ts';
 import { findSession, pendingOpenTarget, resolveRoute, restoreRef, sameRoute } from './route.ts';
 import { applySessionsChanged, isComplete } from './sessionsData.ts';
 import { nextToast } from './store.ts';
@@ -69,7 +70,8 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
  *    stale, and the session must not open later, once the user has moved on.
  *
  * A prompt card's refusal goes once its session's `answer` capability turns from unavailable to
- * available (`clearStaleRefusals`).
+ * available (`clearStaleRefusals`). A new layout, a snapshot's or an event's, settles the filter
+ * values the phone holds while a chip's tap waits (`followLayout`).
  *
  * A change of screen clears the menu and every sheet, since they act on the session the screen
  * showed. The one exception is `new`, which acts on a repo, not a session: it stays when the
@@ -83,7 +85,8 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
  * show; a menu left set would open again when the row comes.
  */
 export function applySessions(state: AppState, sessions: SessionsData): AppState {
-  return { ...state, sessions, ui: followList(state.ui, sessions), prompts: clearStaleRefusals(state.prompts, state.sessions, sessions) };
+  const ui = sessions.layout === state.sessions.layout ? state.ui : followLayout(state.ui, sessions.layout);
+  return { ...state, sessions, ui: followList(ui, sessions), prompts: clearStaleRefusals(state.prompts, state.sessions, sessions) };
 }
 
 /**
