@@ -1199,7 +1199,7 @@ test('a layout after a successful reply wins over the pending value', async () =
   h.actions.onEvent(layoutEvent(false));
   assert.deepEqual(Object.keys(h.state().ui.remoteFilterPending), []);
   assert.equal(chipOn(h), false);
-  assert.deepEqual(shownRows(h), ['BOX', 'W1']);
+  assert.deepEqual(shownRows(h), ['W1', 'BOX']);
 });
 
 test('a refused reply flips the chip back and toasts the laptop\'s reason', async () => {
