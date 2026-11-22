@@ -794,6 +794,51 @@ struct TmuxResumeGateRPCTests {
         #expect(f.holder.launches.count == 1)
     }
 
+    /// A shell tab on the pty holder carries the session of a Claude started
+    /// by hand in it, so the reopen is refused with that tab named as a shell.
+    /// A `SessionEnd` naming another session leaves it carrying the session;
+    /// once that Claude's own `SessionEnd` says it left, the tab forgets the
+    /// id, stays open, and the same reopen goes ahead beside it.
+    @Test func closedTerminalsReopenBesideAHolderShellGoesAheadOnceItsHandStartedSessionEnds() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let entry = try await closedHolderEntry(f)
+        let shell = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            claudeSessionID: Self.sessionID, kind: .shell, transport: .holder)
+        let params = TerminalHistoryReviveParams(worktreeID: f.worktree.id, id: entry.id)
+
+        let refused = try await f.send(RPCMethod.terminalHistoryRevive, params)
+        #expect(!refused.success)
+        #expect(refused.error == RPCRouter.handStartedCarrierRefusal(terminalID: shell.id))
+        #expect(refused.error?.hasPrefix("A Claude started by hand in shell tab") == true)
+        let outcome = try f.lastOutcome()
+        #expect(outcome.result == .synchronous(.refused))
+        #expect(outcome.reason == .notEligible)
+        #expect(f.holder.launches.isEmpty)
+
+        let earlier = try await f.send(
+            RPCMethod.terminalSessionEnded,
+            TerminalSessionEndedParams(terminalID: shell.id, reason: "exit", sessionID: "sess-acme-earlier"))
+        #expect(earlier.success, "error: \(earlier.error ?? "nil")")
+        #expect(try await f.db.terminals.get(id: shell.id) == shell)
+        let stillRefused = try await f.send(RPCMethod.terminalHistoryRevive, params)
+        #expect(stillRefused.error == RPCRouter.handStartedCarrierRefusal(terminalID: shell.id))
+
+        let ended = try await f.send(
+            RPCMethod.terminalSessionEnded,
+            TerminalSessionEndedParams(terminalID: shell.id, reason: "exit", sessionID: Self.sessionID))
+        #expect(ended.success, "error: \(ended.error ?? "nil")")
+        let after = try #require(try await f.db.terminals.get(id: shell.id))
+        #expect(after.claudeSessionID == nil)
+        #expect(!after.isParked)
+
+        let reopened = try await f.send(RPCMethod.terminalHistoryRevive, params)
+        #expect(reopened.success, "error: \(reopened.error ?? "nil")")
+        #expect(f.holder.launches.count == 1)
+        #expect(try await f.db.terminals.get(id: shell.id) != nil)
+    }
+
     // MARK: - A session the worktree's archived record names
 
     /// An active worktree that still carries its archived record, as adopting
@@ -911,19 +956,15 @@ struct TmuxResumeGateRPCTests {
     /// A shell can run one hand-started Claude after another under the same
     /// incarnation. A `SessionEnd` from an earlier one that arrives after a
     /// newer one recorded its id names the earlier session, so the tab keeps
-    /// the newer id and the gate keeps refusing a second start of it. A
-    /// report that names no session, from an older CLI, forgets nothing
-    /// either.
-    @Test("a late SessionEnd from an earlier hand-started Claude keeps the newer session's id",
-          arguments: ["sess-acme-earlier", nil] as [String?])
-    func aLateSessionEndFromAnEarlierSessionKeepsHoldingTheGate(endedSessionID: String?) async throws {
+    /// the newer id and the gate keeps refusing a second start of it.
+    @Test func aLateSessionEndFromAnEarlierSessionKeepsHoldingTheGate() async throws {
         let f = try await fixture()
         defer { f.tearDown() }
         let row = try await openATmuxRow(f, in: f.worktree, kind: .shell)
 
         let ended = try await f.send(
             RPCMethod.terminalSessionEnded,
-            TerminalSessionEndedParams(terminalID: row.id, reason: "exit", sessionID: endedSessionID))
+            TerminalSessionEndedParams(terminalID: row.id, reason: "exit", sessionID: "sess-acme-earlier"))
         #expect(ended.success, "error: \(ended.error ?? "nil")")
         #expect(try await f.db.terminals.get(id: row.id) == row,
                 "a report naming another session changed the tab")
@@ -932,6 +973,29 @@ struct TmuxResumeGateRPCTests {
             RPCMethod.sessionResume,
             SessionResumeParams(worktreeID: f.worktree.id, identity: identity))
         try await expectRefused(refused, f, terminalsBefore: [row], marks: [])
+    }
+
+    /// A `SessionEnd` that names no session, as an older `tbd` sends it, is
+    /// judged by its incarnation alone: the tab forgets the id it carries,
+    /// and the resume goes ahead without asking the probe again.
+    @Test func aSessionEndNamingNoSessionForgetsTheTabsSessionByItsIncarnation() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let row = try await openATmuxRow(f, in: f.worktree, kind: .shell)
+        let params = SessionResumeParams(worktreeID: f.worktree.id, identity: identity)
+
+        let refused = try await f.send(RPCMethod.sessionResume, params)
+        try await expectRefused(refused, f, terminalsBefore: [row], marks: [])
+
+        let ended = try await f.send(
+            RPCMethod.terminalSessionEnded,
+            TerminalSessionEndedParams(terminalID: row.id, reason: "exit"))
+        #expect(ended.success, "error: \(ended.error ?? "nil")")
+        #expect(try await f.db.terminals.get(id: row.id)?.claudeSessionID == nil)
+
+        let resumed = try await f.send(RPCMethod.sessionResume, params)
+        #expect(resumed.success, "error: \(resumed.error ?? "nil")")
+        #expect(f.probe.servers == ["tbd-acme"])
     }
 
     /// A `SessionEnd` whose reason is not a process exit (`clear`) leaves the
@@ -954,43 +1018,66 @@ struct TmuxResumeGateRPCTests {
         try await expectRefused(refused, f, terminalsBefore: [row], marks: [])
     }
 
-    /// The store's guards: only a tab that is not an agent's, still on tmux,
-    /// with the report's incarnation and the session the report names,
-    /// forgets its id.
-    @Test func forgettingAnEndedHandStartedSessionSparesAgentTabsHolderRowsAndStaleReports() async throws {
+    /// The store's guards: a tab that is not an agent's, on either transport,
+    /// with the report's incarnation, forgets its id when the report names
+    /// that session or names none. An agent tab, a stale incarnation and a
+    /// report naming another session forget nothing.
+    @Test func forgettingAnEndedHandStartedSessionSparesAgentTabsAndStaleReports() async throws {
         let f = try await fixture()
         defer { f.tearDown() }
         let claudeTab = try await openATmuxRow(f, in: f.worktree)
         let codexTab = try await openATmuxRow(f, in: f.worktree, kind: .codex)
-        let holderShell = try await f.db.terminals.create(
-            worktreeID: f.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
-            claudeSessionID: Self.sessionID, kind: .shell, transport: .holder)
         let incarnation = UUID()
-        let tmuxShell = try await f.db.terminals.create(
-            worktreeID: f.worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%3",
-            claudeSessionID: Self.sessionID, kind: .shell, transport: .tmux,
-            sessionIncarnationID: incarnation)
 
-        for spared in [claudeTab, codexTab, holderShell] {
-            let cleared = try await f.db.terminals.clearEndedHandStartedSession(
-                id: spared.id, reportedIncarnationID: nil, endedSessionID: Self.sessionID)
-            #expect(!cleared, "terminal \(spared.id) forgot its session id")
-            #expect(try await f.db.terminals.get(id: spared.id)?.claudeSessionID == Self.sessionID)
+        for spared in [claudeTab, codexTab] {
+            for named in [Self.sessionID, nil] as [String?] {
+                let cleared = try await f.db.terminals.clearEndedHandStartedSession(
+                    id: spared.id, reportedIncarnationID: nil, endedSessionID: named)
+                #expect(!cleared, "agent tab \(spared.id) forgot its session id")
+                #expect(try await f.db.terminals.get(id: spared.id)?.claudeSessionID == Self.sessionID)
+            }
         }
-        let stale = try await f.db.terminals.clearEndedHandStartedSession(
-            id: tmuxShell.id, reportedIncarnationID: UUID(), endedSessionID: Self.sessionID)
-        #expect(!stale)
-        #expect(try await f.db.terminals.get(id: tmuxShell.id)?.claudeSessionID == Self.sessionID)
-        for otherSession in ["sess-acme-earlier", "", nil] as [String?] {
+
+        for transport in [TerminalTransport.tmux, .holder] {
+            let named = try await handStartedShell(f, on: transport, incarnation: incarnation)
+            for stale in [Self.sessionID, nil] as [String?] {
+                let cleared = try await f.db.terminals.clearEndedHandStartedSession(
+                    id: named.id, reportedIncarnationID: UUID(), endedSessionID: stale)
+                #expect(!cleared, "a stale \(transport.rawValue) report forgot the tab's session id")
+            }
             let other = try await f.db.terminals.clearEndedHandStartedSession(
-                id: tmuxShell.id, reportedIncarnationID: incarnation, endedSessionID: otherSession)
-            #expect(!other, "a report naming \(otherSession ?? "no session") forgot the tab's session id")
-            #expect(try await f.db.terminals.get(id: tmuxShell.id)?.claudeSessionID == Self.sessionID)
+                id: named.id, reportedIncarnationID: incarnation, endedSessionID: "sess-acme-earlier")
+            #expect(!other, "a report naming another session forgot the \(transport.rawValue) tab's id")
+            #expect(try await f.db.terminals.get(id: named.id)?.claudeSessionID == Self.sessionID)
+            let current = try await f.db.terminals.clearEndedHandStartedSession(
+                id: named.id, reportedIncarnationID: incarnation, endedSessionID: Self.sessionID)
+            #expect(current, "the \(transport.rawValue) tab kept the session that ended")
+            #expect(try await f.db.terminals.get(id: named.id)?.claudeSessionID == nil)
+            let again = try await f.db.terminals.clearEndedHandStartedSession(
+                id: named.id, reportedIncarnationID: incarnation, endedSessionID: nil)
+            #expect(!again, "a tab carrying no session reported a change")
+
+            for unnamed in ["", nil] as [String?] {
+                let fallback = try await handStartedShell(f, on: transport, incarnation: incarnation)
+                let cleared = try await f.db.terminals.clearEndedHandStartedSession(
+                    id: fallback.id, reportedIncarnationID: incarnation, endedSessionID: unnamed)
+                #expect(cleared, "a \(transport.rawValue) report naming no session kept the tab's id")
+                #expect(try await f.db.terminals.get(id: fallback.id)?.claudeSessionID == nil)
+            }
         }
-        let current = try await f.db.terminals.clearEndedHandStartedSession(
-            id: tmuxShell.id, reportedIncarnationID: incarnation, endedSessionID: Self.sessionID)
-        #expect(current)
-        #expect(try await f.db.terminals.get(id: tmuxShell.id)?.claudeSessionID == nil)
+    }
+
+    /// A shell tab on `transport` carrying `sessionID` under `incarnation`,
+    /// as a Claude started by hand in it leaves it.
+    private func handStartedShell(
+        _ f: Fixture, on transport: TerminalTransport, incarnation: UUID
+    ) async throws -> Terminal {
+        try await f.db.terminals.create(
+            worktreeID: f.worktree.id,
+            tmuxWindowID: transport == .tmux ? "@3" : "",
+            tmuxPaneID: transport == .tmux ? "%3" : "",
+            claudeSessionID: Self.sessionID, kind: .shell, transport: transport,
+            sessionIncarnationID: incarnation)
     }
 
     // MARK: - Switching the account of a parked tmux row

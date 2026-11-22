@@ -52,7 +52,8 @@ struct SessionEndCommand: AsyncParsableCommand {
 
     /// Lift `session_id` out of a hook payload, under the same cap as
     /// `hookReason`. Nil when the payload is empty, oversized, not the object
-    /// this expects, or names no session; the daemon then forgets no session.
+    /// this expects, or names no session; the daemon then judges the report by
+    /// its incarnation alone.
     static func hookSessionID(from data: Data) -> String? {
         guard !data.isEmpty, data.count <= 1 << 20,
               let payload = try? JSONDecoder().decode(HookSessionPayload.self, from: data),

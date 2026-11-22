@@ -1155,15 +1155,22 @@ extension RPCRouter {
             // entry's, so nothing else stops it starting beside that tab, and
             // the gate below reads only tmux rows and marks. The entry can be
             // reopened once that tab is closed.
+            //
+            // A shell tab carries a session while a Claude started by hand in
+            // it runs, and forgets it when that Claude's `SessionEnd` says it
+            // left (`TerminalStore.clearEndedHandStartedSession`). Such a tab
+            // cannot resume the session itself, so it is answered apart.
             let worktreeRows = try await actuating(actuationID) {
                 try await db.terminals.list(worktreeID: worktree.id)
             }
             if let carrier = worktreeRows.first(where: {
                 $0.transport == .holder && $0.claudeSessionID == sessionID
             }) {
-                let message = "Terminal \(carrier.id) is still open and carries this session, so "
-                    + "reopening it would run the session a second time. Use that tab, or close "
-                    + "it before reopening this entry from Closed Terminals."
+                let message = carrier.isClaudeTab || carrier.isCodexTerminal
+                    ? "Terminal \(carrier.id) is still open and carries this session, so "
+                        + "reopening it would run the session a second time. Use that tab, or close "
+                        + "it before reopening this entry from Closed Terminals."
+                    : Self.handStartedCarrierRefusal(terminalID: carrier.id)
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
@@ -1431,6 +1438,15 @@ extension RPCRouter {
     static func holderRecreateRefusal(terminalID: UUID) -> String {
         "Terminal \(terminalID) runs on the pty-holder transport, which has no "
             + "tmux window to recreate. Its session is unchanged."
+    }
+
+    /// The refusal a Closed Terminals reopen returns while a holder tab that
+    /// is not an agent's — a shell — carries the entry's session, because a
+    /// Claude started by hand in it has not yet reported its end. That tab
+    /// cannot resume the session, so it is named for what it is.
+    static func handStartedCarrierRefusal(terminalID: UUID) -> String {
+        "A Claude started by hand in shell tab \(terminalID) carries this session; "
+            + "exit it or close that tab first."
     }
 
     /// The refusal `terminal.swapProfile` returns for an in-place switch of a
@@ -5112,11 +5128,13 @@ extension RPCRouter {
         // ended inside a tab that is not Claude's, which the stamp leaves
         // alone because no wake would resume Claude there. The others
         // (holder row, already parked, stale incarnation) are routine. Such a
-        // tab still on tmux forgets the ended session's id, which would
-        // otherwise keep the resume gate refusing it — only when the report
-        // names that session, so a late report from an earlier hand-started
-        // Claude leaves a newer one's id alone
-        // (`TerminalStore.clearEndedHandStartedSession`).
+        // tab, on either transport, forgets the ended session's id, which
+        // would otherwise keep refusing a start of it — the resume gate for a
+        // tmux tab, a Closed Terminals reopen for a holder tab. A report that
+        // names its session forgets the id only when it is that one, so a late
+        // report from an earlier hand-started Claude leaves a newer one's id
+        // alone; one from an older `tbd`, which names none, is judged by its
+        // incarnation (`TerminalStore.clearEndedHandStartedSession`).
         if !stamped, let row = try? await db.terminals.get(id: params.terminalID),
            !row.isClaudeTab {
             let cleared: Bool

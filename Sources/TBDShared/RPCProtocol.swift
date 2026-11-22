@@ -4975,7 +4975,8 @@ public struct TerminalSessionEndedParams: Codable, Sendable, Equatable {
     /// earlier Claude leaves a newer one's id alone.
     ///
     /// Optional because an older CLI sends none. A report that names no
-    /// session forgets nothing.
+    /// session is judged by `sessionIncarnationID` alone, as every report was
+    /// before this field existed.
     public let sessionID: String?
     public init(
         terminalID: UUID, sessionIncarnationID: UUID? = nil, reason: String? = nil,

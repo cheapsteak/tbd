@@ -360,13 +360,16 @@ respawned the window, and left the park in flight when the respawn failed, so
 the agent may still be running behind such a row. A parked tmux row with no
 park in flight is no reason to ask, since its session ended when it was parked.
 A shell tab in which Claude was started by hand carries that Claude's session
-id while it runs, and forgets it when Claude's `SessionEnd` reports its
-process gone (`TerminalStore.clearEndedHandStartedSession`), so a shell that
-outlives its Claude does not keep the session refused. The report names the
-session that ended, and the tab forgets its id only when it is that one: a
-shell can run one hand-started Claude after another, and a late report from
-an earlier one must not clear the id of the one still running. A report that
-names no session, from an older CLI, forgets nothing.
+id while it runs, on either transport, and forgets it when Claude's
+`SessionEnd` reports its process gone
+(`TerminalStore.clearEndedHandStartedSession`), so a shell that outlives its
+Claude does not keep the session refused. The report names the session that
+ended, and the tab forgets its id only when it is that one: a shell can run
+one hand-started Claude after another, and a late report from an earlier one
+must not clear the id of the one still running. A report that names no
+session, from an older CLI, is judged by its incarnation alone, so a shell
+still forgets a session that ended in it when the `tbd` on the PATH predates
+the field.
 Outside a revive, a session neither names starts without more: one read of each
 of two indexes, each holding only the rows it can match, which is all a wake of
 a parked holder row pays, and a History pane resume or Closed Terminals reopen
@@ -433,7 +436,11 @@ refused, `not-eligible`, before the gate: the session comes back in that tab
 when it is woken, and the gate, which does not read a parked row, would not
 stop it. So is a reopen while a tab on the pty holder in the same worktree
 carries the entry's session, running it or parked: the reopen opens a new
-terminal beside that tab, and the gate reads no holder row.
+terminal beside that tab, and the gate reads no holder row. A shell tab
+carries a session while a Claude started by hand in it runs, so its refusal
+names it as that, not as a tab that can resume the session; it forgets the
+session the same way a tmux shell does (above), and the reopen then goes
+ahead beside it.
 
 The gate is keyed by session id rather than by row or worktree, because the
 requests that resume a session reach it from different records: an archived
