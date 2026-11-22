@@ -142,24 +142,35 @@ public enum RPCErrorCode: String, Sendable {
     /// `woken: false` no-op, because there is no live session behind the row:
     /// the caller's `prompt` went nowhere and the terminal needs recovery.
     case terminalSessionGone
-    /// A request was refused because the row is still on the tmux transport,
-    /// which TBD no longer starts sessions on, shows, sends to or stops.
-    /// Nothing was changed. Two cases, and the text says what to do in each:
+    /// A request was refused over the tmux transport, which TBD no longer
+    /// starts sessions on, shows, sends to or stops: the row is still on it,
+    /// or the session the request would start may still be running in a tmux
+    /// server. Nothing was changed. Three cases, and the text says what to do
+    /// in each:
     ///
     /// - **The row's session may still be running in tmux** – a tmux server
     ///   an earlier build started can outlive `tbd update`. Any request that
     ///   would reach the session is refused with `tmux -L <server>
     ///   kill-server`, which ends it, followed by `tbd terminal migrate <id>`:
     ///   a view, a send, a wake, a park (`terminal.hibernate` or
-    ///   `terminal.suspend`), a recreate or a move.
+    ///   `terminal.suspend`), a recreate, a move, or an account switch of a
+    ///   row whose park is still in flight.
     /// - **Nothing of the row runs in tmux any more** – a parked row, or one
     ///   whose window is gone. A request that would start or replace its
     ///   process (a wake, a window recreate, an in-place account switch, a
     ///   send) names `tbd terminal migrate <id>` to move the row to the pty
     ///   holder, or, for a tab no migration can move, says to close it and
     ///   open a new one.
+    /// - **A session the request would start may still be running in a tmux
+    ///   server** – a tmux row carries it, a tab TBD closed on tmux carried
+    ///   it, or a revived worktree's tabs ran in that server. Any start of it
+    ///   is refused, on whatever transport its row is, holder rows included:
+    ///   a revive, a History pane resume, a Closed Terminals reopen, a wake.
+    ///   The text names `tmux -L <server> kill-server` (or a restart), then
+    ///   says to try the same request again.
     ///
-    /// Either way a plain retry cannot help, so the app offers none.
+    /// In none of them does repeating the request change the answer until the
+    /// step the text names has been taken, so the app offers no retry button.
     case terminalOnTmux
     /// An agent start or wake was held by the user's start-admission command
     /// (`~/tbd/hooks/start-admission`). The message is the command's reason.
