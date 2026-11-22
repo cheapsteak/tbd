@@ -1106,11 +1106,14 @@ final class AppState {
     /// than defaulting to 0 or clamping at the call site.
     var activeTabIndices: [UUID: Int] = [:]
     var worktreeTabOrders: [UUID: [UUID]] = [:]
-    /// Terminals of a closed tab whose `terminal.delete` has not answered yet.
-    /// They are still in `terminals`, so `reconcileTabs` skips them rather
-    /// than give each a tab of its own while it is being torn down
-    /// (`settleTabClose` clears them).
-    @ObservationIgnored var closingTerminalIDs: Set<UUID> = []
+    /// Terminals of a closed tab that the close still holds: their
+    /// `terminal.delete` has not answered yet, or it failed without the
+    /// daemon's answer and waits on the next terminal list
+    /// (`ClosingTerminal.awaitingList`). They are still in `terminals`, so
+    /// `reconcileTabs` skips them rather than give each a tab of its own
+    /// while it is being torn down (`settleTerminalClose` and
+    /// `finishClosingTerminal` let them go).
+    @ObservationIgnored var closingTerminals: [UUID: ClosingTerminal] = [:]
     /// Worktrees whose persisted tab order / active tab has been hydrated from
     /// the daemon with actual content. Distinct from `worktreeTabOrders[id] != nil`,
     /// which is also true for the empty response a poll gets while the daemon is
@@ -4769,9 +4772,10 @@ final class AppState {
     /// Removes tabs whose root terminal no longer exists. Adds tabs for
     /// terminals that aren't already represented (either as a tab root or
     /// embedded in another tab's split layout), except a closed tab's
-    /// terminals while their deletes are in flight. Drops any note tab, with its
-    /// layout: a note shows in the side panel as a worktree panel, never as a
-    /// workspace tab, so one held in memory from an older build never shows.
+    /// terminals while the close holds them (`closingTerminals`). Drops any
+    /// note tab, with its layout: a note shows in the side panel as a
+    /// worktree panel, never as a workspace tab, so one held in memory from an
+    /// older build never shows.
     func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
         // Capture the active tab's IDENTITY before touching the array: every
         // mutation below shifts indices, so a stored index re-binds to whatever
@@ -4827,10 +4831,10 @@ final class AppState {
         }
 
         // 3. Add tabs for terminals not already in any surviving layout, but
-        //    not for a closed tab's terminal whose delete is still in flight
-        //    (`closingTerminalIDs`).
+        //    not for a closed tab's terminal the close still holds
+        //    (`closingTerminals`).
         for terminal in terminals
-        where !terminalIDsInLayouts.contains(terminal.id) && !closingTerminalIDs.contains(terminal.id) {
+        where !terminalIDsInLayouts.contains(terminal.id) && closingTerminals[terminal.id] == nil {
             currentTabs.append(TBDShared.Tab(
                 id: terminal.id,
                 content: .terminal(terminalID: terminal.id),

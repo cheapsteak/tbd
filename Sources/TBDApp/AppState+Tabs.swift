@@ -30,6 +30,16 @@ enum ActiveTabAnchor: Sendable, Equatable {
     case pinned(UUID?)
 }
 
+/// The refusals one tab close has collected (`AppState.showTabCloseRefusal`),
+/// so its terminals share one alert however far apart their answers land.
+@MainActor
+final class TabCloseRefusals {
+    /// The daemon's messages the alert on screen carries.
+    var messages: [String] = []
+    /// The alert text this close last showed.
+    var shownAlert: String?
+}
+
 extension AppState {
 
     // MARK: - Active tab resolution
@@ -355,10 +365,28 @@ extension AppState {
 
     // MARK: - Close
 
+    /// What a tab close holds for one of its terminals until the terminal is
+    /// settled (`closingTerminals`).
+    struct ClosingTerminal: Sendable {
+        /// The closed tab's label, carried by the terminal the tab was rooted
+        /// at, so the tab that terminal comes back as keeps its name.
+        let tabLabel: String?
+        /// Set when the delete failed without the daemon's answer — a
+        /// disconnect, a receive timeout, a response cut off. The next
+        /// terminal list adopted for the worktree then decides
+        /// (`adoptTerminalSnapshot`): a terminal it holds comes back as a
+        /// tab, and one it lacks is gone. A list the daemon answered before
+        /// the delete reached it can still hold a terminal it went on to
+        /// delete; that tab then shows until the removal broadcast or the
+        /// next list takes it away.
+        var awaitingList = false
+    }
+
     /// Close one tab and clean up resources owned by that tab. This is shared
     /// by the tab bar close button and the Cmd-W menu shortcut. The tab closes
-    /// before this returns. A terminal the daemon refuses to delete comes back
-    /// as a tab of its own, with an alert (`settleTabClose`).
+    /// before this returns. Each of its terminals is settled on its own once
+    /// its delete answers: one the daemon refuses to delete comes back as a
+    /// tab of its own, with an alert (`settleTerminalClose`).
     func closeTab(worktreeID: UUID, index: Int) {
         guard var arr = tabs[worktreeID],
               arr.indices.contains(index) else { return }
@@ -383,31 +411,22 @@ extension AppState {
             focusedTabCloseContext = nil
         }
 
-        // Drop any pending unread-completion bold for this tab's terminals so a
-        // background tab that completed and was closed without being activated
-        // doesn't leak stale UUIDs into `unreadTerminals`.
-        unreadTerminals.subtract(terminalIDsInTab)
-
-        // A closed tab takes its composers' unsent messages — and their focus
-        // registrations and spawn bookkeeping — with it: the terminals below are
-        // being deleted, so a kept draft could never be sent and would only sit
-        // in the map for the app's lifetime. Safe from eating a send in flight —
+        // The terminals this close deletes keep everything the app holds for
+        // them — their unread bold, their composer's unsent message, its focus
+        // registrations and spawn bookkeeping — until each delete answers.
+        // Once one succeeds, `removeDeletedTerminalFromState` lets all of it
+        // go, so none of it outlives the terminal; a terminal the daemon keeps
+        // comes back as a tab with all of it (`settleTerminalClose`).
+        //
+        // Any other terminal the tab names is not deleted: the one a
+        // `.liveTranscript` tab — the composer's own home — shows, which is
+        // exactly the shape `allTerminalIDs()` does not enumerate. Its
+        // composer's unsent message, focus registrations and spawn
+        // bookkeeping go with the tab. Safe from eating a send in flight —
         // the send path clears the draft itself on success, and a tab cannot
-        // close while its own send is mid-flight without the person closing it
-        // deliberately.
-        //
-        // `terminalIDs(in:)` rather than `terminalIDsInTab`, because a
-        // `.liveTranscript` tab — the composer's own home — is exactly the
-        // shape `allTerminalIDs()` does not enumerate.
-        //
-        // The drafts of the terminals being deleted are held until the
-        // deletes answer, so one the daemon refuses gets its draft back
-        // (`settleTabClose`).
-        var draftsHeldForRefusal: [UUID: ComposerDraft] = [:]
-        for terminalID in terminalIDsInTab {
-            draftsHeldForRefusal[terminalID] = composerDrafts[.terminal(terminalID)]
-        }
-        for terminalID in terminalIDs(in: tab) {
+        // close while its own send is mid-flight without the person closing
+        // it deliberately.
+        for terminalID in terminalIDs(in: tab).subtracting(terminalIDsInTab) {
             forgetComposerState(for: terminalID)
         }
 
@@ -417,16 +436,22 @@ extension AppState {
         worktreeTabOrders[worktreeID] = arr.map(\.id)
         prunePaneHistories()
 
-        closingTerminalIDs.formUnion(terminalIDsInTab)
-        let deletes: [(terminalID: UUID, outcome: Task<TerminalDeleteOutcome, Never>)] =
-            terminalIDsInTab.map { terminalID in
-                let outcome = Task {
-                    await deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
+        if !terminalIDsInTab.isEmpty {
+            var rootTerminalID: UUID?
+            if case .terminal(let id) = tab.content { rootTerminalID = id }
+            let refusals = TabCloseRefusals()
+            // Each task starts only after this method returns, so every
+            // terminal of the tab is held before any of them settles.
+            for terminalID in terminalIDsInTab {
+                closingTerminals[terminalID] = ClosingTerminal(
+                    tabLabel: terminalID == rootTerminalID ? tab.label : nil)
+                Task {
+                    let outcome = await deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
+                    settleTerminalClose(
+                        terminalID: terminalID, worktreeID: worktreeID,
+                        outcome: outcome, refusals: refusals)
                 }
-                return (terminalID: terminalID, outcome: outcome)
             }
-        Task {
-            await settleTabClose(worktreeID: worktreeID, deletes: deletes, drafts: draftsHeldForRefusal)
         }
 
         if closingActiveTab {
@@ -450,43 +475,96 @@ extension AppState {
         }
     }
 
-    /// Once a tab close's deletes have all answered, its terminals stop
-    /// being hidden from `reconcileTabs`. Each one the daemon refused to
-    /// delete — it answered with an error, so it kept the row — gets its
-    /// composer draft back and comes back as a tab of its own at the end of
-    /// the strip, and the close shows one alert carrying the daemon's
-    /// message. The order the close wrote lacks that tab, which leaves it at
-    /// the end on the next load, and the next close or reorder writes it in.
+    /// Settles one terminal of a tab close once its delete has answered,
+    /// whatever the close's other terminals are still waiting on.
     ///
-    /// A delete that failed any other way — a disconnect, a receive timeout,
-    /// a response cut off — says nothing certain about the terminal, so it
-    /// shows nothing, and the terminal, if the daemon kept it, comes back at
-    /// the next reconcile.
-    func settleTabClose(
-        worktreeID: UUID,
-        deletes: [(terminalID: UUID, outcome: Task<TerminalDeleteOutcome, Never>)],
-        drafts: [UUID: ComposerDraft]
-    ) async {
-        var refusals: [String] = []
-        for delete in deletes {
-            guard case .refused(let message) = await delete.outcome.value else { continue }
-            refusals.append(message)
-            if let draft = drafts[delete.terminalID],
-               composerDrafts[.terminal(delete.terminalID)]?.hasContent != true {
-                composerDrafts[.terminal(delete.terminalID)] = draft
-                if draft.hasContent { pushComposerDrafts() }
+    /// - **Deleted** – `removeDeletedTerminalFromState` has already let go of
+    ///   it and everything the app held for it.
+    /// - **Refused** – the daemon kept it (`deleteTerminal`). It comes back
+    ///   as a tab of its own at the end of the strip, with all the close held
+    ///   for it, and only it: a terminal of the same close that is still
+    ///   closing, or whose delete got no answer, stays hidden. The order the
+    ///   close wrote lacks that tab, which leaves it at the end on the next
+    ///   load, and the next close or reorder writes it in. The close's
+    ///   refusals share one alert (`showTabCloseRefusal`).
+    /// - **Failed** – no answer from the daemon, which says nothing certain
+    ///   about the terminal. It shows nothing, and stays hidden until the
+    ///   next terminal list adopted for its worktree decides
+    ///   (`ClosingTerminal.awaitingList`).
+    ///
+    /// A refused or failed terminal that has left the app's state meanwhile —
+    /// its worktree was archived while the delete was in flight — has no tab
+    /// to come back as and shows no alert. The removal already let go of
+    /// what the close held for it: every path that takes a terminal out of
+    /// `terminals` does (`recordTerminalRemoval`, `letGoOfDroppedTerminal`),
+    /// and this settle lets go again in case one ever does not.
+    func settleTerminalClose(
+        terminalID: UUID, worktreeID: UUID,
+        outcome: TerminalDeleteOutcome, refusals: TabCloseRefusals
+    ) {
+        if case .deleted = outcome { return }
+        guard let worktreeTerminals = terminals[worktreeID],
+              worktreeTerminals.contains(where: { $0.id == terminalID }) else {
+            letGoOfDroppedTerminal(terminalID)
+            return
+        }
+        if case .refused(let message) = outcome {
+            bringBackClosedTerminals([terminalID], worktreeID: worktreeID, terminals: worktreeTerminals)
+            showTabCloseRefusal(message, refusals: refusals)
+        } else {
+            closingTerminals[terminalID]?.awaitingList = true
+        }
+    }
+
+    /// Reconciles a worktree's tabs once the closed terminals named here,
+    /// which the daemon kept, stop being held: `reconcileTabs` gives each a
+    /// tab of its own at the end of the strip, and each that the closed tab
+    /// was rooted at takes that tab's label. With no terminals named it is a
+    /// plain reconcile.
+    func bringBackClosedTerminals(
+        _ terminalIDs: [UUID], worktreeID: UUID, terminals worktreeTerminals: [TBDShared.Terminal]
+    ) {
+        var labels: [UUID: String] = [:]
+        for terminalID in terminalIDs {
+            if let label = closingTerminals[terminalID]?.tabLabel {
+                labels[terminalID] = label
             }
+            finishClosingTerminal(terminalID)
         }
-        closingTerminalIDs.subtract(deletes.map { $0.terminalID })
-        guard let message = refusals.first else { return }
-        if let worktreeTerminals = terminals[worktreeID] {
-            reconcileTabs(worktreeID: worktreeID, terminals: worktreeTerminals)
+        let tabIDsBefore = Set((tabs[worktreeID] ?? []).map(\.id))
+        reconcileTabs(worktreeID: worktreeID, terminals: worktreeTerminals)
+        guard !labels.isEmpty, var arr = tabs[worktreeID] else { return }
+        var relabelled = false
+        for index in arr.indices where !tabIDsBefore.contains(arr[index].id) {
+            guard case .terminal(let terminalID) = arr[index].content,
+                  let label = labels[terminalID], arr[index].label != label else { continue }
+            arr[index].label = label
+            relabelled = true
         }
-        showAlert(
-            refusals.count == 1
-                ? "Couldn't close terminal: \(message)"
-                : "Couldn't close \(refusals.count) terminals: \(message)",
-            isError: true)
+        if relabelled {
+            tabs[worktreeID] = arr
+        }
+    }
+
+    /// Ends the close's hold on one terminal (`closingTerminals`).
+    func finishClosingTerminal(_ terminalID: UUID) {
+        closingTerminals.removeValue(forKey: terminalID)
+    }
+
+    /// Shows a refusal in its close's one alert. A refusal that lands while
+    /// that alert is still up joins it, and the alert lists every message;
+    /// one that lands after it was dismissed starts a new one.
+    func showTabCloseRefusal(_ message: String, refusals: TabCloseRefusals) {
+        if alertMessage != refusals.shownAlert {
+            refusals.messages.removeAll()
+        }
+        refusals.messages.append(message)
+        let text = refusals.messages.count == 1
+            ? "Couldn't close terminal: \(message)"
+            : "Couldn't close \(refusals.messages.count) terminals:\n\n"
+                + refusals.messages.joined(separator: "\n\n")
+        refusals.shownAlert = text
+        showAlert(text, isError: true)
     }
 
     /// `closeTab(worktreeID:index:)` for the tab with this ID.

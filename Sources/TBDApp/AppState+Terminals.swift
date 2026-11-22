@@ -408,10 +408,38 @@ extension AppState {
             if terminalEngineOverrides[terminal.id] != nil {
                 terminalEngineOverrides.removeValue(forKey: terminal.id)
             }
+            // A terminal a tab close holds after its delete got no answer has
+            // no removal broadcast coming, so this list is the word that the
+            // daemon deleted it, and what the close kept for it goes. Any
+            // other terminal's composer state stays: a list answered before a
+            // terminal was created can arrive after it, so absence from one
+            // list does not prove the terminal ended, and forgetting would
+            // fail the session-start waiters of a terminal just created.
+            if closingTerminals[terminal.id] != nil {
+                letGoOfDroppedTerminal(terminal.id)
+            }
         }
-        guard visible != existing else { return }
-        terminals[worktreeID] = visible
-        reconcileTabs(worktreeID: worktreeID, terminals: visible)
+        // A closed tab's terminal whose delete got no answer waits on a list
+        // (`ClosingTerminal.awaitingList`), and this is one: a terminal it
+        // holds was kept by the daemon and comes back as a tab, even when the
+        // list is otherwise unchanged; one it lacks went with the loop above.
+        let listChanged = visible != existing
+        let returning = visible.map(\.id).filter { closingTerminals[$0]?.awaitingList == true }
+        guard listChanged || !returning.isEmpty else { return }
+        if listChanged {
+            terminals[worktreeID] = visible
+        }
+        bringBackClosedTerminals(returning, worktreeID: worktreeID, terminals: visible)
+    }
+
+    /// Lets go of what the app holds for a terminal a tab close held when it
+    /// left the app's state without passing through
+    /// `removeDeletedTerminalFromState`: the close's hold, its composer's
+    /// draft and bookkeeping, and its unread bold.
+    func letGoOfDroppedTerminal(_ terminalID: UUID) {
+        finishClosingTerminal(terminalID)
+        forgetComposerState(for: terminalID)
+        if unreadTerminals.contains(terminalID) { unreadTerminals.remove(terminalID) }
     }
 
     /// Merge a terminal returned by an explicit creation action and select
@@ -572,8 +600,15 @@ extension AppState {
 
     /// Preserve an active recreation claim across removal, so the recreation's
     /// late response cannot bring the row back. Shared by terminal and
-    /// worktree removal.
+    /// worktree removal. A tab close that still holds the terminal lets it go
+    /// (`finishClosingTerminal`), with the composer state it kept for a tab
+    /// that can no longer come back, and the unread bold goes too.
     func recordTerminalRemoval(terminalID: UUID, date: Date = Date()) {
+        if closingTerminals[terminalID] != nil {
+            forgetComposerState(for: terminalID)
+            finishClosingTerminal(terminalID)
+        }
+        if unreadTerminals.contains(terminalID) { unreadTerminals.remove(terminalID) }
         terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
         terminalReplacementObservedGeneration.removeValue(forKey: terminalID)
         lastForwardedProgramStatusReports.removeValue(forKey: terminalID)
