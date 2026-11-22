@@ -21,14 +21,21 @@ claude -p --model claude-fable-5-2 --output-format json "Reply with only the wor
 ```
 
 It prints one JSON result object. The classifier
-(`FableProbeClassifier.classify(resultJSON:now:)`, pure, in `TBDShared`) reads:
+(`FableProbeClassifier.classify(resultJSON:now:)`, pure, in `TBDShared`) maps
+it to a state:
 
-| Reply | State |
-| --- | --- |
-| `is_error: false`, a non-empty string `result`, no `api_error` | `available` |
-| `api_error: "model_requires_usage_credits"` (HTTP 429, nothing billed), or no `api_error` and a `result` saying "out of usage credits" | `out` |
-| `api_error: "usage_limit_reached"` (the 5-hour or weekly window), network, auth, anything else | `unknown` |
-| empty output, malformed or truncated JSON, a non-object, a missing or non-boolean `is_error`, a mistyped `api_error`, a missing result | `unknown` |
+- **`available`** – `is_error` is `false`, `result` is a non-empty string, and
+  there is no `api_error`.
+- **`out`** – `is_error` is `true`, and either `api_error` is
+  `"model_requires_usage_credits"` (HTTP 429, nothing billed), or there is no
+  `api_error` and `result` says "out of usage credits".
+- **`unknown`** – everything else. That covers two kinds of reply:
+  - An error that is not about credits: `api_error: "usage_limit_reached"`
+    (the 5-hour or weekly window), a network or auth failure, or any other
+    code.
+  - A reply that cannot be read: empty output, malformed or truncated JSON, a
+    value that is not an object, a missing or non-boolean `is_error`, an
+    `api_error` that is not a string, or a missing result.
 
 A second signal needs no probe: Claude Code's StopFailure hook. When a Fable
 turn fails because the account has no credits, the error message
