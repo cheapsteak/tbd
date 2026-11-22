@@ -27,12 +27,14 @@ enum FableProbeRunner {
     }
 
     /// The probe for the daemon's store: loads the profile's environment (not
-    /// counted as a use of the profile), runs `claude`, classifies.
+    /// counted as a use of the profile), runs `claude`, classifies. `clock`
+    /// times the probe's timeout.
     static func live(
         profiles: ModelProfileStore,
         repos: RepoStore,
         config: ConfigStore,
-        configDirManager: ClaudeProfileConfigDirManager
+        configDirManager: ClaudeProfileConfigDirManager,
+        clock: any Clock<Duration> = ContinuousClock()
     ) -> FableAvailabilityStore.Probe {
         let resolver = ModelProfileResolver(profiles: profiles, repos: repos, config: config)
         return { profileID in
@@ -64,7 +66,7 @@ enum FableProbeRunner {
             let env = ProfileExecEnvironment.compose(
                 inherited: ProcessInfo.processInfo.environment, profile: exec.environment)
             let output = await run(executable: executable, arguments: arguments(),
-                                   environment: env, timeout: timeout)
+                                   environment: env, timeout: timeout, clock: clock)
             let reading: FableAvailability
             switch output {
             case .timedOut: reading = unknown("probe_timeout")
@@ -84,10 +86,11 @@ enum FableProbeRunner {
 
     /// Run a process to completion or until `timeout`, capturing stdout (stderr
     /// is discarded). On timeout the child gets SIGTERM, then SIGKILL two
-    /// seconds later.
+    /// seconds later, both timed on `clock`.
     static func run(
         executable: String, arguments: [String], environment: [String: String],
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        clock: any Clock<Duration> = ContinuousClock()
     ) async -> RunOutput {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -117,11 +120,11 @@ enum FableProbeRunner {
         }
         let timedOut = TimedOutFlag()
         let killer = Task {
-            try? await Task.sleep(for: .seconds(timeout))
+            try? await clock.sleep(for: .seconds(timeout))
             guard !Task.isCancelled, process.isRunning else { return }
             timedOut.set()
             process.terminate()
-            try? await Task.sleep(for: .seconds(2))
+            try? await clock.sleep(for: .seconds(2))
             if process.isRunning { kill(process.processIdentifier, SIGKILL) }
         }
         for await _ in exited { break }

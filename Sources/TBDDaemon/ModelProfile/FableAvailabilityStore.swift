@@ -26,10 +26,17 @@ public actor FableAvailabilityStore {
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let probe: Probe
     private let now: @Sendable () -> Date
+    /// Times a caller's `deadline`; only the wait is timed, never a probe.
+    private let clock: any Clock<Duration>
 
-    public init(probe: @escaping Probe, now: @Sendable @escaping () -> Date = { Date() }) {
+    public init(
+        probe: @escaping Probe,
+        now: @Sendable @escaping () -> Date = { Date() },
+        clock: any Clock<Duration> = ContinuousClock()
+    ) {
         self.probe = probe
         self.now = now
+        self.clock = clock
     }
 
     /// The latest reading for a profile at any age, or nil if never checked.
@@ -67,7 +74,7 @@ public actor FableAvailabilityStore {
 
         if !pending.isEmpty {
             if let deadline {
-                await Self.waitForAll(pending, orUntil: deadline)
+                await Self.waitForAll(pending, orUntil: deadline, clock: clock)
             } else {
                 for task in pending { _ = await task.value }
             }
@@ -134,7 +141,8 @@ public actor FableAvailabilityStore {
     }
 
     private static func waitForAll(
-        _ tasks: [Task<FableAvailability, Never>], orUntil deadline: TimeInterval
+        _ tasks: [Task<FableAvailability, Never>], orUntil deadline: TimeInterval,
+        clock: any Clock<Duration>
     ) async {
         let once = Once()
         let waiter = Task {
@@ -142,7 +150,7 @@ public actor FableAvailabilityStore {
             once.fire()
         }
         let timer = Task {
-            try? await Task.sleep(for: .seconds(deadline))
+            try? await clock.sleep(for: .seconds(deadline))
             once.fire()
         }
         await withCheckedContinuation { once.set($0) }
