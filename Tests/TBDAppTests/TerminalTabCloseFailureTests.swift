@@ -764,9 +764,13 @@ struct TerminalTabCloseFailureTests {
             try #require(returningLabelSave.isHolding, "the returning tab's label save is in flight")
 
             state.renameTab(tabID: build, worktreeID: worktreeID, newLabel: "web")
-            await PanelTabsFixture.drainMainActor()
+            // The rename's write waits on the save's task (`Task.value`), and a
+            // `Task.value` waiter resumes through the global executor before it
+            // hops back to the main actor, so draining the main actor can finish
+            // first. Await the rename's write itself, the last one for the tab.
+            let renameWrite = try #require(state.tabLabelWriteTails[build]?.write)
             returningLabelSave.release()
-            await PanelTabsFixture.drainMainActor()
+            await renameWrite.value
 
             let writes = [
                 TabLabelWrite(tabID: build, worktreeID: worktreeID, label: "build server"),
