@@ -1255,6 +1255,13 @@ final class AppState {
     /// latch before registering, so a already-arrived start is a same-frame
     /// `true` rather than a wait.
     @ObservationIgnored var lastStartedIncarnation: [UUID: UUID] = [:]
+    /// Every incarnation whose `SessionStart` landed while a tab close held
+    /// the terminal (`closingTerminals`), keyed by terminal. The latch above
+    /// keeps only the latest, and a close answers every send it held: a
+    /// terminal the daemon kept releases each waiter one of these matches as
+    /// it comes back (`releaseSessionStartWaitersHeldByClose`), and a deletion
+    /// drops them with the waiters (`releaseSessionStartWaiters`).
+    @ObservationIgnored var sessionStartsDuringClose: [UUID: Set<UUID>] = [:]
     /// Terminals whose account "Switch account" is changing in place, keyed by
     /// terminal id. Set by `swapTerminalProfile` before the RPC, for a row the
     /// cache holds awake and only by the first swap to claim it, and cleared
@@ -3323,8 +3330,9 @@ final class AppState {
     /// A closed tab one of whose terminals a close still holds
     /// (`closedTabsAwaitingDeletes`) keeps its slot histories too, as
     /// `panel.syncTabs` keeps listing it: its delete has not answered, and
-    /// the daemon may keep its terminal. Once the close lets go of the tab,
-    /// the next prune drops them unless an open tab shows those panes.
+    /// the daemon may keep its terminal. The close prunes once it lets go of
+    /// the tab (`finishClosingTerminal`), which drops them unless an open tab
+    /// shows those panes.
     func prunePaneHistories() {
         guard !paneHistories.isEmpty else { return }
         var liveIDs = Set<UUID>()

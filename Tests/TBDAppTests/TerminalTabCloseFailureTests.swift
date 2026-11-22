@@ -623,6 +623,65 @@ struct TerminalTabCloseFailureTests {
         }
     }
 
+    @Test("a lost answer for a row a list already dropped mid-delete is let go by the next list that lacks it")
+    func lostAnswerAfterAMidDeleteListIsLetGo() async {
+        await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build], tabs: [Self.tab(claude), Self.tab(build)])
+            state.composerDraft(for: build).text = "half a sentence"
+            state.terminalEngineOverrides[build] = .ghostty
+            daemon.hold([build])
+            daemon.failures[build] = DaemonClientError.connectionFailed("connection refused")
+            daemon.rowGoneBeforeFailure = [build]
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            // A poll that lands after the daemon deleted the row, before an
+            // answer that is then lost.
+            let afterTheRowDelete = daemon.list(worktreeID: worktreeID).filter { $0.id != build }
+            state.adoptTerminalSnapshot(afterTheRowDelete, worktreeID: worktreeID)
+            daemon.release(build)
+            await PanelTabsFixture.drainMainActor()
+            #expect(state.closingTerminals[build]?.awaitingList == true)
+            #expect(!Self.terminalIDs(state, worktreeID).contains(build))
+
+            Self.poll(state, daemon, worktreeID)
+
+            #expect(state.closingTerminals.isEmpty, "a list that lacks it is the word, even an unchanged one")
+            #expect(state.closedTabsAwaitingDeletes[worktreeID] == nil)
+            #expect(state.composerDrafts[.terminal(build)] == nil)
+            #expect(state.terminalEngineOverrides[build] == nil)
+            let closed: [UUID] = [claude]
+            #expect(Self.tabIDs(state, worktreeID) == closed)
+        }
+    }
+
+    @Test("a list landing while a refused delete is in flight leaves the terminal's engine choice for its return")
+    func refusedTerminalKeepsItsEngineChoiceThroughAMidDeleteList() async {
+        await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build], tabs: [Self.tab(claude), Self.tab(build)])
+            state.terminalEngineOverrides[build] = .ghostty
+            daemon.hold([build])
+            daemon.failures[build] = DaemonClientError.rpcError(Self.refusal, code: nil)
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            let answeredMidDelete = daemon.list(worktreeID: worktreeID).filter { $0.id != build }
+            state.adoptTerminalSnapshot(answeredMidDelete, worktreeID: worktreeID)
+            #expect(state.terminalEngineOverrides[build] == .ghostty, "the delete in flight still holds the terminal")
+
+            daemon.release(build)
+            await PanelTabsFixture.drainMainActor()
+            Self.poll(state, daemon, worktreeID)
+
+            #expect(Self.tabIDs(state, worktreeID).last == build)
+            #expect(state.terminalEngineOverrides[build] == .ghostty, "the kept terminal comes back on its engine")
+        }
+    }
+
     @Test("a refused split pane takes the closed tab's label under its own tab ID, persisted")
     func refusedSplitPanePersistsItsLabel() async throws {
         try await Self.withState { state, daemon in
@@ -646,7 +705,18 @@ struct TerminalTabCloseFailureTests {
         }
     }
 
-    @Test("a session start during a close answers no send until the delete does, and the delete fails it")
+    /// What a send held on `waiter` was told. Asked only after the close has
+    /// answered: a waiter nothing resumed is still registered, which the
+    /// caller asserts against first, and the cancel turns it into `false`
+    /// rather than an await that never returns.
+    private static func answer(of waiter: Task<Bool, Never>) async -> Bool {
+        waiter.cancel()
+        return await waiter.value
+    }
+
+    @Test(
+        "a session start during a close answers no send until the delete does, and the delete fails it",
+        .fastPassBounded)
     func sessionStartDuringADeletedClose() async throws {
         try await Self.withState { state, daemon in
             let (claude, build) = (UUID(), UUID())
@@ -666,12 +736,14 @@ struct TerminalTabCloseFailureTests {
 
             daemon.release(build)
             await PanelTabsFixture.drainMainActor()
-            #expect(await waiter.value == false, "the delete ended the terminal the send was held on")
-            #expect(state.sessionStartWaiters[build] == nil)
+            #expect(state.sessionStartWaiters[build] == nil, "the delete answered the held send")
+            #expect(await Self.answer(of: waiter) == false, "the delete ended the terminal the send was held on")
         }
     }
 
-    @Test("a session start during a close the daemon refuses answers the send as the terminal comes back")
+    @Test(
+        "a session start during a close the daemon refuses answers the send as the terminal comes back",
+        .fastPassBounded)
     func sessionStartDuringARefusedClose() async throws {
         try await Self.withState { state, daemon in
             let (claude, build) = (UUID(), UUID())
@@ -695,9 +767,46 @@ struct TerminalTabCloseFailureTests {
             daemon.release(build)
             await PanelTabsFixture.drainMainActor()
             #expect(Self.tabIDs(state, worktreeID).last == build)
-            #expect(await early.value == true, "the kept terminal runs the session the send started")
-            #expect(await late.value == true)
-            #expect(state.sessionStartWaiters[build] == nil)
+            #expect(state.sessionStartWaiters[build] == nil, "the refusal answered both held sends")
+            #expect(await Self.answer(of: early) == true, "the kept terminal runs the session the send started")
+            #expect(await Self.answer(of: late) == true)
+        }
+    }
+
+    @Test(
+        "every session that starts during a refused close answers its own send, not only the latest",
+        .fastPassBounded)
+    func everySessionStartDuringARefusedClose() async throws {
+        try await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build], tabs: [Self.tab(claude), Self.tab(build)])
+            let (first, second, neverStarted) = (UUID(), UUID(), UUID())
+            let firstSend = try await Self.registerWaiter(
+                state, terminalID: build, incarnationID: first, count: 1)
+            let secondSend = try await Self.registerWaiter(
+                state, terminalID: build, incarnationID: second, count: 2)
+            let unstartedSend = try await Self.registerWaiter(
+                state, terminalID: build, incarnationID: neverStarted, count: 3)
+            daemon.hold([build])
+            daemon.failures[build] = DaemonClientError.rpcError(Self.refusal, code: nil)
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            state.noteSessionStart(terminalID: build, incarnationID: first)
+            state.noteSessionStart(terminalID: build, incarnationID: second)
+            #expect(state.lastStartedIncarnation[build] == second, "the latch keeps only the latest")
+
+            daemon.release(build)
+            await PanelTabsFixture.drainMainActor()
+            #expect(Self.tabIDs(state, worktreeID).last == build)
+            let stillWaiting: [UUID] = [neverStarted]
+            #expect(state.sessionStartWaiters[build]?.map { $0.incarnationID } == stillWaiting,
+                    "both started sessions answered their sends; the one that never started still waits")
+            #expect(state.sessionStartsDuringClose[build] == nil)
+            #expect(await Self.answer(of: firstSend) == true, "the earlier session started too")
+            #expect(await Self.answer(of: secondSend) == true)
+            #expect(await Self.answer(of: unstartedSend) == false)
         }
     }
 
@@ -781,8 +890,8 @@ struct TerminalTabCloseFailureTests {
 
             daemon.release(build)
             await PanelTabsFixture.drainMainActor()
-            state.prunePaneHistories()
-            #expect(state.paneHistories[slot] == nil, "once the delete succeeds, no tab holds the slot")
+            #expect(state.paneHistories[slot] == nil,
+                    "once the delete succeeds the close lets go of the tab, and no open tab holds the slot")
         }
     }
 

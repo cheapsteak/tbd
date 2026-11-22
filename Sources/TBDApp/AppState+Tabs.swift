@@ -553,7 +553,7 @@ extension AppState {
     /// was rooted at takes that tab's label, persisted under the new tab's
     /// ID — a split's tab had an ID of its own, so the label stored under it
     /// would not reach the new tab after a restart. A composer send each
-    /// one's close held is answered now (`releaseLatchedSessionStartWaiters`).
+    /// one's close held is answered now (`releaseSessionStartWaitersHeldByClose`).
     /// With no terminals named it is a plain reconcile.
     func bringBackClosedTerminals(
         _ terminalIDs: [UUID], worktreeID: UUID, terminals worktreeTerminals: [TBDShared.Terminal]
@@ -564,7 +564,7 @@ extension AppState {
                 labels[terminalID] = label
             }
             finishClosingTerminal(terminalID)
-            releaseLatchedSessionStartWaiters(terminalID: terminalID)
+            releaseSessionStartWaitersHeldByClose(terminalID: terminalID)
         }
         let tabIDsBefore = Set((tabs[worktreeID] ?? []).map(\.id))
         reconcileTabs(worktreeID: worktreeID, terminals: worktreeTerminals)
@@ -615,7 +615,8 @@ extension AppState {
     /// Ends the close's hold on one terminal (`closingTerminals`). Once no
     /// terminal of the closed tab is held, `panel.syncTabs` stops listing
     /// the tab, so the worktree's next sync omits it — or lists it in its
-    /// place, if it came back.
+    /// place, if it came back — and the slot histories it kept go unless an
+    /// open tab shows those panes (`prunePaneHistories`).
     func finishClosingTerminal(_ terminalID: UUID) {
         guard let closing = closingTerminals.removeValue(forKey: terminalID),
               !closingTerminals.values.contains(where: { $0.tabID == closing.tabID }),
@@ -623,6 +624,7 @@ extension AppState {
         closedTabs.removeAll { $0.tabID == closing.tabID }
         closedTabsAwaitingDeletes[closing.worktreeID] = closedTabs.isEmpty ? nil : closedTabs
         notePanelHeldTabsChanged(worktreeID: closing.worktreeID)
+        prunePaneHistories()
     }
 
     /// Shows a refusal in its close's one alert. A refusal that lands while
