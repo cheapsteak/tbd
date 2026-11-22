@@ -200,10 +200,9 @@ struct FilePreviewViewTests {
             await host.pump()
             return await MainActor.run { host.descendants(TableHostView.self).count == 1 }
         }
-        let found = host.descendants(TableHostView.self).count
-        try #require(
-            mounted == .satisfied,
-            Comment(rawValue: "expected one table (\(mounted)); found \(found)"))
+        try requireSatisfied(mounted, waitingFor: "one table in the pane") {
+            "\(host.descendants(TableHostView.self).count) table view(s)"
+        }
         let tableHost = try #require(host.descendants(TableHostView.self).first)
         let titles = tableHost.tableView.tableColumns.map(\.title)
         #expect(titles == ["name", "age"])
@@ -302,10 +301,9 @@ extension AccessibilityBridgeSerialized {
                     await host.pump()
                     return await accessibilityTree(of: host, contains: "export const")
                 }
-                let tree = host.accessibilityTreeDescription()
-                try #require(
-                    rendered == .satisfied,
-                    Comment(rawValue: "the file's text never rendered (\(rendered)); accessibility tree:\n\(tree)"))
+                try requireSatisfied(rendered, waitingFor: "the file's text to render") {
+                    "accessibility tree:\n\(host.accessibilityTreeDescription())"
+                }
 
                 let avPlayers = host.descendants(AVPlayerView.self).count
                 let mediaHosts = host.descendants(MediaPlayerHostView.self).count
@@ -337,14 +335,33 @@ extension AccessibilityBridgeSerialized {
                     await host.pump()
                     return await accessibilityTree(of: host, contains: "name,age")
                 }
-                let tree = host.accessibilityTreeDescription()
-                try #require(
-                    rendered == .satisfied,
-                    Comment(rawValue: "the file's text never rendered (\(rendered)); accessibility tree:\n\(tree)"))
+                try requireSatisfied(rendered, waitingFor: "the file's text to render") {
+                    "accessibility tree:\n\(host.accessibilityTreeDescription())"
+                }
 
                 #expect(host.descendants(TableHostView.self).isEmpty)
             }
         }
+    }
+}
+
+/// Ends a bounded wait on `outcome`. A satisfied wait returns. A cancelled
+/// one throws `CancellationError`: the harness ended the test, and no timeout
+/// is invented for it. A timed-out one throws `BoundedWaitTimeout` carrying
+/// what `observed` reads then, since only a thrown error puts the observed
+/// state on the failure line a CI summary keeps (Tests/CLAUDE.md, "Assertion
+/// hygiene", rule 4).
+@MainActor
+private func requireSatisfied(
+    _ outcome: PollOutcome, waitingFor what: String, observed: () -> String
+) throws {
+    switch outcome {
+    case .satisfied:
+        return
+    case .cancelled:
+        throw CancellationError()
+    case .timedOut:
+        throw BoundedWaitTimeout(what: what, observed: observed(), deadline: TestDeadlines.saturatedPass)
     }
 }
 
