@@ -301,13 +301,14 @@ extension RPCRouter {
     /// broadcasts the change, so a running phone sessions list gathers again.
     /// The one core behind the socket RPC (`repo.setRegistryRemoteHidden`) and
     /// the phone's `repo.setRemoteFilter` (`phoneSetRegistryRemoteHidden`). An
-    /// unknown repo is an error and writes nothing.
+    /// unknown repo is an error, writes nothing and broadcasts nothing. One
+    /// write both finds the repo and sets it, so a repo removed at any moment
+    /// before that write is unknown too, never a success with a delta for a
+    /// repo that is gone.
     func setRegistryRemoteHidden(repoID: UUID, hidden: Bool) async throws -> RPCResponse {
-        guard try await db.repos.get(id: repoID) != nil else {
+        guard try await db.repos.setRegistryRemoteHidden(id: repoID, hidden: hidden) else {
             return RPCResponse(error: "Repository not found: \(repoID)")
         }
-
-        try await db.repos.setRegistryRemoteHidden(id: repoID, hidden: hidden)
 
         subscriptions.broadcast(delta: .repoRegistryRemoteHiddenChanged(RepoRegistryRemoteHiddenDelta(
             repoID: repoID, hidden: hidden
