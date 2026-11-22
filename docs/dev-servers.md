@@ -170,7 +170,7 @@ Stopping an exited server closes its tab and clears its Exited state without sig
 
 ### On archive
 
-Archive stops only the servers TBD started in its own tabs. A server tab still running its command, or reading Unknown, has its process group signalled under the rules above: SIGTERM, then SIGKILL after 5 seconds. This happens before the worktree's tabs are torn down and before the archive hook runs, forced archives included. A holder tab whose job has no recorded start time is not signalled; the tab teardown ends it.
+Archive stops only the servers TBD started in its own tabs. A server tab still running its command has its process group signalled under the rules above: SIGTERM, then SIGKILL after 5 seconds. This happens before the worktree's tabs are torn down and before the archive hook runs, forced archives included. A tab whose job has no recorded start time, or whose state TBD could not read, is not signalled; the tab teardown ends it. A tab still on the tmux transport is the exception: the teardown deletes it and logs `tmux -L <server> kill-server`, and its command keeps running in tmux until someone runs that.
 
 Archive never does two things:
 
@@ -202,7 +202,7 @@ docker compose -p "acme-$TBD_WORKTREE_NAME" down --remove-orphans || true
 A crashed server's final screen is usually the only explanation of the crash, so it stays readable.
 
 - **holder transport** – every server tab opens on a pty holder. When the command exits, the daemon saves the final screen and scrollback into Session History, Closed Terminals, with the exit code. Both survive a daemon restart. "Show last output" opens that entry.
-- **tmux transport** – a server tab that still runs on tmux, from before TBD opened every session on the holder, keeps its final screen and exit code in its tmux window, because `remain-on-exit` was set when the window was created. TBD cannot show that window: "Show last output" focuses the tab, which shows the notice for a session still running in tmux ([design](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update)). TBD reads no tmux tab, so a start is refused until its tmux server is ended and the tab closed, as [How TBD runs a server](#how-tbd-runs-a-server) describes; the next start opens it in a fresh tab, on a holder.
+- **tmux transport** – a server tab that still runs on tmux, from before TBD opened every session on the holder, keeps its final screen and exit code in its tmux window, because `remain-on-exit` was set when the window was created. TBD reads no tmux tab, so the server reads Unknown rather than Exited and the menu offers no "Show last output"; the tab itself shows the notice for a session still running in tmux ([design](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update)). A start is refused until its tmux server is ended and the tab closed, as [How TBD runs a server](#how-tbd-runs-a-server) describes; the next start opens it in a fresh tab, on a holder.
 
 Start opens a fresh tab, and Start or Stop detaches the saved entry from the server; it stays in Closed Terminals as an ordinary entry. An exit caused by Stop is never recorded as the server's last output.
 
