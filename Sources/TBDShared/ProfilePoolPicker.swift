@@ -30,6 +30,9 @@ public struct ProfilePoolCandidate: Sendable, Equatable {
     public var sortOrder: Int
     /// Whether this profile is the global configured default.
     public var isConfiguredDefault: Bool
+    /// The profile's latest Fable reading, if it has ever been checked. Only
+    /// consulted when the pick asks for a Fable model (`requiresFable`).
+    public var fable: FableAvailability?
 
     public init(
         profileID: UUID,
@@ -40,7 +43,8 @@ public struct ProfilePoolCandidate: Sendable, Equatable {
         snapshot: ProfileUsageSnapshot? = nil,
         liveSessions: Int,
         sortOrder: Int,
-        isConfiguredDefault: Bool
+        isConfiguredDefault: Bool,
+        fable: FableAvailability? = nil
     ) {
         self.profileID = profileID
         self.kind = kind
@@ -51,6 +55,7 @@ public struct ProfilePoolCandidate: Sendable, Equatable {
         self.liveSessions = liveSessions
         self.sortOrder = sortOrder
         self.isConfiguredDefault = isConfiguredDefault
+        self.fable = fable
     }
 
     /// Whether a profile holds a credential it could start a session with.
@@ -119,6 +124,15 @@ public enum ProfilePoolVerdict: Sendable, Equatable {
     /// by default), so headroom is at or below `ProfilePoolPolicy.headroomFloor`.
     /// The profile is treated as full.
     case exhausted
+
+    /// The pick asked for a Fable model and this profile's Fable reading is
+    /// fresh and says it is out of usage credits. Never chosen, and never a
+    /// fallback: the fallback tiers only name profiles turned away for their
+    /// usage reading, and this verdict is assigned before that is looked at.
+    /// A profile never checked, or whose reading is past its TTL, is not
+    /// refused here: the resolver probes those first, and one that stays
+    /// unverified is eligible.
+    case fableOut
 }
 
 /// The thresholds that decide whether a usage reading is safe to route a new
@@ -259,6 +273,8 @@ public enum ProfilePoolPicker {
     ///     this set are marked `.sameAccount` even if otherwise eligible.
     ///   - now: The current time for staleness assessment.
     ///   - policy: The usage ceiling and reading-age thresholds.
+    ///   - requiresFable: The spawn asks for a Fable model: profiles whose
+    ///     fresh Fable reading is `out` get `.fableOut` and are never chosen.
     ///
     /// - Returns: A decision with the chosen profile id (nil if none eligible),
     ///   verdicts for every candidate, and the fallback when nothing is eligible.
@@ -266,10 +282,12 @@ public enum ProfilePoolPicker {
         candidates: [ProfilePoolCandidate],
         excludingAccountKeys: Set<String> = [],
         now: Date,
-        policy: ProfilePoolPolicy = .standard
+        policy: ProfilePoolPolicy = .standard,
+        requiresFable: Bool = false
     ) -> ProfilePoolDecision {
         let verdicts = assessCandidates(
-            candidates, excludingAccountKeys: excludingAccountKeys, now: now, policy: policy)
+            candidates, excludingAccountKeys: excludingAccountKeys, now: now, policy: policy,
+            requiresFable: requiresFable)
         let chosen = selectBest(from: candidates, with: verdicts)
         let fallback = chosen == nil ? selectFallback(from: candidates, with: verdicts) : nil
         return ProfilePoolDecision(chosen: chosen, verdicts: verdicts, fallback: fallback)
@@ -293,10 +311,12 @@ public enum ProfilePoolPicker {
         candidates: [ProfilePoolCandidate],
         excludingAccountKeys: Set<String> = [],
         now: Date,
-        policy: ProfilePoolPolicy = .standard
+        policy: ProfilePoolPolicy = .standard,
+        requiresFable: Bool = false
     ) -> [UUID] {
         let verdicts = assessCandidates(
-            candidates, excludingAccountKeys: excludingAccountKeys, now: now, policy: policy)
+            candidates, excludingAccountKeys: excludingAccountKeys, now: now, policy: policy,
+            requiresFable: requiresFable)
         let eligible = candidates.compactMap { candidate -> (candidate: ProfilePoolCandidate, verdict: ProfilePoolVerdict)? in
             guard case .eligible = verdicts[candidate.profileID] else { return nil }
             return (candidate, verdicts[candidate.profileID]!)
@@ -369,7 +389,8 @@ public enum ProfilePoolPicker {
         _ candidates: [ProfilePoolCandidate],
         excludingAccountKeys: Set<String>,
         now: Date,
-        policy: ProfilePoolPolicy
+        policy: ProfilePoolPolicy,
+        requiresFable: Bool
     ) -> [UUID: ProfilePoolVerdict] {
         // Pre-compute live session counts per account key (sum across all candidates,
         // eligible or not, so an opted-out twin still occupies its account's windows).
@@ -403,6 +424,15 @@ public enum ProfilePoolPicker {
             // Rule 4: accountKey must not be in the excluded set.
             if excludingAccountKeys.contains(candidate.accountKey) {
                 verdicts[candidate.profileID] = .sameAccount
+                continue
+            }
+
+            // Rule 4b: a Fable request never lands on a profile known to be out
+            // of Fable credits. Before the reading rules, so an out profile can
+            // not reach the fallback tiers through a stale or over-ceiling
+            // reading.
+            if requiresFable, candidate.fable?.isOut(now: now) == true {
+                verdicts[candidate.profileID] = .fableOut
                 continue
             }
 
