@@ -156,7 +156,7 @@ private struct PinnedTerminalCell: View {
                 LeftoverTmuxSessionNotice(terminalID: terminal.id, server: worktree.tmuxServer)
             } else if let worktree, TerminalPanePresentation.dockShowsParkedSnapshot(for: terminal) {
                 // Parked on tmux: the frozen snapshot, as the main pane draws
-                // it, with a notice that says how to move the row from here.
+                // it, with a notice that says how to resume the row from here.
                 // A suspended panel never attaches, so it cannot contend for a
                 // session.
                 TerminalPanelView(

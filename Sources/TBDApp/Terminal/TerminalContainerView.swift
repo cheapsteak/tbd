@@ -523,33 +523,21 @@ enum HibernatedBannerModel {
         return nil
     }
 
-    /// What a person must do first with a row parked on the tmux transport,
-    /// without the gesture that then resumes it. The parked pane's notice
-    /// (`parkedOnTmuxMessage`) and the transcript composer's note
-    /// (`TableTranscriptPaneView.parkedOnTmuxComposerNote`) each finish it
-    /// with their own gesture, so the two say the rest in the same words.
-    static let parkedOnTmuxInstruction =
-        "\(parkedOnTmuxLead) — choose "
-        + "\(TransportMigrationVocabulary.menuTitle) in the tab's menu (or run `tbd terminal migrate`)"
-
     /// What every notice for a row parked on the tmux transport opens with.
-    static let parkedOnTmuxLead = "Parked on tmux, which TBD no longer resumes sessions on"
+    static let parkedOnTmuxLead = "Parked on tmux"
 
     /// The pinned dock's notice for a row parked on the tmux transport. The
-    /// dock has no tab menu and no click-to-resume, so this names the gesture
-    /// it does have: its header opens the tab in its worktree, where the tab's
-    /// menu moves it.
+    /// dock has no click-to-resume, so this names the gesture it does have:
+    /// its header opens the tab in its worktree, where a click resumes it.
     static let parkedOnTmuxDockMessage =
-        "\(parkedOnTmuxLead) — open this tab in its worktree to move it to the pty holder "
-        + "(or run `tbd terminal migrate`)"
+        "\(parkedOnTmuxLead) — open this tab in its worktree and click it to resume it on the pty holder"
 
     /// The notice for a row parked on the tmux transport. The daemon starts
-    /// sessions only on the pty holder, so such a row cannot be woken where it
-    /// is — a click would only be refused — and the notice says how to move
-    /// it first. Every park reason gets this one: the reason no longer matters
-    /// to what the person can do.
+    /// sessions only on the pty holder, so a click's wake moves the row there
+    /// first and resumes it, and the notice says so. Every park reason gets
+    /// this one: the move is what the person will see, whatever parked it.
     static let parkedOnTmuxMessage =
-        parkedOnTmuxInstruction + ", then click anywhere in the pane to resume"
+        "\(parkedOnTmuxLead) — click anywhere in the pane to resume it on the pty holder"
 
     /// The parked pane's notice for a row: the park reason's phrasing, plus
     /// why the last automatic wake was held when the row carries a hold
@@ -557,15 +545,15 @@ enum HibernatedBannerModel {
     /// gate, cleared by the next successful wake). Pure, with the clock's
     /// zone and locale as inputs so the time is assertable.
     ///
-    /// A row parked on tmux gets `parkedOnTmuxMessage` instead, whatever its
-    /// reason or hold: until it is moved, no wake can start it.
+    /// A row parked on tmux takes `parkedOnTmuxMessage` as its phrasing,
+    /// whatever its reason, and a hold is appended to it as to any other.
     static func message(
         for terminal: Terminal,
         timeZone: TimeZone = .current,
         locale: Locale = .current
     ) -> String {
-        guard terminal.transport == .holder else { return parkedOnTmuxMessage }
-        let base = message(for: terminal.hibernateReason)
+        let base = terminal.transport == .holder
+            ? message(for: terminal.hibernateReason) : parkedOnTmuxMessage
         guard let reason = terminal.startHeldReason, !reason.isEmpty else { return base }
         guard let heldAt = terminal.startHeldAt else {
             return "\(base) · Automatic wake held: \(reason)"

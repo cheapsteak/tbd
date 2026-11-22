@@ -136,8 +136,8 @@ enum TerminalPanePresentation {
     /// it finds its server gone (at startup, on `tbd cleanup`, and on Check
     /// Again), so a row still live on tmux is one whose server outlived the
     /// update and may still be running. A parked tmux row keeps the parked
-    /// pane, whose notice says how to move it to the pty holder; a holder row,
-    /// parked or live, is a terminal as ever.
+    /// pane, whose click moves it to the pty holder and resumes it; a holder
+    /// row, parked or live, is a terminal as ever.
     static func showsLeftoverTmuxNotice(for terminal: Terminal) -> Bool {
         terminal.transport == .tmux && !terminal.isParked
     }
@@ -149,15 +149,14 @@ enum TerminalPanePresentation {
     /// `attachIdentity`): its view keeps the last frame it drew. A row on tmux
     /// has no such frame, because no panel attaches to tmux, so the dock draws
     /// what the main pane does — the snapshot, with a notice that says how to
-    /// move the row to the pty holder (`dockParkedNoticeMessage`).
+    /// resume the row on the pty holder (`dockParkedNoticeMessage`).
     static func dockShowsParkedSnapshot(for terminal: Terminal) -> Bool {
         terminal.transport == .tmux && terminal.isParked
     }
 
     /// The notice the pinned dock composes into a parked tmux row's snapshot,
     /// or nil for a row the dock draws no snapshot for. Not the main pane's
-    /// notice, which points at the tab's menu and a click in the pane; the
-    /// dock has neither.
+    /// notice, which points at a click in the pane; the dock has none.
     static func dockParkedNoticeMessage(for terminal: Terminal) -> String? {
         guard dockShowsParkedSnapshot(for: terminal) else { return nil }
         return HibernatedBannerModel.parkedOnTmuxDockMessage
