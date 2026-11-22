@@ -528,9 +528,9 @@ enum HibernatedBannerModel {
 
     /// The pinned dock's notice for a row parked on the tmux transport. The
     /// dock has no click-to-resume, so this names the gesture it does have:
-    /// its header opens the tab in its worktree, where a click resumes it.
+    /// its header opens the tab in its worktree, whose pane resumes it.
     static let parkedOnTmuxDockMessage =
-        "\(parkedOnTmuxLead) — open this tab in its worktree and click it to resume it on the pty holder"
+        "\(parkedOnTmuxLead) — open this tab in its worktree to resume it on the pty holder"
 
     /// The notice for a row parked on the tmux transport. The daemon starts
     /// sessions only on the pty holder, so a click's wake moves the row there
