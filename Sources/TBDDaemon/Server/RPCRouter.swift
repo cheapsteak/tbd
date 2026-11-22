@@ -274,8 +274,10 @@ public final class RPCRouter: Sendable {
     /// reader rather than crashing.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
 
-    /// Replaces the production operations of `terminal.migrateTransport`'s
-    /// migrator. Tests only: the production wiring needs a live pty to wake.
+    /// Replaces the production operations of the transport migrator that
+    /// `terminal.migrateTransport` and a person's wake of a row parked on tmux
+    /// use (`makeTransportMigrator`). Tests only: the production wiring needs a
+    /// live pty to wake.
     nonisolated(unsafe) var transportMigratorOperationsOverride:
         TerminalTransportMigrator.Operations?
 

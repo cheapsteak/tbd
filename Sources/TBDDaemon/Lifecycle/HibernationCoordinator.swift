@@ -108,9 +108,10 @@ public enum WakeResult: Equatable, Sendable {
     /// running in tmux because a tmux row carries it too, or a live
     /// tmux row TBD deleted carried it (`TmuxResumeGate`). Nothing was touched
     /// and an `initialPrompt` was not
-    /// delivered. `reason` says what to do: a parked tmux row's names
-    /// `tbd terminal migrate`, and the others say the session may still be
-    /// running in tmux and how to end it.
+    /// delivered. `reason` says what to do: a parked tmux row's — reached by a
+    /// rail's wake, since a person's moves the row to the pty holder first —
+    /// says that a person's wake or `tbd terminal migrate` moves it, and the
+    /// others say the session may still be running in tmux and how to end it.
     ///
     /// A refusal rather than a failed start, so no retry helps: the wake RPCs
     /// answer it with `RPCErrorCode.terminalOnTmux`, as every other request a
@@ -200,8 +201,11 @@ struct HolderSpawnOracle: Sendable {
 ///
 /// **Only holder rows park and wake.** TBD no longer drives tmux: every park
 /// refuses a live row still on the tmux transport (`liveTmuxParkRefusal`), and
-/// every wake refuses a tmux row (`tmuxWakeRefusal`) — a parked one names
-/// `tbd terminal migrate`, a live one says it is still running in tmux. A tmux
+/// every wake refuses a tmux row (`tmuxWakeRefusal`) — a live one says it is
+/// still running in tmux, and a parked one says how it moves to the pty
+/// holder. A person's wake of a parked tmux row never reaches that refusal:
+/// the router moves the row to the holder first and then wakes it here
+/// (`RPCRouter.moveParkedTmuxRowBeforeWake`). A tmux
 /// row is parked only once its tmux server is positively gone, and not here:
 /// reconcile, the app's Check Again and the transport migration park it
 /// (`WorktreeLifecycle.parkLeftoverTmuxRow`, `LeftoverTmuxServerProbe`). Wake
@@ -391,17 +395,23 @@ public actor HibernationCoordinator {
     /// do not exercise it.
     let programStatus: ProgramStatusStore?
 
-    /// What a person is told when a session parked on the tmux transport is
-    /// asked to wake. TBD opens sessions only on the pty holder, so such a row
-    /// never wakes where it is, whether or not tmux is installed. Names the
-    /// gesture that moves the session, **and the session**: this string is the
-    /// entire product of the backstop — it exists to hand a stranded person a
-    /// command they can run — so the id is interpolated rather than left as a
+    /// What a wake of a session parked on the tmux transport answers when
+    /// nothing moved the row first. TBD opens sessions only on the pty holder,
+    /// so such a row never wakes where it is, whether or not tmux is installed.
+    ///
+    /// A person's wake moves the row to the holder before it reaches the
+    /// coordinator (`RPCRouter.moveParkedTmuxRowBeforeWake`), so this is the
+    /// answer to a rail's wake — session restore, limit resume, a queued
+    /// prompt, which never move a session — and what the actuation record
+    /// says for it. Names the gestures that move the session, **and the
+    /// session**: whoever reads it in a log or a report should be able to run
+    /// the command as printed, so the id is interpolated rather than left as a
     /// placeholder to be looked up.
     static func tmuxWakeUnavailableReason(terminalID: UUID) -> String {
-        "This session was parked on the tmux transport, which TBD no longer runs sessions on. "
-        + "Run `tbd terminal migrate \(terminalID.uuidString)` (or `tbd terminal migrate --all`) "
-        + "to move it to the pty holder, then wake it again."
+        "This session is parked on the tmux transport, which TBD no longer runs sessions on. "
+        + "TBD moves it to the pty holder when a person wakes it (click it, or run "
+        + "`tbd terminal wake \(terminalID.uuidString)`) or with "
+        + "`tbd terminal migrate \(terminalID.uuidString)`."
     }
 
     private var defaultShell: String {
@@ -1050,8 +1060,10 @@ public actor HibernationCoordinator {
     /// What a wake of a row still on the tmux transport answers. Nothing is
     /// touched either way, and an `initialPrompt` is not delivered.
     ///
-    /// A parked row refuses with `tmuxWakeUnavailableReason`, which names
-    /// `tbd terminal migrate`. A live row is running in tmux as far as this
+    /// A parked row refuses with `tmuxWakeUnavailableReason`. A person's wake
+    /// moves such a row to the pty holder before it gets here
+    /// (`RPCRouter.moveParkedTmuxRowBeforeWake`), so the parked row refused
+    /// here is a rail's wake, or a direct caller's. A live row is running in tmux as far as this
     /// daemon knows — reconcile parks a row once its tmux server is gone — and
     /// this daemon can neither reach nor stop it, so the refusal says so and
     /// how to end it. Both are `.onTmux`, a refusal rather than a failed
@@ -1059,10 +1071,10 @@ public actor HibernationCoordinator {
     /// where a row's server is looked at.
     private func tmuxWakeRefusal(_ terminal: Terminal) async -> WakeResult {
         if terminal.isParked {
-            // `.notice`, not `.error`: a retrying focus-wake reaches this on
-            // every attempt, and a state the person can act on is not a daemon
+            // `.notice`, not `.error`: a rail that retries reaches this on
+            // every attempt, and a state a person can act on is not a daemon
             // fault.
-            logger.notice("wake: terminal \(terminal.id, privacy: .public) is parked on the tmux transport; refusing and leaving it parked")
+            logger.notice("wake: terminal \(terminal.id, privacy: .public) is parked on the tmux transport and nothing moved it to the pty holder; refusing and leaving it parked")
             return .onTmux(
                 reason: Self.tmuxWakeUnavailableReason(terminalID: terminal.id))
         }
@@ -1081,8 +1093,10 @@ public actor HibernationCoordinator {
     ///
     /// **Only a holder row wakes.** A row on the tmux transport is refused
     /// before anything else about it is asked (`tmuxWakeRefusal`): a parked
-    /// one names `tbd terminal migrate` and stays parked, and a live one says
-    /// it is still running in tmux. TBD no longer starts sessions on tmux. A
+    /// one says how it moves to the pty holder and stays parked, and a live
+    /// one says it is still running in tmux. TBD no longer starts sessions on
+    /// tmux. A person's wake of a parked tmux row arrives here already moved
+    /// to the holder (`RPCRouter.moveParkedTmuxRowBeforeWake`). A
     /// holder row whose session a tmux row also carries, or a deleted live
     /// tmux row carried, is refused the same way while that row's tmux server
     /// may still be running it (`TmuxResumeGate`), and stays parked.
@@ -1125,7 +1139,7 @@ public actor HibernationCoordinator {
         // change the answer: TBD starts sessions only on the pty holder, so a
         // tmux row never wakes where it is. Refusing here, before anything is
         // touched, leaves a parked row parked with its session id, so a wake
-        // after `tbd terminal migrate` succeeds on the holder.
+        // after the row moves to the pty holder succeeds there.
         if terminal.transport != .holder {
             return await tmuxWakeRefusal(terminal)
         }
@@ -1507,7 +1521,8 @@ public actor HibernationCoordinator {
     ///
     /// A parked row on the tmux transport is left parked. TBD no longer reads
     /// tmux, so it has no evidence to un-park one with, and such a row wakes
-    /// only after `tbd terminal migrate` moves it to the holder. The one
+    /// only once it moves to the holder: a person's wake moves it first, and so
+    /// does `tbd terminal migrate`. The one
     /// exception is an earlier build's exit stamp on a tab that is not
     /// Claude's, which is lifted (`liftEarlierBuildsExitStamp`).
     public func reconcileOnStartup() async {

@@ -41,9 +41,9 @@ struct LeftoverTmuxServerSighting: Sendable, Equatable {
 /// running there. This probe tells the two cases apart:
 ///
 /// - **Absent** — the row is parked, keeping its session id, and from there
-///   the ordinary path moves it: a wake refuses and names
-///   `tbd terminal migrate`, the migration rewrites the parked row, and a wake
-///   opens it on the pty holder.
+///   the ordinary path moves it: a person's wake rewrites the parked row onto
+///   the pty holder and opens it there, as `tbd terminal migrate` followed by
+///   a wake does.
 /// - **Running** — the row stays live. The app shows a notice in place of the
 ///   terminal (`LeftoverTmuxSession.notice(server:)`), and the migration and
 ///   every other request that would have to reach the session refuse with
