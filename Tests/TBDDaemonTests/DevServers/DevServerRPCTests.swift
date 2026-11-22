@@ -489,8 +489,9 @@ struct DevServerRPCTests {
         #expect(try await f.db.terminals.get(id: existing.id) == nil)
     }
 
-    /// A tab whose state could not be read may still run the server: a stop
-    /// neither runs anything nor reports success.
+    /// A holder tab whose state could not be read may still run the server:
+    /// a stop neither runs anything nor reports success, and says to retry,
+    /// since the next read may succeed.
     @Test func stopRefusesWhenTheServersTabCannotBeRead() async throws {
         let runner = FakeDevServerCommandRunner()
         let signalling = FakeDevServerSignalling()
@@ -500,12 +501,15 @@ struct DevServerRPCTests {
             runner: runner, signalling: signalling)
         defer { f.tearDown() }
         let existing = try await f.db.terminals.create(
-            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", kind: .shell, serverName: "web")
-        f.inspector.set(.unknown(reason: "tmux timed out"), for: existing.id)
+            worktreeID: f.worktree.id, tmuxWindowID: "", tmuxPaneID: "", label: "Web app",
+            kind: .shell, transport: .holder, serverName: "web")
+        f.inspector.set(.unknown(reason: "the process could not be read"), for: existing.id)
         let result = try await f.call(RPCMethod.serverStop,
                                       DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
             .decodeResult(DevServerActionResult.self)
         #expect(result.outcomes.first?.status == .failed)
+        #expect(result.outcomes.first?.message?.contains("try again") == true)
+        #expect(result.outcomes.first?.message?.contains("kill-server") == false)
         #expect(runner.runs.isEmpty)
         #expect(signalling.sentSignals.isEmpty)
         #expect(try await f.db.terminals.get(id: existing.id) != nil)
