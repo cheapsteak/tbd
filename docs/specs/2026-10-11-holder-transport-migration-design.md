@@ -48,18 +48,23 @@ A person's wake of a parked session is such a choice. Waking it starts its
 program, at a moment its owner picked: selecting it in the app, a click in its
 parked pane, a message sent to it from the composer or the phone,
 `tbd terminal wake`, `tbd terminal resume` or `tbd worktree resume`. Selecting
-is the app's wake on focus, the same wake that resumes any parked session a
-person selects: selecting a worktree wakes the session it shows, or its first
-parked session when the one it shows is not parked, and activating a tab wakes
-the parked sessions in that tab. As it does for a holder session, it passes
-over a session parked by hand or stamped as exited, which wakes only when asked
-for directly. The selection is the person's act, so its wake moves a row as a
-click does.
+is the app's wake on focus, the same wake that resumes any parked, resumable
+session a person selects: selecting a worktree wakes the session it shows, or
+its first parked, resumable session when the one it shows is not one, and
+activating a tab wakes the parked, resumable sessions in that tab. Resumable
+there means a Claude session with a session id, so the focus wake passes over a
+parked shell or Codex tab, which wakes only when asked for directly. As it does
+for a holder session, it also passes over a session parked by hand or stamped as
+exited, which likewise wakes only when asked for directly. The selection is the
+person's act, so its wake moves a row as a click does.
 
 For a row whose park is complete the move only rewrites the row, so moving it
 first starts nothing the wake would not have started, and the two gestures
 compose: the wake moves the row to the holder and resumes it
-there, in one step, with the wake's own parameters. The move is the one the
+there, in one step, with the wake's own parameters. A row the action would
+move but the wake could not resume on the holder — a parked shell, which has no
+resume plan — is not moved: the wake is refused as its wake on the holder would
+be, and the row stays on tmux as it was. The move is the one the
 per-session action makes (`TerminalTransportMigrator.migrate`), so a row whose
 park is still in flight is refused while its tmux server may run, and a row the
 action would skip is refused with the same reason. Start admission is asked
@@ -68,7 +73,10 @@ leaves the row on tmux untouched. When the move cannot happen, the wake is
 refused with the move's reason and `terminalOnTmux`, and the row is as the move
 found it. A move that loses its compare-and-set to a writer that left the row on
 the holder — a concurrent wake, or a migration — has nothing left to do, and the
-wake resumes the row there.
+wake resumes the row there. A row closed while the move ran is answered as any
+missing row is, "Terminal not found". A row that cannot be read is not taken
+for a missing or awake one: the wake is refused with the read error, recorded
+as a failure, and moves nothing.
 
 A wake the daemon decides on its own — session restore, a limit resume, a
 queued prompt — is no owner's choice of moment, so it moves nothing and is
@@ -715,10 +723,14 @@ never unlinks it, and nothing TBD runs creates one any more.
   resumes the same row, conversation and label on the holder through the spawn
   seam, and publishes the move; a Codex tab resumes its thread. A rail's wake,
   session restore's included, moves nothing and refuses with `terminalOnTmux`.
-  A row whose park is in flight is refused while its server may run, a row with
-  nothing to resume is refused with its skip reason, and a lost compare-and-set
-  refuses unless the other writer left the row on the holder, which the wake
-  then resumes. The person-started rule is pinned per actor kind. Start
+  A row whose park is in flight is refused while its server may run, by each
+  of the three requests, with one actuation outcome; a row with nothing to
+  resume is refused with its skip reason; a parked shell is refused as its wake
+  on the holder is, and not moved; a lost compare-and-set refuses unless the
+  other writer left the row on the holder, which the wake then resumes; a row
+  closed during the move is not found; and a row that cannot be read is refused
+  with the read error. The person-started rule is pinned per actor kind, and
+  what every caller inside the daemon passes as the actor is pinned. Start
   admission is asked about a person's wake of a parked `tmux` row before the
   move, and a hold leaves the row on tmux; a rail's wake of one is not asked.
 - Check Again on a live tmux row refuses with the still-running advice while the

@@ -62,9 +62,11 @@ again. A held transport move leaves the session running where it is and lists it
 Also checked: moving a live tmux session with a conversation — Claude, or Codex with a
 recorded thread — to the pty holder once its tmux server is gone, and a person's wake of a
 tab parked on tmux, which moves it to the pty holder and starts it there. That wake is asked
-before the move, and a hold leaves the tab parked on tmux, unmoved. Not checked: shell and
-dev-server tabs, a wake of a tab that is not parked or is Codex's (the wake refuses it), a
-rail's wake of a tab parked on tmux (it moves nothing and is refused), a move that starts no
-agent, Check Again on a tmux tab (it starts nothing), remote sessions, and TBD's own daemon
-rails other than the session restore pass, which starts many agents with no gesture. The actor is self-declared, so this
+before the move, and a hold leaves the tab parked on tmux, unmoved. A wake of a parked Codex
+tab with a recorded thread is checked as a `codex` start, wherever it is parked. Not checked:
+shell and dev-server tabs, a wake of a tab that is not parked or names nothing to resume, such
+as a Codex tab with no recorded thread (the wake refuses it), a rail's wake of a tab parked
+on tmux (it moves nothing and is refused), a move that starts no agent, Check Again on a tmux
+tab (it starts nothing), remote sessions, and TBD's own daemon rails other than the session
+restore pass, which starts many agents with no gesture. The actor is self-declared, so this
 is a resource policy and not a security boundary.
