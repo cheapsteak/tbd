@@ -622,18 +622,29 @@ final class AppState {
         }
     }
     /// Repos whose sidebar section hides registry-provider remote sessions
-    /// (everything but cloud). Observed: the outline rebuilds on it. Loaded
-    /// from and written to `userDefaults` under
-    /// `sidebarRegistryRemoteHiddenRepoIDsKey`; see
-    /// docs/specs/2026-11-19-sidebar-remote-session-filter-design.md.
+    /// (everything but cloud). Observed: the outline rebuilds on it. A mirror
+    /// of the repos whose `Repo.registryRemoteHidden` is `true`, set from the
+    /// repo list after each fetch and by a toggle at once; the daemon's repo
+    /// row holds the setting. See `AppState+SidebarRegistryFilter.swift` and
+    /// docs/specs/2026-11-22-phone-remote-session-filter-design.md.
     var sidebarRegistryRemoteHiddenRepoIDs: Set<UUID> = [] {
         didSet {
             guard sidebarRegistryRemoteHiddenRepoIDs != oldValue else { return }
-            persistSidebarRegistryRemoteHiddenRepoIDs()
             sidebarRegistryFilterCache.removeAll()
             sidebarParentRemoteGroupsCache.removeAll()
         }
     }
+    /// This app's `repo.setRegistryRemoteHidden` calls not yet retired, the
+    /// latest per repo. `refreshRepos()` lays them over each fetched list, so
+    /// a fetch that read the daemon before a toggle committed cannot flip
+    /// the button back. See `AppState+SidebarRegistryFilter.swift`.
+    @ObservationIgnored var pendingRegistryFilterToggles: [UUID: PendingRegistryFilterToggle] = [:]
+    /// Tells a toggle from a later one of the same repo.
+    @ObservationIgnored var nextRegistryFilterToggleToken: UInt64 = 0
+    /// The number the next `refreshRepos()` fetch gets when it is sent.
+    @ObservationIgnored var nextRepoFetchNumber: UInt64 = 0
+    /// Where the one-time copy of the old `UserDefaults` set stands.
+    @ObservationIgnored var registryFilterLegacyCopy: RegistryFilterLegacyCopy = .pending
     /// An explicit re-selection must reveal a manually collapsed group too.
     var sidebarSelectionGeneration: UInt64 = 0
     @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
@@ -2731,6 +2742,11 @@ final class AppState {
     /// injectable so tests can drive the removal without a daemon.
     @ObservationIgnored lazy var repoRemover: @MainActor (UUID, Bool) async throws -> Void =
         { [daemonClient] id, force in try await daemonClient.removeRepo(repoID: id, force: force) }
+    /// How the registry filter's toggle and its one-time copy send
+    /// `repo.setRegistryRemoteHidden` (`id`, `hidden`) — injectable so a
+    /// test decides when the call returns and whether it fails.
+    @ObservationIgnored lazy var registryRemoteHiddenSender: @MainActor (UUID, Bool) async throws -> Void =
+        { [daemonClient] id, hidden in try await daemonClient.setRepoRegistryRemoteHidden(id: id, hidden: hidden) }
     /// How `refreshWorktrees(repoID:)` fetches the non-archived worktree
     /// list — injectable for the same reason as `reposFetcher`, so tests can
     /// drive the list merge without a real daemon.
@@ -2985,7 +3001,6 @@ final class AppState {
         }
         skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
         expandedSidebarGroups = Self.restoredSidebarGroups(defaults: userDefaults)
-        sidebarRegistryRemoteHiddenRepoIDs = Self.restoredSidebarRegistryRemoteHiddenRepoIDs(defaults: userDefaults)
         startMemoryPressureMonitor()
         registerFocusObservers()
         watchGhosttyTerminalEngineFlag()
@@ -4480,16 +4495,25 @@ final class AppState {
     }
 
     /// Refresh the repo list. Only updates if data changed.
+    ///
+    /// The registry filter's toggles still in flight, or committed after this
+    /// fetch was sent, are laid over the fetched list, and the filter's
+    /// mirror is set from the result; then the old `UserDefaults` set is
+    /// copied to the daemon once (`AppState+SidebarRegistryFilter.swift`).
     func refreshRepos() async {
+        let fetchNumber = nextRepoFetchNumber
+        nextRepoFetchNumber += 1
         do {
             let fetchedRepos = try await reposFetcher()
-            if fetchedRepos != repos {
-                repos = fetchedRepos
+            let merged = mergingRegistryFilterToggles(into: fetchedRepos, fetchNumber: fetchNumber)
+            if merged != repos {
+                repos = merged
                 updateNavigationFlags()
             }
             reposLoaded = true
             pruneExpandedSidebarGroups(repoIDs: Set(fetchedRepos.map(\.id)))
-            pruneSidebarRegistryRemoteHiddenRepoIDs(repoIDs: Set(fetchedRepos.map(\.id)))
+            syncSidebarRegistryRemoteHiddenRepoIDs()
+            await copyLegacySidebarRegistryFilterIfNeeded()
         } catch {
             logger.error("Failed to list repos: \(error)")
             handleConnectionError(error)
