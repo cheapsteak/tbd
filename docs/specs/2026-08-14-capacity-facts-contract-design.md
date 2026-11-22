@@ -192,9 +192,11 @@ including about what is missing — and are stated in the reference document.
   listing carries no snapshots at all — the not-yet-fetched state, not stale
   numbers.
 - **Secret-bearing fields stay, with a warning.** The envelope's env-override
-  fields are the values the daemon routes through tmux's sensitive environment
-  channel specifically to keep them out of `ps`, and they routinely carry auth
-  tokens and proxy keys. Removing them would break the additive promise, so they
+  fields are the values the daemon hands each session's pty holder over a file
+  descriptor specifically to keep them off every command line, and they
+  routinely carry auth tokens and proxy keys; as the session job's environment
+  they are still visible to `ps -E` for the same user. Removing them would
+  break the additive promise, so they
   remain — but a capacity consumer needs none of them, and the reference
   document tells programs to drop or redact them before logging or persisting
   the envelope. A contract that documents a field's presence should also
