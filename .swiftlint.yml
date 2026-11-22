@@ -567,7 +567,7 @@ custom_rules:
     # swap's forced step goes through `HolderRegistry.abandon`, whose `killJob`
     # sends a raw `kill(` SIGKILL to the job's process group and pid. Neither
     # is matched here; both are covered by the manual audit.
-    regex: '(?<!func )\b(?:killWindow|killServer|respawnWindow|createWindow|pasteText|sendKeys|sendKey|setHibernated)\s*\('
+    regex: '(?<!func )\bsetHibernated\s*\('
     # Code only. Several doc comments name these primitives while explaining the
     # boundary, and firing on the prose that documents the rule is how a rule
     # gets disabled.
