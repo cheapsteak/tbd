@@ -231,11 +231,24 @@ struct TabUnreadCompletionTests {
 
     // MARK: - Tab close cleanup (finding #1)
 
+    /// An `AppState` whose `terminal.delete` succeeds, for the tab closes
+    /// below. A close lets a terminal's bold go once the daemon has deleted
+    /// it; one the daemon keeps comes back as a tab, still bold
+    /// (`TerminalTabCloseFailureTests`).
+    private func withClosingState(_ body: @MainActor (AppState) async -> Void) async {
+        let suite = TestDefaultsSuite("TBDAppTests.TabUnreadCompletion")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+        state.terminalDeleter = { @MainActor _ in }
+        await body(state)
+    }
+
     /// Closing a background tab that has a pending unread-completion bold must
-    /// remove that tab's terminal from `unreadTerminals` — otherwise the UUID
-    /// leaks forever once the tab (and its terminal) are gone.
-    @Test func closingBackgroundTabWithUnread_removesFromUnreadTerminals() {
-        withState { state in
+    /// remove that tab's terminal from `unreadTerminals` once its delete
+    /// succeeds — otherwise the UUID leaks forever once the tab (and its
+    /// terminal) are gone.
+    @Test func closingBackgroundTabWithUnread_removesFromUnreadTerminals() async {
+        await withClosingState { state in
             let worktreeID = UUID()
             let activeTerminal = UUID()
             let backgroundTerminal = UUID()
@@ -246,9 +259,11 @@ struct TabUnreadCompletionTests {
                 ]
             ]
             state.activeTabIndices = [worktreeID: 0]
+            state.tabStateHydratedWorktreeIDs.insert(worktreeID)
             state.unreadTerminals = [backgroundTerminal]
 
             state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
 
             #expect(!state.unreadTerminals.contains(backgroundTerminal))
         }
@@ -256,8 +271,8 @@ struct TabUnreadCompletionTests {
 
     /// Closing a split-layout tab clears unread for ALL of its panes, not just
     /// the primary `tab.content` terminal.
-    @Test func closingSplitTab_removesAllPaneUnread() {
-        withState { state in
+    @Test func closingSplitTab_removesAllPaneUnread() async {
+        await withClosingState { state in
             let worktreeID = UUID()
             let tabID = UUID()
             let primaryTerminal = UUID()
@@ -278,9 +293,11 @@ struct TabUnreadCompletionTests {
                 )
             ]
             state.activeTabIndices = [worktreeID: 0]
+            state.tabStateHydratedWorktreeIDs.insert(worktreeID)
             state.unreadTerminals = [primaryTerminal, secondaryTerminal]
 
             state.closeTab(worktreeID: worktreeID, index: 0)
+            await PanelTabsFixture.drainMainActor()
 
             #expect(!state.unreadTerminals.contains(primaryTerminal))
             #expect(!state.unreadTerminals.contains(secondaryTerminal))

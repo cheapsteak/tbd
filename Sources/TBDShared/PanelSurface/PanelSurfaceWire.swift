@@ -78,7 +78,9 @@ public struct LegacyTabPayload: Codable, Sendable, Equatable {
 /// worktree's surfaces for tabs not listed.
 public struct PanelSyncTabsParams: Codable, Sendable, Equatable {
     public let worktreeID: UUID
-    /// Every workspace tab, in tab-bar order.
+    /// Every workspace tab, in tab-bar order, then each closed tab a delete
+    /// of one of whose terminals has not settled yet, so its surface lasts
+    /// until the daemon says whether it keeps the terminal.
     public let tabs: [LegacyTabPayload]
     /// PR #472's persisted per-pane histories (legacy `PaneContent` MRU),
     /// keyed by legacy pane ID; read when a tab is imported.

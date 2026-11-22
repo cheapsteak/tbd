@@ -1106,11 +1106,19 @@ final class AppState {
     /// than defaulting to 0 or clamping at the call site.
     var activeTabIndices: [UUID: Int] = [:]
     var worktreeTabOrders: [UUID: [UUID]] = [:]
-    /// Terminals of a closed tab whose `terminal.delete` has not answered yet.
-    /// They are still in `terminals`, so `reconcileTabs` skips them rather
-    /// than give each a tab of its own while it is being torn down
-    /// (`settleTabClose` clears them).
-    @ObservationIgnored var closingTerminalIDs: Set<UUID> = []
+    /// Terminals of a closed tab that the close still holds: their
+    /// `terminal.delete` has not answered yet, or it failed without the
+    /// daemon's answer and waits on the next terminal list
+    /// (`ClosingTerminal.awaitingList`). They are still in `terminals`, so
+    /// `reconcileTabs` skips them rather than give each a tab of its own
+    /// while it is being torn down (`settleTerminalClose` and
+    /// `finishClosingTerminal` let them go).
+    @ObservationIgnored var closingTerminals: [UUID: ClosingTerminal] = [:]
+    /// Per worktree, in close order, each closed tab one of whose terminals
+    /// `closingTerminals` still holds. `panel.syncTabs` keeps listing it
+    /// after the open tabs, so the sync does not delete the surface a
+    /// terminal the daemon keeps comes back to (`buildPanelSyncParams`).
+    @ObservationIgnored var closedTabsAwaitingDeletes: [UUID: [LegacyTabPayload]] = [:]
     /// Worktrees whose persisted tab order / active tab has been hydrated from
     /// the daemon with actual content. Distinct from `worktreeTabOrders[id] != nil`,
     /// which is also true for the empty response a poll gets while the daemon is
@@ -2815,6 +2823,12 @@ final class AppState {
     /// and script the daemon keeping a terminal.
     @ObservationIgnored lazy var terminalDeleter: @MainActor (UUID) async throws -> Void =
         { [daemonClient] terminalID in try await daemonClient.deleteTerminal(terminalID: terminalID) }
+    /// How `deleteTerminal` reads one worktree's terminals back after the
+    /// daemon answered a `terminal.delete` with an error, to tell a refusal
+    /// from a delete that failed after the row was gone — injectable for the
+    /// same reason as `terminalDeleter`.
+    @ObservationIgnored lazy var worktreeTerminalsFetcher: @MainActor (UUID) async throws -> [TBDShared.Terminal] =
+        { [daemonClient] worktreeID in try await daemonClient.listTerminals(worktreeID: worktreeID) }
     /// How `refreshArchivedScratch()` lists the archived scratch spaces —
     /// injectable for the same reason as `worktreesFetcher`, so a test can
     /// tell whether an archive asked for the refresh.
@@ -3332,14 +3346,26 @@ final class AppState {
     /// `layouts.values`. `paneHistories` is filtered to pane IDs that actually
     /// appear in the included tabs, absorbing the #477 over-retention concern
     /// at the sync boundary rather than trusting the caller.
+    ///
+    /// A closed tab one of whose terminals is still closing is listed after
+    /// the open tabs, as it was when it closed (`closedTabsAwaitingDeletes`),
+    /// so the sync keeps its surface. A terminal the daemon refuses to delete
+    /// comes back as a tab whose ID is the terminal's, which is the closed
+    /// tab's own whenever the tab was made for that terminal, so the tab
+    /// comes back to its surface. Once open again it is listed in its place
+    /// among the open tabs, and only there.
     func buildPanelSyncParams(worktreeID: UUID) -> PanelSyncTabsParams? {
         guard let wtTabs = tabs[worktreeID] else { return nil }
         var includedPaneIDs = Set<UUID>()
-        let legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
+        var legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
             let payload = legacyTabPayload(for: tab)
             includedPaneIDs.insert(tab.content.paneID)
             if let layout = payload.layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
             return payload
+        }
+        let openTabIDs = Set(wtTabs.map(\.id))
+        for closed in closedTabsAwaitingDeletes[worktreeID] ?? [] where !openTabIDs.contains(closed.tabID) {
+            legacyTabs.append(closed)
         }
         let includedPaneHistories = paneHistories.filter { includedPaneIDs.contains($0.key) }
         return PanelSyncTabsParams(
@@ -4769,9 +4795,10 @@ final class AppState {
     /// Removes tabs whose root terminal no longer exists. Adds tabs for
     /// terminals that aren't already represented (either as a tab root or
     /// embedded in another tab's split layout), except a closed tab's
-    /// terminals while their deletes are in flight. Drops any note tab, with its
-    /// layout: a note shows in the side panel as a worktree panel, never as a
-    /// workspace tab, so one held in memory from an older build never shows.
+    /// terminals while the close holds them (`closingTerminals`). Drops any
+    /// note tab, with its layout: a note shows in the side panel as a
+    /// worktree panel, never as a workspace tab, so one held in memory from an
+    /// older build never shows.
     func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
         // Capture the active tab's IDENTITY before touching the array: every
         // mutation below shifts indices, so a stored index re-binds to whatever
@@ -4827,10 +4854,10 @@ final class AppState {
         }
 
         // 3. Add tabs for terminals not already in any surviving layout, but
-        //    not for a closed tab's terminal whose delete is still in flight
-        //    (`closingTerminalIDs`).
+        //    not for a closed tab's terminal the close still holds
+        //    (`closingTerminals`).
         for terminal in terminals
-        where !terminalIDsInLayouts.contains(terminal.id) && !closingTerminalIDs.contains(terminal.id) {
+        where !terminalIDsInLayouts.contains(terminal.id) && closingTerminals[terminal.id] == nil {
             currentTabs.append(TBDShared.Tab(
                 id: terminal.id,
                 content: .terminal(terminalID: terminal.id),
