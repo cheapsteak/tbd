@@ -13,11 +13,12 @@ import Foundation
 /// same pacing rather than inventing a second number.
 ///
 /// **Why the send is a closure.** The type is deliberately ignorant of the
-/// transport: the actual write stays inside `RPCRouter+TerminalHandlers.swift`,
-/// the file the actuation audit already covers, so a paced sequence cannot
-/// become a new unrecorded actuation site (`.swiftlint.yml`'s
-/// `actuation_primitive_allowlist`). It also makes the pacing a tier-1 test
-/// with no session and no daemon.
+/// transport: the actual write — the injection courier's `deliver` — stays
+/// inside `RPCRouter+TerminalHandlers.swift`, which writes the send's row and
+/// which `.swiftlint.yml`'s `actuation_primitive_allowlist` admits, so a paced
+/// sequence cannot become a new unrecorded actuation site and this file stays
+/// off that allowlist. It also makes the pacing a tier-1 test with no session
+/// and no daemon.
 struct PacedKeySender: Sendable {
     /// The pause between consecutive keys. Same value, same reason, as
     /// `LimitResumeActuator.interKeyPause`.

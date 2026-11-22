@@ -116,11 +116,12 @@ struct DeliveryObservation: Sendable, Equatable {
 /// `DeliveryRecord.statuses`, and `replayMissedObservations` performs those
 /// observations late.
 ///
-/// **It calls no tmux primitive.** Re-delivery arrives as a closure supplied by
-/// `RPCRouter`, whose implementation reuses the send path's own
-/// consult-then-paste code inside the file the actuation audit already covers.
-/// That keeps `.swiftlint.yml`'s `actuation_primitive_allowlist` untouched and
-/// makes the retry a counted fake in tests.
+/// **It calls no actuation primitive.** Re-delivery arrives as a closure
+/// supplied by `RPCRouter` (`redeliverVerifiedPayload`), which writes through
+/// the send path's own injection courier inside `RPCRouter+TerminalHandlers.swift`
+/// — a file `.swiftlint.yml`'s `actuation_primitive_allowlist` already admits,
+/// whose send row this retry is recorded against. So this file stays off that
+/// allowlist, and the retry is a counted fake in tests.
 actor DeliveryVerifier: DeliveryVerificationArming {
     /// How much of the transcript's end one observation reads.
     ///

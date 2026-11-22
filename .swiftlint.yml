@@ -545,29 +545,55 @@ custom_rules:
       # still has to read those files. What it does catch is the shape the
       # misses actually took: a primitive called from a file that had never
       # actuated before.
-      - "Sources/TBDDaemon/Server/RPCRouter\\+DevServerHandlers\\.swift"      # server.start / server.stop; one worktree-named row per call, written before any spawn, respawn or tab close
+      #
+      # The implementations. A primitive's own body calls the layer under it,
+      # which is defining the act, not performing one.
+      - "Sources/TBDDaemon/Holder/HolderRegistry\\.swift"                     # defines spawn and abandon; its calls reach the spawner, the fabricator and itself
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\.swift"               # defines disposeHolder, the row-shaped teardown every close and archive calls; covered by its callers' rows
+      # The doors: each writes its own row before it acts.
+      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers, each writing its row before it acts; closeTerminalTab, shared with server.start / server.stop under their row; the send courier and its delivery-verification re-send, recorded against the send's row
+      - "Sources/TBDDaemon/Server/RPCRouter\\+ScratchHandlers\\.swift"        # scratch.delete / scratch.archive; one worktree-named row, then the per-terminal disposal
+      - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"          # park/wake engine: RPC rows plus the auto-hibernate rails' entry points; the running-shell move of terminal.migrateTransport
+      - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\+Holder\\.swift"  # the holder legs of park, wake and profile swap; covered by the same rows as HibernationCoordinator
+      - "Sources/TBDDaemon/Daemon\\.swift"                                    # composition root: hands the limit-resume rail its courier-backed send; LimitResumeActuator writes the rail's row
       # The shared lifecycle internals and phases. They stay deliberately
       # silent — `worktree.archive` and the reconcile sweep both reach them, and
       # a row down here would double-count every teardown — so their acts are
       # covered by the handler or rail row written one layer up.
-      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Create\\.swift"      # primary-terminal spawn; covered by worktree.create / scratch.create / revive
-      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+SpawnTerminal\\.swift" # the one spawn-and-record step every spawn path calls; covered by the caller's row: terminal.create / terminal.continueInCodex / worktree.create / scratch.create / revive
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Archive\\.swift"     # archive teardown; covered by worktree.archive / repo.remove / auto-archive-on-merge
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Forget\\.swift"      # forget teardown; covered by worktree.forget
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"  # hook-terminal close; covered by worktree.rerunPreSession / worktree.create
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+SpawnTerminal\\.swift" # the one spawn-and-record step every spawn path calls, and its rollback; covered by the caller's row: terminal.create / terminal.continueInCodex / worktree.create / scratch.create / revive / server.start
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Reconcile\\.swift"   # the reconcile rail; one row per act at its own entry point
-    # Call sites only, which decides the odd-looking piece of this regex:
-    # `(?<!func )` skips DECLARATIONS. TerminalStore's `setHibernated` is a
-    # primitive being defined, not an act being performed — and skipping it
-    # keeps TerminalStore.swift (a DB layer that must never actuate) fully
-    # covered instead of allowlisted for a declaration.
+    # The primitives are the holder transport's acts on a session: spawning a
+    # holder (`HolderRegistry.spawn`), letting one go or killing its job
+    # (`HolderRegistry.abandon`, `abandonVerifiedJob`), tearing one down with
+    # its row (`disposeHolder`), and writing input into one
+    # (`HolderInjectionCourier.deliver`) — plus `setHibernated`, the park's
+    # record. A caller that spawns through `spawnTerminal` reaches the spawn
+    # inside an allowlisted file, as every spawn path does.
+    #
+    # Call sites only, which decides the odd-looking pieces of this regex.
+    # `(?<!func )` skips DECLARATIONS: TerminalStore's `setHibernated` and the
+    # registry's own `func spawn(terminalID:` are primitives being defined, not
+    # acts being performed — and skipping them keeps TerminalStore.swift (a DB
+    # layer that must never actuate) fully covered instead of allowlisted for a
+    # declaration. The lookaheads on argument labels exist because `spawn`,
+    # `abandon` and `deliver` are common names: a cloud spawner's
+    # `spawn(request)`, a `.spawn(path:` and an `.abandon(.notFound` enum case
+    # are not holder acts, and a rule that fired on them would be one people
+    # disable. The lookahead keeps the label out of the match, so the matched
+    # text is the identifier and its parenthesis alone.
     #
     # Raw `kill(` is deliberately NOT in this list: no regex can separate a
     # signal sent to a session's process from ordinary subprocess reaping, and a
     # rule that fired on both would be one people disable. The park and the
     # profile swap send their SIGTERM through `ProcessSignaller`
-    # (Sources/TBDDaemon/Process/ProcessSignaller.swift); a holder park's or
-    # swap's forced step goes through `HolderRegistry.abandon`, whose `killJob`
-    # sends a raw `kill(` SIGKILL to the job's process group and pid. Neither
-    # is matched here; both are covered by the manual audit.
-    regex: '(?<!func )\bsetHibernated\s*\('
+    # (Sources/TBDDaemon/Process/ProcessSignaller.swift), and the SIGKILL of a
+    # forced step is `HolderRegistry.killJob` inside `abandon`, which is matched
+    # at the `abandon` call. The orphan sweeps reach `killJob` too (the rowless
+    # holder collector), but a session with no row is reclaimed, not actuated.
+    regex: '(?<!func )\b(?:(?:spawn|abandon|deliver)\s*\((?=\s*terminalID:)|abandon\s*\((?=\s*terminal:)|(?:abandonVerifiedJob|disposeHolder|setHibernated)\s*\()'
     # Code only. Several doc comments name these primitives while explaining the
     # boundary, and firing on the prose that documents the rule is how a rule
     # gets disabled.
