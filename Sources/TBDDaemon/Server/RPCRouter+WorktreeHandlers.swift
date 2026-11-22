@@ -709,6 +709,18 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .worktreeRevive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))
+        // The resume gate (`TmuxResumeGate`), asked as the revive asks it and
+        // ahead of start admission, which would otherwise hold or record a
+        // start the gate then refuses: a session the revive relaunches may
+        // still be running in a tmux server. A refusal here comes before
+        // anything is written, so it is a declined act.
+        if let refusal = try await actuating(actuationID, {
+            try await lifecycle.reviveResumeRefusal(
+                worktreeID: params.worktreeID, preferred: preferred)
+        }) {
+            await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
+            return refusal.coded.response
+        }
         // Admit each distinct provider before the lifecycle mutates git.
         // An empty archive starts the configured primary, as a fresh create does.
         var reviveAgents: [StartAdmissionAgent] = []
@@ -742,10 +754,15 @@ extension RPCRouter {
                 preferredSession: params.preferredSession
             )
         } catch let refusal as TmuxResumeRefusal {
-            // The resume gate refused before the revive wrote anything: a
-            // declined act, answered with `terminalOnTmux` and the command
-            // that ends the server.
-            await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
+            // The gate above let the revive through, so this refusal is one
+            // the lifecycle raised after it: its own gate, asked again, or
+            // `spawnTerminal`'s, which asks for each tab it opens, after the
+            // revive may have re-added the checkout, revived the row and
+            // opened other tabs. Which one cannot be told from here, so the
+            // act is recorded as failed rather than declined, which would
+            // claim nothing was written. The person is still told the same
+            // thing: `terminalOnTmux` and the command that ends the server.
+            await finishActuation(actuationID, .transportFailed, error: refusal.message)
             return refusal.coded.response
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
@@ -794,6 +811,22 @@ extension RPCRouter {
             .worktreeReviveConversationFresh, actor: actor,
             target: ActuationTarget(worktree: params.archivedWorktreeID.uuidString))
 
+        // The resume gate (`TmuxResumeGate`), asked as the lifecycle asks it
+        // and ahead of start admission: a Codex thread is resumed itself, and
+        // may still be running in a tmux server, the archived worktree's own
+        // included. A Claude conversation is forked and asks nothing. A
+        // refusal here comes before anything is written, so it is a declined
+        // act.
+        if params.resolvedIdentity.agentKind == .codex,
+           let refusal = try await actuating(actuationID, {
+               try await self.lifecycle.tmuxResumeRefusal(
+                   resuming: [params.resolvedIdentity.sessionID],
+                   worktreeServer: source.tmuxServer)
+           }) {
+            await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
+            return refusal.coded.response
+        }
+
         // Admission follows the selected provider, including the legacy Claude fallback.
         if let held = await holdStartIfDenied(
             actuationID, actor: actor, agent: params.resolvedIdentity.agentKind == .claude ? .claude : .codex, worktreeID: params.archivedWorktreeID) {
@@ -826,9 +859,10 @@ extension RPCRouter {
                 }
             }
         } catch let refusal as TmuxResumeRefusal {
-            // As in `handleWorktreeRevive`: refused before the new worktree
-            // existed.
-            await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
+            // As in `handleWorktreeRevive`: the gate above let it through, so
+            // this one the lifecycle raised later, perhaps once the new
+            // worktree existed, and it is recorded as failed, not declined.
+            await finishActuation(actuationID, .transportFailed, error: refusal.message)
             return refusal.coded.response
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")

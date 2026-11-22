@@ -145,7 +145,33 @@ extension WorktreeLifecycle {
                     }
                     continue
                 }
+                // The resume gate a revive asks before it relaunches anything
+                // (`beginReviveWorktree`), asked again here because this
+                // finishes a revive whose own ask may predate the gate: the
+                // sessions it relaunches, and the worktree's own tmux server,
+                // which an earlier build's archive could leave running one of
+                // them with no row or mark naming it. `spawnTerminal` asks
+                // only by session. Refused, or unable to ask, the revive is
+                // left as a failed restore leaves it: active, with its full
+                // unfinished record, for an explicit retry.
+                let relaunched = Self.reviveResumeKeys(
+                    skipClaude: false,
+                    missingTabs: missingArchivedAgentTabs(restoreTabs, terminals: terminals))
                 let task = Task.detached { [self] in
+                    let refusal: TmuxResumeRefusal?
+                    do {
+                        refusal = try await tmuxResumeRefusal(
+                            resuming: relaunched, worktreeServer: worktree.tmuxServer)
+                    } catch {
+                        logger.error("recovery: the resume gate could not be asked for \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public); preserving archive for explicit retry")
+                        try? await db.worktrees.revive(id: worktree.id, clearSessions: false)
+                        return
+                    }
+                    if let refusal {
+                        logger.notice("recovery: archived restore of \(worktree.id, privacy: .public) waits for tmux server \(refusal.server, privacy: .public); preserving archive for explicit retry")
+                        try? await db.worktrees.revive(id: worktree.id, clearSessions: false)
+                        return
+                    }
                     do {
                         _ = try await completeArchivedRestore(worktree: worktree.worktree, repo: repo, tabs: restoreTabs)
                     } catch {
