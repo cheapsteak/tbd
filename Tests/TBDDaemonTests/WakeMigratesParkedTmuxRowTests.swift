@@ -633,9 +633,10 @@ struct WakeMigratesParkedTmuxRowTests {
     /// That is a missing row, so the wake answers it as the missing row it now
     /// is — "Terminal not found", recorded as not found — and not as a move
     /// that could not be recorded, whose `terminalOnTmux` code says the
-    /// session is still parked on tmux.
+    /// session is still parked on tmux. `worktree.resume` reports no missing
+    /// row of its own, so the two single-terminal requests are the ones asked.
     @Test("a person's wake of a row closed while it was being moved answers that it is gone",
-          arguments: Entry.allCases.filter { $0 != .worktreeResume })
+          arguments: [Entry.terminalWake, .terminalResume])
     func aRowClosedDuringTheMoveIsNotFound(_ entry: Entry) async throws {
         let f = try await Self.makeFixture()
         defer { f.tearDown() }
