@@ -23,9 +23,10 @@ struct SessionStatesRPCTests {
     ///   - now: the router's date seam. Defaulted so every existing case is
     ///     unchanged; the fallback-stamp case below pins it, which is the only
     ///     way to tell an injected clock from wall time.
-    ///   - touches: when given, every seam through which the router can reach
-    ///     a holder session's process or screen records into it, and the
-    ///     router's holder registry spawns through `holder`.
+    ///   - touches: when given, every seam `HolderTouchRecorder` covers
+    ///     records into it — the router's and the lifecycle's process seams,
+    ///     the router's screen and input seams, and the router's holder
+    ///     registry, which spawns through `holder`.
     private func makeFixture(
         now: @escaping @Sendable () -> Date = { Date() },
         touches: HolderTouchRecorder? = nil,
@@ -51,6 +52,7 @@ struct SessionStatesRPCTests {
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), hooks: HookResolver(),
+                processSignaller: processSignaller,
                 leftoverTmuxProbe: .absent),
             startTime: Date(),
             now: now,
@@ -59,7 +61,7 @@ struct SessionStatesRPCTests {
             processTableReader: processTableReader)
         if let touches {
             touches.install(on: router)
-            router.holderRegistry = makeHolderRegistryDouble(launch: holder)
+            router.holderRegistry = touches.registryDouble(launch: holder)
         }
 
         let repo = try await db.repos.create(
@@ -190,11 +192,17 @@ struct SessionStatesRPCTests {
 
     /// The cheap-path property, asserted rather than assumed: a pass over a
     /// live holder Claude row starts no process, reads no screen, types
-    /// nothing, reads no process table and signals nothing. Every way the
-    /// router has to do one of those records into `touches`, so an empty
-    /// record is the proof that the pass costs no subprocess and no screen
-    /// read, which is what lets this method be called on a cadence for every
-    /// agent at once.
+    /// nothing, reads no process table, signals nothing and builds no reader
+    /// for the session. That is what lets this method be called on a cadence
+    /// for every agent at once.
+    ///
+    /// Each of those, made through a seam the router, its lifecycle or its
+    /// holder registry owns, records into `touches`, and the last assertion
+    /// shows the fixture wired every such seam — so the empty record speaks
+    /// for all of them. It cannot speak for a subprocess started without a
+    /// seam, such as a direct `ProcessTableSnapshot.read()` or a `Process`
+    /// launched in the handler: `HolderTouchRecorder` lists what it cannot
+    /// see.
     @Test func performsNoSubprocessOrScreenRead() async throws {
         let touches = HolderTouchRecorder()
         let holder = FakeHolderLaunch()
@@ -218,6 +226,13 @@ struct SessionStatesRPCTests {
         #expect(touches.events.isEmpty,
                 "session.states reached a holder session's process or screen: \(touches.events)")
         #expect(holder.launches.isEmpty)
+        #expect(holder.abandonments.isEmpty)
+
+        // The control: every seam the empty record above speaks for was
+        // wired on this fixture, so reaching it would have recorded.
+        let unwired = await touches.unwiredSeams(of: fixture.router)
+        #expect(unwired.isEmpty,
+                "left unwired, so the empty record says nothing about them: \(unwired)")
     }
 
     @Test func theWorktreeFilterNarrowsTheReport() async throws {

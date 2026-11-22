@@ -181,38 +181,69 @@ final class FakeHolderLaunch: HolderSpawnFabricator, @unchecked Sendable {
 /// reports `canSpawn`, so the transport gate grants it. Everything else is the
 /// production registry: let-go marks, releases, attach bookkeeping and the rest
 /// behave as they do in the daemon, over sessions that have no reader.
+///
+/// `signaller` and `emulatorKind` are the registry's own seams, defaulted as
+/// the registry defaults them. `HolderTouchRecorder.registryDouble(launch:)`
+/// passes recording ones.
 func makeHolderRegistryDouble(
     launch: FakeHolderLaunch,
     environment: [String: String] = FakeHolderLaunch.scratchEnvironment(),
-    listTerminals: @escaping @Sendable () async throws -> [TBDShared.Terminal] = { [] }
+    listTerminals: @escaping @Sendable () async throws -> [TBDShared.Terminal] = { [] },
+    signaller: any ProcessSignaller = ProductionProcessSignaller(),
+    emulatorKind: @escaping @Sendable () async -> HolderEmulatorKind = { .swiftTerm }
 ) -> HolderRegistry {
     HolderRegistry(
         owner: HolderOwnerToken(rawValue: "acme-installation"),
         environment: environment,
         listTerminals: listTerminals,
         spawner: nil,
-        spawnFabricator: launch)
+        signaller: signaller,
+        spawnFabricator: launch,
+        emulatorKind: emulatorKind)
 }
 
-/// Records every way a router can reach a holder session's process or screen,
-/// for a test that asserts a path reaches none of them.
+/// Records every call through the seams listed here — the router's ways to
+/// reach a holder session's process or screen, and its reads of process
+/// facts — for a test that asserts a path makes none. Each seam records into
+/// `events` instead of acting.
 ///
-/// `install(on:)` wires each seam the router owns, and each records into
-/// `events` instead of acting:
+/// **What it covers**
 ///
-///   - **Screen reads** – `holderScreenResolver`, whose reader census and
-///     daemon-store lookups are what every screen read of a session asks.
-///   - **Input** – `holderInjectionCourier`, through which the daemon types
-///     into a session: the viewer lookup, the sidecar frame and the direct
-///     write.
-///   - **Processes** – `holderChildSignaller` and `holderProcessIsLive`. The
-///     signaller's identity reads (`commandLine`, `stat`, `startTime`) are
-///     `ps` subprocesses in production.
+///   - **Screen reads** – the router's `holderScreenResolver`: its reader
+///     census (`ptyReader`) and its daemon-store lookup, the first thing every
+///     screen read through the resolver asks. Wired by `install(on:)`.
+///   - **Input** – the router's `holderInjectionCourier`, through which the
+///     daemon types into a session: the viewer lookup, the sidecar frame and
+///     the direct write. Wired by `install(on:)`.
+///   - **Holder probes** – the router's `holderChildSignaller` and
+///     `holderProcessIsLive`, and its `appIdentityResolver`, which runs `ps`
+///     for the app's identity in production. Wired by `install(on:)`.
+///   - **Process facts** – `signaller` and `processTableReader`. These are
+///     initializer parameters, so the fixture passes them itself: as the
+///     router's `processSignaller:` and `processTableReader:`, and as the
+///     lifecycle's `processSignaller:`. The signaller's identity reads
+///     (`commandLine`, `stat`, `startTime`) are `ps` subprocesses in
+///     production.
+///   - **The registry** – `registryDouble(launch:)`, a holder registry double
+///     whose own `signaller` and `emulatorKind` record here. Such a registry
+///     holds a reader only once an adoption has built one, and every adoption
+///     asks `emulatorKind` before it connects to the session's rendezvous, so
+///     each attempt to obtain a reader is recorded although it then fails at
+///     the empty rendezvous. Spawns and teardowns are the spawn double's to
+///     record (`FakeHolderLaunch.launches` and `.abandonments`).
 ///
-/// The router's `processSignaller` and `processTableReader` are initializer
-/// parameters, so a fixture passes `signaller` and `processTableReader` when it
-/// builds the router. Spawns are the holder spawn double's to record
-/// (`FakeHolderLaunch.launches`), on whichever registry the fixture wires.
+/// `unwiredSeams(of:)` reaches each covered seam once and names those that
+/// recorded nothing, so a test can show its fixture wired every seam before
+/// it reads an empty `events` as evidence.
+///
+/// **What it cannot see.** Anything that reaches a process or a session
+/// without going through one of those seams: a direct
+/// `ProcessTableSnapshot.read()`, a `Process` launched in place, a
+/// `ProductionProcessSignaller()` built at the call site, a `HolderClient`
+/// opened on a rendezvous directly, any router seam not listed above (the
+/// dev-server runner and probes among them), and the router's hibernation
+/// coordinator, which builds its own signaller. None of those has a seam a
+/// test can route here, so an empty `events` says nothing about them.
 final class HolderTouchRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [String] = []
@@ -230,6 +261,23 @@ final class HolderTouchRecorder: @unchecked Sendable {
     }
 
     var signaller: any ProcessSignaller { RecordingSignaller(recorder: self) }
+
+    /// The registry's reader-build seam. A registry asks it at every adoption,
+    /// before connecting, and at a spawn through a real `HolderSpawner`, which
+    /// a registry double never has.
+    var emulatorKind: @Sendable () async -> HolderEmulatorKind {
+        { [self] in
+            note("registry: reader build")
+            return .swiftTerm
+        }
+    }
+
+    /// A holder registry double over `launch` whose own process probes and
+    /// reader builds record here. Wire it wherever the fixture wires a
+    /// registry: `router.holderRegistry`, `lifecycle.holderRegistry`.
+    func registryDouble(launch: FakeHolderLaunch) -> HolderRegistry {
+        makeHolderRegistryDouble(launch: launch, signaller: signaller, emulatorKind: emulatorKind)
+    }
 
     func install(on router: RPCRouter) {
         // Each seam is typed as its initializer or property declares it, so no
@@ -266,6 +314,83 @@ final class HolderTouchRecorder: @unchecked Sendable {
             return false
         }
         router.holderProcessIsLive = holderProcessIsLive
+        let appIdentityResolver: @Sendable (Int32) -> ProcessIdentity? = { [self] pid in
+            note("app identity read of \(pid)")
+            return nil
+        }
+        router.appIdentityResolver = appIdentityResolver
+    }
+
+    /// Reaches every seam this recorder covers on `router` once, and answers
+    /// the ones that recorded nothing: seams the fixture left on their
+    /// production defaults, or never wired. Empty means an empty `events`
+    /// read earlier on the same fixture spoke for every one of them.
+    ///
+    /// It records as it goes and leaves state on the router's registry, so a
+    /// test calls it once, after its own assertions on `events`.
+    func unwiredSeams(of router: RPCRouter) async -> [String] {
+        // Above macOS's PID_MAX (99,999) and below the spawn double's floor,
+        // so even a seam left on its production default asks the kernel about
+        // no real process and no double's session.
+        let pid = FakeHolderLaunch.pidFloor - 1
+        let sessionID = UUID()
+        var unwired: [String] = []
+        var mark = events.count
+
+        _ = router.processTableReader()
+        settle("router processTableReader", since: &mark, into: &unwired)
+        _ = router.processSignaller.commandLine(pid)
+        settle("router processSignaller", since: &mark, into: &unwired)
+        _ = router.lifecycle.processSignaller.stat(pid - 1)
+        settle("lifecycle processSignaller", since: &mark, into: &unwired)
+        _ = router.holderChildSignaller.startTime(pid - 2)
+        settle("router holderChildSignaller", since: &mark, into: &unwired)
+        _ = router.holderProcessIsLive(pid - 3)
+        settle("router holderProcessIsLive", since: &mark, into: &unwired)
+        _ = router.appIdentityResolver(pid - 4)
+        settle("router appIdentityResolver", since: &mark, into: &unwired)
+
+        if let resolver = router.holderScreenResolver {
+            _ = await resolver.ptyReader(sessionID)
+        }
+        settle("router holderScreenResolver reader census", since: &mark, into: &unwired)
+        if let resolver = router.holderScreenResolver {
+            _ = try? await resolver.screen(terminalID: sessionID, maxLines: 1)
+        }
+        settle("router holderScreenResolver daemon store", since: &mark, into: &unwired)
+        if let courier = router.holderInjectionCourier {
+            _ = await courier.deliver(terminalID: sessionID, bytes: Data("x".utf8))
+        }
+        settle("router holderInjectionCourier", since: &mark, into: &unwired)
+
+        guard let registry = router.holderRegistry else {
+            return unwired + ["router holderRegistry"]
+        }
+        // An adoption. Nothing is bound at the double's rendezvous, so it
+        // fails at the connect, after asking `emulatorKind`.
+        let adoptee = TBDShared.Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder)
+        _ = try? await registry.adopt(terminal: adoptee)
+        settle("registry emulatorKind", since: &mark, into: &unwired)
+        // An attach to a session whose ended status came from an absent
+        // rendezvous asks the registry's signaller when the holder started. A
+        // nil answer declines the adoption, so nothing connects.
+        let probed = TBDShared.Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
+            holderPID: pid - 5)
+        await registry.recordStatusForTesting(
+            .exitedStatusUnknown, for: probed.id, fromAbsentRendezvous: true)
+        try? await registry.adoptForAttach(terminal: probed, holderIsLive: { _ in true })
+        settle("registry signaller", since: &mark, into: &unwired)
+        return unwired
+    }
+
+    /// Adds `seam` to `unwired` when nothing has been recorded since `mark`,
+    /// then moves `mark` to the present.
+    private func settle(_ seam: String, since mark: inout Int, into unwired: inout [String]) {
+        let now = events.count
+        if now == mark { unwired.append(seam) }
+        mark = now
     }
 
     private struct RecordingSignaller: ProcessSignaller {
@@ -277,6 +402,8 @@ final class HolderTouchRecorder: @unchecked Sendable {
         }
         func terminate(_ pid: Int32) { recorder.note("terminate \(pid)") }
         func forceKill(_ pid: Int32) { recorder.note("forceKill \(pid)") }
+        func terminateProcessOnly(_ pid: Int32) { recorder.note("terminateProcessOnly \(pid)") }
+        func forceKillProcessOnly(_ pid: Int32) { recorder.note("forceKillProcessOnly \(pid)") }
         func commandLine(_ pid: Int32) -> String? {
             recorder.note("commandLine \(pid)")
             return nil
