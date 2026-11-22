@@ -464,7 +464,7 @@ struct ProfileCommandsTests {
     @Test func subcommandsRegistered() {
         let names = ProfileCommand.configuration.subcommands.map { String(describing: $0) }
         #expect(names == ["ProfileList", "ProfileSetDefault", "ProfileLogin", "ProfileKeychain", "ProfileExec",
-                          "ProfileBalancing", "ProfilePool", "ProfileRename"])
+                          "ProfileFableCheck", "ProfileBalancing", "ProfilePool", "ProfileRename"])
     }
 
     // MARK: - profile balancing
