@@ -1186,10 +1186,10 @@ report_interrupted_install() {
 # are reachable from a test. A failed relaunch is logged, not fatal: the daemon
 # has already handed over and the app is only a viewer.
 run_app_stage() {
-    # Before the opt-out: the next login relaunch ignores LSEnvironment.PATH
-    # and needs the saved tmux fallback whether or not this run relaunches.
-    # Only a run from the user's shell seeds: an --auto run's PATH is the
-    # daemon's plus UpdateLauncher.pathFallbacks, so its tmux is a guess.
+    # Before the opt-out: the leftover-tmux probe reads the saved tmux path
+    # whether or not this run relaunches the app. Only a run from the user's
+    # shell seeds: an --auto run's PATH is the daemon's plus
+    # UpdateLauncher.pathFallbacks, so its tmux is a guess.
     if [ "$OPT_AUTO" = false ]; then
         seed_tmux_fallback "$TBD_HOME_DIR"
     fi

@@ -78,6 +78,20 @@ import Foundation
     #expect(body.contains("screen.ageMilliseconds"))
 }
 
+/// The recipe for a session an earlier version left on tmux has two steps.
+///
+/// A migration of a parked row rewrites the row and starts nothing, so a recipe
+/// that stops at `tbd terminal migrate` leaves the agent with a session it
+/// still cannot read. Pinned with the CLI's own spelling of wake, which takes
+/// the id as `--terminal`, not as a positional argument.
+@Test func bodyWakesALeftoverTmuxSessionAfterMigratingIt() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("`tbd terminal migrate <id>` to move it to"))
+    #expect(body.contains("migration only rewrites a parked session's row"))
+    #expect(body.contains("run `tbd terminal wake --terminal <id>` to start it on the holder"))
+    #expect(!body.contains("`tbd terminal wake <id>`"))
+}
+
 @Test func bodyContainsSiblingMessagingSection() {
     let body = TBDSkillContent.body
     #expect(body.contains("### Message a sibling session"))

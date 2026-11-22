@@ -39,9 +39,12 @@ import TBDShared
 // `kind` names the act, and both are spelled once, per surface.
 //
 // The mechanical guard is the SwiftLint custom rule `actuation_primitive_allowlist`
-// in `.swiftlint.yml`: calling a park primitive from a daemon file outside
-// the audited set fails the build, so a new actuation surface has to be wired
-// here before it can be written.
+// in `.swiftlint.yml`: calling a holder primitive — `HolderRegistry.spawn` or
+// `abandon`, `abandonVerifiedJob`, `disposeHolder`, the injection courier's
+// `deliver` — or the park's `setHibernated` from a daemon file outside the
+// audited set fails lint, so a new actuation surface has to be wired here
+// before it can be written. The rule is file-level, so a new call inside an
+// already-audited file is a reviewer's to catch.
 
 /// The public RPC surfaces that actuate a session, and what each one is.
 ///

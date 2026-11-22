@@ -1258,15 +1258,15 @@ launch_app_bundle() {
     open --env "PATH=$launch_path" "$bundle_dir" --stdout "$log_path" --stderr "$log_path"
 }
 
-# Seed the saved tmux fallback with the installing shell's tmux.
+# Seed the saved tmux path with the installing shell's tmux.
 #
 #   seed_tmux_fallback <tbd_home>
 #
-# LaunchServices ignores LSEnvironment.PATH on a login relaunch, so a
-# package-manager tmux is invisible to that launch. The saved fallback is what
-# the resolver consults next; write it from this shell unless it already names
-# a usable executable, so a user's Locate or Settings choice always survives.
-# Never fails the install: without tmux here, warn and let the app prompt.
+# TBD runs no tmux. The leftover-tmux probe reads this file only for the name
+# of the binary, to recognize a tmux server an earlier version started from a
+# tmux of any name. Write it from this shell unless it already names a usable
+# executable, so a path saved earlier survives. Never fails the install, and a
+# shell with no tmux is not a problem: there is nothing to save.
 # See docs/specs/2026-09-22-tmux-fallback-install-seeding-design.md.
 seed_tmux_fallback() {
     local tbd_home="${1-}"
@@ -1290,10 +1290,10 @@ seed_tmux_fallback() {
     local found
     found="$(command -v tmux 2>/dev/null || true)"
     if ! _is_absolute_regular_executable "$found"; then
-        echo "warning: tmux not found on PATH; TBD will ask you to locate it" >&2
+        echo "note: no tmux on PATH, so no tmux path was saved; TBD needs none" >&2
         return 0
     fi
-    local unsaved="warning: could not save $found to $file; TBD may ask you to locate tmux"
+    local unsaved="warning: could not save $found to $file; the leftover-tmux probe will recognize tmux only by the name tmux"
     # A directory at the file's path would swallow the mv below.
     if [ -d "$file" ] || ! mkdir -p "$tbd_home" 2>/dev/null; then
         echo "$unsaved" >&2

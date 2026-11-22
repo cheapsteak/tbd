@@ -3,21 +3,23 @@ import os
 /// Hands the PTY IO thread a way to reach the terminal engine without racing
 /// teardown.
 ///
-/// With `LocalProcess(delegate:dispatchQueue:directDelivery: true)`,
-/// `dataReceived` fires on the IO thread and calls `feed` right there —
+/// Bytes arrive off the main actor and are fed right there: a holder panel's
+/// `HolderStreamReader` callback (`TerminalPanelView`) calls `feed` on its
+/// read thread, and `LocalPTYTerminalView`'s
+/// `LocalProcess(delegate:dispatchQueue:directDelivery: true)` fires
+/// `dataReceived` on the IO thread and calls `feed` there too.
 /// `TerminalEngine.feed` itself is thread-safe (the parse runs under the
 /// engine's own lock), but the *reference* to the engine must be owned
 /// separately.
-/// This holder is that ownership: written once on the main actor before
-/// `startProcess`, cleared by `cleanup()` on the main actor BEFORE the
-/// process is terminated or released, so no batch feeds an engine whose
-/// session is being torn down.
+/// This holder is that ownership: written once on the main actor before the
+/// reader starts, cleared on the main actor — by `cleanup()`, or by the
+/// handback that ends a holder panel's attach — BEFORE the reader or process
+/// is torn down, so no batch feeds an engine whose session is being torn
+/// down.
 ///
-/// It is also the **one seam both transports feed through** — the tmux arm from
-/// `Coordinator.dataReceived(slice:)`, the holder arm from the
-/// `HolderStreamReader` callback — which is what makes the two arms' latency
-/// numbers comparable by construction rather than by argument. See
-/// `TerminalLatencyTap` and
+/// It is also the **one seam a panel's bytes pass through**, which is where
+/// `TerminalLatencyTap` stamps them, so the instrument measures every panel at
+/// the same point. See `TerminalLatencyTap` and
 /// `docs/specs/2026-09-22-terminal-transport-latency-instrument-design.md`.
 final class TerminalViewHolder: @unchecked Sendable {
     /// The engine, the tap and the last-byte stamp are read together, under
@@ -55,8 +57,8 @@ final class TerminalViewHolder: @unchecked Sendable {
         }
     }
 
-    /// Cleared by `cleanup()` on the main actor BEFORE `terminate()` (or the
-    /// `LocalProcess` release) so late IO batches read nil and drop.
+    /// Called on the main actor BEFORE the reader stops or the process is
+    /// terminated or released, so late IO batches read nil and drop.
     func clear() {
         lock.withLockUnchecked {
             $0.engine = nil

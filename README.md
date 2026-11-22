@@ -15,7 +15,9 @@ https://github.com/user-attachments/assets/85881cde-dbac-47a9-a65c-45c684c92460
 
 Three components communicate over a Unix socket using a JSON RPC protocol:
 
-- **`tbdd`** — Daemon that owns all state (SQLite via GRDB, tmux, git)
+- **`tbdd`** — Daemon that owns all state (SQLite via GRDB, git) and starts each
+  session in its own pty holder (`TBDHolder`), a process that outlives the daemon
+  and the app
 - **`tbd`** — CLI client for scripting and shell integration
 - **`TBDApp`** — SwiftUI app with embedded terminal views (SwiftTerm)
 
@@ -23,7 +25,9 @@ Three components communicate over a Unix socket using a JSON RPC protocol:
 
 - macOS 15+
 - Swift 6.0+ / Xcode 16+
-- [tmux](https://github.com/tmux/tmux) installed (`brew install tmux`)
+- [tmux](https://github.com/tmux/tmux) (`brew install tmux`), only to run the
+  whole test suite: `TBDDaemonLiveTests` starts a real tmux server for the
+  leftover-tmux probe to find. TBD itself runs no tmux.
 - [SwiftLint](https://github.com/realm/SwiftLint) installed (`brew install swiftlint`) — required for the pre-push git hook
 
 ## Build & Run
@@ -55,8 +59,9 @@ scripts/restart.sh --quick  # skip build
 
 `tbd update` moves the whole installation to the head of `main`. It builds in a
 dedicated clone under `~/tbd/updates/`, then hands the running daemon over to
-its successor rather than killing it, so tmux sessions survive and anything the
-new daemon's startup reconcile parks anyway is woken a few at a time.
+its successor rather than killing it. Sessions live in their pty holders, so
+they survive: the new daemon adopts each holder again, and anything its startup
+reconcile parks anyway is woken a few at a time.
 
 ```bash
 tbd version                       # what is running, and whether main has moved

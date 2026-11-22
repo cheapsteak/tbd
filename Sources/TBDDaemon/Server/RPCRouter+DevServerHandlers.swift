@@ -108,7 +108,8 @@ extension RPCRouter {
             // would be a duplicate server.
             if let tab = snapshot.tabs[name], case .unknown(let reason) = tab.status {
                 outcomes.append(.init(name: name, status: .failed, terminalID: tab.terminal.id,
-                                      message: Self.unreadableTabMessage(reason)))
+                                      message: Self.unknownTabMessage(
+                                          tab.terminal, reason: reason, worktree: worktree)))
                 continue
             }
             if let reason = snapshot.tabsUnreadable {
@@ -259,7 +260,8 @@ extension RPCRouter {
             // than report a stop that did not happen.
             if let tab, case .unknown(let reason) = tab.status {
                 outcomes.append(.init(name: name, status: .failed, terminalID: tab.terminal.id,
-                                      message: Self.unreadableTabMessage(reason)))
+                                      message: Self.unknownTabMessage(
+                                          tab.terminal, reason: reason, worktree: worktree)))
                 continue
             }
             if let reason = snapshot.tabsUnreadable {
@@ -323,6 +325,31 @@ extension RPCRouter {
 
     static func unreadableTabMessage(_ reason: String) -> String {
         "the state of its tab could not be read, so it may still be running; try again (\(reason))"
+    }
+
+    /// The refusal for a server whose tab is still on the tmux transport.
+    ///
+    /// Not "try again": TBD reads no tmux tab, so such a tab reads Unknown
+    /// for as long as it exists, and every retry would be refused the same
+    /// way. The remedy is the person's: end the tmux server the command may
+    /// still run in, then close the tab, after which a start opens a new tab
+    /// on the pty holder. Closing first would leave the command running in
+    /// tmux beside the new one.
+    static func tmuxTabMessage(server: String) -> String {
+        "its tab is still on the tmux transport, which TBD does not read, so it may still be "
+            + "running there. " + LeftoverTmuxSession.endingAdvice(server: server)
+            + " Then close the tab; the next start opens a new one on the pty holder."
+    }
+
+    /// The refusal for a server whose tab reads Unknown: the tmux remedy for
+    /// a tab still on tmux, and a retry for one whose state could not be read
+    /// this time.
+    static func unknownTabMessage(
+        _ terminal: TBDShared.Terminal, reason: String, worktree: LocalWorktree
+    ) -> String {
+        terminal.transport == .tmux
+            ? tmuxTabMessage(server: worktree.tmuxServer)
+            : unreadableTabMessage(reason)
     }
 
     /// Closes a server's tab with no outcome row of its own (the call's one

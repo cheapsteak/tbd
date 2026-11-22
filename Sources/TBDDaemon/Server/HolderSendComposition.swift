@@ -17,9 +17,9 @@ import TBDShared
 /// submits — measured at ~230 bytes and again at 4 KB, which is what shows it
 /// is not a size effect. Wrapping the body in `ESC[200~`…`ESC[201~` and putting
 /// the `\r` after the end marker makes the Enter provably outside the paste.
-/// That is the property the tmux arm had, by pasting and pressing Enter as two
-/// separate acts; this gets it without splitting the message, so a payload is
-/// still never split across a routing decision.
+/// Pasting and pressing Enter as two separate writes would also keep the Enter
+/// out of the paste, but would split one message across a routing decision;
+/// the wrapping gets the property in one write, so a payload is never split.
 ///
 /// **An empty body is never wrapped.** `--text "" --submit` is a real way to
 /// press Enter, and a bracketed paste of nothing is a pair of markers the child

@@ -289,9 +289,10 @@ fi
 
 # MARK: - Seed the tmux fallback
 
-# A login relaunch ignores LSEnvironment.PATH, so record this shell's tmux as
-# the saved fallback unless a usable one is already saved. Runs on every path,
-# --daemon-only included: the next login relaunch needs the file regardless.
+# Record this shell's tmux for the leftover-tmux probe, which reads the saved
+# path only for the binary's name, unless a usable one is already saved. Runs
+# on every path, --daemon-only included: the daemon reads the file whatever
+# this run restarts.
 seed_tmux_fallback "${TBD_HOME:-$HOME/tbd}"
 
 # MARK: - Stopping the app

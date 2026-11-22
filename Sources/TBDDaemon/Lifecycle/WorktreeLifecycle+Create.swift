@@ -1460,18 +1460,19 @@ extension WorktreeLifecycle {
         return configuredPreference.terminalKind
     }
 
-    /// Wraps a command so the user's shell takes over when it exits,
-    /// preventing tmux from destroying the window and jumping to another.
-    /// If the command is already the user's shell, returns it unchanged.
+    /// Wraps a command so the user's shell takes over when it exits, so the
+    /// tab keeps a live session at a prompt instead of ending with its
+    /// command. If the command is already the user's shell, returns it
+    /// unchanged.
     private func shellWrapped(_ command: String) -> String {
         if command == defaultShell { return command }
         return "\(shellEscape(command)); exec \(defaultShell)"
     }
 
-    /// Composes a spawn as a holder launch, through the same
-    /// `ShellLaunchComposer` the tmux park leg uses for its respawns, so a
-    /// session starts the *same* program in the *same* place whichever
-    /// transport its row is on:
+    /// Composes a spawn as a holder launch, through `ShellLaunchComposer`,
+    /// for every path that starts a session — a fresh spawn, the replacement a
+    /// wake or profile swap starts, a running shell's move onto the holder —
+    /// so each starts the *same* program in the *same* place:
     ///
     ///   - `envExportPrefixed` inlines `env` as `export K='v';` in front of the
     ///     command, so those variables land after every startup file has run —

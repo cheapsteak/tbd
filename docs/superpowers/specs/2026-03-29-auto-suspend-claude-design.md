@@ -49,9 +49,7 @@ Add to the `Terminal` model and database:
 
 ### `ClaudeStateDetector`
 
-New file: `Sources/TBDDaemon/Claude/ClaudeStateDetector.swift`
-
-Takes a `TmuxManager` dependency. `TmuxManager` needs new public methods: `capturePaneOutput(server:paneID:)` (wraps `capture-pane -p`) and `paneCurrentCommand(server:paneID:)` (wraps `list-panes -F "#{pane_current_command}"`).
+The detector was designed for `Sources/TBDDaemon/Claude/ClaudeStateDetector.swift`, which today holds only the session-id helpers (see the status note above). As designed, it took a `TmuxManager` dependency, and `TmuxManager` was to gain two public methods: `capturePaneOutput(server:paneID:)` (wrapping `capture-pane -p`) and `paneCurrentCommand(server:paneID:)` (wrapping `list-panes -F "#{pane_current_command}"`).
 
 #### `isIdle(server:paneID:) async -> Bool`
 

@@ -323,14 +323,35 @@ extension AppState {
         }
         arr[idx].label = newValue
         tabs[worktreeID] = arr
-        Task {
+        persistTabLabel(newValue, tabID: tabID, worktreeID: worktreeID)
+    }
+
+    /// Persists a tab's label override (`tab.setLabel`; nil clears it),
+    /// fire-and-forget, in the order the writes for that tab were asked for.
+    ///
+    /// Every RPC goes out on its own connection, so two writes for one tab
+    /// sent back to back can reach the daemon in either order: a rename made
+    /// just after a returning tab's label was saved could land first and be
+    /// overwritten by the save. So each write waits for the one asked for
+    /// before it for the same tab (`tabLabelWriteTails`), and the daemon
+    /// keeps the label asked for last. A failed write is logged and does not
+    /// stop the ones behind it.
+    func persistTabLabel(_ label: String?, tabID: UUID, worktreeID: UUID) {
+        let previous = tabLabelWriteTails[tabID]?.write
+        let token = UUID()
+        let write = Task {
+            if let previous { await previous.value }
             do {
-                try await tabLabelSetter(tabID, worktreeID, newValue)
+                try await tabLabelSetter(tabID, worktreeID, label)
             } catch {
-                logger.error("renameTab persist failed for \(tabID, privacy: .public): \(error, privacy: .public)")
+                logger.error("tab label persist failed for \(tabID, privacy: .public): \(error, privacy: .public)")
                 handleConnectionError(error)
             }
+            if tabLabelWriteTails[tabID]?.token == token {
+                tabLabelWriteTails.removeValue(forKey: tabID)
+            }
         }
+        tabLabelWriteTails[tabID] = (token: token, write: write)
     }
 
     /// Commit a note's rename field in the side region's strip: the note's
@@ -376,7 +397,9 @@ extension AppState {
         /// at, so the tab that terminal comes back as keeps its name.
         let tabLabel: String?
         /// Set when the delete failed without the daemon's answer — a
-        /// disconnect, a receive timeout, a response cut off. The next
+        /// disconnect, a receive timeout, a response cut off — and when it
+        /// was refused for a terminal a list dropped mid-delete and the
+        /// terminal list fetched after the refusal failed too. The next
         /// terminal list adopted for the worktree then decides
         /// (`adoptTerminalSnapshot`): a terminal it holds comes back as a
         /// tab, and one it lacks is gone. A list the daemon answered before
@@ -510,11 +533,13 @@ extension AppState {
     ///   next terminal list adopted for its worktree decides
     ///   (`ClosingTerminal.awaitingList`).
     ///
-    /// A refused or failed terminal that a terminal list dropped while its
-    /// delete was in flight is still held: the list predates the daemon's
-    /// answer, which a refusal says kept the terminal. It waits for the next
-    /// list, as a failed one does (`ClosingTerminal.awaitingList`), and a
-    /// refusal still shows its alert.
+    /// A terminal list that lands while a delete is in flight can drop the
+    /// terminal, since it predates the daemon's answer; the close still
+    /// holds it. A refusal has put it back from the list read after the
+    /// refusal (`deleteTerminal`), so it comes back like any other. One
+    /// still missing — its delete got no answer, or the list after a refusal
+    /// could not be read — waits for the next list
+    /// (`ClosingTerminal.awaitingList`), and a refusal still shows its alert.
     ///
     /// A refused or failed terminal that has left the app's state meanwhile —
     /// its worktree was archived while the delete was in flight — has no tab
@@ -552,16 +577,21 @@ extension AppState {
     /// tab of its own at the end of the strip, and each that the closed tab
     /// was rooted at takes that tab's label, persisted under the new tab's
     /// ID — a split's tab had an ID of its own, so the label stored under it
-    /// would not reach the new tab after a restart. A composer send each
-    /// one's close held is answered now (`releaseSessionStartWaitersHeldByClose`).
-    /// With no terminals named it is a plain reconcile.
+    /// would not reach the new tab after a restart. The label moves rather
+    /// than copies: when the closed tab's ID differs from the new one, the
+    /// label stored under the old ID is cleared, so no row is left naming a
+    /// tab that is gone. Both writes go through `persistTabLabel`, so a
+    /// rename of the returning tab made after this lands after the save.
+    /// A composer send each one's close held is answered now
+    /// (`releaseSessionStartWaitersHeldByClose`). With no terminals named it
+    /// is a plain reconcile.
     func bringBackClosedTerminals(
         _ terminalIDs: [UUID], worktreeID: UUID, terminals worktreeTerminals: [TBDShared.Terminal]
     ) {
-        var labels: [UUID: String] = [:]
+        var labels: [UUID: (label: String, closedTabID: UUID)] = [:]
         for terminalID in terminalIDs {
-            if let label = closingTerminals[terminalID]?.tabLabel {
-                labels[terminalID] = label
+            if let closing = closingTerminals[terminalID], let label = closing.tabLabel {
+                labels[terminalID] = (label: label, closedTabID: closing.tabID)
             }
             finishClosingTerminal(terminalID)
             releaseSessionStartWaitersHeldByClose(terminalID: terminalID)
@@ -570,23 +600,25 @@ extension AppState {
         reconcileTabs(worktreeID: worktreeID, terminals: worktreeTerminals)
         guard !labels.isEmpty, var arr = tabs[worktreeID] else { return }
         var relabelled: [(tabID: UUID, label: String)] = []
+        var vacated: [UUID] = []
         for index in arr.indices where !tabIDsBefore.contains(arr[index].id) {
             guard case .terminal(let terminalID) = arr[index].content,
-                  let label = labels[terminalID], arr[index].label != label else { continue }
-            arr[index].label = label
-            relabelled.append((tabID: arr[index].id, label: label))
-        }
-        guard !relabelled.isEmpty else { return }
-        tabs[worktreeID] = arr
-        for (tabID, label) in relabelled {
-            Task {
-                do {
-                    try await tabLabelSetter(tabID, worktreeID, label)
-                } catch {
-                    logger.error("label persist for a returning tab \(tabID, privacy: .public) failed: \(error, privacy: .public)")
-                    handleConnectionError(error)
-                }
+                  let moved = labels[terminalID] else { continue }
+            if moved.closedTabID != arr[index].id {
+                vacated.append(moved.closedTabID)
             }
+            guard arr[index].label != moved.label else { continue }
+            arr[index].label = moved.label
+            relabelled.append((tabID: arr[index].id, label: moved.label))
+        }
+        if !relabelled.isEmpty {
+            tabs[worktreeID] = arr
+        }
+        for (tabID, label) in relabelled {
+            persistTabLabel(label, tabID: tabID, worktreeID: worktreeID)
+        }
+        for closedTabID in vacated {
+            persistTabLabel(nil, tabID: closedTabID, worktreeID: worktreeID)
         }
     }
 

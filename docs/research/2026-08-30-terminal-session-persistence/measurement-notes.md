@@ -2,8 +2,8 @@
 
 Companion to the two research records in this directory. Everything here was
 measured on a loaded development machine (48 GB, ~75 concurrent agent
-processes) with the probes in `scripts/diag/`, and is included because the
-design question turns on *where* the latency comes from, not merely that it
+processes) with the probes listed under Reproducing, and is included because
+the design question turns on *where* the latency comes from, not merely that it
 exists.
 
 ## Keystroke-to-visible, raw pty against tmux
@@ -118,6 +118,9 @@ iTerm2 never reads (stall, no loss), and tmux and its modern equivalents read
 into a headless VT (neither, at the cost of a process in the path).
 
 ## Reproducing
+
+Both scripts are at `32defab43`, the last commit that carries them
+(`git show 32defab43:scripts/diag/<name>`).
 
 - `scripts/diag/tmux-vs-rawpty-idle.py` — the raw-pty/tmux comparison above.
 - `scripts/diag/tmux-server-contention.py` — interleaves a busy server against a

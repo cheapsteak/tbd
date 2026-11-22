@@ -13,9 +13,10 @@ for one", because the raw arm is the design's central claim and a gate that
 assumes the claim measures nothing.
 
 Nothing in TBD can take that measurement. The probes committed with the
-transport spec (`scripts/diag/tmux-vs-rawpty-idle.py`,
-`scripts/diag/tmux-server-contention.py`) drive a pty the script owns; they
-never pass through TBD's app, its reader threads, or its emulator. The
+transport spec (`scripts/diag/tmux-vs-rawpty-idle.py` and
+`scripts/diag/tmux-server-contention.py`, both at `32defab43`) drive a pty the
+script owns; they never pass through TBD's app, its reader threads, or its
+emulator. The
 instrument that did cover TBD's own output path (PR #739) measured a
 main-thread hop that no longer exists, since output now feeds synchronously on
 the IO thread, and it only ever covered the tmux arm, because a holder-backed
