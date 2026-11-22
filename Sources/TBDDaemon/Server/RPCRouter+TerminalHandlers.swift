@@ -5092,7 +5092,9 @@ extension RPCRouter {
         // alone because no wake would resume Claude there. The others
         // (holder row, already parked, stale incarnation) are routine. Such a
         // tab still on tmux forgets the ended session's id, which would
-        // otherwise keep the resume gate refusing it
+        // otherwise keep the resume gate refusing it — only when the report
+        // names that session, so a late report from an earlier hand-started
+        // Claude leaves a newer one's id alone
         // (`TerminalStore.clearEndedHandStartedSession`).
         if !stamped, let row = try? await db.terminals.get(id: params.terminalID),
            !row.isClaudeTab {
@@ -5100,7 +5102,8 @@ extension RPCRouter {
             do {
                 cleared = try await db.terminals.clearEndedHandStartedSession(
                     id: params.terminalID,
-                    reportedIncarnationID: params.sessionIncarnationID)
+                    reportedIncarnationID: params.sessionIncarnationID,
+                    endedSessionID: params.sessionID)
             } catch {
                 logger.error("""
                     sessionEnded: forgetting the ended session id of terminal \

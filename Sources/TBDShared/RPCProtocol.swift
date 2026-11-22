@@ -4966,10 +4966,25 @@ public struct TerminalSessionEndedParams: Codable, Sendable, Equatable {
     /// running daemon: an older CLI sends no `reason`, which reads as "we do not
     /// know" and parks nothing.
     public let reason: String?
-    public init(terminalID: UUID, sessionIncarnationID: UUID? = nil, reason: String? = nil) {
+    /// The `session_id` of the session that ended, from the same hook payload.
+    ///
+    /// A shell tab can run one hand-started Claude after another under the
+    /// same incarnation, so the incarnation alone cannot tell which of them a
+    /// report is about; this can. The daemon forgets a shell tab's recorded
+    /// session only when it is the one named here, so a late report from an
+    /// earlier Claude leaves a newer one's id alone.
+    ///
+    /// Optional because an older CLI sends none. A report that names no
+    /// session forgets nothing.
+    public let sessionID: String?
+    public init(
+        terminalID: UUID, sessionIncarnationID: UUID? = nil, reason: String? = nil,
+        sessionID: String? = nil
+    ) {
         self.terminalID = terminalID
         self.sessionIncarnationID = sessionIncarnationID
         self.reason = reason
+        self.sessionID = sessionID
     }
 }
 

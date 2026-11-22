@@ -354,7 +354,11 @@ park in flight is no reason to ask, since its session ended when it was parked.
 A shell tab in which Claude was started by hand carries that Claude's session
 id while it runs, and forgets it when Claude's `SessionEnd` reports its
 process gone (`TerminalStore.clearEndedHandStartedSession`), so a shell that
-outlives its Claude does not keep the session refused.
+outlives its Claude does not keep the session refused. The report names the
+session that ended, and the tab forgets its id only when it is that one: a
+shell can run one hand-started Claude after another, and a late report from
+an earlier one must not clear the id of the one still running. A report that
+names no session, from an older CLI, forgets nothing.
 Outside a revive, a session neither names starts without more: one read of each
 of two indexes, each holding only the rows it can match, which is all a wake of
 a parked holder row pays, and a History pane resume or Closed Terminals reopen

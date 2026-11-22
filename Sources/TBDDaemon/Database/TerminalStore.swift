@@ -1993,14 +1993,22 @@ public struct TerminalStore: Sendable {
     /// pty holder is left alone (its job's exit answers for it, and the gate
     /// never reads it), as is a Claude or Codex tab, whose id is its own
     /// session, and a report whose incarnation is not the row's.
+    ///
+    /// Only the session that ended is forgotten: `endedSessionID` must be the
+    /// id the row carries. One shell can run one hand-started Claude after
+    /// another under the same incarnation, so a late `SessionEnd` from an
+    /// earlier one would otherwise forget the id of the one still running,
+    /// and the gate would let a second start of it through. A report that
+    /// names no session forgets nothing.
     @discardableResult
     public func clearEndedHandStartedSession(
-        id: UUID, reportedIncarnationID: UUID?
+        id: UUID, reportedIncarnationID: UUID?, endedSessionID: String?
     ) async throws -> Bool {
-        try await writer.write { db in
+        guard let endedSessionID, !endedSessionID.isEmpty else { return false }
+        return try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
                   record.transport != TerminalTransport.holder.rawValue,
-                  record.claudeSessionID != nil,
+                  record.claudeSessionID == endedSessionID,
                   let terminal = record.toModel(),
                   !terminal.isClaudeTab, !terminal.isCodexTerminal,
                   record.sessionIncarnationID == reportedIncarnationID?.uuidString else {

@@ -855,7 +855,7 @@ struct TmuxResumeGateRPCTests {
 
         let ended = try await f.send(
             RPCMethod.terminalSessionEnded,
-            TerminalSessionEndedParams(terminalID: row.id, reason: "exit"))
+            TerminalSessionEndedParams(terminalID: row.id, reason: "exit", sessionID: Self.sessionID))
         #expect(ended.success, "error: \(ended.error ?? "nil")")
         let after = try #require(try await f.db.terminals.get(id: row.id))
         #expect(after.claudeSessionID == nil)
@@ -864,6 +864,32 @@ struct TmuxResumeGateRPCTests {
         let resumed = try await f.send(RPCMethod.sessionResume, params)
         #expect(resumed.success, "error: \(resumed.error ?? "nil")")
         #expect(f.probe.servers == ["tbd-acme"])
+    }
+
+    /// A shell can run one hand-started Claude after another under the same
+    /// incarnation. A `SessionEnd` from an earlier one that arrives after a
+    /// newer one recorded its id names the earlier session, so the tab keeps
+    /// the newer id and the gate keeps refusing a second start of it. A
+    /// report that names no session, from an older CLI, forgets nothing
+    /// either.
+    @Test("a late SessionEnd from an earlier hand-started Claude keeps the newer session's id",
+          arguments: ["sess-acme-earlier", nil] as [String?])
+    func aLateSessionEndFromAnEarlierSessionKeepsHoldingTheGate(endedSessionID: String?) async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let row = try await openATmuxRow(f, in: f.worktree, kind: .shell)
+
+        let ended = try await f.send(
+            RPCMethod.terminalSessionEnded,
+            TerminalSessionEndedParams(terminalID: row.id, reason: "exit", sessionID: endedSessionID))
+        #expect(ended.success, "error: \(ended.error ?? "nil")")
+        #expect(try await f.db.terminals.get(id: row.id) == row,
+                "a report naming another session changed the tab")
+
+        let refused = try await f.send(
+            RPCMethod.sessionResume,
+            SessionResumeParams(worktreeID: f.worktree.id, identity: identity))
+        try await expectRefused(refused, f, terminalsBefore: [row], marks: [])
     }
 
     /// A `SessionEnd` whose reason is not a process exit (`clear`) leaves the
@@ -887,7 +913,8 @@ struct TmuxResumeGateRPCTests {
     }
 
     /// The store's guards: only a tab that is not an agent's, still on tmux,
-    /// with the report's incarnation, forgets its id.
+    /// with the report's incarnation and the session the report names,
+    /// forgets its id.
     @Test func forgettingAnEndedHandStartedSessionSparesAgentTabsHolderRowsAndStaleReports() async throws {
         let f = try await fixture()
         defer { f.tearDown() }
@@ -904,16 +931,22 @@ struct TmuxResumeGateRPCTests {
 
         for spared in [claudeTab, codexTab, holderShell] {
             let cleared = try await f.db.terminals.clearEndedHandStartedSession(
-                id: spared.id, reportedIncarnationID: nil)
+                id: spared.id, reportedIncarnationID: nil, endedSessionID: Self.sessionID)
             #expect(!cleared, "terminal \(spared.id) forgot its session id")
             #expect(try await f.db.terminals.get(id: spared.id)?.claudeSessionID == Self.sessionID)
         }
         let stale = try await f.db.terminals.clearEndedHandStartedSession(
-            id: tmuxShell.id, reportedIncarnationID: UUID())
+            id: tmuxShell.id, reportedIncarnationID: UUID(), endedSessionID: Self.sessionID)
         #expect(!stale)
         #expect(try await f.db.terminals.get(id: tmuxShell.id)?.claudeSessionID == Self.sessionID)
+        for otherSession in ["sess-acme-earlier", "", nil] as [String?] {
+            let other = try await f.db.terminals.clearEndedHandStartedSession(
+                id: tmuxShell.id, reportedIncarnationID: incarnation, endedSessionID: otherSession)
+            #expect(!other, "a report naming \(otherSession ?? "no session") forgot the tab's session id")
+            #expect(try await f.db.terminals.get(id: tmuxShell.id)?.claudeSessionID == Self.sessionID)
+        }
         let current = try await f.db.terminals.clearEndedHandStartedSession(
-            id: tmuxShell.id, reportedIncarnationID: incarnation)
+            id: tmuxShell.id, reportedIncarnationID: incarnation, endedSessionID: Self.sessionID)
         #expect(current)
         #expect(try await f.db.terminals.get(id: tmuxShell.id)?.claudeSessionID == nil)
     }

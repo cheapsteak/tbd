@@ -61,4 +61,37 @@ import Testing
         #expect(SessionEndCommand.hookReason(from: payload("[]")) == nil)
         #expect(SessionEndCommand.hookReason(from: payload(#"{"reason":42}"#)) == nil)
     }
+
+    // MARK: - session_id
+
+    /// The session id names which session ended, so the daemon forgets a
+    /// shell tab's recorded session only when it is that one.
+    @Test("the session id is lifted out of the payload, beside the reason")
+    func sessionIDPresent() {
+        #expect(SessionEndCommand.hookSessionID(
+            from: payload(#"{"session_id":"sess-acme","reason":"other","cwd":"/tmp"}"#)) == "sess-acme")
+    }
+
+    /// Decoded apart from the reason: a malformed reason does not lose the
+    /// session, and a malformed session does not lose the reason.
+    @Test("a malformed reason does not lose the session id, nor the other way round")
+    func sessionIDIndependentOfReason() {
+        #expect(SessionEndCommand.hookSessionID(
+            from: payload(#"{"session_id":"sess-acme","reason":42}"#)) == "sess-acme")
+        #expect(SessionEndCommand.hookReason(
+            from: payload(#"{"session_id":42,"reason":"other"}"#)) == "other")
+    }
+
+    @Test("a payload that names no session, or names it badly, names none")
+    func sessionIDAbsent() {
+        #expect(SessionEndCommand.hookSessionID(from: Data()) == nil)
+        #expect(SessionEndCommand.hookSessionID(from: payload("{}")) == nil)
+        #expect(SessionEndCommand.hookSessionID(from: payload(#"{"session_id":""}"#)) == nil)
+        #expect(SessionEndCommand.hookSessionID(from: payload(#"{"session_id":null}"#)) == nil)
+        #expect(SessionEndCommand.hookSessionID(from: payload(#"{"session_id":42}"#)) == nil)
+        #expect(SessionEndCommand.hookSessionID(from: payload("{not json")) == nil)
+        let oversized = payload(
+            #"{"session_id":"sess-acme","pad":""# + String(repeating: "x", count: 1 << 20) + #""}"#)
+        #expect(SessionEndCommand.hookSessionID(from: oversized) == nil)
+    }
 }
