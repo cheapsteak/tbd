@@ -43,6 +43,20 @@ struct DelimitedTableLoaderTests {
         #expect(t.rows == [["1", "2"]])
     }
 
+    /// The open follows symlinks, so a link to a regular file is that file.
+    @Test("a symlink to a CSV file loads the file")
+    func symlinkToACsvFileLoads() throws {
+        let dir = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("target.csv")
+        try Data("a,b\n1,2\n".utf8).write(to: file)
+        let link = dir.appendingPathComponent("link.csv")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
+        let t = try loadedTable(DelimitedTableLoader.load(path: link.path))
+        #expect(t.titles == ["a", "b"])
+        #expect(t.rows == [["1", "2"]])
+    }
+
     /// 14 bytes against a 10-byte limit: the first 10 end after "222\n", and
     /// the row the cut may have split ("222") is dropped.
     @Test("the byte limit cuts the file and drops its last row")
