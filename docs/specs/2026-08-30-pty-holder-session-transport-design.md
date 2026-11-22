@@ -1084,14 +1084,14 @@ met.
   measurement and a felt absence of lag is a report, and reading the second as
   the first is how a design talks itself into a number it never took.
 
-  The probes committed alongside this design —
+  Two probes drew the curve this design rests on:
   `scripts/diag/tmux-vs-rawpty-idle.py` for the raw-versus-tmux echo comparison
-  and `scripts/diag/tmux-server-contention.py` for the pane-count control — and
-  the in-app instrument behind `enableTerminalLatencyDiagnostic`, which takes
-  one number on both transports through a single seam, remain the tools for
-  re-drawing the latency curve whenever a question about it arises. A design
-  justified by a latency curve has to ship the tool that can re-draw it. They
-  are instruments, not gates.
+  and `scripts/diag/tmux-server-contention.py` for the pane-count control, both
+  at `32defab43`, the last commit that carries them. The in-app instrument
+  behind `enableTerminalLatencyDiagnostic` takes one number on both transports
+  through a single seam, inside TBD, and is the tool for re-drawing the curve
+  whenever a question about it arises. A design justified by a latency curve
+  has to ship the tool that can re-draw it. These are instruments, not gates.
 
   **"No double-reader violations" is only evidence if something can see one.**
   A double read is silent by construction — each `read()` takes bytes the other
@@ -1187,9 +1187,10 @@ of which is carried into this design:
   redistributes panes without removing a single wakeup. The supporting
   measurement (a busy server against a private one-pane server, 34.1 vs
   36.5 ms p50 under load) is **weaker than it looks and should not be leaned
-  on**: `tmux-server-contention.py` forks a `tmux send-keys` client per
-  sample, so both arms carry a fork+exec that dominates the reading — which is
-  why those numbers sit ~30× above the 1.1 ms p50 the fork-avoiding method
+  on**: `scripts/diag/tmux-server-contention.py` (at `32defab43`) forks a
+  `tmux send-keys` client per sample, so both arms carry a fork+exec that
+  dominates the reading — which is why those numbers sit ~30× above the
+  1.1 ms p50 the fork-avoiding method
   measures for quiet tmux. Both arms share the method, so a large difference
   would still have surfaced; but at that resolution the run cannot rule out a
   difference of a few milliseconds. It supports "pane count is not a large
