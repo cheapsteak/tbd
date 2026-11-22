@@ -600,6 +600,64 @@ struct TmuxResumeGateTests {
         #expect(holder.launch(for: resumed.id) != nil)
     }
 
+    // MARK: - Recovery's finish of an archived restore
+
+    /// A revive the daemon died in after re-adding the checkout and opening
+    /// one tab, before it relaunched the archived agent tab: recovery finishes
+    /// it, and asks the resume gate first, about the session it relaunches and
+    /// the worktree's own tmux server, which an earlier build's archive could
+    /// leave running that session with no row or mark naming it. Nothing
+    /// names the session here, so only the worktree's own server is asked.
+    /// While it may run, the row is left active with its whole record for an
+    /// explicit retry and nothing is launched; once it is gone, the restore
+    /// relaunches the tab on the holder and clears the record.
+    @Test(arguments: [LeftoverTmuxServerState.running, .absent])
+    func recoveryOfAnArchivedRestoreAsksTheResumeGateFirst(
+        serverState: LeftoverTmuxServerState
+    ) async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
+        let probe = RecordingLeftoverTmuxProbe { _ in serverState }
+        let lifecycle = makeLifecycle(db: db, holder: holder, leftoverTmuxProbe: probe.probe)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let worktree = try await lifecycle.beginCreateWorktree(repoID: repo.id)
+        try await db.worktrees.updateStatus(id: worktree.id, status: .creating)
+        // The tab the revive opened before the daemon died: a primary, so
+        // recovery reads the restore as one with no hook to wait for.
+        _ = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: "zsh", kind: .shell, transport: .holder)
+        let sessionID = UUID().uuidString.lowercased()
+        let tabs = [ArchivedAgentTab(
+            identity: AgentSessionIdentity(agentKind: .claude, sessionID: sessionID),
+            ordinal: 0, isPrimary: true)]
+        try await db.worktrees.setArchivedAgentTabs(id: worktree.id, tabs: tabs)
+        #expect(try await db.terminalHistory.liveOnTmuxServers(sessionIDs: [sessionID]).isEmpty)
+        #expect(try await db.terminals.liveTmuxServers(sessionIDs: [sessionID]).isEmpty)
+
+        for task in await lifecycle.recoverCreatingWorktrees() { await task.value }
+
+        #expect(probe.servers == [worktree.tmuxServer])
+        let row = try #require(try await db.worktrees.get(id: worktree.id))
+        #expect(row.status == .active)
+        let relaunched = try await db.terminals.list(worktreeID: worktree.id)
+            .filter { $0.claudeSessionID == sessionID }
+        switch serverState {
+        case .running:
+            #expect(row.archivedAgentTabs == tabs)
+            #expect(relaunched.isEmpty)
+            #expect(holder.launches.isEmpty)
+        case .absent:
+            #expect(row.archivedAgentTabs == nil)
+            let tab = try #require(relaunched.first)
+            #expect(relaunched.count == 1)
+            #expect(tab.transport == .holder)
+            #expect(holder.launches.contains { $0.terminalID == tab.id })
+        }
+    }
+
     // MARK: - The refusal
 
     @Test func theRefusalCarriesTheTmuxCodeAndTheCommandThatEndsTheServer() {
