@@ -1379,8 +1379,8 @@ extension RPCRouter {
     ///   - **Gone, with a session to resume** – Claude, or Codex with a
     ///     recorded thread – the row is parked with its identity kept, and the
     ///     parked row is returned. Nothing is spawned. A person's wake of a
-    ///     row parked on tmux moves it to the pty holder and resumes it there,
-    ///     and the app's parked notice says a click does that.
+    ///     row parked on tmux — selecting it in the app, a click in its parked
+    ///     pane, a send — moves it to the pty holder and resumes it there.
     ///   - **Gone, with nothing to resume** – a shell, an agent tab whose
     ///     session never began, a hook tab – nothing a park could keep, so it
     ///     is refused and left exactly as it was, with a plain message: tmux

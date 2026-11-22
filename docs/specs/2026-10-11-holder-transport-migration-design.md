@@ -45,11 +45,20 @@ initiates it. Reconcile parks a live row whose tmux server is gone, which keeps
 the session resumable, but it never rewrites a transport.
 
 A person's wake of a parked session is such a choice. Waking it starts its
-program, at a moment its owner picked: a click in its pane, a message sent to it
-from the composer or the phone, `tbd terminal wake`, `tbd terminal resume` or
-`tbd worktree resume`. For a row whose park is complete the move only rewrites
-the row, so moving it first starts nothing the wake would not have started, and
-the two gestures compose: the wake moves the row to the holder and resumes it
+program, at a moment its owner picked: selecting it in the app, a click in its
+parked pane, a message sent to it from the composer or the phone,
+`tbd terminal wake`, `tbd terminal resume` or `tbd worktree resume`. Selecting
+is the app's wake on focus, the same wake that resumes any parked session a
+person selects: selecting a worktree wakes the session it shows, or its first
+parked session when the one it shows is not parked, and activating a tab wakes
+the parked sessions in that tab. As it does for a holder session, it passes
+over a session parked by hand or stamped as exited, which wakes only when asked
+for directly. The selection is the person's act, so its wake moves a row as a
+click does.
+
+For a row whose park is complete the move only rewrites the row, so moving it
+first starts nothing the wake would not have started, and the two gestures
+compose: the wake moves the row to the holder and resumes it
 there, in one step, with the wake's own parameters. The move is the one the
 per-session action makes (`TerminalTransportMigrator.migrate`), so a row whose
 park is still in flight is refused while its tmux server may run, and a row the
@@ -63,10 +72,13 @@ wake resumes the row there.
 
 A wake the daemon decides on its own — session restore, a limit resume, a
 queued prompt — is no owner's choice of moment, so it moves nothing and is
-refused with the reason that names the move (the backstop, below). Which wakes
-are a person's is decided by the declared actor's kind alone: every kind but
-`daemon` (`TransportMigrationOnWake.isPersonStarted`). The actor is
-self-declared, so the rule says who chose the moment, not who may.
+refused with the reason that names the move (the backstop, below). Nothing
+else that runs without a person moves a row either: reconcile parks a row and
+never rewrites its transport, and `tbd update` wakes only sessions already on
+the holder. Which wakes are a person's is decided by the declared actor's kind
+alone: every kind but `daemon` (`TransportMigrationOnWake.isPersonStarted`).
+The actor is self-declared, so the rule says who chose the moment, not who
+may.
 
 ## What it is not
 
@@ -501,9 +513,9 @@ One RPC method, exposed three ways: a per-session action in the app's row
 context menu, the CLI equivalent, and a fleet-wide run. The run's report is its
 product — a person needs to know what did not move and why, not merely that
 something did. A person's wake of a parked row reaches the same move through the
-wake RPCs, so the app's parked pane, its composer and the phone offer the
-ordinary click or send for a row parked on tmux, and say that it resumes on the
-pty holder.
+wake RPCs, so a row parked on tmux comes back as any parked row does: selecting
+it in the app, a click in its parked pane, or a send from the composer or the
+phone. The parked pane says that it resumes on the pty holder.
 
 **The fleet run is composed from the per-session move on both surfaces**, and
 each surface has its own reason for that. The daemon's `--all` loops its own

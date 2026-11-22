@@ -533,9 +533,11 @@ enum HibernatedBannerModel {
         "\(parkedOnTmuxLead) — open this tab in its worktree to resume it on the pty holder"
 
     /// The notice for a row parked on the tmux transport. The daemon starts
-    /// sessions only on the pty holder, so a click's wake moves the row there
-    /// first and resumes it, and the notice says so. Every park reason gets
-    /// this one: the move is what the person will see, whatever parked it.
+    /// sessions only on the pty holder, so a person's wake — selecting the
+    /// tab, a click in the pane, a send — moves the row there first and
+    /// resumes it. The notice names the click, the gesture the pane itself
+    /// offers. Every park reason gets this one: the move is what the person
+    /// will see, whatever parked it.
     static let parkedOnTmuxMessage =
         "\(parkedOnTmuxLead) — click anywhere in the pane to resume it on the pty holder"
 

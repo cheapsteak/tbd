@@ -136,8 +136,9 @@ enum TerminalPanePresentation {
     /// it finds its server gone (at startup, on `tbd cleanup`, and on Check
     /// Again), so a row still live on tmux is one whose server outlived the
     /// update and may still be running. A parked tmux row keeps the parked
-    /// pane, whose click moves it to the pty holder and resumes it; a holder
-    /// row, parked or live, is a terminal as ever.
+    /// pane, and a person's wake of it — selecting it, a click in the pane, a
+    /// send — moves it to the pty holder and resumes it; a holder row, parked
+    /// or live, is a terminal as ever.
     static func showsLeftoverTmuxNotice(for terminal: Terminal) -> Bool {
         terminal.transport == .tmux && !terminal.isParked
     }

@@ -155,9 +155,10 @@ park live sessions wholesale. Four things make the handover safe.
   Only sessions on the pty holder are woken. A session parked on the tmux
   transport is left parked and not counted: the daemon starts sessions only on
   the holder, so waking it would move it there, and moving a session is its
-  owner's choice, not an update's. A click in its pane moves it and resumes
-  it; **Move to Holder (No tmux)** in the tab's menu, or `tbd terminal
-  migrate`, moves it, and a wake after that resumes it.
+  owner's choice, not an update's, so the update itself never moves one.
+  Selecting it in the app, clicking its parked pane or sending to it moves it
+  and resumes it; **Move to Holder (No tmux)** in the tab's menu, or
+  `tbd terminal migrate`, moves it, and a wake after that resumes it.
 
 `--wake-only` runs just that last step against a daemon that is already new,
 for the case where an update finished but sessions were left parked.
