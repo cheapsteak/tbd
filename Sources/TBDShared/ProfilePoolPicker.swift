@@ -31,8 +31,14 @@ public struct ProfilePoolCandidate: Sendable, Equatable {
     /// Whether this profile is the global configured default.
     public var isConfiguredDefault: Bool
     /// The profile's latest Fable reading, if it has ever been checked. Only
-    /// consulted when the pick asks for a Fable model (`requiresFable`).
+    /// consulted under `requiresFable`, for a candidate whose `model` is a
+    /// Fable model.
     public var fable: FableAvailability?
+    /// The model a session placed on this profile runs, as far as TBD knows:
+    /// the spawn's own model when it names one, else the profile's configured
+    /// model. nil when neither names one (the account's default model then
+    /// applies, which TBD cannot see). Only the Fable rule reads it.
+    public var model: String?
 
     public init(
         profileID: UUID,
@@ -44,7 +50,8 @@ public struct ProfilePoolCandidate: Sendable, Equatable {
         liveSessions: Int,
         sortOrder: Int,
         isConfiguredDefault: Bool,
-        fable: FableAvailability? = nil
+        fable: FableAvailability? = nil,
+        model: String? = nil
     ) {
         self.profileID = profileID
         self.kind = kind
@@ -56,6 +63,7 @@ public struct ProfilePoolCandidate: Sendable, Equatable {
         self.sortOrder = sortOrder
         self.isConfiguredDefault = isConfiguredDefault
         self.fable = fable
+        self.model = model
     }
 
     /// Whether a profile holds a credential it could start a session with.
@@ -125,7 +133,8 @@ public enum ProfilePoolVerdict: Sendable, Equatable {
     /// The profile is treated as full.
     case exhausted
 
-    /// The pick asked for a Fable model and this profile's Fable reading is
+    /// The pick may need Fable (`requiresFable`), a session placed on this
+    /// profile would run a Fable model (its `model`), and its Fable reading is
     /// fresh and says it is out of usage credits. Never chosen, and never a
     /// fallback: the fallback tiers only name profiles turned away for their
     /// usage reading, and this verdict is assigned before that is looked at.
@@ -273,8 +282,9 @@ public enum ProfilePoolPicker {
     ///     this set are marked `.sameAccount` even if otherwise eligible.
     ///   - now: The current time for staleness assessment.
     ///   - policy: The usage ceiling and reading-age thresholds.
-    ///   - requiresFable: The spawn asks for a Fable model: profiles whose
-    ///     fresh Fable reading is `out` get `.fableOut` and are never chosen.
+    ///   - requiresFable: The spawn may run a Fable model: a candidate whose
+    ///     `model` is a Fable model and whose fresh Fable reading is `out` gets
+    ///     `.fableOut` and is never chosen.
     ///
     /// - Returns: A decision with the chosen profile id (nil if none eligible),
     ///   verdicts for every candidate, and the fallback when nothing is eligible.
@@ -427,11 +437,12 @@ public enum ProfilePoolPicker {
                 continue
             }
 
-            // Rule 4b: a Fable request never lands on a profile known to be out
-            // of Fable credits. Before the reading rules, so an out profile can
-            // not reach the fallback tiers through a stale or over-ceiling
-            // reading.
-            if requiresFable, candidate.fable?.isOut(now: now) == true {
+            // Rule 4b: a session that would run a Fable model never lands on a
+            // profile known to be out of Fable credits. Before the reading
+            // rules, so an out profile can not reach the fallback tiers through
+            // a stale or over-ceiling reading.
+            if requiresFable, FableModel.isFable(candidate.model),
+               candidate.fable?.isOut(now: now) == true {
                 verdicts[candidate.profileID] = .fableOut
                 continue
             }

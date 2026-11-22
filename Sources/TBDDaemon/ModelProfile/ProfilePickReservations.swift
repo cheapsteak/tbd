@@ -74,7 +74,7 @@ public actor ProfilePickReservations {
     ///   - candidates: The candidate list as read from the stores.
     ///   - pickTime: The time the picker judges snapshot staleness against.
     ///   - policy: The usage ceiling and reading-age thresholds.
-    ///   - requiresFable: The spawn asks for a Fable model (see `ProfilePoolPicker.pick`).
+    ///   - requiresFable: The spawn may run a Fable model (see `ProfilePoolPicker.pick`).
     public func pickAndReserve(
         candidates: [ProfilePoolCandidate],
         pickTime: Date,
