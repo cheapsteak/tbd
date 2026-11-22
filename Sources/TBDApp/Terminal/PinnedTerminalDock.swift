@@ -174,6 +174,22 @@ private struct PinnedTerminalCell: View {
                     attachRetry: appState.terminalAttachRetries[terminal.id] ?? 0,
                     engineOverride: appState.terminalEngineOverrides[terminal.id]))
             } else if let worktree {
+                // A row a person's wake moves off tmux reaches this branch
+                // still parked: the daemon publishes the moved row
+                // (`.terminalReplaced`, now on the holder) before the wake
+                // that follows spawns its holder, and the identity below does
+                // not change when that wake lands — a holder row's window id
+                // is empty before and after, and only an account switch's
+                // wake bumps the attach epoch. The panel mounted on the moved
+                // row still picks the session up. Its attach is refused with
+                // an error, never the ended status: no holder pid is recorded
+                // on a moved row, and the daemon reads none as ended
+                // (`HolderAttachEndedRPCTests`). An error is retried on
+                // `HolderAttachRetry`'s backoff, within its 15 s deadline,
+                // and the first attempt after the wake has spawned the
+                // session attaches (`HolderAttachRetryTests`). A wake slower
+                // than that leaves the attach-failed placard, whose Retry
+                // rebuilds the panel.
                 TerminalPanelView(
                     terminalID: terminal.id,
                     worktreePath: worktree.path
