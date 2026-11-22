@@ -72,16 +72,20 @@ import TestSupport
         case wake
         case resume
 
-        func request(_ terminalID: UUID, prompt: String? = nil) throws -> RPCRequest {
+        func request(
+            _ terminalID: UUID, prompt: String? = nil, actor: ActuationActor? = nil
+        ) throws -> RPCRequest {
             switch self {
             case .wake:
                 return try RPCRequest(
                     method: RPCMethod.terminalWake,
-                    params: TerminalWakeParams(terminalID: terminalID, prompt: prompt))
+                    params: TerminalWakeParams(terminalID: terminalID, prompt: prompt),
+                    actor: actor)
             case .resume:
                 return try RPCRequest(
                     method: RPCMethod.terminalResume,
-                    params: TerminalResumeParams(terminalID: terminalID))
+                    params: TerminalResumeParams(terminalID: terminalID),
+                    actor: actor)
             }
         }
     }
@@ -155,18 +159,21 @@ import TestSupport
         }
     }
 
-    /// A row still on tmux is refused by both verbs with
+    /// A rail's wake of a row still on tmux is refused by both verbs with
     /// `RPCErrorCode.terminalOnTmux`, as every other request such a row
     /// refuses is, so a caller can branch without matching the text. A live
     /// row's refusal says its session may still be running in tmux and how to
-    /// end it; a parked row's names `tbd terminal migrate`. Nothing is woken
-    /// and the row is left as it was.
+    /// end it; a parked row's says how it moves to the pty holder, since a
+    /// rail's wake does not move it. Nothing is woken and the row is left as
+    /// it was.
     @Test(arguments: [WakeVerb.wake, .resume], [false, true])
-    func aWakeOfATmuxRowIsRefusedWithTheTmuxCode(_ verb: WakeVerb, parked: Bool) async throws {
+    func aRailsWakeOfATmuxRowIsRefusedWithTheTmuxCode(_ verb: WakeVerb, parked: Bool) async throws {
         let (router, db) = try makeRouter()
         let terminal = try await makeTerminal(db, tag: "repoT", transport: .tmux, parked: parked)
 
-        let resp = await router.handle(try verb.request(terminal.id, prompt: "do the thing"))
+        let resp = await router.handle(try verb.request(
+            terminal.id, prompt: "do the thing",
+            actor: .daemon(rail: ActuationRail.limitResume)))
 
         #expect(!resp.success, "a tmux row's wake reported success")
         #expect(resp.errorCode == RPCErrorCode.terminalOnTmux.rawValue)

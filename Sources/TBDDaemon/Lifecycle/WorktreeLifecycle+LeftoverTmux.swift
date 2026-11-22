@@ -93,7 +93,7 @@ extension WorktreeLifecycle {
         await pendingQuestions.clear(terminalID: terminal.id)
         await subscriptions?.broadcastPendingPrompts(
             terminalID: terminal.id, from: pendingQuestions)
-        logger.notice("leftover tmux park: parked terminal \(terminal.id, privacy: .public) — its tmux server is gone; session preserved, it wakes after `tbd terminal migrate`")
+        logger.notice("leftover tmux park: parked terminal \(terminal.id, privacy: .public) — its tmux server is gone; session preserved, a person's wake moves it to the pty holder")
         // The park is written, so a read back that fails reports a park, not
         // a failure, and not a tab that is gone.
         do {

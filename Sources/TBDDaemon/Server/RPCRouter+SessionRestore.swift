@@ -117,9 +117,10 @@ extension RPCRouter {
     /// The activity columns cannot supply the order, because parking overwrites
     /// them.
     ///
-    /// Only rows on the pty holder. A row on tmux moves to the holder through
-    /// `tbd terminal migrate`, not a wake: its wake is refused with
-    /// `terminalOnTmux`. Reconcile parks a tmux row for recovery once, on the
+    /// Only rows on the pty holder. A row on tmux moves to the holder only on a
+    /// person's gesture — their own wake of it, or `tbd terminal migrate` — and
+    /// this pass's wake is a rail's, which is refused with `terminalOnTmux`.
+    /// Reconcile parks a tmux row for recovery once, on the
     /// startup that finds its server gone, so selecting it would count a
     /// failure and log an error on that restart; a later restart finds the
     /// park older than its time limit. `update.sh`'s wake sweep leaves it out

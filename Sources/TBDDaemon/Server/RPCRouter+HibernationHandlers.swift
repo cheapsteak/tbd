@@ -78,8 +78,12 @@ extension RPCRouter {
         }
     }
 
-    /// `terminal.wake` — respawn `claude --resume <id>` in the hibernated
-    /// terminal's kept-alive window. Idempotent.
+    /// `terminal.wake` — respawn `claude --resume <id>` (or the Codex resume)
+    /// for a parked terminal on the pty holder. Idempotent.
+    ///
+    /// A person's wake of a row parked on the tmux transport moves it to the
+    /// pty holder first and then wakes it there (`moveParkedTmuxRowBeforeWake`).
+    /// A rail's wake of one is refused by the coordinator and moves nothing.
     ///
     /// `condition` is for the in-process caller that chose its rows earlier, the
     /// session restore pass. `terminal.wake` has no parameter for it.
@@ -97,6 +101,10 @@ extension RPCRouter {
         if let held = await holdWakeIfDenied(
             actuationID, actor: actor, terminalID: params.terminalID) {
             return held
+        }
+        if let refused = await moveParkedTmuxRowBeforeWake(
+            actuationID, actor: actor, terminalID: params.terminalID) {
+            return refused
         }
         let result = await hibernationCoordinator.wake(
             terminalID: params.terminalID, cols: params.cols, rows: params.rows,

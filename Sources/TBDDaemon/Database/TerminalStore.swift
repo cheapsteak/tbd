@@ -722,8 +722,9 @@ public struct TerminalStore: Sendable {
     ///
     /// `transport` is stamped here. Every spawn passes `.holder`
     /// (`WorktreeLifecycle.spawnTerminal`); the `.tmux` default remains for the
-    /// fixtures that write the rows an older build left behind, and only
-    /// `tbd terminal migrate` moves a row off it.
+    /// fixtures that write the rows an older build left behind, and only the
+    /// transport migration moves a row off it: `tbd terminal migrate`, or a
+    /// person's wake of a row parked there.
     ///
     /// `sessionIncarnationID` is the incarnation a fresh Claude spawn exports
     /// as `TBD_TERMINAL_INCARNATION_ID` when a session-mod feature is on

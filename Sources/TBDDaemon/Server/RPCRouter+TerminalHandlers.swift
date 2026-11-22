@@ -1418,10 +1418,9 @@ extension RPCRouter {
     ///     the server (`LeftoverTmuxSession.stillRunningRefusal`).
     ///   - **Gone, with a session to resume** – Claude, or Codex with a
     ///     recorded thread – the row is parked with its identity kept, and the
-    ///     parked row is returned. Nothing is spawned. A wake of a row parked
-    ///     on tmux refuses and names `tbd terminal migrate`, and the app's
-    ///     parked notice says the same, so the session comes back through a
-    ///     migration followed by a wake.
+    ///     parked row is returned. Nothing is spawned. A person's wake of a
+    ///     row parked on tmux — selecting it in the app, a click in its parked
+    ///     pane, a send — moves it to the pty holder and resumes it there.
     ///   - **Gone, with nothing to resume** – a shell, an agent tab whose
     ///     session never began, a hook tab – nothing a park could keep, so it
     ///     is refused and left exactly as it was, with a plain message: tmux
@@ -1475,7 +1474,7 @@ extension RPCRouter {
         switch outcome {
         case .parked(let parked):
             await finishActuation(reparkID, .dispatched)
-            logger.notice("recreateWindow: parked \(plan.identity.agentKind.rawValue, privacy: .public) terminal \(terminal.id, privacy: .public) on tmux — its server \(sighting.server, privacy: .public) is gone, session \(plan.identity.sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
+            logger.notice("recreateWindow: parked \(plan.identity.agentKind.rawValue, privacy: .public) terminal \(terminal.id, privacy: .public) on tmux — its server \(sighting.server, privacy: .public) is gone, session \(plan.identity.sessionID, privacy: .public) preserved; a person's wake moves it to the pty holder")
             guard let parked else {
                 return RPCResponse(error: "Terminal not found: \(params.terminalID)")
             }
@@ -1906,11 +1905,7 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalMigrateTransportParams.self, from: paramsData)
-
-        let operations = transportMigratorOperationsOverride ?? .production(
-            hibernation: hibernationCoordinator, holderRegistry: holderRegistry,
-            lifecycle: lifecycle)
-        let migrator = TerminalTransportMigrator(db: db, operations: operations)
+        let migrator = makeTransportMigrator()
 
         let terminalIDs: [UUID]
         if let id = params.terminalID {
@@ -1969,6 +1964,17 @@ extension RPCRouter {
             skipped: skipped, refused: refused, alreadyHolder: alreadyHolder))
     }
 
+    /// The migrator `terminal.migrateTransport` and a person's wake of a row
+    /// parked on tmux (`moveParkedTmuxRowBeforeWake`) both move a session
+    /// with: the production operations, or a test's
+    /// `transportMigratorOperationsOverride`.
+    func makeTransportMigrator() -> TerminalTransportMigrator {
+        let operations = transportMigratorOperationsOverride ?? .production(
+            hibernation: hibernationCoordinator, holderRegistry: holderRegistry,
+            lifecycle: lifecycle)
+        return TerminalTransportMigrator(db: db, operations: operations)
+    }
+
     /// Publish one migrated row whole, for every outcome that may have left it
     /// holder-backed.
     ///
@@ -1982,7 +1988,7 @@ extension RPCRouter {
     /// A re-read that fails or finds nothing is logged rather than swallowed:
     /// the consequence is a client holding a stale transport, which is
     /// invisible from the row and has to be findable in the log.
-    private func publishIfMovedToHolder(
+    func publishIfMovedToHolder(
         terminalID: UUID, outcome: TransportMigrationOutcome
     ) async {
         guard outcome != .alreadyHolder else { return }

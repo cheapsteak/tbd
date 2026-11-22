@@ -9,16 +9,21 @@ extension RPCRouter {
     /// Which agent a wake of this row would start, or nil when the wake starts
     /// no agent and so is not checked.
     ///
-    /// Only a row parked on the pty holder can start anything. A wake of a
-    /// live row is answered as a no-op and must stay that way. A wake of a row
-    /// parked on tmux starts nothing either: it is refused with the command
-    /// that moves the session (`HibernationCoordinator.tmuxWakeUnavailableReason`).
-    /// Asking admission first would let a hold hide that command, and mark
-    /// start-held a row that no wake will ever start. A parked holder row
-    /// names the provider through its recovery resume plan, just as the wake
-    /// itself does.
-    static func startAdmissionAgent(forWaking terminal: Terminal) -> StartAdmissionAgent? {
-        guard terminal.isParked, terminal.transport == .holder,
+    /// Only a parked row can start anything; a wake of a live row is answered
+    /// as a no-op and must stay that way. A row parked on the pty holder
+    /// starts its agent there. A row parked on tmux starts one only when the
+    /// wake moves it to the pty holder first, which a person's wake does
+    /// (`migratesFromTmux`, `TransportMigrationOnWake.isPersonStarted`), so
+    /// admission is asked before the move and a hold leaves the row on tmux.
+    /// A rail's wake of one moves nothing and is refused with the reason that
+    /// names the move (`HibernationCoordinator.tmuxWakeUnavailableReason`), so
+    /// it starts nothing and is not asked: a hold would hide that reason, and
+    /// mark start-held a row the rail will never start. A parked row names the
+    /// provider through its recovery resume plan, just as the wake itself does.
+    static func startAdmissionAgent(
+        forWaking terminal: Terminal, migratesFromTmux: Bool
+    ) -> StartAdmissionAgent? {
+        guard terminal.isParked, terminal.transport == .holder || migratesFromTmux,
               let plan = terminal.recoveryResumePlan else { return nil }
         switch plan {
         case .claude: return .claude
@@ -78,11 +83,14 @@ extension RPCRouter {
         return Self.heldResponse(reason)
     }
 
-    /// The start-admission gate for a wake. Call right after `beginActuation`.
+    /// The start-admission gate for a wake. Call right after `beginActuation`,
+    /// and before a person's wake moves a row parked on tmux to the pty holder
+    /// (`moveParkedTmuxRowBeforeWake`), so a held wake leaves that row on tmux.
     ///
-    /// A terminal that is missing, not parked, parked on tmux, or not an agent
-    /// tab is not checked, so the wake path gives it its own answer: a row
-    /// parked on tmux is refused with `tbd terminal migrate`. A held
+    /// A terminal that is missing, not parked, or not an agent tab is not
+    /// checked, and neither is a rail's wake of a row parked on tmux, so the
+    /// wake path gives each its own answer: the rail's is refused with the
+    /// reason that names the move. A held
     /// wake records the reason and the time on the row and publishes the row,
     /// so the parked pane can say why it is still asleep. If the row was woken or
     /// re-parked while the command ran, nothing is written. `earlierHold` is as
@@ -93,7 +101,10 @@ extension RPCRouter {
     ) async -> RPCResponse? {
         guard StartAdmissionActorRule.isChecked(actor) else { return nil }
         guard let terminal = (try? await db.terminals.get(id: terminalID)) ?? nil,
-              let agent = Self.startAdmissionAgent(forWaking: terminal) else { return nil }
+              let agent = Self.startAdmissionAgent(
+                  forWaking: terminal,
+                  migratesFromTmux: TransportMigrationOnWake.isPersonStarted(actor))
+        else { return nil }
         let verdict = await admissionVerdict(
             earlierHold: earlierHold,
             StartAdmissionRequest(

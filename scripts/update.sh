@@ -1281,10 +1281,12 @@ print(json.dumps(out))
 # empty <since> means every recovery-parked row, which is what --wake-only
 # does — it runs against a daemon whose start it did not witness.
 #
-# Only rows on the pty holder. A row on tmux cannot be woken where it is — the
-# daemon refuses the wake and names `tbd terminal migrate` — so sending one
-# would only count a failure. Anything but "holder" reads as tmux, as it does
-# for the app's decoder: an absent or unrecognized transport is tmux.
+# Only rows on the pty holder. A row on tmux cannot be woken where it is, and
+# the daemon reads a `tbd terminal wake` as a person's, which moves the row to
+# the holder first. Moving a session is its owner's choice, not an update's, so
+# such a row stays parked for its owner to wake. Anything but "holder" reads as
+# tmux, as it does for the app's decoder: an absent or unrecognized transport
+# is tmux.
 select_wake_candidates() {
     local since="${1-}"
     python3 -c '

@@ -6,12 +6,15 @@ import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// A tmux row never wakes: TBD starts sessions only on the pty holder. A
-/// parked one is refused with the migration gesture, before anything else
-/// about it is asked, and stays parked with its session id; a live one is
-/// refused as still running in tmux and left exactly as it was. Either way
-/// nothing is touched. A parked holder row wakes as before. `worktree.resume` hands the refusal to its caller when it
-/// woke nothing.
+/// A tmux row never wakes where it is: TBD starts sessions only on the pty
+/// holder. The coordinator refuses a parked one with the gestures that move
+/// it, before anything else about it is asked, and it stays parked with its
+/// session id; a live one is refused as still running in tmux and left
+/// exactly as it was. Either way nothing is touched. A parked holder row
+/// wakes as before. A person's wake moves a parked tmux row to the holder
+/// before the coordinator sees it (`WakeMigratesParkedTmuxRowTests`), so the
+/// router's refusal is a rail's: `worktree.resume` hands it to its caller when
+/// it woke nothing.
 @Suite("Tmux wake backstop")
 struct TmuxWakeBackstopTests {
     private static let sessionID = "sess-backstop"
@@ -120,11 +123,12 @@ struct TmuxWakeBackstopTests {
             return
         }
         #expect(reason == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: row.id))
-        // The command is the whole product of this refusal, so it has to be
-        // runnable as printed: a literal `<id>` would send a stranded person
-        // looking for which session it meant.
+        // The commands have to be runnable as printed: a literal `<id>` would
+        // send whoever reads the refusal looking for which session it meant.
         #expect(reason.contains("tbd terminal migrate \(row.id.uuidString)"),
                 "the refusal does not name the session to migrate: \(reason)")
+        #expect(reason.contains("tbd terminal wake \(row.id.uuidString)"),
+                "the refusal does not name the session to wake: \(reason)")
         let after = try #require(try await f.db.terminals.get(id: row.id))
         #expect(after.isParked, "the refusal must leave the row parked")
         #expect(after.claudeSessionID == session)
@@ -223,10 +227,15 @@ struct TmuxWakeBackstopTests {
 
     // MARK: - worktree.resume
 
-    /// A resume whose only parked row is on tmux wakes nothing, so it answers
-    /// with the refusal that names the migration rather than with success, and
-    /// the row stays parked.
-    @Test func aResumeThatWokeNothingAnswersWithTheMigration() async throws {
+    /// A rail's resume moves nothing, so the router hands its tmux row to the
+    /// coordinator's refusal. No rail sends `worktree.resume` today; the actor
+    /// is declared here so the refusal path the fan-out keeps is still proved.
+    private static let rail = ActuationActor.daemon(rail: ActuationRail.limitResume)
+
+    /// A rail's resume whose only parked row is on tmux wakes nothing, so it
+    /// answers with the refusal that names the move rather than with success,
+    /// and the row stays parked on tmux.
+    @Test func aResumeThatWokeNothingAnswersWithTheMove() async throws {
         let f = try await Self.makeFixture()
         defer { f.tearDown() }
         let row = try await Self.parkedRow(f, transport: .tmux)
@@ -234,17 +243,19 @@ struct TmuxWakeBackstopTests {
 
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.worktreeResume,
-            params: WorktreeResumeParams(worktreeID: f.worktree.id)))
+            params: WorktreeResumeParams(worktreeID: f.worktree.id), actor: Self.rail))
 
         #expect(!response.success, "a resume that woke nothing reported success")
         #expect(response.error == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: row.id))
         #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
         #expect(try await f.db.terminals.get(id: row.id)?.isParked == true)
+        #expect(try await f.db.terminals.get(id: row.id)?.transport == .tmux,
+                "a rail's resume moved the row")
         #expect(f.holder.launches.isEmpty, "a tmux row's wake started a holder")
     }
 
-    /// The other branch: a resume that woke another session succeeds, as it
-    /// does when any other row fails, and the tmux row stays parked.
+    /// The other branch: a rail's resume that woke another session succeeds,
+    /// as it does when any other row fails, and the tmux row stays parked.
     @Test func aResumeThatWokeAnotherSessionStillSucceeds() async throws {
         let f = try await Self.makeFixture()
         defer { f.tearDown() }
@@ -255,7 +266,7 @@ struct TmuxWakeBackstopTests {
 
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.worktreeResume,
-            params: WorktreeResumeParams(worktreeID: f.worktree.id)))
+            params: WorktreeResumeParams(worktreeID: f.worktree.id), actor: Self.rail))
 
         #expect(response.success, "a resume that woke a session failed: \(response.error ?? "")")
         #expect(try await f.db.terminals.get(id: holderRow.id)?.isParked == false,

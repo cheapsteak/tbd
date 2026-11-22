@@ -92,8 +92,9 @@ fork of it. The work runs in four streams:
 - **Sessions still on tmux** – The second step waits until no tmux rows remain, which TBD
   cannot observe on other installs. The
   [migration design](2026-10-11-holder-transport-migration-design.md) covers that case: a
-  person moves a session with the migrate action, and after the tmux path is gone a
-  leftover row refuses to wake, with a reason that names the action.
+  person's wake of a parked row moves it to the pty holder and resumes it there, as the
+  migrate action does. After the tmux path is gone, a rail's wake of a leftover row is
+  refused, with a reason that names both gestures.
 - **What D needs from B** – `TmuxBridge` and its panels are gone. They are the last viewers
   that have to draw through SwiftTerm.
 

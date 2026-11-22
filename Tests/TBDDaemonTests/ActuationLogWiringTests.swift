@@ -349,11 +349,12 @@ struct ActuationLogWiringTests {
         #expect(written.last?["reason"] as? String == "not-found")
     }
 
-    /// A wake of a row still on tmux is a refusal, not a transport failure:
-    /// TBD tried no transport, it declined the act, as it declines a send to
-    /// such a row. Live or parked, the record says `not-eligible`, with the
-    /// refusal the caller was given.
-    @Test("a wake of a tmux row records not-eligible, not a transport failure",
+    /// A wake of a row still on tmux that does not move it is a refusal, not
+    /// a transport failure: TBD tried no transport, it declined the act, as it
+    /// declines a send to such a row. Live or parked, the record says
+    /// `not-eligible`, with the refusal the caller was given. A rail's wake
+    /// is declared, because a person's moves a parked row and wakes it.
+    @Test("a rail's wake of a tmux row records not-eligible, not a transport failure",
           arguments: [false, true])
     func wakeOfATmuxRowRecordsNotEligible(parked: Bool) async throws {
         let fixture = try makeFixture()
@@ -367,7 +368,8 @@ struct ActuationLogWiringTests {
 
         let response = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalWake,
-            params: TerminalWakeParams(terminalID: terminal.id, prompt: "carry on")))
+            params: TerminalWakeParams(terminalID: terminal.id, prompt: "carry on"),
+            actor: .daemon(rail: ActuationRail.limitResume)))
 
         let written = try rows(at: fixture.logPath)
         #expect(written.count == 2)

@@ -53,16 +53,19 @@ struct LeftoverTmuxSessionNoticeTests {
 
     /// The dock draws no parked placeholder for a holder row, but a row parked
     /// on tmux has no live frame to keep, so the dock draws its snapshot and
-    /// a notice that says how to move it. The dock has no tab menu and no
-    /// click-to-resume, so its notice names neither.
-    @Test("the dock draws a parked tmux row's snapshot and move advice true of the dock")
+    /// a notice that says where it resumes: its worktree, whose pane moves it
+    /// to the pty holder. The dock has no tab menu and no click-to-resume, so
+    /// its notice names neither, and no migration either, since a wake does
+    /// the move.
+    @Test("the dock draws a parked tmux row's snapshot and advice true of the dock")
     func dockDrawsAParkedTmuxRowsSnapshot() throws {
         let row = Self.row(transport: .tmux, parked: true)
         #expect(TerminalPanePresentation.dockShowsParkedSnapshot(for: row))
         let notice = try #require(TerminalPanePresentation.dockParkedNoticeMessage(for: row))
         #expect(notice == HibernatedBannerModel.parkedOnTmuxDockMessage)
         #expect(notice.hasPrefix(HibernatedBannerModel.parkedOnTmuxLead))
-        #expect(notice.contains("tbd terminal migrate"))
+        #expect(notice.contains("open this tab in its worktree"))
+        #expect(!notice.contains("tbd terminal migrate"))
         #expect(!notice.contains("menu"))
         #expect(!notice.localizedCaseInsensitiveContains("click"))
     }

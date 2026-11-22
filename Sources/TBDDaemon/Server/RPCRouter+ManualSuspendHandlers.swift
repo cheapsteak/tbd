@@ -58,6 +58,10 @@ extension RPCRouter {
             actuationID, actor: actor, terminalID: params.terminalID) {
             return held
         }
+        if let refused = await moveParkedTmuxRowBeforeWake(
+            actuationID, actor: actor, terminalID: params.terminalID) {
+            return refused
+        }
         let result = await hibernationCoordinator.wake(terminalID: params.terminalID)
         await finishActuation(
             actuationID, ActuationOutcome.classify(result),
@@ -169,12 +173,14 @@ extension RPCRouter {
         // reports the first hold, so a caller that woke nothing is not told it
         // succeeded.
         //
-        // A row parked on tmux never wakes where it is, and its refusal names
-        // `tbd terminal migrate`. When nothing woke, the call answers with the
-        // first such refusal and its `terminalOnTmux` code, so that advice
-        // reaches the caller instead of only the actuation log. A resume that
-        // woke another session still succeeds, as it does when any other row
-        // fails.
+        // A row parked on tmux never wakes where it is. A person's resume
+        // moves it to the pty holder first and wakes it there
+        // (`moveParkedTmuxRowBeforeWake`); a rail's is refused with the reason
+        // that names the move, and so is a person's whose move cannot happen.
+        // When nothing woke, the call answers with the first such refusal and
+        // its `terminalOnTmux` code, so that advice reaches the caller instead
+        // of only the actuation log. A resume that woke another session still
+        // succeeds, as it does when any other row fails.
         var firstHold: RPCResponse?
         var firstTmuxRefusal: String?
         var wokeAny = false
@@ -186,6 +192,11 @@ extension RPCRouter {
                 actuationID, actor: actor, terminalID: terminal.id,
                 earlierHold: firstHold?.error) {
                 firstHold = firstHold ?? held
+                continue
+            }
+            if let refused = await moveParkedTmuxRowBeforeWake(
+                actuationID, actor: actor, terminalID: terminal.id) {
+                firstTmuxRefusal = firstTmuxRefusal ?? refused.error
                 continue
             }
             let result = await hibernationCoordinator.wake(terminalID: terminal.id)
