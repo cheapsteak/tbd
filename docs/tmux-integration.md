@@ -8,8 +8,9 @@ TBD opens every session on the pty holder
 ([`specs/2026-08-30-pty-holder-session-transport-design.md`](specs/2026-08-30-pty-holder-session-transport-design.md))
 and does not drive tmux: it cannot show a tmux session, send to one or park
 one, and it ends one only by killing its window when the row is torn down. A
-row still recorded as `tmux` is either parked — its wake refuses and names
-`tbd terminal migrate`, which moves it to the holder — or live. A live tmux
+row still recorded as `tmux` is either parked — a person's wake moves it to the
+holder and resumes it there, as `tbd terminal migrate` moves it, while a wake
+the daemon makes on its own is refused — or live. A live tmux
 row is judged by its tmux server's socket and by this user's tmux processes
 that name the server: once the server is gone the row is parked with its session kept (a
 row with nothing to resume is removed), and while it may still be running the

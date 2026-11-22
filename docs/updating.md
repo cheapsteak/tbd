@@ -153,10 +153,11 @@ park live sessions wholesale. Four things make the handover safe.
   simultaneous `claude --resume` respawns have taken a machine down before
   (issues #284 and #367). The counts land in the summary, failures included.
   Only sessions on the pty holder are woken. A session parked on the tmux
-  transport is left parked and not counted, because its wake would only be
-  refused: the daemon starts sessions only on the holder. **Move to Holder (No
-  tmux)** in the tab's menu, or `tbd terminal migrate`, moves it there, and a
-  wake after that resumes it.
+  transport is left parked and not counted: the daemon starts sessions only on
+  the holder, so waking it would move it there, and moving a session is its
+  owner's choice, not an update's. A click in its pane moves it and resumes
+  it; **Move to Holder (No tmux)** in the tab's menu, or `tbd terminal
+  migrate`, moves it, and a wake after that resumes it.
 
 `--wake-only` runs just that last step against a daemon that is already new,
 for the case where an update finished but sessions were left parked.
