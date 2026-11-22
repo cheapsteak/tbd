@@ -1064,4 +1064,42 @@ struct TmuxResumeGateRPCTests {
         #expect(deleted.success, "error: \(deleted.error ?? "nil")")
         #expect(try await f.db.scheduledResumes.pending(terminalID: row.id) == nil)
     }
+
+    /// A tmux row's close whose mark is written but whose delete fails keeps
+    /// the row, and the row keeps its pending auto-resume: the close cancels
+    /// it only once the delete has committed.
+    @Test func aCloseWhoseDeleteFailsKeepsThePendingAutoResume() async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let row = try await openATmuxRow(f, in: f.worktree)
+        _ = try await f.db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: row.id, worktreeID: f.worktree.id,
+            resetsAt: Date(), fireAt: Date().addingTimeInterval(3600),
+            limitType: "session", rawMessage: "m"))
+        try await f.db.writerForTests.write { db in
+            try db.execute(sql: """
+                CREATE TRIGGER acme_reject_terminal_delete BEFORE DELETE ON terminal
+                BEGIN SELECT RAISE(ABORT, 'acme terminal delete failed'); END
+                """)
+        }
+
+        let failed = try await f.send(
+            RPCMethod.terminalDelete, TerminalDeleteParams(terminalID: row.id))
+
+        #expect(!failed.success)
+        #expect(try await f.db.terminals.get(id: row.id) != nil)
+        #expect(try await f.db.scheduledResumes.pending(terminalID: row.id) != nil,
+                "a close whose delete failed cancelled the row's auto-resume")
+        #expect(try f.lastOutcome().result == .synchronous(.transportFailed))
+
+        try await f.db.writerForTests.write { db in
+            try db.execute(sql: "DROP TRIGGER acme_reject_terminal_delete")
+        }
+        let deleted = try await f.send(
+            RPCMethod.terminalDelete, TerminalDeleteParams(terminalID: row.id))
+        #expect(deleted.success, "error: \(deleted.error ?? "nil")")
+        #expect(try await f.db.terminals.get(id: row.id) == nil)
+        #expect(try await f.db.scheduledResumes.pending(terminalID: row.id) == nil,
+                "a close that deleted the row kept its auto-resume")
+    }
 }

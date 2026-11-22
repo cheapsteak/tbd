@@ -852,8 +852,11 @@ extension RPCRouter {
         // once the close is certain to go ahead: a close that throws keeps
         // the row, and the row keeps its auto-resume with it. For a holder
         // row that is before its holder is disposed of, so no resume fires
-        // into a session being torn down; a tmux row's close can still throw
-        // when its mark cannot be written, so it cancels after that.
+        // into a session being torn down. A tmux row disposes of nothing,
+        // and its close can throw when its mark cannot be written or when the
+        // delete fails, so it cancels once the delete has committed.
+        // `scheduled_resumes` has no foreign key to the row, so the cancel
+        // still finds the pending resume after the row is gone.
         func cancelPendingResume() async {
             if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
                 await limitResumeScheduler?.wake()
@@ -907,14 +910,14 @@ extension RPCRouter {
                     terminal, server: worktree?.tmuxServer,
                     history: worktree == nil ? nil : db.terminalHistory)
             }
-            await cancelPendingResume()
         }
 
         // Delete from DB
-        try await step {
-            try await db.terminals.delete(id: terminal.id)
-            try await db.tabs.delete(tabID: terminal.id)
+        try await step { try await db.terminals.delete(id: terminal.id) }
+        if terminal.transport == .tmux {
+            await cancelPendingResume()
         }
+        try await step { try await db.tabs.delete(tabID: terminal.id) }
         await pendingQuestions.clear(terminalID: terminal.id)
         await broadcastPendingPrompts(terminalID: terminal.id)
         await lifecycle.sessionTitles.forget(terminalID: terminal.id)
