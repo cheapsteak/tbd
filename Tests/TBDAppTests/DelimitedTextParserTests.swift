@@ -176,6 +176,27 @@ struct DelimitedTextParserTests {
         #expect(result == .empty)
     }
 
+    /// The scan asks after the title row and then every
+    /// `cancellationCheckInterval` data rows. Here the first answer is no,
+    /// so the parse goes on, and a later answer, after 4,096 rows, is yes:
+    /// the periodic check stops the scan, not only the one after the title
+    /// row.
+    @Test("a parse cancelled partway through stops early")
+    func cancellationMidParseStopsEarly() throws {
+        let rowCount = 10_000
+        try #require(rowCount > 2 * DelimitedTextParser.cancellationCheckInterval)
+        let text = "a,b\n" + (1...rowCount).map { "\($0),x\n" }.joined()
+        let bytes = Data(text.utf8)
+
+        var calls = 0
+        let result = DelimitedTextParser.parse(bytes, delimiter: 0x2C) {
+            calls += 1
+            return calls > 1
+        }
+        #expect(result == .empty)
+        #expect(calls > 1, "only the check after the title row ran")
+    }
+
     @Test("input cut by the byte limit drops its last row")
     func cutDropsLastRow() throws {
         let t = try table(parse("a\n1\n2\n3", cut: true))
