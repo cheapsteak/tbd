@@ -202,6 +202,8 @@ struct FilePreviewViewTests {
         }
         try requireSatisfied(mounted, waitingFor: "one table in the pane") {
             "\(host.descendants(TableHostView.self).count) table view(s)"
+        } recheck: {
+            host.descendants(TableHostView.self).count == 1
         }
         let tableHost = try #require(host.descendants(TableHostView.self).first)
         let titles = tableHost.tableView.tableColumns.map(\.title)
@@ -303,6 +305,8 @@ extension AccessibilityBridgeSerialized {
                 }
                 try requireSatisfied(rendered, waitingFor: "the file's text to render") {
                     "accessibility tree:\n\(host.accessibilityTreeDescription())"
+                } recheck: {
+                    accessibilityTree(of: host, contains: "export const")
                 }
 
                 let avPlayers = host.descendants(AVPlayerView.self).count
@@ -337,6 +341,8 @@ extension AccessibilityBridgeSerialized {
                 }
                 try requireSatisfied(rendered, waitingFor: "the file's text to render") {
                     "accessibility tree:\n\(host.accessibilityTreeDescription())"
+                } recheck: {
+                    accessibilityTree(of: host, contains: "name,age")
                 }
 
                 #expect(host.descendants(TableHostView.self).isEmpty)
@@ -351,9 +357,18 @@ extension AccessibilityBridgeSerialized {
 /// what `observed` reads then, since only a thrown error puts the observed
 /// state on the failure line a CI summary keeps (Tests/CLAUDE.md, "Assertion
 /// hygiene", rule 4).
+///
+/// The poll's last read and this one are separated by a hop back to the main
+/// actor, so the view can reach the waited-for state in between, and
+/// `observed` would then report it met in a timeout. So, as `waitFor` in
+/// `BoundedGateSupport` does, `observed` is read first and `recheck`, the
+/// poll's condition, is asked once more after it: if it holds now, the wait
+/// returns. Both run on the main actor with no suspension between them, so a
+/// `recheck` that fails agrees with what `observed` read.
 @MainActor
 private func requireSatisfied(
-    _ outcome: PollOutcome, waitingFor what: String, observed: () -> String
+    _ outcome: PollOutcome, waitingFor what: String,
+    observed: () -> String, recheck: () -> Bool
 ) throws {
     switch outcome {
     case .satisfied:
@@ -361,7 +376,9 @@ private func requireSatisfied(
     case .cancelled:
         throw CancellationError()
     case .timedOut:
-        throw BoundedWaitTimeout(what: what, observed: observed(), deadline: TestDeadlines.saturatedPass)
+        let seen = observed()
+        if recheck() { return }
+        throw BoundedWaitTimeout(what: what, observed: seen, deadline: TestDeadlines.saturatedPass)
     }
 }
 

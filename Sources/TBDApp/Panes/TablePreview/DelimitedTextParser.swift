@@ -41,7 +41,8 @@ enum DelimitedTextParser {
     static let tableExtensions: Set<String> = ["csv", "tsv"]
     static let defaultRowLimit = 100_000
     static let defaultColumnLimit = 1_000
-    /// How many rows the scan reads between two checks of `Task.isCancelled`.
+    /// How many rows the scan reads between two calls of `parse`'s
+    /// `isCancelled`.
     static let cancellationCheckInterval = 4_096
 
     /// `,` (0x2C) for csv, tab (0x09) for tsv, case-insensitive; nil otherwise.
@@ -61,15 +62,20 @@ enum DelimitedTextParser {
     /// the file, so the last row may be partial: it is dropped, even when the
     /// cut lands inside a quoted field, and the table is marked as stopped.
     ///
-    /// When the calling task is cancelled, the scan stops within
-    /// `cancellationCheckInterval` rows and returns `.empty`, whatever the
-    /// bytes hold. Only a cancelled caller sees that value, and it drops the
-    /// result, so a superseded read of a large file stops early.
+    /// The scan calls `isCancelled` after the title row and then every
+    /// `cancellationCheckInterval` data rows. When it returns true, the scan
+    /// stops and returns `.empty`, whatever the bytes hold. It defaults to
+    /// `Task.isCancelled`, so the scan stops within
+    /// `cancellationCheckInterval` rows once the calling task is cancelled.
+    /// Only a cancelled caller sees that value, and it drops the result, so a
+    /// superseded read of a large file stops early. A test passes its own
+    /// `isCancelled` to reach the checks after the first.
     nonisolated static func parse(
         _ bytes: Data, delimiter: UInt8,
         rowLimit: Int = DelimitedTextParser.defaultRowLimit,
         columnLimit: Int = DelimitedTextParser.defaultColumnLimit,
-        cutAtByteLimit: Bool = false
+        cutAtByteLimit: Bool = false,
+        isCancelled: () -> Bool = { Task.isCancelled }
     ) -> DelimitedParseResult {
         bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> DelimitedParseResult in
             var scan = DelimitedByteScan(
@@ -79,7 +85,7 @@ enum DelimitedTextParser {
                 columnLimit: columnLimit,
                 cutAtByteLimit: cutAtByteLimit
             )
-            return scan.run()
+            return scan.run(isCancelled: isCancelled)
         }
     }
 }
@@ -126,7 +132,7 @@ private struct DelimitedByteScan {
         self.cutAtByteLimit = cutAtByteLimit
     }
 
-    mutating func run() -> DelimitedParseResult {
+    mutating func run(isCancelled: () -> Bool) -> DelimitedParseResult {
         let count = bytes.count
         if count >= 3, bytes[0] == 0xEF, bytes[1] == 0xBB, bytes[2] == 0xBF {
             index = 3
@@ -172,7 +178,7 @@ private struct DelimitedByteScan {
             }
             // A cancelled caller drops the result, so the scan returns the
             // cheapest value rather than finish (see `parse`).
-            if dataRows.count % DelimitedTextParser.cancellationCheckInterval == 0, Task.isCancelled {
+            if dataRows.count % DelimitedTextParser.cancellationCheckInterval == 0, isCancelled() {
                 return .empty
             }
             if index == count { break scanning }
