@@ -719,11 +719,12 @@ extension RPCRouter {
         return try RPCResponse(result: ModelProfileFableCheckResult(profiles: entries))
     }
 
-    /// `claude.fableCreditsOut` — a session's StopFailure hook saw the
-    /// out-of-usage-credits message. Marks the terminal's profile out, but only
-    /// when the terminal's model is a Fable model: the same line on another
-    /// model would mean something else. Fire-and-forget, so every miss is a
-    /// quiet no-op.
+    /// `claude.fableCreditsOut` — a session's StopFailure hook reported the
+    /// out-of-usage-credits error message. Marks the terminal's profile out,
+    /// but only when the session runs a Fable model (the terminal's spawn
+    /// model, else its profile's configured model): the same message on
+    /// another model would mean something else. Fire-and-forget, so every
+    /// miss is a quiet no-op.
     func handleFableCreditsOut(
         _ paramsData: Data, connection: RPCConnectionContext? = nil
     ) async throws -> RPCResponse {
@@ -731,7 +732,7 @@ extension RPCRouter {
         guard let store = modelProfileResolver.fable,
               let terminal = try await db.terminals.get(id: params.terminalID),
               let profileID = terminal.profileID,
-              let reading = FableProbeClassifier.classify(screenText: params.rawMessage, now: Date())
+              let reading = FableProbeClassifier.classify(hookMessage: params.rawMessage, now: Date())
         else { return .ok() }
         if await hookCallerRefused(
             method: RPCMethod.claudeFableCreditsOut, terminal: terminal, connection: connection) {

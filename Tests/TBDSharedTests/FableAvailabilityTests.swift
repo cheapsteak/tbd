@@ -89,13 +89,13 @@ struct FableProbeClassifierTests {
         #expect(long.reason == "unrecognized_error")
     }
 
-    @Test func screenText() {
-        let line = "You're out of usage credits. Run /usage-credits to keep using Fable 5.2 or /model to switch models."
-        let r = FableProbeClassifier.classify(screenText: line, now: now)
+    @Test func hookMessage() {
+        let message = "You're out of usage credits. Run /usage-credits to keep using Fable 5.2 or /model to switch models."
+        let r = FableProbeClassifier.classify(hookMessage: message, now: now)
         #expect(r?.state == .out)
         #expect(r?.source == .session)
-        #expect(FableProbeClassifier.classify(screenText: "You've hit your 5-hour limit", now: now) == nil)
-        #expect(FableProbeClassifier.classify(screenText: "", now: now) == nil)
+        #expect(FableProbeClassifier.classify(hookMessage: "You've hit your 5-hour limit", now: now) == nil)
+        #expect(FableProbeClassifier.classify(hookMessage: "", now: now) == nil)
     }
 }
 

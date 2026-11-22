@@ -30,7 +30,7 @@ struct StopFailureCommand: AsyncParsableCommand {
         // of the two cases below; tell the daemon (best effort) and let the
         // message print as before.
         if let message = outcome.message,
-           FableProbeClassifier.classify(screenText: message, now: Date()) != nil {
+           FableProbeClassifier.classify(hookMessage: message, now: Date()) != nil {
             reportFableCreditsOut(message)
         }
         if let detected = outcome.detectedLimit, reportToDaemon(detected) {
@@ -46,7 +46,7 @@ struct StopFailureCommand: AsyncParsableCommand {
 
     /// Fire the fableCreditsOut RPC. Silent on every failure — the hook must
     /// never wedge Claude. The daemon decides whether the terminal's model is
-    /// Fable; this only forwards the text.
+    /// Fable; this only forwards the hook's error message.
     private func reportFableCreditsOut(_ message: String) {
         guard let terminalIDString = ProcessInfo.processInfo.environment["TBD_TERMINAL_ID"],
               let terminalID = UUID(uuidString: terminalIDString) else { return }

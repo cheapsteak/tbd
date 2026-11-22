@@ -5,15 +5,16 @@ import Foundation
 /// Fable needs usage credits, a meter separate from the 5-hour and weekly
 /// windows, so a profile with plenty of window headroom can still be unable to
 /// run it. Nothing in the usage snapshot says so; the only signals are a probe
-/// (`FableProbeClassifier.classify(resultJSON:now:)`) and the line a session
-/// shows when it hits the wall (`classify(screenText:now:)`).
+/// (`FableProbeClassifier.classify(resultJSON:now:)`) and the error message
+/// Claude Code's StopFailure hook reports when a Fable turn fails for lack of
+/// credits (`classify(hookMessage:now:)`).
 ///
 /// The state is **fail-closed toward `unknown`**: `available` is only ever
 /// produced from a probe that returned a result and said it was not an error,
 /// and `out` only from the credits signal itself. Every other outcome (a usage
 /// window limit, a network failure, a malformed reply) is `unknown`, which
 /// balancing treats as "not known to be out". See
-/// `docs/fable-availability.md`.
+/// `docs/specs/2026-11-11-fable-availability-design.md`.
 public struct FableAvailability: Codable, Sendable, Equatable {
     public enum State: String, Codable, Sendable, Equatable {
         case available
@@ -24,7 +25,8 @@ public struct FableAvailability: Codable, Sendable, Equatable {
     public enum Source: String, Codable, Sendable, Equatable {
         /// A headless `claude -p` probe run under the profile.
         case probe
-        /// A live session on the profile showed the out-of-credits line.
+        /// A session on the profile hit the out-of-credits error, as its
+        /// StopFailure hook reported it.
         case session
     }
 
@@ -84,7 +86,8 @@ public enum FableModel {
     }
 }
 
-/// Pure classification of what a Fable probe or a session said.
+/// Pure classification of what a Fable probe printed or a StopFailure hook
+/// reported.
 public enum FableProbeClassifier {
     /// The `api_error` code Claude Code reports when an account has no Fable
     /// credits.
@@ -147,14 +150,16 @@ public enum FableProbeClassifier {
         return unknown("error_without_code")
     }
 
-    /// Classify the line a session shows (or its transcript records) when its
-    /// account is out of credits: "You're out of usage credits. Run
-    /// /usage-credits to keep using Fable 5.2 or /model to switch models."
-    /// Returns nil for any other text. The caller applies it only to a session
-    /// whose model is Fable.
-    public static func classify(screenText: String, now: Date) -> FableAvailability? {
+    /// Classify the error message of a StopFailure hook, a Claude Code hook
+    /// payload: the message `tbd hooks stop-failure` builds from the hook's
+    /// input and the API-error record in the session transcript that input
+    /// names. When the account is out of credits the message is "You're out
+    /// of usage credits. Run /usage-credits to keep using Fable 5.2 or /model
+    /// to switch models." Returns nil for any other message. The caller
+    /// applies it only to a session whose model is Fable.
+    public static func classify(hookMessage: String, now: Date) -> FableAvailability? {
         // Curly and straight apostrophes both appear; the phrase needs neither.
-        guard screenText.lowercased().contains(creditsPhrase) else { return nil }
+        guard hookMessage.lowercased().contains(creditsPhrase) else { return nil }
         return FableAvailability(
             state: .out, reason: creditsErrorCode, checkedAt: now, source: .session)
     }

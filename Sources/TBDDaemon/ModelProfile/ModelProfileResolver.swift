@@ -61,9 +61,11 @@ public struct ResolvedModelProfile: Sendable, Equatable {
     }
 }
 
-/// A Fable spawn found no account it may run on: every profile balancing
-/// could have used is out of Fable usage credits. The spawn fails with this
-/// rather than quietly running another model or an out account.
+/// A Fable spawn found no account it may run on: every profile it could have
+/// landed on has a fresh Fable reading of `out`. The spawn fails with this
+/// rather than quietly running another model or landing on one of those
+/// profiles. A profile with no fresh reading is never named here, because the
+/// Fable rule counts it as eligible.
 public struct FableUnavailableError: LocalizedError, Sendable, Equatable {
     /// The profiles that were out, by name.
     public let profileNames: [String]
@@ -102,8 +104,12 @@ public struct ModelProfileResolver: Sendable {
     let fable: FableAvailabilityStore?
 
     /// How long a Fable spawn waits for probes of unchecked profiles before it
-    /// places the session on what it knows. A profile still unchecked then is
-    /// eligible but unverified.
+    /// places the session on what it knows. A probe can run for up to
+    /// `FableProbeRunner.timeout` (60 s), longer than this wait, and at most
+    /// `FableAvailabilityStore.maxConcurrentProbes` (2) run at once. So with
+    /// more than two unchecked profiles, or one slow probe, the wait can end
+    /// with profiles still unchecked. Those count as eligible: the spawn can
+    /// land on an account that is out of credits but not yet read.
     static let fableProbeDeadline: TimeInterval = 45
 
     public init(
@@ -240,14 +246,18 @@ public struct ModelProfileResolver: Sendable {
         worktreeID: UUID? = nil,
         model: String? = nil
     ) async throws -> ResolvedModelProfile? {
-        // A spawn that will run a Fable model is never balanced onto a profile
-        // known to be out of Fable credits, and throws `FableUnavailableError`
-        // rather than land on one. A session runs the spawn's `model`, or its
+        // A spawn whose session will run a Fable model is never balanced or
+        // defaulted onto a profile whose fresh Fable reading is `out`, and
+        // throws `FableUnavailableError` when those are the only profiles it
+        // could land on. A profile still unchecked when the probe wait ends
+        // counts as eligible, so the spawn can land on an account that is out
+        // but not yet read. A session runs the spawn's `model`, or its
         // profile's configured model when the spawn names none (as
         // `handleFableCreditsOut` reads it), so the rule is decided per
-        // profile; a resume (`balance: false`) naming no model keeps its
-        // account. An explicit pin (steps 0 to 1.5) is the person's choice and
-        // is not second-guessed.
+        // profile; a profile with no configured model never counts as Fable.
+        // A resume (`balance: false`) naming no model keeps its account. An
+        // explicit pin (steps 0 to 1.5) is the person's choice and is not
+        // second-guessed.
         let requiresFable = fable != nil
             && (FableModel.isFable(model) || (model == nil && balance))
         // Step 0: explicit per-creation override — highest priority. If the
@@ -451,7 +461,7 @@ public struct ModelProfileResolver: Sendable {
     /// Probe every pool profile a session from this spawn would run a Fable
     /// model on, and whose Fable reading is missing or past its TTL, waiting
     /// at most `fableProbeDeadline`. Best effort: a profile still unchecked
-    /// afterwards stays eligible, unverified.
+    /// afterwards counts as eligible, even if its account is out.
     private func probeFablePool(source: ProfilePoolCandidateSource, defaultProfileID: UUID?, spawnModel: String?) async {
         guard let fable,
               let candidates = try? await source.candidates(defaultProfileID: defaultProfileID, spawnModel: spawnModel)

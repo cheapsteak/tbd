@@ -1,7 +1,10 @@
 # Fable availability
 
 TBD knows, per profile, whether the account can run a Fable model right now,
-and balancing never places a Fable spawn on an account known to be out.
+and balancing never places a session that would run Fable on a profile whose
+fresh reading is `out`. A profile not read in time counts as eligible, so such
+a session can still land on an account that is out but not yet read (see
+Balancing).
 
 ## Why
 
@@ -21,21 +24,32 @@ claude -p --model claude-fable-5-2 --output-format json "Reply with only the wor
 ```
 
 It prints one JSON result object. The classifier
-(`FableProbeClassifier.classify(resultJSON:now:)`, pure, in `TBDShared`) reads:
+(`FableProbeClassifier.classify(resultJSON:now:)`, pure, in `TBDShared`) maps
+it to a state:
 
-| Reply | State |
-| --- | --- |
-| `is_error: false`, a non-empty string `result`, no `api_error` | `available` |
-| `api_error: "model_requires_usage_credits"` (HTTP 429, nothing billed), or no `api_error` and a `result` saying "out of usage credits" | `out` |
-| `api_error: "usage_limit_reached"` (the 5-hour or weekly window), network, auth, anything else | `unknown` |
-| empty output, malformed or truncated JSON, a non-object, a missing or non-boolean `is_error`, a mistyped `api_error`, a missing result | `unknown` |
+- **`available`** – `is_error` is `false`, `result` is a non-empty string, and
+  there is no `api_error`.
+- **`out`** – `is_error` is `true`, and either `api_error` is
+  `"model_requires_usage_credits"` (HTTP 429, nothing billed), or there is no
+  `api_error` and `result` says "out of usage credits".
+- **`unknown`** – everything else. That covers two kinds of reply:
+  - An error that is not about credits: `api_error: "usage_limit_reached"`
+    (the 5-hour or weekly window), a network or auth failure, or any other
+    code.
+  - A reply that cannot be read: empty output, malformed or truncated JSON, a
+    value that is not an object, a missing or non-boolean `is_error`, an
+    `api_error` that is not a string, or a missing result.
 
-A second signal needs no probe: a live session whose model is a Fable model
-shows "You're out of usage credits. Run /usage-credits to keep using Fable 5.2
-or /model to switch models." The StopFailure hook forwards that line
-(`claude.fableCreditsOut`); the daemon re-classifies it
-(`classify(screenText:now:)`), checks the terminal's model is Fable, and marks
-the terminal's profile `out` with source `session`.
+A second signal needs no probe: Claude Code's StopFailure hook. When a Fable
+turn fails because the account has no credits, the error message
+`tbd hooks stop-failure` builds from the hook's input (and the API-error record
+in the session transcript that input names) is "You're out of usage credits.
+Run /usage-credits to keep using Fable 5.2 or /model to switch models." The
+hook command forwards that message (`claude.fableCreditsOut`); the daemon
+re-classifies it (`classify(hookMessage:now:)`), checks that the session runs
+a Fable model (the terminal's spawn model, else its profile's configured
+model), and marks the terminal's profile `out` with source `session`. The
+signal is hook payload, never text read off a terminal screen.
 
 ## Fail closed
 
@@ -61,7 +75,8 @@ time it is needed).
 | `unknown` | 10 minutes |
 
 **Nothing probes on a timer.** A probe runs only when something asks for a
-reading that is missing or past its TTL: a Fable spawn that balances,
+reading that is missing or past its TTL: a spawn that TBD places (a balanced
+pick or the global default) on a profile where its session would run Fable,
 `tbd profile fable-check`, or `tbd profile list --refresh-fable`. Limits: one
 probe at a time per profile (a second ask joins the one in flight), at most two
 at once across profiles, 60 seconds each, then SIGTERM and SIGKILL. The probe
@@ -69,6 +84,16 @@ runs in the environment `tbd profile exec` builds
 (`ProfileExecEnvironmentBuilder`, shared with that verb), and it does not move
 the profile's last-used time. The daemon never logs the environment or the
 output.
+
+**A session's reading outranks an older probe.** The StopFailure hook's
+reading replaces whatever the store holds for that profile. A probe of the
+same profile that began before it may have read the account before the
+credits ran out, so that probe's result is dropped when it finishes. A probe
+begins when it gets one of the two slots, right before it reads the account.
+A probe that begins after the hook's reading replaces it as usual. The store
+orders the two by counting hook readings per profile, not by `checkedAt`: a
+probe stamps its reading when it finishes, so its time is always later than a
+hook reading that landed while it ran.
 
 ## Cost
 
@@ -81,24 +106,51 @@ directory.
 
 ## Balancing
 
-A spawn asks for Fable when its per-spawn model (an alias such as `fable`, or
-an id containing `fable`) says so. For a balanced pick:
+The Fable rule is decided per profile, by the model a session placed on that
+profile would run: the spawn's own model when it names one, else the profile's
+configured model. A model counts as Fable when it is an alias such as `fable`
+or an id containing `fable`. A profile with no configured model never counts
+as Fable for a spawn that names no model, because the account's own default
+model is not visible to TBD. This is the same model `claude.fableCreditsOut`
+checks before it records a reading. Each pool candidate carries it as
+`ProfilePoolCandidate.model`.
 
-1. Pool profiles whose reading is missing or stale are probed first, waiting at
-   most 45 seconds. **A profile still unchecked after that is eligible but
-   unverified**: it is not refused, and the spawn is not delayed further.
-2. `ProfilePoolPicker` gives a profile whose reading is `out` and fresh the
-   verdict `.fableOut`, before any usage-reading rule. It is never chosen and
-   never reaches the fallback tiers (`aboveCeiling`, `staleReading`, `full`),
-   which only name profiles turned away for their usage reading.
+A spawn is held to the rule when it names a Fable model, or names no model and
+may be balanced. A resume (`balance: false`) that names no model is not held
+to it. For a balanced pick:
+
+1. Pool profiles a session would run Fable on, and whose reading is missing or
+   stale, are probed first, and the spawn waits at most 45 seconds for them.
+   A probe can run for up to 60 seconds and at most two run at once, so the
+   wait can end with profiles still unchecked, most often when more than two
+   need a probe or one is slow. **A profile still unchecked when the wait
+   ends counts as eligible**: it is not refused, and the spawn does not wait
+   for it any longer. Its probe keeps running and records the result for
+   later spawns.
+2. `ProfilePoolPicker` gives the verdict `.fableOut` to a profile whose
+   session would run Fable and whose reading is `out` and fresh, before any
+   usage-reading rule. It is never chosen and never reaches the fallback
+   tiers (`aboveCeiling`, `staleReading`, `full`), which only name profiles
+   turned away for their usage reading. A profile whose session would run
+   another model is ranked as usual, whatever its reading.
 3. If nothing is eligible and nothing is a fallback but some profile was
    `.fableOut`, the spawn fails with `FableUnavailableError` naming those
-   profiles. It does not run another model and does not land on an out
-   account. The same check guards the global-default step.
+   profiles. It does not run another model. The same check guards the
+   global-default step when a session there would run Fable, after a wait of
+   up to 45 seconds for that profile's own probe.
 
-A non-Fable request is unaffected. An **explicit pin** (the picker's chosen
-profile, a repo or scratch override) is the person's choice and is not
-second-guessed; the reading is shown in `tbd profile list` for them to see.
+So the guarantee is narrow: a session that would run Fable, placed by TBD
+itself by a balanced pick or at the global default, never lands on a profile
+whose fresh reading is `out`. It can land on an account that is out of credits
+but not yet read. That session fails on its first turn, and the profile reads
+`out` once its probe finishes or the session's StopFailure hook reports the
+credits error, so later Fable sessions avoid it. The design accepts that gap
+rather than hold a spawn until every probe ends.
+
+A session that would run another model is unaffected. An **explicit pin** (the
+picker's chosen profile, a repo or scratch override) is the person's choice
+and is not second-guessed; the reading is shown in `tbd profile list` for them
+to see.
 
 ## Surfaces
 
@@ -112,7 +164,48 @@ second-guessed; the reading is shown in `tbd profile list` for them to see.
 - RPC: `modelProfile.fableCheck`, `claude.fableCreditsOut`, and an optional
   `fable` on `ModelProfileWithUsage`, all backwards-compatible.
 
+## No flag
+
+This ships without a default-off flag. Here is each case in which the repo's
+CLAUDE.md asks for one, checked against this design:
+
+- **Acting without a user gesture** – a probe runs only when something asks
+  for a reading: a spawn whose session would run Fable,
+  `tbd profile fable-check`, or `tbd profile list --refresh-fable`. Nothing
+  probes on a timer or in the background. The one signal that arrives
+  unasked, the StopFailure hook's credits message, runs no probe; it only
+  updates the in-memory reading.
+- **Killing processes** – the only process TBD signals is its own probe. A
+  `claude -p` probe still running after 60 seconds gets SIGTERM, then
+  SIGKILL. No session and no other process is touched.
+- **Deleting or changing persisted state** – readings live in memory only,
+  and a probe does not move the profile's last-used time. A probe prepares
+  the profile's config directory the way `tbd profile exec` does, and Claude
+  Code leaves one small session transcript there (see Cost). Nothing is
+  deleted or rewritten.
+- **Sending input to a session** – none. A probe is its own headless process
+  with no stdin, and the hook path only records a reading.
+- **Replacing a load-bearing path** – balancing gains one verdict,
+  `.fableOut`, which the picker gives only to a profile whose session would
+  run Fable. The global-default step, which runs whether or not balancing is
+  on, gains the same check by the same rule. So a spawn that names no model
+  is also gated, but only on profiles configured for Fable. A spawn that names
+  another model, a resume that names no model, and a spawn none of whose
+  profiles would run Fable take the same path as before.
+- **Moving existing UI** – the `FABLE` column is new, after the usage columns
+  in `tbd profile list`, and `fable` is a new field in its JSON. Existing
+  columns and fields keep their order and meaning; the trailing markers such
+  as `[default]` come after the new column.
+
+What it does cost:
+
+- Each probe bills a few tokens on an account that has credits.
+- A spawn is refused, not started, when every profile it could land on would
+  run Fable and reads `out`.
+- A spawn waits for probes of unchecked profiles it would run Fable on before
+  it starts, at most 45 seconds per wait (see Balancing).
+
 ## Not verified yet
 
-The StopFailure hook's delivery of the credits line for a Fable turn has not
-been observed on a real session; the probe path is the reliable signal.
+The StopFailure hook's delivery of the credits error message for a Fable turn
+has not been observed on a real session; the probe path is the reliable signal.
