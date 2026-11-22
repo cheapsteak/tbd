@@ -108,7 +108,7 @@ test("the method, event and error code lists are PhoneAppProtocol.swift's", () =
   assert.deepEqual([...METHODS], swiftRawValues(file, 'PhoneAppMethod'));
   assert.deepEqual([...EVENTS], swiftRawValues(file, 'PhoneAppEventName'));
   assert.deepEqual([...ERROR_CODES], swiftRawValues(file, 'PhoneAppErrorCode'));
-  assert.equal(METHODS.length, 14);
+  assert.equal(METHODS.length, 15);
   assert.equal(EVENTS.length, 5);
   assert.equal(ERROR_CODES.length, 10);
 });
@@ -444,4 +444,45 @@ test('profiles.list takes an optional repoID, and worktree.create an optional pr
   const withModel = { ...create, model: 'opus' } as unknown as ParamsOf<'worktree.create'>;
   assert.deepEqual(requestBody('r6', 'worktree.create', withModel).params, create);
   assert.throws(() => decodeParams('worktree.create', { ...create, profileID: 7 }), at('profileID'));
+});
+
+// The registry-provider filter: `repo.setRemoteFilter`, and a repo group's `remoteFilterOn`.
+
+const LAYOUT = { id: 'repo:16E7737E-5C20-548E-81FC-5DD3F9A51D36', kind: 'repo', name: 'acme-web', rows: [{ id: 'row-1', depth: 0 }] };
+
+test("a group layout's fields are PhoneAppMessages.swift's", () => {
+  assert.deepEqual(swiftStructFields('TBDDaemon/PhoneBridge/App/PhoneAppMessages.swift', 'PhoneGroupLayout'),
+    ['id', 'kind', 'name', 'rows', 'remoteFilterOn']);
+});
+
+test('a layout keeps remoteFilterOn when it is true, and leaves it absent when the daemon left it out', () => {
+  const on = { ...LAYOUT, remoteFilterOn: true };
+  assert.deepEqual(decodePhoneGroupLayout(on), on);
+  const off = decodePhoneGroupLayout(LAYOUT);
+  assert.deepEqual(off, LAYOUT);
+  assert.equal('remoteFilterOn' in off, false);
+  const data = decodeEventData('sessions.changed', { layout: [on, LAYOUT], rows: [], removedRowIDs: [] });
+  assert.deepEqual(JSON.parse(JSON.stringify(data)).layout, [on, LAYOUT]);
+});
+
+test('a remoteFilterOn of false, null or another type is refused: the daemon writes it only as true', () => {
+  for (const value of [false, null, 'true', 1]) {
+    assert.throws(() => decodePhoneGroupLayout({ ...LAYOUT, remoteFilterOn: value }), at('remoteFilterOn'), String(value));
+  }
+  assert.throws(() => decodeResult('sessions.subscribe', {
+    stream: 's1', seq: 1, replayed: false, omittedRows: 0, more: false, layout: [{ ...LAYOUT, remoteFilterOn: false }],
+  }), at('layout[0].remoteFilterOn'));
+});
+
+test('repo.setRemoteFilter sends a repo ID and a boolean, and its reply is {}', () => {
+  const repoID = '16E7737E-5C20-548E-81FC-5DD3F9A51D36';
+  for (const hidden of [true, false]) {
+    assert.deepEqual(requestBody('r1', 'repo.setRemoteFilter', { repoID, hidden }),
+      { kind: 'request', requestID: 'r1', method: 'repo.setRemoteFilter', params: { repoID, hidden } });
+  }
+  const extra = { repoID, hidden: true, provider: 'acme-box' } as unknown as ParamsOf<'repo.setRemoteFilter'>;
+  assert.deepEqual(requestBody('r2', 'repo.setRemoteFilter', extra).params, { repoID, hidden: true });
+  assert.throws(() => decodeParams('repo.setRemoteFilter', { repoID, hidden: 'yes' }), at('hidden'));
+  assert.throws(() => decodeParams('repo.setRemoteFilter', { hidden: true }), at('repoID'));
+  assert.deepEqual(decodeResult('repo.setRemoteFilter', {}), {});
 });

@@ -20,7 +20,7 @@ import type {
   PhoneRemoteProvidersParams, PhoneRemoteProvidersResult, PhoneRow, PhoneRowKind, PhoneRowPlacement, PhoneSession,
   PhoneSessionRef, PhoneStatus, PhoneStatusChip, PhoneWorktreeCreateParams, PhoneWorktreeCreateResult,
   ProfilesListParams, ProfilesListResult, PromptAnswer, PromptAnswerOutcome, PromptAnswerResult, PromptChangedData, MessageSendParams,
-  ResultOf, SessionForkParams, SessionRefResult, SessionSetModelParams, SessionSwitchProfileParams,
+  RepoSetRemoteFilterParams, ResultOf, SessionForkParams, SessionRefResult, SessionSetModelParams, SessionSwitchProfileParams,
   SessionSwitchProfileResult,
   SessionsChangedData, SessionsSubscribeParams, SessionsSubscribeResult, TranscriptDetailParams, TranscriptDetailPart,
   TranscriptDetailResult, TranscriptItemsData, TranscriptOpenParams, TranscriptOpenResult, TranscriptPage,
@@ -41,7 +41,7 @@ function members<K extends string>(set: Readonly<Record<K, true>>): readonly K[]
   return Object.freeze(Object.keys(set) as K[]);
 }
 
-/** The 14 methods, in `PhoneAppMethod`'s order. */
+/** The 15 methods, in `PhoneAppMethod`'s order. */
 export const METHODS = members<Method>({
   'sessions.subscribe': true,
   'transcript.open': true,
@@ -57,6 +57,7 @@ export const METHODS = members<Method>({
   'worktree.create': true,
   'remote.providers': true,
   'remote.create': true,
+  'repo.setRemoteFilter': true,
 });
 
 /** The 5 events, in `PhoneAppEventName`'s order. */
@@ -210,8 +211,17 @@ export const decodePhoneRowPlacement = obj<PhoneRowPlacement>({ id: str, depth: 
 
 export const decodePhoneGroupKind: Decoder<PhoneGroupKind> = oneOf(PHONE_GROUP_KINDS);
 
+/**
+ * `true`, the only value of a flag the daemon writes when it is on and leaves out when it is off,
+ * such as `PhoneGroupLayout.remoteFilterOn`. A `false` is refused: the daemon never writes one.
+ */
+export const onlyTrue: Decoder<true> = (raw, path = '') => {
+  if (bool(raw, path) !== true) throw new DecodeError(path, 'is false; the daemon leaves the field out instead');
+  return true;
+};
+
 export const decodePhoneGroupLayout = obj<PhoneGroupLayout>(
-  { id: str, kind: decodePhoneGroupKind, name: str, rows: arr(decodePhoneRowPlacement) }, {});
+  { id: str, kind: decodePhoneGroupKind, name: str, rows: arr(decodePhoneRowPlacement) }, { remoteFilterOn: onlyTrue });
 
 // MARK: - sessions.subscribe and sessions.changed
 
@@ -373,6 +383,8 @@ export const decodePhoneRemoteProvidersResult = obj<PhoneRemoteProvidersResult>(
 export const decodePhoneRemoteCreateParams = obj<PhoneRemoteCreateParams>(
   { provider: str, repoID: str, message: str, strings: record(str), bools: record(bool) }, {});
 
+export const decodeRepoSetRemoteFilterParams = obj<RepoSetRemoteFilterParams>({ repoID: str, hidden: bool }, {});
+
 /** `{}`. Any fields it holds are dropped. */
 export const decodePhoneEmpty: Decoder<PhoneEmpty> = (raw, path = '') => {
   plainObject(raw, path);
@@ -396,6 +408,7 @@ const PARAMS: { readonly [M in Method]: Decoder<ParamsOf<M>> } = {
   'worktree.create': decodePhoneWorktreeCreateParams,
   'remote.providers': decodePhoneRemoteProvidersParams,
   'remote.create': decodePhoneRemoteCreateParams,
+  'repo.setRemoteFilter': decodeRepoSetRemoteFilterParams,
 };
 
 const RESULTS: { readonly [M in Method]: Decoder<ResultOf<M>> } = {
@@ -413,6 +426,7 @@ const RESULTS: { readonly [M in Method]: Decoder<ResultOf<M>> } = {
   'worktree.create': decodePhoneWorktreeCreateResult,
   'remote.providers': decodePhoneRemoteProvidersResult,
   'remote.create': decodeSessionRefResult,
+  'repo.setRemoteFilter': decodePhoneEmpty,
 };
 
 const EVENT_DATA: { readonly [E in EventName]: Decoder<DataOf<E>> } = {
