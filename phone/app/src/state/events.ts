@@ -6,7 +6,7 @@
 
 import type { AppEvent } from '../protocol/types.ts';
 import { applyPromptChanged, clearStaleRefusals } from './prompts.ts';
-import { followLayout } from './remoteFilter.ts';
+import { followLayout, followSessionsChanged } from './remoteFilter.ts';
 import { findSession, pendingOpenTarget, resolveRoute, restoreRef, sameRoute } from './route.ts';
 import { applySessionsChanged, isComplete } from './sessionsData.ts';
 import { nextToast } from './store.ts';
@@ -25,7 +25,8 @@ const SLICES: EventSlices = { applyTranscriptEvent, applyPromptChanged, addRecei
 /**
  * `state` with `event` folded in:
  * - `sessions.changed` merges into the list (`applySessionsChanged`), and the route follows
- *   the list (`applySessions`);
+ *   the list (`applySessions`); with or without a layout, it ends each filter chip's wait the
+ *   laptop took already (`followSessionsChanged`);
  * - `transcript.*` goes to the transcript slice (`applyTranscriptEvent`);
  * - `prompt.changed` goes to the prompt slice (`applyPromptChanged`, with the session the route
  *   shows), and each receipt that gives goes to the transcript (`addReceipt`), in order.
@@ -39,8 +40,11 @@ export function applyEvent(state: AppState, event: AppEvent): AppState {
 /** `applyEvent`, with the slice functions given. */
 export function applyEventWith(state: AppState, event: AppEvent, slices: EventSlices): AppState {
   switch (event.event) {
-    case 'sessions.changed':
-      return applySessions(state, applySessionsChanged(state.sessions, event.data));
+    case 'sessions.changed': {
+      const next = applySessions(state, applySessionsChanged(state.sessions, event.data));
+      const ui = followSessionsChanged(next.ui);
+      return ui === next.ui ? next : { ...next, ui };
+    }
     case 'transcript.append':
     case 'transcript.update':
     case 'transcript.reset': {

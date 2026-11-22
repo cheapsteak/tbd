@@ -77,7 +77,7 @@ export interface UIState {
   drafts: Readonly<Record<string, string>>;
   /**
    * The phone's own value of a repo's filter for registry-provider sessions, by repo ID, while a
-   * tap on its chip waits for the laptop's list to agree (`state/remoteFilter.ts`).
+   * tap on its chip waits for the laptop's list to settle it (`state/remoteFilter.ts`).
    */
   remoteFilterPending: Readonly<Record<string, RemoteFilterPending>>;
 }

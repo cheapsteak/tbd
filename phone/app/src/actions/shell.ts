@@ -19,7 +19,7 @@
 import { AppError } from '../client/client.ts';
 import type { AppEvent, PhoneSessionRef, SessionsSubscribeParams, SessionsSubscribeResult } from '../protocol/types.ts';
 import { applyEvent, applySessions, withPendingOpen } from '../state/events.ts';
-import { shownFilterOn, tapFailed, tapTaken, withTap } from '../state/remoteFilter.ts';
+import { shownFilterOn, TAKEN_WAIT_MS, tapExpired, tapFailed, tapTaken, withTap } from '../state/remoteFilter.ts';
 import { findSession, restoreRef, sameRoute } from '../state/route.ts';
 import { decodeRoute } from '../state/routeState.ts';
 import { applySnapshot, isComplete } from '../state/sessionsData.ts';
@@ -38,6 +38,10 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
    * from a send until the reply to its last send has been handled.
    */
   const filterChains = new Map<string, Promise<void>>();
+  /** Runs `run` once `ms` milliseconds have passed (`ActionContext.after`). */
+  const runAfter = ctx.after ?? ((ms: number, run: () => void): void => {
+    setTimeout(run, ms);
+  });
 
   function setUI(fn: (ui: UIState) => UIState): void {
     store.update((s) => {
@@ -328,33 +332,37 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
     /**
      * A tap on repo `repoID`'s filter chip. The chip flips at once: the phone holds the flipped
      * value for the repo (`withTap`) and sends it in `repo.setRemoteFilter`. The laptop's list
-     * settles it (`followLayout` in `state/remoteFilter.ts`); a failure flips it back and toasts
-     * the laptop's reason, unless a newer tap on the chip followed. A repo the list does not show
-     * sends nothing. It resolves once the reply has settled.
+     * settles it (`state/remoteFilter.ts`); a failure flips it back and toasts the laptop's reason,
+     * unless a newer tap on the chip followed. Once the laptop took the request, the value waits
+     * `TAKEN_WAIT_MS` at most for the laptop's next `sessions.changed`, which may never come
+     * (`tapExpired`). A repo the list does not show sends nothing. It resolves once the reply has
+     * settled.
      *
      * A repo's requests go one at a time. The client posts them in the order they were made, even
      * across a drop, but the laptop runs each request on its own, so two in flight together can be
      * written in either order, and on, then off, could end on. So a tap's request goes at once
      * when none of the repo's is unanswered, and otherwise once the one before it has settled,
      * whether it succeeded or failed (`filterChains`). It carries the value of its own tap, so the
-     * last tap's value is the last one written. Another repo's taps never wait on this one's.
+     * last tap's value is the last one written. Another repo's taps never wait on this one's. A tap
+     * whose request waits is `queued`: until its own reply, a layout that agrees with it may be
+     * from before the earlier write, so it settles nothing.
      *
      * One the client could not confirm after a drop fails as `not_confirmed`, and the chip flips
      * back; the laptop's next layout shows what it holds.
      */
     async toggleRemoteFilter(repoID: string): Promise<void> {
       const seq = ++filterTaps;
+      const before = filterChains.get(repoID);
       const sent: { hidden: boolean | null } = { hidden: null };
       store.update((s) => {
         const shown = shownFilterOn(s.ui, s.sessions, repoID);
         if (shown === null) return s;
         sent.hidden = !shown;
-        return { ...s, ui: withTap(s.ui, repoID, !shown, seq) };
+        return { ...s, ui: withTap(s.ui, repoID, !shown, seq, before !== undefined) };
       });
       const hidden = sent.hidden;
       if (hidden === null) return;
       const post = () => ctx.client.request('repo.setRemoteFilter', { repoID, hidden });
-      const before = filterChains.get(repoID);
       const reply = before === undefined ? post() : before.then(post);
       const settled = reply.then(() => {}, () => {});
       filterChains.set(repoID, settled);
@@ -364,6 +372,7 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
           const ui = tapTaken(s.ui, s.sessions, repoID, seq);
           return ui === s.ui ? s : { ...s, ui };
         });
+        runAfter(TAKEN_WAIT_MS, () => setUI((ui) => tapExpired(ui, repoID, seq)));
       } catch (error) {
         const text = errorText(error);
         setUI((ui) => tapFailed(ui, repoID, seq, text));
