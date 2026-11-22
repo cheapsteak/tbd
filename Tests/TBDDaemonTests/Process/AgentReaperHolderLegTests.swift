@@ -34,12 +34,18 @@ struct AgentReaperHolderLegTests {
 
     private func reaper(
         _ signaller: FakeProcessSignaller,
-        records: [HolderChildRecord]
+        records: [HolderChildRecord],
+        handedBack: HandedBack? = nil
     ) -> AgentReaper {
-        AgentReaper(
+        var onHolderJobGone: (@Sendable (HolderChildRecord) async -> Void)?
+        if let handedBack {
+            onHolderJobGone = { record in handedBack.append(record) }
+        }
+        return AgentReaper(
             signaller: signaller,
             graceAttempts: 3, pollInterval: .milliseconds(1),
-            holderSessions: { records })
+            holderSessions: { records },
+            onHolderJobGone: onHolderJobGone)
     }
 
     private static func record(
@@ -141,15 +147,82 @@ struct AgentReaperHolderLegTests {
         }
     }
 
+    /// Also the nil-callback branch: a reaper built without
+    /// `onHolderJobGone`, as every caller but the daemon builds it, sweeps a
+    /// gone child exactly as before — nothing signalled, nothing else done.
     @Test func aRecordedPidWhoseProcessIsGoneIsNotSignalled() async {
         let signaller = orphanSignaller()
         signaller.behaviors[Self.childPID] = .init(aliveInitially: false)
         let reaper = reaper(signaller, records: [Self.record()])
-        #expect(reaper.decideHolderChild(Self.record()) == .keep(reason: "child-gone"))
+        #expect(reaper.decideHolderChild(Self.record()) == .childGone)
 
         await reaper.sweepHolderChildren()
         #expect(signaller.terminated.isEmpty)
         #expect(signaller.killed.isEmpty)
+    }
+
+    // MARK: - The hand-back of a row whose job is gone
+
+    /// A dead holder over a gone child is the one verdict that says the
+    /// session is over, so its row goes back to the reconciler that disposes
+    /// of such rows — and the leg still signals nothing.
+    @Test func aGoneChildsRowIsHandedBack() async {
+        let signaller = orphanSignaller()
+        signaller.behaviors[Self.childPID] = .init(aliveInitially: false)
+        let handedBack = HandedBack()
+        let reaper = reaper(signaller, records: [Self.record()], handedBack: handedBack)
+
+        await reaper.sweepHolderChildren()
+        #expect(handedBack.records == [Self.record()])
+        #expect(signaller.terminated.isEmpty)
+        #expect(signaller.killed.isEmpty)
+    }
+
+    /// Every other verdict keeps its row to itself. Each of these says either
+    /// that the session may still be running or that the sweep cannot tell,
+    /// and none of them is evidence the session is over.
+    @Test func noOtherVerdictHandsTheRowBack() async {
+        let cases: [(String, HolderChildRecord, (FakeProcessSignaller) -> Void)] = [
+            ("holder-alive", Self.record(), {
+                $0.behaviors[Self.holderPID] = .init(aliveInitially: true)
+            }),
+            ("holder-unrecorded", Self.record(holderPID: nil), { _ in }),
+            ("invalid-child-pid", Self.record(childPID: 1), { _ in }),
+            ("start-time-mismatch", Self.record(), {
+                $0.startTimes[Self.childPID] = Self.createdAt.addingTimeInterval(3600)
+            }),
+            ("start-time-unreadable", Self.record(), {
+                $0.startTimes.removeValue(forKey: Self.childPID)
+            }),
+            ("command-unreadable", Self.record(), {
+                $0.cmdlines.removeValue(forKey: Self.childPID)
+            }),
+            ("foreign-executable", Self.record(), {
+                $0.cmdlines[Self.childPID] = "/usr/bin/vim README.md"
+            }),
+        ]
+        for (reason, record, script) in cases {
+            let signaller = orphanSignaller()
+            script(signaller)
+            let handedBack = HandedBack()
+            let reaper = reaper(signaller, records: [record], handedBack: handedBack)
+            #expect(reaper.decideHolderChild(record) == .keep(reason: reason))
+
+            await reaper.sweepHolderChildren()
+            #expect(handedBack.records.isEmpty, "a \(reason) row was handed back")
+        }
+    }
+
+    /// A reaped orphan is not handed back either: its job was alive when the
+    /// leg looked, which is the opposite of the fact the hand-back carries.
+    @Test func aReapedOrphanIsNotHandedBack() async {
+        let signaller = orphanSignaller()
+        let handedBack = HandedBack()
+        let reaper = reaper(signaller, records: [Self.record()], handedBack: handedBack)
+
+        await reaper.sweepHolderChildren()
+        #expect(signaller.terminated == [Self.childPID])
+        #expect(handedBack.records.isEmpty)
     }
 
     /// The anti-pid-reuse gate. The pid is alive and presents a plausible
@@ -278,6 +351,14 @@ struct AgentReaperHolderLegTests {
             signaller.killed.isEmpty,
             "the escalation must re-prove identity before SIGKILL, and this pid no longer verifies")
     }
+}
+
+/// The records a sweep handed back through `onHolderJobGone`.
+private final class HandedBack: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handed: [HolderChildRecord] = []
+    func append(_ record: HolderChildRecord) { lock.withLock { handed.append(record) } }
+    var records: [HolderChildRecord] { lock.withLock { handed } }
 }
 
 /// Counts calls from a `@Sendable` closure without an actor hop.

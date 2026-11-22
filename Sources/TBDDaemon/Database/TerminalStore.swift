@@ -432,6 +432,45 @@ struct TerminalReplacementSnapshot: Sendable {
     }
 }
 
+/// A live holder-transport row as a reconcile pass read it: what it would
+/// launch (`replacement`) and which holder and job it names.
+///
+/// The compare-and-set for that pass's disposal of a row whose holder and job
+/// it found gone (`TerminalStore.parkEndedHolderRow`,
+/// `TBDDatabase.deleteEndedHolderTerminalAndTab`). Its probe runs between the
+/// read and the write, and the row's ground truth is a rendezvous nothing here
+/// holds still, so the row can move on in between: a park and a wake, or a
+/// wake alone, replace the pids and the session incarnation with those of a
+/// session that is running now. Parking that row would let a later wake start
+/// a second agent on the same session id, and deleting it would strand the
+/// new job. Either change fails this comparison and the row is left as it is.
+struct LiveHolderRowSnapshot: Sendable {
+    let replacement: TerminalReplacementSnapshot
+    let holderPID: Int32?
+    let childPID: Int32?
+
+    init(terminal: Terminal) {
+        replacement = TerminalReplacementSnapshot(terminal: terminal)
+        holderPID = terminal.holderPID
+        childPID = terminal.childPID
+    }
+
+    fileprivate func matches(_ record: TerminalRecord) -> Bool {
+        record.transport == TerminalTransport.holder.rawValue
+            && record.hibernatedAt == nil && record.suspendedAt == nil
+            && record.holder_pid == holderPID
+            && record.child_pid == childPID
+            && replacement.matches(record)
+    }
+
+    func matches(_ terminal: Terminal) -> Bool {
+        terminal.transport == .holder && !terminal.isParked
+            && terminal.holderPID == holderPID
+            && terminal.childPID == childPID
+            && replacement.matches(terminal)
+    }
+}
+
 /// The complete safety state that authorizes hibernating a live process.
 /// Unlike general replacement snapshots, this includes the activity and
 /// keep-warm rails so a hook or preference change between the final read and
@@ -483,6 +522,46 @@ struct TerminalHibernationSnapshot: Sendable {
 private enum HibernatedTranscriptPathUpdate {
     case preserve
     case replace(String?)
+}
+
+/// The columns a complete park writes: the session to resume, a fresh
+/// incarnation, the park stamp and reason, and the activity of a parked row.
+/// Shared by `persistHibernatedState` and `parkEndedHolderRow`, so the two
+/// parks cannot drift apart. The caller writes the record and then cancels its
+/// scheduled resumes.
+private func applyHibernatedState(
+    record: inout TerminalRecord,
+    sessionID: String,
+    transcriptPathUpdate: HibernatedTranscriptPathUpdate,
+    snapshot: String?,
+    reason: HibernateReason?,
+    at date: Date
+) -> UUID {
+    record.claudeSessionID = sessionID
+    if case .replace(let transcriptPath) = transcriptPathUpdate {
+        record.transcriptPath = transcriptPath
+    }
+    record.sessionOrderObservedAt = nil
+    record.codexTranscriptBoundaryOffset = nil
+    let incarnationID = UUID()
+    record.sessionIncarnationID = incarnationID.uuidString
+    record.pendingSessionIncarnationID = nil
+    record.hibernatedAt = date
+    record.hibernateReason = reason?.rawValue
+    if let snapshot {
+        record.suspendedSnapshot = snapshot
+    }
+    record.activityState = TerminalActivityState.idle.rawValue
+    // A parked session is idle because TBD's own record says it is
+    // parked — `.database`, observed at the moment of the park. A
+    // parked session is also waiting for nothing, so any carried
+    // awaiting-input reason is cleared with it.
+    record.activityStateSource = FactColumnJSON.encode(FactSource.database)
+    record.activityStateObservedAt = date
+    record.activityStateOrderObservedAt = date
+    record.awaitingInputReason = nil
+    record.awaitingInputObservedAt = nil
+    return incarnationID
 }
 
 @discardableResult
@@ -1705,6 +1784,46 @@ public struct TerminalStore: Sendable {
             at: date)
     }
 
+    /// Park a holder row whose holder and job reconcile has found gone, and
+    /// clear the pids it names, in one write — only while the row is still the
+    /// live holder row the caller read (`expectedState`). False means it
+    /// changed first, or is gone, and nothing was written.
+    ///
+    /// The park itself is `setHibernated`'s, field for field, scheduled
+    /// resumes included. A parked holder row names no processes: the holder
+    /// and its job are already gone, so pids left on it would point the
+    /// reaper's holder leg and every identity check at numbers the kernel has
+    /// recycled. One transaction, so a row is never left parked with those
+    /// pids still on it.
+    func parkEndedHolderRow(
+        id: UUID,
+        expectedState: LiveHolderRowSnapshot,
+        sessionID: String,
+        reason: HibernateReason,
+        at date: Date = Date()
+    ) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
+                  expectedState.matches(record) else {
+                return false
+            }
+            _ = applyHibernatedState(
+                record: &record,
+                sessionID: sessionID,
+                transcriptPathUpdate: .preserve,
+                snapshot: nil,
+                reason: reason,
+                at: date)
+            record.holder_pid = nil
+            record.child_pid = nil
+            record.holder_child_started_at = nil
+            try record.update(db)
+            // After `record.update`, as in `persistHibernatedState`.
+            try ScheduledResumeStore.cancelPendingInTransaction(db, terminalID: id.uuidString)
+            return true
+        }
+    }
+
     /// Record the hibernation intent before ending the live agent. The
     /// current process token remains intact until the agent is confirmed
     /// ended, so startup reconciliation can safely unpark a still-running
@@ -1791,30 +1910,13 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
-            record.claudeSessionID = sessionID
-            if case .replace(let transcriptPath) = transcriptPathUpdate {
-                record.transcriptPath = transcriptPath
-            }
-            record.sessionOrderObservedAt = nil
-            record.codexTranscriptBoundaryOffset = nil
-            let incarnationID = UUID()
-            record.sessionIncarnationID = incarnationID.uuidString
-            record.pendingSessionIncarnationID = nil
-            record.hibernatedAt = date
-            record.hibernateReason = reason?.rawValue
-            if let snapshot {
-                record.suspendedSnapshot = snapshot
-            }
-            record.activityState = TerminalActivityState.idle.rawValue
-            // A parked session is idle because TBD's own record says it is
-            // parked — `.database`, observed at the moment of the park. A
-            // parked session is also waiting for nothing, so any carried
-            // awaiting-input reason is cleared with it.
-            record.activityStateSource = FactColumnJSON.encode(FactSource.database)
-            record.activityStateObservedAt = date
-            record.activityStateOrderObservedAt = date
-            record.awaitingInputReason = nil
-            record.awaitingInputObservedAt = nil
+            let incarnationID = applyHibernatedState(
+                record: &record,
+                sessionID: sessionID,
+                transcriptPathUpdate: transcriptPathUpdate,
+                snapshot: snapshot,
+                reason: reason,
+                at: date)
             try record.update(db)
             // AFTER record.update: the routine nils pendingResumeAt via raw
             // SQL, and an update of the (stale-fetched) record afterward

@@ -34,14 +34,26 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 ///
 /// An actor because one `WorktreeLifecycle` value is copied per call and every
 /// copy must read the same flag — the same reason `conflictSweepCache` is one.
+///
+/// **Passes overlap, so the clock is shared and counted.** The sweep's callers
+/// run independently of each other — the hourly scratch pass, `repo.add`, the
+/// `cleanup` RPC, and the reaper's hand-back of a single row
+/// (`reconcileHolderRowAfterJobGone`) — and the hourly pass and the reaper
+/// both make their first run as the daemon starts. A pass that begins while
+/// another is running joins its clock, and the clock stops only when the last
+/// pass on it ends, so a pass that finishes first cannot take the bound off
+/// one that is still probing.
 actor HolderProbeBudget {
     private var spent = false
     private var timer: Task<Void, Never>?
+    /// How many passes are between `begin` and `end` right now.
+    private var passes = 0
 
-    /// Starts the clock for one pass. A second call while a pass is running is
-    /// a no-op, so a nested or re-entered pass shares the outer one's budget
-    /// rather than silently granting itself a fresh one.
+    /// Starts the clock for one pass. A call while a pass is running starts no
+    /// new clock: the pass shares the running one's budget rather than
+    /// silently granting itself a fresh one.
     func begin(_ budget: Duration, clock: any Clock<Duration>) {
+        passes += 1
         guard timer == nil else { return }
         spent = false
         timer = Task { [weak self] in
@@ -55,9 +67,12 @@ actor HolderProbeBudget {
         }
     }
 
-    /// Ends the pass and cancels the timer. Safe to call when no pass is
-    /// running.
+    /// Ends one pass, and cancels the timer when it was the last pass on it.
+    /// Safe to call when no pass is running.
     func end() {
+        guard passes > 0 else { return }
+        passes -= 1
+        guard passes == 0 else { return }
         timer?.cancel()
         timer = nil
     }
@@ -529,15 +544,7 @@ extension WorktreeLifecycle {
             // reach, and the row is already exactly what this pass would
             // produce.
             for terminal in terminals where !terminal.isParked {
-                // A nonparked Codex row with a pending incarnation is an
-                // unfinished Continue in Claude fence, which nothing in the
-                // daemon finishes. The row still holds its Codex
-                // source identity. The recovery park below would carry the
-                // fence onto a parked row, where it reads as a park still in
-                // flight, so the row is kept as it is and logged instead;
-                // closing its tab clears it.
-                if terminal.kind == .codex,
-                   terminal.pendingSessionIncarnationID != nil {
+                if Self.holdsUnfinishedContinueInClaude(terminal) {
                     logger.warning("reconcile: keeping Codex terminal \(terminal.id, privacy: .public) as it is — an earlier build left a Continue in Claude replacement unfinished on it; close the tab to clear it")
                     continue
                 }
@@ -549,22 +556,23 @@ extension WorktreeLifecycle {
                 // A holder row's ground truth is the holder inventory
                 // (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
                 // "Reconciliation"), which is what `holderRowVerdict(for:)`
-                // reads; the shared fork below disposes of it. A tmux row's is
-                // its server's socket
+                // reads, and `disposeOfEndedHolderRow` disposes of it. A tmux
+                // row's is its server's socket
                 // (`docs/specs/2026-10-11-holder-transport-migration-design.md`,
                 // "A live row whose tmux server outlived the update"), and
-                // `disposeOfLeftoverTmuxRow` disposes of it, each write a
-                // compare-and-set.
-                let disposal: String
+                // `disposeOfLeftoverTmuxRow` disposes of it. Each write on
+                // either arm is a compare-and-set.
                 switch terminal.transport {
                 case .holder:
                     switch await holderRowVerdict(for: terminal) {
                     case .keep(let reason):
                         logger.debug("reconcile: keeping holder-backed terminal \(terminal.id, privacy: .public) — \(reason, privacy: .public)")
-                        continue
                     case .sessionOver(let status):
-                        disposal = "its holder is gone and its job "
-                            + Self.jobEndingDescription(status)
+                        await disposeOfEndedHolderRow(
+                            terminal,
+                            finding: "its holder is gone and its job "
+                                + Self.jobEndingDescription(status),
+                            actuationLog: actuationLog)
                     }
 
                 case .tmux:
@@ -585,51 +593,183 @@ extension WorktreeLifecycle {
                     }
                     await disposeOfLeftoverTmuxRow(
                         terminal, server: wt.tmuxServer, actuationLog: actuationLog)
-                    continue
                 }
-
-                // An identified agent row is parked with its provider's native
-                // session ID. Only this positively-unreachable recovery fork
-                // accepts Codex; manual and automatic parking remain Claude-only.
-                if let resumePlan = terminal.recoveryResumePlan {
-                    let sessionID = resumePlan.identity.sessionID
-                    // This park bypasses `HibernationCoordinator`, so the
-                    // reconcile rail records its own independent actuation.
-                    // Fail closed if that authoritative record cannot be made.
-                    var row = ActuationRow(
-                        actor: .daemon(rail: ActuationRail.reconcile), kind: .hibernate)
-                    row.target = .local(worktree: wt.id, terminal: terminal.id)
-                    guard let actuationID = try? await actuationLog.appendRequest(row) else {
-                        logger.warning("reconcile: skipped parking terminal \(terminal.id, privacy: .public) — the actuation record is unwritable")
-                        continue
-                    }
-                    do {
-                        try await db.terminals.setHibernated(
-                            id: terminal.id, sessionID: sessionID, reason: .recovery)
-                        // A parked holder row names no processes. The holder
-                        // and its job are already gone — that is what
-                        // `.sessionOver` established — so leaving their pids on
-                        // the row would point the reaper's holder leg and every
-                        // identity check at numbers the kernel has recycled.
-                        try await db.terminals.setHolderProcess(
-                            id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
-                        await actuationLog.appendOutcome(
-                            confirms: actuationID, result: .dispatched)
-                    } catch {
-                        await actuationLog.appendOutcome(
-                            confirms: actuationID, result: .transportFailed, error: "\(error)")
-                    }
-                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
-                } else {
-                    try? await db.deleteTerminalAndTab(id: terminal.id)
-                    await sessionTitles.forget(terminalID: terminal.id)
-                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), no session to preserve")
-                }
-                await pendingQuestions.clear(terminalID: terminal.id)
-                await subscriptions?.broadcastPendingPrompts(
-                    terminalID: terminal.id, from: pendingQuestions)
             }
         }
+    }
+
+    /// Whether `terminal` is a nonparked Codex row with a pending incarnation:
+    /// an unfinished Continue in Claude fence, which nothing in the daemon
+    /// finishes. The row still holds its Codex source identity. The recovery
+    /// park would carry the fence onto a parked row, where it reads as a park
+    /// still in flight, so the sweep keeps such a row as it is on either
+    /// transport, and so does `reconcileHolderRowAfterJobGone`; closing its tab
+    /// clears it.
+    private static func holdsUnfinishedContinueInClaude(_ terminal: Terminal) -> Bool {
+        terminal.kind == .codex && terminal.pendingSessionIncarnationID != nil
+    }
+
+    /// Park or delete a holder row whose session `holderRowVerdict(for:)` found
+    /// over — the holder arm's half of "two transports, one outcome", shared by
+    /// the sweep and by `reconcileHolderRowAfterJobGone` so that both reach the
+    /// same disposal by the same code.
+    ///
+    /// An identified agent row is parked with its provider's native session ID
+    /// and reason `.recovery`; a row with nothing to resume is deleted with its
+    /// tab. Only this positively-unreachable recovery fork accepts Codex;
+    /// manual and automatic parking remain Claude-only.
+    ///
+    /// Each write is a compare-and-set against `terminal`, the row as the
+    /// caller read it before probing (`LiveHolderRowSnapshot`). A row that
+    /// changed in between — parked and woken onto a new holder, closed,
+    /// renamed — is left as it is and logged, and the next pass, or the
+    /// reaper's next hand-back, judges it afresh.
+    ///
+    /// `finding` is what the caller established, in the words the log line
+    /// carries, so the two callers' lines can be told apart.
+    private func disposeOfEndedHolderRow(
+        _ terminal: Terminal, finding: String, actuationLog: ActuationLog
+    ) async {
+        let expectedState = LiveHolderRowSnapshot(terminal: terminal)
+        if let resumePlan = terminal.recoveryResumePlan {
+            let sessionID = resumePlan.identity.sessionID
+            // This park bypasses `HibernationCoordinator`, so the reconcile
+            // rail records its own independent actuation. Fail closed if that
+            // authoritative record cannot be made.
+            var row = ActuationRow(
+                actor: .daemon(rail: ActuationRail.reconcile), kind: .hibernate)
+            row.target = .local(worktree: terminal.worktreeID, terminal: terminal.id)
+            guard let actuationID = try? await actuationLog.appendRequest(row) else {
+                logger.warning("reconcile: skipped parking terminal \(terminal.id, privacy: .public) — the actuation record is unwritable")
+                return
+            }
+            let parked: Bool
+            do {
+                // The park and the cleared pids in one write: the holder and
+                // its job are already gone — that is what `.sessionOver`
+                // established — so a parked row names no processes.
+                parked = try await db.terminals.parkEndedHolderRow(
+                    id: terminal.id, expectedState: expectedState,
+                    sessionID: sessionID, reason: .recovery, at: now())
+            } catch {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .transportFailed, error: "\(error)")
+                logger.warning("reconcile: could not park terminal \(terminal.id, privacy: .public) — \(finding, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard parked else {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .refused(.notEligible),
+                    error: "the row changed after reconcile read it")
+                logger.info("reconcile: left holder-backed terminal \(terminal.id, privacy: .public) as it is — it changed after this pass read it")
+                return
+            }
+            await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
+            logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — \(finding, privacy: .public), session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
+        } else {
+            let deleted: Bool
+            do {
+                deleted = try await db.deleteEndedHolderTerminalAndTab(
+                    id: terminal.id, expectedState: expectedState)
+            } catch {
+                logger.warning("reconcile: could not delete terminal \(terminal.id, privacy: .public) — \(finding, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard deleted else {
+                logger.info("reconcile: left holder-backed terminal \(terminal.id, privacy: .public) as it is — it changed after this pass read it")
+                return
+            }
+            await sessionTitles.forget(terminalID: terminal.id)
+            logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(finding, privacy: .public), no session to preserve")
+        }
+        await pendingQuestions.clear(terminalID: terminal.id)
+        await subscriptions?.broadcastPendingPrompts(
+            terminalID: terminal.id, from: pendingQuestions)
+    }
+
+    /// Judge one holder row again once `AgentReaper` has found its holder and
+    /// its job both gone, and park or delete it as the startup pass would
+    /// have.
+    ///
+    /// **This closes a keep that nothing else revisits in time.** The sweep
+    /// keeps a holder row whose job is still running even when its holder is
+    /// provably gone (`holderRowVerdict(for:)`, "job-still-running"), because
+    /// the row is the only record of the child pid the reaper's holder leg
+    /// reads. A pass that runs while the child is mid-exit — a holder killed a
+    /// moment before a daemon handover's startup reconcile — keeps the row,
+    /// and the job is gone a moment later. The reaper then reads `child-gone`
+    /// on every sweep and signals nothing, so without a hand-back the row
+    /// stays a live, unparked holder row over a dead holder and a dead job
+    /// until some later pass happens to sweep its repository — too late for
+    /// the wake that follows a handover, which wakes only what is parked.
+    /// The reaper's `child-gone` verdict calls this (`AgentReaper.onHolderJobGone`).
+    ///
+    /// It decides nothing of its own. It re-reads the row, and judges it only
+    /// if the row is still a live holder row naming the holder and job the
+    /// caller saw gone (`expectedHolderPID`, `expectedChildPID`): a wake or a
+    /// respawn in between replaces those pids, and the session they name now
+    /// is running. Then it asks `holderRowVerdict(for:)`, so every gate the
+    /// sweep applies applies here unchanged — a viewer attached, a live reader,
+    /// a remembered status, the probe budget, a job still running — and on
+    /// `.sessionOver` it disposes of the row through `disposeOfEndedHolderRow`,
+    /// the sweep's own code. A keep does nothing; the reaper's next sweep asks
+    /// again while the row still reads `child-gone`.
+    ///
+    /// The probe runs under the same `HolderProbeBudget` as a sweep's: begun
+    /// here, or joined when a sweep is already running.
+    ///
+    /// Returns the verdict it acted on, or nil when it judged nothing because
+    /// the row is not one it may judge. The daemon discards it; it is there so
+    /// a test can tell which gate decided.
+    @discardableResult
+    func reconcileHolderRowAfterJobGone(
+        terminalID: UUID,
+        expectedHolderPID: Int32?,
+        expectedChildPID: Int32?,
+        actuationLog: ActuationLog
+    ) async -> HolderRowVerdict? {
+        let terminal: Terminal
+        do {
+            guard let current = try await db.terminals.get(id: terminalID) else {
+                logger.debug("reconcile: not re-judging terminal \(terminalID, privacy: .public) — its row is gone")
+                return nil
+            }
+            terminal = current
+        } catch {
+            logger.warning("reconcile: could not read terminal \(terminalID, privacy: .public) to judge it after its holder's job was found gone: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        guard terminal.transport == .holder, !terminal.isParked else {
+            logger.debug("reconcile: not re-judging terminal \(terminalID, privacy: .public) — it is no longer a live holder-backed row")
+            return nil
+        }
+        guard terminal.holderPID == expectedHolderPID,
+              terminal.childPID == expectedChildPID else {
+            logger.debug("reconcile: not re-judging terminal \(terminalID, privacy: .public) — it names a different holder or job than the one found gone")
+            return nil
+        }
+        guard !Self.holdsUnfinishedContinueInClaude(terminal) else {
+            logger.debug("reconcile: keeping Codex terminal \(terminalID, privacy: .public) as it is — a Continue in Claude replacement is unfinished on it")
+            return nil
+        }
+
+        // Only the verdict is bracketed: it is the one step that may open a
+        // socket, and it does not throw, so `end` is reached on every path.
+        await holderProbeBudget.begin(Self.holderPhaseBudget, clock: clock)
+        let verdict = await holderRowVerdict(for: terminal)
+        await holderProbeBudget.end()
+
+        switch verdict {
+        case .keep(let reason):
+            logger.debug("reconcile: keeping holder-backed terminal \(terminalID, privacy: .public) after its holder's job was found gone — \(reason, privacy: .public)")
+        case .sessionOver(let status):
+            await disposeOfEndedHolderRow(
+                terminal,
+                finding: "its holder and job were found gone after the startup pass, and the job "
+                    + Self.jobEndingDescription(status),
+                actuationLog: actuationLog)
+        }
+        return verdict
     }
 
     /// Park or delete a live tmux row whose tmux server the probe found gone.
@@ -932,6 +1072,16 @@ extension WorktreeLifecycle {
     /// reclaim an inventory entry and strand the process it named, which is the
     /// hazard `HolderRegistry.killJob`'s doc comment describes. So this sweep
     /// signals nothing, ever.
+    ///
+    /// **That keep is handed back once the job is gone.** It is ordinary for
+    /// the job to end a moment after this gate read it — a child caught
+    /// mid-exit — while a repository's rows are not swept again until the
+    /// next daemon start, `repo.add` or `cleanup`. The
+    /// reaper's holder leg reads the same row on every sweep, and when it finds
+    /// the holder gone and nothing running under the child pid (`child-gone`)
+    /// it hands the row back to `reconcileHolderRowAfterJobGone`, which asks
+    /// this verdict again and, on `.sessionOver`, parks or deletes the row
+    /// exactly as the sweep would have.
     ///
     /// **Naming that contingency honestly: the loop does not always close.**
     /// The reaper keeps rather than signals whenever identity is uncertain —
