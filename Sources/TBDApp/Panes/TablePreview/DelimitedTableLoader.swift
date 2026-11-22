@@ -14,29 +14,39 @@ enum DelimitedTableLoader {
 
     /// Off-main. Delimiter from `DelimitedTextParser.delimiter(forPath:)`, comma if nil.
     ///
-    /// Only a regular file is read, for the reason `TextSniff.fileReadsAsText`
-    /// gives: opening a FIFO blocks until a writer appears. So the path is
-    /// opened `O_NONBLOCK`, which opens a FIFO at once instead of waiting,
-    /// and the descriptor it opened is the one checked with `fstat`: a file
-    /// swapped for a FIFO between a check of the path and the open cannot
-    /// block the read. The open follows symlinks, so a link to a regular file
-    /// counts. A FIFO, a directory, a socket, a missing path or a read error
-    /// is `.unreadable`. When the file holds more than `byteLimit` bytes, the
-    /// parser gets the first `byteLimit` and drops the row the cut may have
-    /// split.
+    /// Only a regular file is read, and two checks see to it:
+    ///
+    /// - `stat` on the path, before the open, so a file that is not regular
+    ///   is never opened. Opening a FIFO blocks until a writer appears, for
+    ///   the reason `TextSniff.fileReadsAsText` gives. An open that does not
+    ///   wait is no better: it releases a writer blocked opening the FIFO,
+    ///   such as a shell's `producer > out.csv`, and closing it again leaves
+    ///   that writer with no reader, so its next write fails with `SIGPIPE`
+    ///   or `EPIPE`.
+    /// - `fstat` on the descriptor the open returned, because the path may
+    ///   change between the two. The open is `O_NONBLOCK`, so a FIFO swapped
+    ///   in after the `stat` opens at once instead of blocking, and this
+    ///   check refuses it.
+    ///
+    /// Both follow symlinks, so a link to a regular file counts. A FIFO, a
+    /// directory, a socket, a missing path or a read error is `.unreadable`.
+    /// When the file holds more than `byteLimit` bytes, the parser gets the
+    /// first `byteLimit` and drops the row the cut may have split.
     nonisolated static func load(
         path: String,
         rowLimit: Int = DelimitedTextParser.defaultRowLimit,
         columnLimit: Int = DelimitedTextParser.defaultColumnLimit,
         byteLimit: Int = DelimitedTableLoader.byteLimit
     ) -> DelimitedTableLoad {
+        var info = stat()
+        guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return .unreadable }
         let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
         guard descriptor >= 0 else { return .unreadable }
         // The handle owns the descriptor from here, so every return below,
         // a refused file's included, closes it.
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
-        var info = stat()
+        // The path may name another file by now; the descriptor is what is read.
         guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return .unreadable }
         // A regular file ignores `O_NONBLOCK`; clearing it anyway makes the
         // read an ordinary blocking read whatever the file system.
