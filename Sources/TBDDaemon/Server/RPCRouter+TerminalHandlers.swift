@@ -250,12 +250,13 @@ extension RPCRouter {
         // leave an orphan terminal row behind. After the resume gate, because
         // preparing writes the Codex home a refused resume must not touch.
         //
-        // A failure is recorded as a refusal, not a transport failure: the
-        // start lacks what it needs — a Codex CLI it can run, or a Codex home
-        // it can use — and nothing of the terminal exists yet, so the start is
-        // declined before anything starts, as the plugin-dir and profile
-        // refusals are. The answer is the error as the caller has always
-        // seen it.
+        // No Codex CLI to run is recorded as a refusal, not a transport
+        // failure: the start lacks what it needs, and nothing of the terminal
+        // exists yet, so it is declined before anything starts, as the
+        // plugin-dir and profile refusals are. A Codex home that cannot be
+        // written is a failure of the start itself, recorded as one; the
+        // ensurer may have written part of the home by then. Either answer is
+        // the error as the caller has always seen it.
         let codexPreparation: CodexLaunchPreparation?
         if params.type == .codex {
             do {
@@ -263,10 +264,15 @@ extension RPCRouter {
                     guardedHome: guardedCodexHome?.path,
                     executableResolver: codexExecutableResolver,
                     sharedHomeEnsurer: codexHomeEnsurer)
+            } catch let unresolved as CodexExecutableResolutionError {
+                let message = "\(unresolved)"
+                logger.warning("terminal.create: no Codex CLI to run, so nothing was started: \(message, privacy: .public)")
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
             } catch {
                 let message = "\(error)"
-                logger.warning("terminal.create: Codex could not be prepared, so nothing was started: \(message, privacy: .public)")
-                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                logger.error("terminal.create: the Codex home could not be prepared, so nothing was started: \(message, privacy: .public)")
+                await finishActuation(actuationID, .transportFailed, error: message)
                 return RPCResponse(error: message)
             }
         } else {
