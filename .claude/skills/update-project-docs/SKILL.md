@@ -32,7 +32,7 @@ Review these sections and update if they've drifted from the code:
 - **RPC Methods list** — compare against `RPCMethod` constants in `Sources/TBDShared/RPCProtocol.swift`
 - **Data model tables** — compare against migrations in `Sources/TBDDaemon/Database/Database.swift`
 - **Hook events** — compare against `HookEvent` enum in `Sources/TBDShared/HookResolver.swift`
-- **Tmux architecture** — compare against `Sources/TBDDaemon/Lifecycle/LeftoverTmuxServerProbe.swift`, `Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+LeftoverTmux.swift` and `Sources/TBDApp/Terminal/LeftoverTmuxSessionNotice.swift`
+- **Session transport** — compare against `Sources/TBDDaemon/Holder/` (`HolderSpawner.swift`, `HolderRegistry.swift`, `HolderReader.swift`), `Sources/TBDDaemon/Lifecycle/LeftoverTmuxServerProbe.swift`, `Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+LeftoverTmux.swift` and `Sources/TBDApp/Terminal/LeftoverTmuxSessionNotice.swift`
 - **Lifecycle flows** — compare against `Sources/TBDDaemon/Lifecycle/WorktreeLifecycle.swift`
 
 ### 3. SKILL.md
