@@ -28,7 +28,7 @@ enum ShellLaunchComposer {
     /// behave consistently across both). Flags are separate argv elements
     /// (`-i -l -c`, never clustered `-ilc`): some shells (e.g. nushell)
     /// accept the individual flags but reject GNU-style clustering, and a
-    /// rejected spawn kills every pane silently. csh and tcsh cannot combine
+    /// rejected spawn kills every session silently. csh and tcsh cannot combine
     /// -l with -c at all (tcsh accepts -l only as its sole argument), so
     /// they keep the pre-login-shell `-i -c`; every other shell gets
     /// `-i -l -c` (interactive login shell, see
@@ -55,10 +55,12 @@ enum ShellLaunchComposer {
     }
 
     /// The `[shell] + flags + [command]` argv every spawn path runs. Shared
-    /// for the same drift-hazard reason as `envExportPrefixed`: the tmux
-    /// builders and the holder launch must spawn through the identical shell
-    /// invocation, and the per-shell flag choice (`shellFlags(forShell:)`)
-    /// must not fork between them. The defaulted `environment` parameter is
+    /// for the same drift-hazard reason as `envExportPrefixed`: a fresh
+    /// spawn, the replacement a wake or profile swap starts, and a running
+    /// shell's move onto the holder all launch through
+    /// `WorktreeLifecycle.holderLaunch`, which builds its argv here, so the
+    /// per-shell flag choice (`shellFlags(forShell:)`) has one home and
+    /// cannot fork between them. The defaulted `environment` parameter is
     /// the test seam for the SHELL read, matching the
     /// `TBDConstants.*(environment:)` idiom.
     static func shellInvocation(

@@ -4,12 +4,11 @@ import TBDShared
 
 @testable import TBDCLI
 
-/// The `STATE` column `tbd terminal list` prints. Before this, a row parked by
-/// `stampSessionExited` (or any other hibernation path) looked identical to a
-/// live one in the human table — same ID, WINDOW, PANE, LABEL — even once its
-/// pane id no longer resolved to anything. `--json` always carried
-/// `hibernatedAt`/`hibernateReason`; this is what brings that fact to the
-/// table a human actually reads.
+/// The `STATE` column `tbd terminal list` prints. Without it, a row parked by
+/// `stampSessionExited` (or any other hibernation path) would look identical
+/// to a live one in the human table — same ID, TRANSPORT, LABEL — though
+/// nothing runs behind it. `--json` carries `hibernatedAt`/`hibernateReason`;
+/// this column brings that fact to the table a human actually reads.
 @Suite("tbd terminal list parked-state column")
 struct ParkedStateMarkerTests {
     private static func terminal(
