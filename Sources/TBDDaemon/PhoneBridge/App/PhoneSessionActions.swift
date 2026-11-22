@@ -24,11 +24,12 @@ import TBDShared
 /// `phoneRemoteSendMessage` hold the message they carry to the same rule
 /// (`PhoneMessageText`) before their handler runs.
 ///
-/// **A method that acts takes `deviceID`**, the device of the verified pairing
-/// the request came through. The actuation record names it, and an answer
-/// takes its authority from it, both built from that one value so they cannot
-/// disagree. Take it from the bridge's verified peer, never from anything the
-/// phone sent. The read-only methods take none: their RPCs record nothing.
+/// **A method that acts on a session or creates one takes `deviceID`**, the
+/// device of the verified pairing the request came through. The actuation
+/// record names it, and an answer takes its authority from it, both built from
+/// that one value so they cannot disagree. Take it from the bridge's verified
+/// peer, never from anything the phone sent. The read-only methods take none,
+/// and neither does `phoneSetRegistryRemoteHidden`: their RPCs record nothing.
 ///
 /// **The conformance keeps only the fields a phone may set.** It builds fresh
 /// params for every call, field by field from the fields a phone may set, and
@@ -158,4 +159,11 @@ protocol PhoneSessionActions: Sendable {
     /// `remote.transcriptLoadEarlier` with only the provider and the session.
     /// A `RemoteTranscriptLoadEarlierResult`.
     func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse
+
+    /// `repo.setRegistryRemoteHidden` with only the repo and the value: the
+    /// core that writes the repo's registry-provider filter and broadcasts the
+    /// change. An unknown repo is refused. It takes no device, because the
+    /// setting is a view preference the laptop's sidebar shares and the RPC
+    /// records no actuation, as `repo.setHidden` records none.
+    func phoneSetRegistryRemoteHidden(_ p: RepoSetRegistryRemoteHiddenParams) async throws -> RPCResponse
 }

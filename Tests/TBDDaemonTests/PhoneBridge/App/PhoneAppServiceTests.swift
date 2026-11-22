@@ -279,7 +279,7 @@ struct PhoneAppServiceTests {
         let remembered = PhoneAppMethod.allCases.filter { PhoneAppService.remembersReplies(of: $0) }
         #expect(Set(remembered) == [
             .messageSend, .promptAnswer, .sessionSwitchProfile, .sessionFork, .sessionSetModel,
-            .worktreeCreate, .remoteCreate,
+            .worktreeCreate, .remoteCreate, .repoSetRemoteFilter,
         ])
     }
 

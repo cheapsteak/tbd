@@ -46,6 +46,7 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
         case remoteSendMessage
         case remoteTranscriptSync
         case remoteTranscriptLoadEarlier
+        case setRegistryRemoteHidden
     }
 
     /// One call: the method, and the device it acted for (nil for a read).
@@ -66,6 +67,7 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
         var remoteSends: [RemoteSendMessageParams] = []
         var remoteSyncs: [RemoteTranscriptSyncParams] = []
         var remoteLoadEarliers: [RemoteTranscriptLoadEarlierParams] = []
+        var registryRemoteHiddenSets: [RepoSetRegistryRemoteHiddenParams] = []
     }
 
     /// Answers one call at the moment it is made.
@@ -90,6 +92,9 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
     var remoteSends: [RemoteSendMessageParams] { lock.withLock { log.remoteSends } }
     var remoteSyncs: [RemoteTranscriptSyncParams] { lock.withLock { log.remoteSyncs } }
     var remoteLoadEarliers: [RemoteTranscriptLoadEarlierParams] { lock.withLock { log.remoteLoadEarliers } }
+    var registryRemoteHiddenSets: [RepoSetRegistryRemoteHiddenParams] {
+        lock.withLock { log.registryRemoteHiddenSets }
+    }
 
     /// Every later call of `method` answers `response`.
     func respond(to method: Method, with response: RPCResponse) {
@@ -212,6 +217,10 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
 
     func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse {
         record(.remoteTranscriptLoadEarlier, deviceID: nil) { $0.remoteLoadEarliers.append(p) }
+    }
+
+    func phoneSetRegistryRemoteHidden(_ p: RepoSetRegistryRemoteHiddenParams) async throws -> RPCResponse {
+        record(.setRegistryRemoteHidden, deviceID: nil) { $0.registryRemoteHiddenSets.append(p) }
     }
 }
 

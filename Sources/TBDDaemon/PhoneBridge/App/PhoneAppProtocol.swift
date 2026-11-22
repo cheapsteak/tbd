@@ -19,6 +19,7 @@ enum PhoneAppMethod: String, CaseIterable, Sendable {
     case worktreeCreate = "worktree.create"
     case remoteProviders = "remote.providers"
     case remoteCreate = "remote.create"
+    case repoSetRemoteFilter = "repo.setRemoteFilter"
 }
 
 /// The app protocol's events, by their wire names. Each one's fixture is

@@ -185,6 +185,111 @@ struct PhoneSnapshotBuilderTests {
         #expect(s.omittedRows == 0)
     }
 
+    // MARK: - The registry filter
+
+    /// Three repos, one per filter state, beside a scratch group and a
+    /// provider group. The filtered repo has a remote lane and a loose
+    /// remote session; the provider group has an unmatched one. The rows are
+    /// made once, so two builds differ only in what a test changes.
+    private struct FilterScene {
+        let on = UUID(), off = UUID(), unset = UUID()
+        let worktrees: [Worktree]
+        let scratch: [Worktree]
+
+        init() {
+            worktrees = [
+                PhoneSnapshotBuilderTests.worktree("main", repo: on, status: .main),
+                PhoneSnapshotBuilderTests.worktree(
+                    "lane", repo: on, location: .remote(provider: "acme", sessionID: "rs-lane")),
+                PhoneSnapshotBuilderTests.worktree("main", repo: off, status: .main),
+                PhoneSnapshotBuilderTests.worktree("main", repo: unset, status: .main),
+            ]
+            scratch = [PhoneSnapshotBuilderTests.worktree("notes", repo: nil)]
+        }
+
+        /// The input, with the unset repo's column at `unsetValue`.
+        func input(unsetValue: Bool? = nil) -> PhoneSnapshotInput {
+            PhoneSnapshotBuilderTests.input(
+                repos: [
+                    Repo(id: on, path: "/tmp/acme/on", displayName: "acme-on", registryRemoteHidden: true),
+                    Repo(id: off, path: "/tmp/acme/off", displayName: "acme-off", registryRemoteHidden: false),
+                    Repo(id: unset, path: "/tmp/acme/unset", displayName: "acme-unset",
+                         registryRemoteHidden: unsetValue),
+                ],
+                worktrees: worktrees, scratch: scratch,
+                remoteSessions: [
+                    PhoneSnapshotBuilderTests.remote("rs-lane", repo: on),
+                    PhoneSnapshotBuilderTests.remote("rs-loose", repo: on),
+                    PhoneSnapshotBuilderTests.remote("rs-unmatched"),
+                ],
+                providers: [PhoneSnapshotBuilderTests.provider("acme")])
+        }
+    }
+
+    /// `remoteFilterOn` is `true` on the filtered repo's group alone, and
+    /// absent from an off repo, an unset repo, scratch and a provider group.
+    /// The filtered repo still lists every row: the phone hides them itself.
+    @Test func onlyAFilteredRepoGroupCarriesTheFilter() throws {
+        let scene = FilterScene()
+
+        let s = PhoneSnapshotBuilder.build(scene.input())
+
+        let groupIDs = s.layout.map(\.id)
+        #expect(groupIDs == [
+            "scratch", "repo:\(scene.on)", "repo:\(scene.off)", "repo:\(scene.unset)", "provider:acme",
+        ])
+        let flags = s.layout.map(\.remoteFilterOn)
+        #expect(flags == [nil, true, nil, nil, nil])
+        let filteredGroup = s.layout.first { $0.id == "repo:\(scene.on)" }
+        let filtered = try #require(filteredGroup)
+        let filteredRowIDs = filtered.rows.map(\.id)
+        #expect(filteredRowIDs.count == 3, "the filtered repo lost a row: \(filteredRowIDs)")
+        #expect(filteredRowIDs.contains("remote:acme/rs-loose"))
+
+        // On the wire the field is there only as `true`, never `false`.
+        let encoded = try PhoneAppCoding.makeEncoder().encode(s.layout)
+        let decoded = try JSONSerialization.jsonObject(with: encoded) as? [[String: Any]]
+        let groups = try #require(decoded)
+        let wireFlags = groups.map { $0["remoteFilterOn"] as? Bool }
+        #expect(wireFlags == [nil, true, nil, nil, nil])
+        let keyed = groups.filter { $0.keys.contains("remoteFilterOn") }.count
+        #expect(keyed == 1)
+    }
+
+    /// Turning a repo's filter on changes the layout and nothing else, so the
+    /// publisher's diff sends the new layout with no row.
+    @Test func flippingTheFilterChangesOnlyTheLayout() throws {
+        let scene = FilterScene()
+        let before = PhoneSnapshotBuilder.build(scene.input(unsetValue: nil))
+        let after = PhoneSnapshotBuilder.build(scene.input(unsetValue: true))
+
+        let found = PhoneSessionsPublisher.diff(old: before, new: after)
+        let diff = try #require(found)
+
+        #expect(diff.layout == after.layout)
+        #expect(diff.rows.isEmpty)
+        #expect(diff.removedRowIDs.isEmpty)
+        let flippedGroup = after.layout.first { $0.id == "repo:\(scene.unset)" }
+        let flipped = try #require(flippedGroup)
+        #expect(flipped.remoteFilterOn == true)
+    }
+
+    /// Turning it off again, to a deliberate `false`, reads as off on the
+    /// wire: the field goes, never sent as `false`.
+    @Test func aDeliberateOffCarriesNoField() throws {
+        let scene = FilterScene()
+        let on = PhoneSnapshotBuilder.build(scene.input(unsetValue: true))
+        let off = PhoneSnapshotBuilder.build(scene.input(unsetValue: false))
+
+        let found = PhoneSessionsPublisher.diff(old: on, new: off)
+        let diff = try #require(found)
+
+        let layout = try #require(diff.layout)
+        let group = layout.first { $0.id == "repo:\(scene.unset)" }
+        let turnedOff = try #require(group)
+        #expect(turnedOff.remoteFilterOn == nil)
+    }
+
     /// A remote lane's row stands for its remote session, which then gets no
     /// row of its own.
     @Test func aRemoteLaneRowCarriesItsRemoteSession() throws {

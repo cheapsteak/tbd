@@ -1868,4 +1868,8 @@ private struct ChangingTheSettingBeforeTheCore: PhoneSessionActions {
     func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse {
         try await router.phoneRemoteTranscriptLoadEarlier(p)
     }
+
+    func phoneSetRegistryRemoteHidden(_ p: RepoSetRegistryRemoteHiddenParams) async throws -> RPCResponse {
+        try await router.phoneSetRegistryRemoteHidden(p)
+    }
 }

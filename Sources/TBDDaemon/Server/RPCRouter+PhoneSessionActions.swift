@@ -156,6 +156,11 @@ extension RPCRouter: PhoneSessionActions {
             encoder.encode(Self.phoneRemoteTranscriptLoadEarlierParams(p)))
     }
 
+    func phoneSetRegistryRemoteHidden(_ p: RepoSetRegistryRemoteHiddenParams) async throws -> RPCResponse {
+        let params = Self.phoneSetRegistryRemoteHiddenParams(p)
+        return try await setRegistryRemoteHidden(repoID: params.repoID, hidden: params.hidden)
+    }
+
     // MARK: - The fields a phone may set
 
     /// A worktree a phone creates: the repo, the first message and the
@@ -293,6 +298,13 @@ extension RPCRouter: PhoneSessionActions {
         _ p: RemoteTranscriptSyncParams
     ) -> RemoteTranscriptSyncParams {
         RemoteTranscriptSyncParams(provider: p.provider, sessionID: p.sessionID)
+    }
+
+    /// A repo's registry-provider filter from a phone: the repo and the value.
+    static func phoneSetRegistryRemoteHiddenParams(
+        _ p: RepoSetRegistryRemoteHiddenParams
+    ) -> RepoSetRegistryRemoteHiddenParams {
+        RepoSetRegistryRemoteHiddenParams(repoID: p.repoID, hidden: p.hidden)
     }
 
     /// Earlier remote history from a phone: the provider and the session.
