@@ -142,6 +142,10 @@ struct DeepLinkToastTests {
     @Test func navigateToWorktreeMiss_showsLookingToast() async {
         await withState { state in
             state.isInitialStateLoaded = true
+            // The error toast's auto-dismiss must not race the post-lookup
+            // checks: the test resumes from `archivedLookupTask?.value` through
+            // the global executor before it is back on the main actor.
+            state.toastTickDuration = .seconds(60)
             state.archivedLookupOverride = { _ in [] }
 
             state.navigateToWorktree(UUID())
@@ -156,6 +160,8 @@ struct DeepLinkToastTests {
 
             #expect(state.activeToast?.style == .error)
             #expect(state.activeToast?.message == "Worktree not found — it may have been deleted.")
+
+            state.dismissToast()
         }
     }
 
