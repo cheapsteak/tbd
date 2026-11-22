@@ -73,8 +73,12 @@ import type { AppEvent, ErrorCode, Method, ParamsOf, ResultOf, SessionsSubscribe
  * The methods that act on a session, create something, or change a setting on the laptop. The
  * daemon keeps their replies in its request memory (`PhoneAppService.remembersReplies(of:)`), so
  * a resend of one gets the first run's reply and acts no more, but only while the daemon still
- * remembers it. Acting requests also go out in the order they were made, across a drop, so two
- * quick taps on a repo's filter chip reach the laptop in order.
+ * remembers it. Acting requests also go out in the order they were made, across a drop, so they
+ * reach the laptop in that order. That is their arrival order only: the daemon runs each request
+ * on its own, and one may await more than another before it acts, so two in flight together can
+ * take effect in either order. A caller whose requests must take effect in order sends the next
+ * only once the one before has settled, as `toggleRemoteFilter` (`actions/shell.ts`) does for each
+ * repo's filter chip.
  *
  * **Never retry a failed action automatically under a new ID.** Several failures can mean the
  * action happened all the same: `not_confirmed`, `bad_reply`, `internal`, and a `too_large`

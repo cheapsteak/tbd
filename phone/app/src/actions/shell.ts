@@ -32,6 +32,12 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
   const { store } = ctx;
   /** The number of the last tap on a filter chip, so a reply settles only its own tap (`state/remoteFilter.ts`). */
   let filterTaps = 0;
+  /**
+   * Per repo ID, a promise that settles once the repo's last `repo.setRemoteFilter` has, success
+   * or failure: the tail of its chain of sends (`toggleRemoteFilter`). A repo has an entry only
+   * from a send until the reply to its last send has been handled.
+   */
+  const filterChains = new Map<string, Promise<void>>();
 
   function setUI(fn: (ui: UIState) => UIState): void {
     store.update((s) => {
@@ -326,10 +332,15 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
      * the laptop's reason, unless a newer tap on the chip followed. A repo the list does not show
      * sends nothing. It resolves once the reply has settled.
      *
-     * The request is an acting one (`ACTING_METHODS` in `client/client.ts`), so two quick taps
-     * reach the laptop in order, even across a drop. One the client could not confirm after a
-     * drop fails as `not_confirmed`, and the chip flips back; the laptop's next layout shows what
-     * it holds.
+     * A repo's requests go one at a time. The client posts them in the order they were made, even
+     * across a drop, but the laptop runs each request on its own, so two in flight together can be
+     * written in either order, and on, then off, could end on. So a tap's request goes at once
+     * when none of the repo's is unanswered, and otherwise once the one before it has settled,
+     * whether it succeeded or failed (`filterChains`). It carries the value of its own tap, so the
+     * last tap's value is the last one written. Another repo's taps never wait on this one's.
+     *
+     * One the client could not confirm after a drop fails as `not_confirmed`, and the chip flips
+     * back; the laptop's next layout shows what it holds.
      */
     async toggleRemoteFilter(repoID: string): Promise<void> {
       const seq = ++filterTaps;
@@ -342,8 +353,13 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
       });
       const hidden = sent.hidden;
       if (hidden === null) return;
+      const post = () => ctx.client.request('repo.setRemoteFilter', { repoID, hidden });
+      const before = filterChains.get(repoID);
+      const reply = before === undefined ? post() : before.then(post);
+      const settled = reply.then(() => {}, () => {});
+      filterChains.set(repoID, settled);
       try {
-        await ctx.client.request('repo.setRemoteFilter', { repoID, hidden });
+        await reply;
         store.update((s) => {
           const ui = tapTaken(s.ui, s.sessions, repoID, seq);
           return ui === s.ui ? s : { ...s, ui };
@@ -351,6 +367,9 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
       } catch (error) {
         const text = errorText(error);
         setUI((ui) => tapFailed(ui, repoID, seq, text));
+      } finally {
+        // No later tap queued behind this one: the repo's chain is idle.
+        if (filterChains.get(repoID) === settled) filterChains.delete(repoID);
       }
     },
 

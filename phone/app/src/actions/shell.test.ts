@@ -1178,6 +1178,7 @@ test('a reply ends the wait at once when the list shows its value already', asyn
   const second = h.actions.toggleRemoteFilter(REPO);
   h.sent[0]!.resolve({});
   await first;
+  await flush();
   // On, then off: the laptop's list never changed, so no layout comes. The second reply finds the
   // list saying off already, and ends the wait.
   h.sent[1]!.resolve({});
@@ -1225,15 +1226,12 @@ test('a stale failure does not undo a newer tap', async () => {
   const h = await filterHarness();
   const first = h.actions.toggleRemoteFilter(REPO);
   const second = h.actions.toggleRemoteFilter(REPO);
-  assert.deepEqual(h.requests(), [
-    ['repo.setRemoteFilter', { repoID: REPO, hidden: true }],
-    ['repo.setRemoteFilter', { repoID: REPO, hidden: false }],
-  ]);
   assert.equal(chipOn(h), false);
   assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, confirmed: false });
   // The first request fails: the second tap stands, and says nothing yet.
   h.sent[0]!.reject(new AppError('refused', 'The laptop refused the change.'));
   await first;
+  await flush();
   assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, confirmed: false });
   assert.equal(h.state().ui.toast, null);
   // The second succeeds, and the list says off already, so the wait ends.
@@ -1249,6 +1247,7 @@ test('a stale success does not settle a newer tap', async () => {
   const second = h.actions.toggleRemoteFilter(REPO);
   h.sent[0]!.resolve({});
   await first;
+  await flush();
   // Still the second tap's, and not confirmed: a layout that says on, from the first request, leaves it.
   assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, confirmed: false });
   h.actions.onEvent(layoutEvent(true));
@@ -1258,6 +1257,106 @@ test('a stale success does not settle a newer tap', async () => {
   await second;
   assert.equal(chipOn(h), true);
   assert.deepEqual(h.state().ui.toast, { id: 1, text: 'The laptop refused the change.' });
+});
+
+test('two quick taps send one after another', async () => {
+  const h = await filterHarness();
+  const first = h.actions.toggleRemoteFilter(REPO);
+  const second = h.actions.toggleRemoteFilter(REPO);
+  // The chip shows the second tap at once, but its request waits for the first one's reply: the
+  // laptop could write two in flight together in either order.
+  assert.equal(chipOn(h), false);
+  await flush();
+  assert.deepEqual(h.requests(), [['repo.setRemoteFilter', { repoID: REPO, hidden: true }]]);
+  h.sent[0]!.resolve({});
+  await first;
+  await flush();
+  assert.deepEqual(h.requests(), [
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: true }],
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: false }],
+  ]);
+  h.sent[1]!.resolve({});
+  await second;
+  assert.deepEqual(Object.keys(h.state().ui.remoteFilterPending), []);
+  assert.equal(chipOn(h), false);
+});
+
+test('each queued request carries its own tap\'s value, not the chip\'s when it goes', async () => {
+  const h = await filterHarness();
+  const taps = [h.actions.toggleRemoteFilter(REPO), h.actions.toggleRemoteFilter(REPO), h.actions.toggleRemoteFilter(REPO)];
+  // On, off, on: the chip shows on while the second tap's off waits its turn.
+  assert.equal(chipOn(h), true);
+  for (let i = 0; i < 3; i++) {
+    await flush();
+    assert.equal(h.sent.length, i + 1);
+    h.sent[i]!.resolve({});
+    await taps[i];
+  }
+  assert.deepEqual(h.requests(), [
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: true }],
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: false }],
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: true }],
+  ]);
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: true, seq: 3, confirmed: true });
+});
+
+test('a failed first send still sends the second', async () => {
+  const h = await filterHarness();
+  const first = h.actions.toggleRemoteFilter(REPO);
+  const second = h.actions.toggleRemoteFilter(REPO);
+  await flush();
+  assert.equal(h.sent.length, 1);
+  h.sent[0]!.reject(new AppError('not_confirmed', 'The laptop may not have done that.'));
+  await first;
+  await flush();
+  assert.deepEqual(h.requests(), [
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: true }],
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: false }],
+  ]);
+  // The failure is the first tap's, so the second tap stands and nothing is toasted.
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, confirmed: false });
+  assert.equal(h.state().ui.toast, null);
+  h.sent[1]!.resolve({});
+  await second;
+  assert.deepEqual(Object.keys(h.state().ui.remoteFilterPending), []);
+  assert.equal(chipOn(h), false);
+});
+
+test('a tap after the last reply sends at once', async () => {
+  const h = await filterHarness();
+  const first = h.actions.toggleRemoteFilter(REPO);
+  h.sent[0]!.reject(new AppError('refused', 'The laptop refused the change.'));
+  await first;
+  const second = h.actions.toggleRemoteFilter(REPO);
+  assert.deepEqual(h.requests(), [
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: true }],
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: true }],
+  ]);
+  h.sent[1]!.resolve({});
+  await second;
+});
+
+test('a tap on another repo is not held behind this repo\'s unanswered request', async () => {
+  const OTHER_REPO = '4C2B9A71-0D3E-5F48-9A6B-7E1D2C3B4A50';
+  const h = harness();
+  h.actions.onChannelUp();
+  h.sent[0]!.resolve({
+    stream: 's1', seq: 10, replayed: false, omittedRows: 0, more: false,
+    layout: [...filterLayout(false), { id: `repo:${OTHER_REPO}`, kind: 'repo', name: 'acme-prod', rows: [{ id: 'W2', depth: 0 }] }],
+    rows: [row('W1', [R]), { ...row('BOX', [BOX]), remote: true }, row('W2', [R2])],
+  });
+  await flush();
+  h.sent.length = 0;
+  const first = h.actions.toggleRemoteFilter(REPO);
+  const other = h.actions.toggleRemoteFilter(OTHER_REPO);
+  assert.deepEqual(h.requests(), [
+    ['repo.setRemoteFilter', { repoID: REPO, hidden: true }],
+    ['repo.setRemoteFilter', { repoID: OTHER_REPO, hidden: true }],
+  ]);
+  h.sent[1]!.resolve({});
+  await other;
+  h.sent[0]!.resolve({});
+  await first;
 });
 
 test('a layout that no longer lists the repo ends its wait', async () => {
