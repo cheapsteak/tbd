@@ -312,7 +312,7 @@ extension WorktreeLifecycle {
             var closedEveryTmuxRow = true
             for terminal in terminals where terminal.transport == .tmux {
                 guard let actuationID = await appendReconcileDisposeRequest(
-                    worktreeID: current.id, terminalID: terminal.id) else {
+                    worktreeID: current.id, terminalID: terminal.id, to: actuationLog) else {
                     closedEveryTmuxRow = false
                     break
                 }
@@ -343,7 +343,7 @@ extension WorktreeLifecycle {
             var recordedEveryTeardown = true
             for terminal in terminals where terminal.transport == .holder {
                 guard let actuationID = await appendReconcileDisposeRequest(
-                    worktreeID: current.id, terminalID: terminal.id) else {
+                    worktreeID: current.id, terminalID: terminal.id, to: actuationLog) else {
                     recordedEveryTeardown = false
                     continue
                 }
@@ -1023,7 +1023,9 @@ extension WorktreeLifecycle {
     /// worktree whose checkout is gone, written before the teardown; nil when
     /// the actuation record cannot be written, and the teardown must then not
     /// happen.
-    private func appendReconcileDisposeRequest(worktreeID: UUID, terminalID: UUID) async -> String? {
+    private func appendReconcileDisposeRequest(
+        worktreeID: UUID, terminalID: UUID, to actuationLog: ActuationLog
+    ) async -> String? {
         var row = ActuationRow(actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
         row.target = .local(worktree: worktreeID, terminal: terminalID)
         return try? await actuationLog.appendRequest(row)
