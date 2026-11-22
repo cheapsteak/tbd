@@ -425,9 +425,43 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: dir))
     }
 
+    /// Forget of a worktree whose tabs are all closed removes every Closed
+    /// Terminals entry and the content directory.
     @Test func forgetWorktreeCleansHistoryRowsAndDirectory() async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
+        await fx.db.terminalHistory.store(
+            terminal: fx.terminal, text: "some output", closedAt: Date())
+        try await fx.db.terminals.delete(id: fx.terminal.id)
+        let dir = fx.db.terminalHistory.worktreeDir(worktreeID: fx.worktree.id)
+        #expect(FileManager.default.fileExists(atPath: dir))
+
+        let lifecycle = WorktreeLifecycle(
+            db: fx.db, git: GitManager(), hooks: HookResolver(),
+            leftoverTmuxProbe: .absent)
+        try await lifecycle.forgetWorktree(worktreeID: fx.worktree.id)
+
+        #expect(try await fx.db.worktrees.get(id: fx.worktree.id) == nil)
+        #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: dir))
+    }
+
+    /// Forget closes a live tmux row first and marks its entry with the
+    /// worktree's tmux server, because its session may still run there and
+    /// the mark is what every resume of that session asks about
+    /// (`TmuxResumeGate`). That marked entry is the one forget leaves; every
+    /// other entry and the content directory go. The fixture's terminal is
+    /// such a row.
+    @Test func forgetWorktreeKeepsOnlyTheMarkedEntryOfALiveTmuxRow() async throws {
+        let fx = try await makeFixture()
+        defer { fx.cleanup() }
+        #expect(fx.terminal.transport == .tmux)
+        #expect(!fx.terminal.isParked)
+        let closed = Terminal(
+            worktreeID: fx.worktree.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
+            label: nil, kind: .shell)
+        await fx.db.terminalHistory.store(
+            terminal: closed, text: "closed output", closedAt: Date())
         await fx.db.terminalHistory.store(
             terminal: fx.terminal, text: "some output", closedAt: Date())
         let dir = fx.db.terminalHistory.worktreeDir(worktreeID: fx.worktree.id)
@@ -439,7 +473,11 @@ import Testing
         try await lifecycle.forgetWorktree(worktreeID: fx.worktree.id)
 
         #expect(try await fx.db.worktrees.get(id: fx.worktree.id) == nil)
-        #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty)
+        let left = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
+        #expect(left.map(\.id) == [fx.terminal.id])
+        #expect(left.first?.liveOnTmuxServer == "tbd-th")
+        #expect(try await fx.db.terminalHistory.liveOnTmuxServers(sessionIDs: ["sess-abc"])
+            == ["tbd-th"])
         #expect(!FileManager.default.fileExists(atPath: dir))
     }
 
