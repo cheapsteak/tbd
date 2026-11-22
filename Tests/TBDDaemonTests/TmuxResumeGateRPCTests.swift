@@ -803,9 +803,12 @@ struct TmuxResumeGateRPCTests {
         let f = try await fixture()
         defer { f.tearDown() }
         let entry = try await closedHolderEntry(f)
-        let shell = try await f.db.terminals.create(
+        let created = try await f.db.terminals.create(
             worktreeID: f.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
             claudeSessionID: Self.sessionID, kind: .shell, transport: .holder)
+        // The row as stored, not as `create` returned it: the store keeps
+        // `createdAt` to the millisecond, so the returned value can differ.
+        let shell = try #require(try await f.db.terminals.get(id: created.id))
         let params = TerminalHistoryReviveParams(worktreeID: f.worktree.id, id: entry.id)
 
         let refused = try await f.send(RPCMethod.terminalHistoryRevive, params)
@@ -821,7 +824,10 @@ struct TmuxResumeGateRPCTests {
             RPCMethod.terminalSessionEnded,
             TerminalSessionEndedParams(terminalID: shell.id, reason: "exit", sessionID: "sess-acme-earlier"))
         #expect(earlier.success, "error: \(earlier.error ?? "nil")")
-        #expect(try await f.db.terminals.get(id: shell.id) == shell)
+        let afterEarlier = try #require(try await f.db.terminals.get(id: shell.id))
+        #expect(afterEarlier.claudeSessionID == Self.sessionID,
+                "a report naming another session forgot the shell's session id")
+        #expect(afterEarlier == shell, "a report naming another session changed the shell")
         let stillRefused = try await f.send(RPCMethod.terminalHistoryRevive, params)
         #expect(stillRefused.error == RPCRouter.handStartedCarrierRefusal(terminalID: shell.id))
 
