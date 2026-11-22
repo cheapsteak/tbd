@@ -163,6 +163,50 @@ struct FableAvailabilityStoreTests {
         try? await Task.sleep(for: .milliseconds(100))
         #expect(meter.callCount == 0)
     }
+
+    /// A session reading that lands while a probe runs outranks that probe's
+    /// result: the probe may have read the account before its credits ran
+    /// out. The probe is held on the gate until the session reading is in, so
+    /// the order is fixed rather than raced. A probe that begins afterwards
+    /// replaces the session reading as usual.
+    @Test func sessionRecordDuringAProbe_outranksThatProbesResult() async throws {
+        let clock = Clock(), meter = Meter(), gate = ProbeGate()
+        let s = store(clock: clock, meter: meter, state: .available, gate: gate)
+        let id = UUID()
+        let refreshing = Task { await s.refresh([id], force: true) }
+        try await boundedWait("the probe to start", observed: { "\(meter.callCount) probe calls" }) {
+            meter.callCount == 1
+        }
+        await s.record(FableAvailability(state: .out, checkedAt: clock.now, source: .session), for: id)
+        await gate.open()
+        let result = await refreshing.value
+        #expect(result[id]?.state == .out)
+        #expect(result[id]?.source == .session)
+        let held = await s.current(id)
+        #expect(held?.state == .out)
+        #expect(held?.source == .session)
+
+        let later = await s.refresh([id], force: true)
+        #expect(meter.callCount == 2)
+        #expect(later[id]?.state == .available)
+        #expect(later[id]?.source == .probe)
+    }
+
+    /// The mirror case: a session reading recorded before a probe begins is
+    /// replaced by that probe's result, so a recorded reading never freezes a
+    /// profile.
+    @Test func sessionRecordBeforeAProbe_isReplacedByThatProbesResult() async {
+        let clock = Clock(), meter = Meter()
+        let s = store(clock: clock, meter: meter, state: .available)
+        let id = UUID()
+        await s.record(FableAvailability(state: .out, checkedAt: clock.now, source: .session), for: id)
+        let result = await s.refresh([id], force: true)
+        #expect(meter.callCount == 1)
+        #expect(result[id]?.state == .available)
+        #expect(result[id]?.source == .probe)
+        let held = await s.current(id)
+        #expect(held?.source == .probe)
+    }
 }
 
 /// A bounded wait (Tests/CLAUDE.md, assertion hygiene rule 5) that throws what

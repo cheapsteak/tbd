@@ -22,6 +22,10 @@ public actor FableAvailabilityStore {
 
     private var entries: [UUID: FableAvailability] = [:]
     private var inFlight: [UUID: Task<FableAvailability, Never>] = [:]
+    /// How many readings `record` has taken per profile. A probe notes the
+    /// count when it begins and keeps its result only if the count has not
+    /// moved since (see `record`).
+    private var recordCounts: [UUID: Int] = [:]
     private var running = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let probe: Probe
@@ -52,18 +56,25 @@ public actor FableAvailabilityStore {
     }
 
     /// Record a reading seen elsewhere (a session that showed the credits
-    /// line). Replaces whatever is held.
+    /// line). Replaces whatever is held, and outranks the result of a probe of
+    /// the same profile that began before it: that probe may have read the
+    /// account before the change the session saw, so its result is dropped.
+    /// A probe that begins after this reading replaces it as usual.
     public func record(_ availability: FableAvailability, for id: UUID) {
         entries[id] = availability
+        recordCounts[id, default: 0] += 1
     }
 
     /// Probe each profile whose reading is missing or stale (every profile
     /// when `force`), and return the readings for all of `ids`.
     ///
+    /// A probe's result replaces the held reading unless `record` took a
+    /// reading for that profile while the probe ran (see `record`).
+    ///
     /// `deadline` bounds how long the caller waits. Probes still running at
-    /// the deadline are not cancelled: they finish and record their result,
-    /// but the caller gets whatever is held now, so a profile still unchecked
-    /// is simply absent from the result.
+    /// the deadline are not cancelled: they finish and their result is kept
+    /// as above, but the caller gets whatever is held now, so a profile
+    /// still unchecked is simply absent from the result.
     @discardableResult
     public func refresh(
         _ ids: [UUID], force: Bool = false, deadline: TimeInterval? = nil
@@ -90,17 +101,23 @@ public actor FableAvailabilityStore {
         if let existing = inFlight[id] { return existing }
         let task = Task { [probe] in
             await self.acquire()
+            // Noted once the probe holds a slot, right before it reads the
+            // account: a reading recorded while it waited for the slot is
+            // older than what the probe will see.
+            let recordsAtStart = self.recordCounts[id, default: 0]
             let reading = await probe(id)
             self.release()
-            self.finish(id, reading)
+            self.finish(id, reading, recordsAtStart: recordsAtStart)
             return reading
         }
         inFlight[id] = task
         return task
     }
 
-    private func finish(_ id: UUID, _ reading: FableAvailability) {
-        entries[id] = reading
+    private func finish(_ id: UUID, _ reading: FableAvailability, recordsAtStart: Int) {
+        if recordCounts[id, default: 0] == recordsAtStart {
+            entries[id] = reading
+        }
         inFlight[id] = nil
     }
 
