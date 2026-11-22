@@ -332,6 +332,9 @@ struct HolderTmuxAssumptionGateTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .holder)
+        // Live, so that past the guard the handler would not return it at
+        // the parked-row step, which answers without asking the probe.
+        try #require(!terminal.isParked)
         let before = RowFingerprint(terminal)
         // Answers that the server is gone, so a holder row that got past the
         // guard would be parked.
@@ -347,8 +350,13 @@ struct HolderTmuxAssumptionGateTests {
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
                 "recreateWindow mutated a holder row it was supposed to refuse")
-        // The strongest half: nothing below the guard ran. Everything there
-        // starts by asking the probe about the row's tmux server.
+        // The strongest half: nothing below the guard ran. Below it the
+        // handler returns a parked row unchanged, and refuses a row whose
+        // worktree it cannot read a tmux server from, without asking the
+        // probe; every other row is next taken to the probe with its
+        // worktree's server. This row is live and its worktree names
+        // `tbd-holdergate`, so had it passed the guard the probe would have
+        // been asked.
         #expect(probe.servers.isEmpty,
                 "recreateWindow probed a tmux server for a holder row: \(probe.servers)")
     }
