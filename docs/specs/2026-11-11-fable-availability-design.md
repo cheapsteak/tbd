@@ -30,12 +30,15 @@ It prints one JSON result object. The classifier
 | `api_error: "usage_limit_reached"` (the 5-hour or weekly window), network, auth, anything else | `unknown` |
 | empty output, malformed or truncated JSON, a non-object, a missing or non-boolean `is_error`, a mistyped `api_error`, a missing result | `unknown` |
 
-A second signal needs no probe: a live session whose model is a Fable model
-shows "You're out of usage credits. Run /usage-credits to keep using Fable 5.2
-or /model to switch models." The StopFailure hook forwards that line
-(`claude.fableCreditsOut`); the daemon re-classifies it
-(`classify(screenText:now:)`), checks the terminal's model is Fable, and marks
-the terminal's profile `out` with source `session`.
+A second signal needs no probe: Claude Code's StopFailure hook. When a Fable
+turn fails because the account has no credits, the error message
+`tbd hooks stop-failure` builds from the hook's input (and the API-error record
+in the session transcript that input names) is "You're out of usage credits.
+Run /usage-credits to keep using Fable 5.2 or /model to switch models." The
+hook command forwards that message (`claude.fableCreditsOut`); the daemon
+re-classifies it (`classify(hookMessage:now:)`), checks the terminal's model
+is Fable, and marks the terminal's profile `out` with source `session`. The
+signal is hook payload, never text read off a terminal screen.
 
 ## Fail closed
 
@@ -114,5 +117,5 @@ second-guessed; the reading is shown in `tbd profile list` for them to see.
 
 ## Not verified yet
 
-The StopFailure hook's delivery of the credits line for a Fable turn has not
-been observed on a real session; the probe path is the reliable signal.
+The StopFailure hook's delivery of the credits error message for a Fable turn
+has not been observed on a real session; the probe path is the reliable signal.

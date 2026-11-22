@@ -55,11 +55,12 @@ public actor FableAvailabilityStore {
         return !entry.isFresh(now: now())
     }
 
-    /// Record a reading seen elsewhere (a session that showed the credits
-    /// line). Replaces whatever is held, and outranks the result of a probe of
-    /// the same profile that began before it: that probe may have read the
-    /// account before the change the session saw, so its result is dropped.
-    /// A probe that begins after this reading replaces it as usual.
+    /// Record a reading from elsewhere (the out-of-credits error a session's
+    /// StopFailure hook reported). Replaces whatever is held, and outranks the
+    /// result of a probe of the same profile that began before it: that probe
+    /// may have read the account before the change the hook reported, so its
+    /// result is dropped. A probe that begins after this reading replaces it
+    /// as usual.
     public func record(_ availability: FableAvailability, for id: UUID) {
         entries[id] = availability
         recordCounts[id, default: 0] += 1
