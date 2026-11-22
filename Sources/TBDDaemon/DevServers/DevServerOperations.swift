@@ -86,7 +86,7 @@ struct DevServerOperations: Sendable {
         var tabs: [String: DevServerTabObservation] = [:]
         for terminal in terminals {
             guard let name = terminal.serverName else { continue }
-            let status = await tabInspector.status(of: terminal, tmuxServer: worktree.tmuxServer)
+            let status = await tabInspector.status(of: terminal)
             guard status != .gone else { continue }
             tabs[name] = DevServerTabObservation(terminal: terminal, status: status)
         }
@@ -172,7 +172,7 @@ struct DevServerOperations: Sendable {
         }
         if let tab = snapshot.tabs[name], tab.status.runningPID != nil || tab.status.isUnknown {
             tabWasRunning = true
-            switch await tabInspector.status(of: tab.terminal, tmuxServer: snapshot.worktree.tmuxServer) {
+            switch await tabInspector.status(of: tab.terminal) {
             case .running(let pid, let expected?):
                 targets.append(DevServerKillTarget(
                     pid: pid, expectedStart: expected, tolerance: AgentReaper.defaultHolderIdentityWindow))

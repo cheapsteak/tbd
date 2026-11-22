@@ -12,7 +12,7 @@ final class FakeDevServerTabInspector: DevServerTabInspecting, @unchecked Sendab
         statuses[terminalID] = status
     }
 
-    func status(of terminal: Terminal, tmuxServer: String) async -> DevServerTabStatus {
+    func status(of terminal: Terminal) async -> DevServerTabStatus {
         lookup(terminal.id)
     }
 
