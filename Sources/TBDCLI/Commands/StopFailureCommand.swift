@@ -26,6 +26,13 @@ struct StopFailureCommand: AsyncParsableCommand {
             readFile: { path in try? Data(contentsOf: URL(fileURLWithPath: path)) }
         )
 
+        // An out-of-Fable-credits turn is not a window limit, so it is neither
+        // of the two cases below; tell the daemon (best effort) and let the
+        // message print as before.
+        if let message = outcome.message,
+           FableProbeClassifier.classify(screenText: message, now: Date()) != nil {
+            reportFableCreditsOut(message)
+        }
         if let detected = outcome.detectedLimit, reportToDaemon(detected) {
             return  // daemon owns the limit_reached notification
         }
@@ -35,6 +42,19 @@ struct StopFailureCommand: AsyncParsableCommand {
         if let message = outcome.message {
             print(message)
         }
+    }
+
+    /// Fire the fableCreditsOut RPC. Silent on every failure — the hook must
+    /// never wedge Claude. The daemon decides whether the terminal's model is
+    /// Fable; this only forwards the text.
+    private func reportFableCreditsOut(_ message: String) {
+        guard let terminalIDString = ProcessInfo.processInfo.environment["TBD_TERMINAL_ID"],
+              let terminalID = UUID(uuidString: terminalIDString) else { return }
+        let client = SocketClient()
+        guard client.isDaemonRunning else { return }
+        try? client.callVoid(
+            method: RPCMethod.claudeFableCreditsOut,
+            params: FableCreditsOutParams(terminalID: terminalID, rawMessage: message))
     }
 
     /// Fire the rateLimitDetected RPC. Returns true only when the daemon

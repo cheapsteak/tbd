@@ -16,6 +16,9 @@ public struct ProfilePoolCandidateSource: Sendable {
     let terminals: TerminalStore
     let loginIdentity: @Sendable (UUID) -> String?
     let now: @Sendable () -> Date
+    /// Latest Fable readings, copied onto each candidate. Nil leaves every
+    /// candidate's reading nil (never checked).
+    let fable: FableAvailabilityStore?
 
     /// Initialize a candidate source with injected dependencies.
     ///
@@ -31,8 +34,10 @@ public struct ProfilePoolCandidateSource: Sendable {
         snapshots: OAuthUsageSnapshotStore,
         terminals: TerminalStore,
         loginIdentity: @Sendable @escaping (UUID) -> String?,
-        now: @Sendable @escaping () -> Date = { Date() }
+        now: @Sendable @escaping () -> Date = { Date() },
+        fable: FableAvailabilityStore? = nil
     ) {
+        self.fable = fable
         self.profiles = profiles
         self.snapshots = snapshots
         self.terminals = terminals
@@ -57,6 +62,7 @@ public struct ProfilePoolCandidateSource: Sendable {
         let allProfiles = try await profiles.list()
         let allSnapshots = try await snapshots.loadAll()
         let liveCounts = try await terminals.liveSessionCountsByProfile()
+        let fableReadings = await fable?.all() ?? [:]
 
         return allProfiles.map { row in
             let snapshot = allSnapshots[row.id]
@@ -89,7 +95,8 @@ public struct ProfilePoolCandidateSource: Sendable {
                 snapshot: snapshot,
                 liveSessions: liveCount,
                 sortOrder: row.sortOrder,
-                isConfiguredDefault: isDefault
+                isConfiguredDefault: isDefault,
+                fable: fableReadings[row.id]
             )
         }
     }
