@@ -176,6 +176,50 @@ struct TmuxResumeGateTests {
         #expect(fixture.probe.servers.allSatisfy { $0 == fixture.worktree.tmuxServer })
     }
 
+    /// `worktree.revive` whose gates let it through, but whose
+    /// `spawnTerminal` then finds the marked server running, answers the
+    /// refusal with `terminalOnTmux` and records the act as
+    /// `transport-failed`, not as declined: by then the revive has re-added
+    /// the checkout, so something was written. The probe answers the server
+    /// as gone until the checkout is back on disk, so the router's gate and
+    /// the lifecycle's let the revive through and only `spawnTerminal` is
+    /// refused. Here rather than in `TmuxResumeGateRPCTests`, because getting
+    /// past the git re-add takes a real git worktree.
+    @Test func worktreeReviveRecordsASpawnTerminalRefusalAsTransportFailed() async throws {
+        let fixture = try await archivedFixture(serverState: .absent)
+        defer { fixture.tearDown() }
+        let checkout = fixture.worktree.localPath
+        let server = fixture.worktree.tmuxServer
+        let probe = RecordingLeftoverTmuxProbe { _ in
+            FileManager.default.fileExists(atPath: checkout) ? .running : .absent
+        }
+        var lifecycle = fixture.lifecycle
+        lifecycle.leftoverTmuxProbe = probe.probe
+        let actuationPath = fixture.tempDir.appendingPathComponent("actuations.jsonl").path
+        let router = RPCRouter(
+            db: fixture.db, lifecycle: lifecycle,
+            configDirManager: makeIsolatedConfigDirManager(tag: "revive-spawn-refusal"),
+            actuationLog: ActuationLog(path: actuationPath))
+        router.holderRegistry = lifecycle.holderRegistry
+        #expect(!FileManager.default.fileExists(atPath: checkout))
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeRevive,
+            params: WorktreeReviveParams(worktreeID: fixture.worktree.id)))
+
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
+        #expect(response.error == LeftoverTmuxSession.resumeRefusal(server: server))
+        let outcome = try #require(ActuationRecordReader(activePath: actuationPath).readRows()
+            .last { $0.kind == .outcome })
+        #expect(outcome.result == .synchronous(.transportFailed))
+        #expect(outcome.reason == nil)
+        #expect(FileManager.default.fileExists(atPath: checkout))
+        #expect(probe.servers.allSatisfy { $0 == server })
+        let terminals = try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
+        #expect(!terminals.contains { $0.claudeSessionID == fixture.tmuxSessionID })
+    }
+
     /// A parked tmux row's entry is unmarked, so the relaunch of its session
     /// asks nothing of its own in `spawnTerminal`. The one question is the
     /// revive's, about the worktree's own server, which every revive that
