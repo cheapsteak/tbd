@@ -509,6 +509,15 @@ struct TerminalTransportMigratorTests {
         let after = try #require(try await fixture.db.terminals.get(id: row.id))
         #expect(after.transport == .holder)
         #expect(after.isParked, "the rewrite woke a parked row")
+        // The server is gone, and the agent with it, so the rewrite finishes
+        // the park: the pending token becomes the row's incarnation, as the
+        // fence an earlier build's respawn never reached would have made it,
+        // and the holder row no longer reads as a session that may run.
+        let pending = try #require(row.pendingSessionIncarnationID)
+        #expect(after.pendingSessionIncarnationID == nil)
+        #expect(after.sessionIncarnationID == pending)
+        #expect(WorktreeLifecycle.sessionHasEnded(after, teardownStoppedIt: false))
+        #expect(after.claudeSessionID == row.claudeSessionID)
     }
 
     // MARK: - A live row whose tmux server may still run

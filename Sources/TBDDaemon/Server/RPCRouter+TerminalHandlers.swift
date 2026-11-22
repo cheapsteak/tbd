@@ -199,19 +199,6 @@ extension RPCRouter {
         case .failure(let refusal): return RPCResponse(error: refusal.message)
         }
 
-        // Resolve Codex before creating any tmux state. A GUI-launched daemon
-        // can have a minimal PATH, and a resolution failure must not leave an
-        // orphan window or terminal row behind.
-        let codexPreparation: CodexLaunchPreparation?
-        if params.type == .codex {
-            codexPreparation = try CodexLaunchPreparation.prepare(
-                guardedHome: guardedCodexHome?.path,
-                executableResolver: codexExecutableResolver,
-                sharedHomeEnsurer: codexHomeEnsurer)
-        } else {
-            codexPreparation = nil
-        }
-
         // Resolve initial size: caller-supplied → `TerminalSpawnSize` defaults,
         // wider than 80x24 so an agent does not render into un-reflowable
         // hard-wrapped scrollback.
@@ -238,18 +225,40 @@ extension RPCRouter {
             agent: startAgent?.rawValue ?? (params.type ?? .shell).rawValue)
 
         // The resume gate (`TmuxResumeGate`), for a resume of a session —
-        // `session.resume`, the History pane's Resume, `--resume` — before
-        // start admission and before the trust seed, the transcript sync, the
-        // session title and the session mod's spawn record, which all name
-        // the session: a session a tmux row carries, its tab still showing it
-        // on tmux, or a deleted live tmux row carried may still be running in
-        // that row's tmux server. `spawnTerminal` asks again.
+        // `session.resume`, the History pane's Resume, `--resume` — before the
+        // Codex preparation, start admission, the trust seed, the transcript
+        // sync, the session title and the session mod's spawn record, which
+        // all name the session or write for it: a session a tmux row carries,
+        // its tab still showing it on tmux, or a deleted live tmux row carried
+        // may still be running in that row's tmux server. A session the
+        // worktree's archived record names asks about the worktree's own
+        // server too (`resumeGateWorktreeServer`). `spawnTerminal` asks again.
         if let resumeID = params.resumeSessionID,
            let refusal = try await actuating(actuationID, {
-               try await lifecycle.tmuxResumeRefusal(resuming: [resumeID])
+               try await lifecycle.tmuxResumeRefusal(
+                   resuming: [resumeID],
+                   worktreeServer: await lifecycle.resumeGateWorktreeServer(
+                       resuming: resumeID, worktreeID: worktree.id,
+                       tmuxServer: worktree.tmuxServer))
            }) {
             await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
             return refusal.coded.response
+        }
+
+        // Resolve Codex before creating any terminal state. A GUI-launched
+        // daemon can have a minimal PATH, and a resolution failure must not
+        // leave an orphan terminal row behind. After the resume gate, because
+        // preparing writes the Codex home a refused resume must not touch.
+        let codexPreparation: CodexLaunchPreparation?
+        if params.type == .codex {
+            codexPreparation = try await actuating(actuationID) {
+                try CodexLaunchPreparation.prepare(
+                    guardedHome: guardedCodexHome?.path,
+                    executableResolver: codexExecutableResolver,
+                    sharedHomeEnsurer: codexHomeEnsurer)
+            }
+        } else {
+            codexPreparation = nil
         }
 
         // A Claude terminal's own values, kept on its row so later starts of
@@ -827,9 +836,16 @@ extension RPCRouter {
             guard let actuationID else { return try await body() }
             return try await actuating(actuationID, body)
         }
-        // Terminal close cancels any pending auto-resume (spec §Cancellation).
-        if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
-            await limitResumeScheduler?.wake()
+        // Terminal close cancels any pending auto-resume (spec §Cancellation),
+        // once the close is certain to go ahead: a close that throws keeps
+        // the row, and the row keeps its auto-resume with it. For a holder
+        // row that is before its holder is disposed of, so no resume fires
+        // into a session being torn down; a tmux row's close can still throw
+        // when its mark cannot be written, so it cancels after that.
+        func cancelPendingResume() async {
+            if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
+                await limitResumeScheduler?.wake()
+            }
         }
 
         // The worktree, for the Closed Terminals entry: one is written only for
@@ -858,6 +874,7 @@ extension RPCRouter {
             // The Closed Terminals entry is written first, from the daemon's
             // own emulator: disposal releases the reader the capture is read
             // from.
+            await cancelPendingResume()
             if worktree != nil {
                 await WorktreeLifecycle.recordHolderClosedTerminal(
                     terminal, registry: holderRegistry, resolver: holderScreenResolver,
@@ -878,6 +895,7 @@ extension RPCRouter {
                     terminal, server: worktree?.tmuxServer,
                     history: worktree == nil ? nil : db.terminalHistory)
             }
+            await cancelPendingResume()
         }
 
         // Delete from DB
@@ -1096,14 +1114,36 @@ extension RPCRouter {
         // Claude-kind with a live session id → resume it. Mirrors the
         // archived-session restore spawn in WorktreeLifecycle+Create.
         if entry.kind == .claude, let sessionID = entry.claudeSessionID {
+            // An entry whose tab is still open is not reopened: its session
+            // still runs in that tab, or comes back there when the tab is
+            // woken, and a second start would put a second agent on it. A
+            // close that wrote the entry and then failed leaves such a pair:
+            // an archive refused after its tmux rows' entries were written
+            // (`beginArchiveWorktree`), or a holder row whose delete failed.
+            // The entry can be reopened once the tab is closed.
+            let openTab = try await actuating(actuationID) {
+                try await db.terminals.get(id: entry.id)
+            }
+            if openTab != nil {
+                let message = "Terminal \(entry.id) is still open, so its session runs there. "
+                    + "Close that tab before reopening it from Closed Terminals."
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
             // The resume gate (`TmuxResumeGate`), before start admission and
             // before the trust seed, the transcript sync, the session title
             // and the session mod's spawn record: an entry a live tmux row's
             // close wrote is marked, a tmux row may carry the same session,
             // and either way it may still be running in that row's tmux
-            // server. `spawnTerminal` asks again.
+            // server. A session the worktree's archived record names asks
+            // about the worktree's own server too
+            // (`resumeGateWorktreeServer`). `spawnTerminal` asks again.
             if let refusal = try await actuating(actuationID, {
-                try await lifecycle.tmuxResumeRefusal(resuming: [sessionID])
+                try await lifecycle.tmuxResumeRefusal(
+                    resuming: [sessionID],
+                    worktreeServer: await lifecycle.resumeGateWorktreeServer(
+                        resuming: sessionID, worktreeID: worktree.id,
+                        tmuxServer: worktree.tmuxServer))
             }) {
                 await finishActuation(actuationID, .refused(.notEligible), error: refusal.message)
                 return refusal.coded.response
@@ -2037,6 +2077,27 @@ extension RPCRouter {
         // Re-homing here instead would open no tab and move the session itself
         // to the other profile, the opposite of a fork.
         if oldTerminal.isParked, mode == .inPlace {
+            // A tmux row parked with its park still in flight
+            // (`WorktreeLifecycle.sessionHasEnded`) may still be running its
+            // agent in its tmux server: an earlier build's hibernate signalled
+            // it and left the row so when its respawn failed. Re-homing would
+            // carry a transcript that agent may still be writing to another
+            // account, and set the account its next start uses beside it. So
+            // it is refused while that server may run, as
+            // `TerminalTransportMigrator.migrate` refuses it, and re-homed as
+            // any parked row once the server is gone.
+            if oldTerminal.transport != .holder,
+               !WorktreeLifecycle.sessionHasEnded(oldTerminal, teardownStoppedIt: false) {
+                guard let sighting = await lifecycle.leftoverTmuxServerSighting(for: oldTerminal) else {
+                    return RPCResponse(error: TerminalTransportMigrator.worktreeUnreadableRefusal)
+                }
+                guard sighting.state == .absent else {
+                    return RPCResponse(
+                        error: LeftoverTmuxSession.stillRunningRefusal(
+                            terminalID: oldTerminal.id, server: sighting.server),
+                        code: RPCErrorCode.terminalOnTmux.rawValue)
+                }
+            }
             // A re-home with no transcript simply wakes fresh later — so
             // missing and blank are the same answer here.
             let state = ClaudeSessionScanner.transcriptState(
@@ -5007,13 +5068,29 @@ extension RPCRouter {
         // One refusal cause is named apart: a session carrying TBD's hooks
         // ended inside a tab that is not Claude's, which the stamp leaves
         // alone because no wake would resume Claude there. The others
-        // (holder row, already parked, stale incarnation) are routine.
+        // (holder row, already parked, stale incarnation) are routine. Such a
+        // tab still on tmux forgets the ended session's id, which would
+        // otherwise keep the resume gate refusing it
+        // (`TerminalStore.clearEndedHandStartedSession`).
         if !stamped, let row = try? await db.terminals.get(id: params.terminalID),
            !row.isClaudeTab {
+            let cleared: Bool
+            do {
+                cleared = try await db.terminals.clearEndedHandStartedSession(
+                    id: params.terminalID,
+                    reportedIncarnationID: params.sessionIncarnationID)
+            } catch {
+                logger.error("""
+                    sessionEnded: forgetting the ended session id of terminal \
+                    \(params.terminalID.uuidString, privacy: .public) FAILED: \
+                    \(String(describing: error), privacy: .public)
+                    """)
+                cleared = false
+            }
             logger.debug("""
                 sessionEnded: terminal=\(params.terminalID.uuidString, privacy: .public) \
                 is not a Claude tab (kind=\(row.kind?.rawValue ?? "none", privacy: .public)); \
-                left unstamped
+                left unstamped, session id forgotten=\(cleared, privacy: .public)
                 """)
         }
         return .ok()
