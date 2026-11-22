@@ -609,17 +609,56 @@ struct TerminalTabCloseFailureTests {
             daemon.release(build)
             await PanelTabsFixture.drainMainActor()
             #expect(state.alertMessage == "Couldn't close terminal: \(Self.refusal)")
-            #expect(state.closingTerminals[build]?.awaitingList == true,
-                    "the refusal waits for a list that holds the terminal")
-            #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence")
-
-            Self.poll(state, daemon, worktreeID)
             let back: [UUID] = [claude, build]
-            #expect(Self.tabIDs(state, worktreeID) == back)
+            #expect(Self.tabIDs(state, worktreeID) == back,
+                    "the list read after the refusal holds the terminal, so it comes back without waiting for another")
             let returned = try #require(state.tabs[worktreeID]?.last)
             #expect(returned.label == "build server")
             #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence")
             #expect(state.closingTerminals.isEmpty)
+
+            Self.poll(state, daemon, worktreeID)
+            #expect(Self.tabIDs(state, worktreeID) == back)
+            #expect(state.tabs[worktreeID]?.last?.label == "build server")
+            #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence")
+        }
+    }
+
+    @Test("a refused terminal a list dropped mid-delete is back before the next list, so a later list that predates the refusal lets go of nothing")
+    func refusedTerminalOutlivesAListThatPredatesTheRefusal() async throws {
+        try await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build],
+                tabs: [Self.tab(claude), Self.tab(build, label: "build server")])
+            state.composerDraft(for: build).text = "half a sentence"
+            daemon.hold([build])
+            daemon.failures[build] = DaemonClientError.rpcError(Self.refusal, code: nil)
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            // Lists the daemon answered before it decided the delete, lacking
+            // the row it goes on to keep: one lands while the delete is in
+            // flight, and another only after the refusal has settled.
+            let answeredMidDelete = daemon.list(worktreeID: worktreeID).filter { $0.id != build }
+            state.adoptTerminalSnapshot(answeredMidDelete, worktreeID: worktreeID)
+            daemon.release(build)
+            await PanelTabsFixture.drainMainActor()
+
+            let back: [UUID] = [claude, build]
+            #expect(Self.tabIDs(state, worktreeID) == back, "the settle brings it back from the list read after the refusal")
+            #expect(state.closingTerminals.isEmpty, "nothing waits on a later list")
+            let saved = TabLabelWrite(tabID: build, worktreeID: worktreeID, label: "build server")
+            #expect(daemon.labelWrites == [saved], "the returning tab's label is stored under its ID")
+
+            state.adoptTerminalSnapshot(answeredMidDelete, worktreeID: worktreeID)
+            #expect(state.closingTerminals.isEmpty)
+            #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence",
+                    "a list that lacks a terminal no close holds leaves its draft")
+
+            Self.poll(state, daemon, worktreeID)
+            #expect(Self.tabIDs(state, worktreeID) == back)
+            #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence")
         }
     }
 

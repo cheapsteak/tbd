@@ -376,7 +376,9 @@ extension AppState {
         /// at, so the tab that terminal comes back as keeps its name.
         let tabLabel: String?
         /// Set when the delete failed without the daemon's answer — a
-        /// disconnect, a receive timeout, a response cut off. The next
+        /// disconnect, a receive timeout, a response cut off — and when it
+        /// was refused for a terminal a list dropped mid-delete and the
+        /// terminal list fetched after the refusal failed too. The next
         /// terminal list adopted for the worktree then decides
         /// (`adoptTerminalSnapshot`): a terminal it holds comes back as a
         /// tab, and one it lacks is gone. A list the daemon answered before
@@ -510,11 +512,13 @@ extension AppState {
     ///   next terminal list adopted for its worktree decides
     ///   (`ClosingTerminal.awaitingList`).
     ///
-    /// A refused or failed terminal that a terminal list dropped while its
-    /// delete was in flight is still held: the list predates the daemon's
-    /// answer, which a refusal says kept the terminal. It waits for the next
-    /// list, as a failed one does (`ClosingTerminal.awaitingList`), and a
-    /// refusal still shows its alert.
+    /// A terminal list that lands while a delete is in flight can drop the
+    /// terminal, since it predates the daemon's answer; the close still
+    /// holds it. A refusal has put it back from the list read after the
+    /// refusal (`deleteTerminal`), so it comes back like any other. One
+    /// still missing — its delete got no answer, or the list after a refusal
+    /// could not be read — waits for the next list
+    /// (`ClosingTerminal.awaitingList`), and a refusal still shows its alert.
     ///
     /// A refused or failed terminal that has left the app's state meanwhile —
     /// its worktree was archived while the delete was in flight — has no tab

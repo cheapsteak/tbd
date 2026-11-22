@@ -576,6 +576,10 @@ extension AppState {
     /// daemon's own terminal list decides: a terminal it no longer holds was
     /// deleted, and one it holds was kept. A list that cannot be read leaves
     /// the daemon's answer standing, a refusal.
+    ///
+    /// A kept terminal goes back into `terminals` from that list when a list
+    /// that landed while the delete was in flight dropped it
+    /// (`putBackKeptTerminal`), so the close's settle brings it back at once.
     @discardableResult
     func deleteTerminal(terminalID: UUID, worktreeID: UUID) async -> TerminalDeleteOutcome {
         do {
@@ -586,24 +590,52 @@ extension AppState {
             logger.error("Failed to delete terminal: \(error)")
             handleConnectionError(error)
             guard case .rpcError(let message, _)? = error as? DaemonClientError else { return .failed }
-            if await daemonHoldsTerminal(terminalID, worktreeID: worktreeID) == false {
-                removeDeletedTerminalFromState(terminalID: terminalID, worktreeID: worktreeID)
-                return .deleted
+            if let listed = await daemonTerminalList(afterFailedDeleteOf: terminalID, worktreeID: worktreeID) {
+                guard let kept = listed.first(where: { $0.id == terminalID }) else {
+                    removeDeletedTerminalFromState(terminalID: terminalID, worktreeID: worktreeID)
+                    return .deleted
+                }
+                putBackKeptTerminal(kept, worktreeID: worktreeID)
             }
             return .refused(message)
         }
     }
 
-    /// Whether the daemon's terminal list for the worktree holds the
-    /// terminal, or nil when the list cannot be read.
-    private func daemonHoldsTerminal(_ terminalID: UUID, worktreeID: UUID) async -> Bool? {
+    /// The daemon's terminal list for the worktree, read after a delete of
+    /// `terminalID` failed, or nil when it cannot be read.
+    private func daemonTerminalList(
+        afterFailedDeleteOf terminalID: UUID, worktreeID: UUID
+    ) async -> [TBDShared.Terminal]? {
         do {
-            return try await worktreeTerminalsFetcher(worktreeID).contains { $0.id == terminalID }
+            return try await worktreeTerminalsFetcher(worktreeID)
         } catch {
             logger.error("terminal list after a failed delete of \(terminalID, privacy: .public) failed: \(error, privacy: .public)")
             handleConnectionError(error)
             return nil
         }
+    }
+
+    /// Puts a terminal the daemon kept back into `terminals`, from the list
+    /// read after its delete was refused, when a list that landed while the
+    /// delete was in flight dropped it. That list was answered before the
+    /// daemon decided the delete, so it says nothing about the terminal;
+    /// this one was answered after. Without it the close would wait for the
+    /// next list (`ClosingTerminal.awaitingList`), and the next list to land
+    /// can be another one answered before the refusal, which also lacks the
+    /// terminal and so lets go of it, its tab's label and its composer's
+    /// draft with it.
+    ///
+    /// Only while the close still holds the terminal and its worktree is
+    /// still in the app's state, and never for a terminal the app recorded
+    /// as deleted. The row goes at the end; the next list adopted for the
+    /// worktree puts the daemon's order back.
+    private func putBackKeptTerminal(_ kept: TBDShared.Terminal, worktreeID: UUID) {
+        guard closingTerminals[kept.id] != nil,
+              recentlyDeletedTerminalIDs[kept.id] == nil,
+              var worktreeTerminals = terminals[worktreeID],
+              !worktreeTerminals.contains(where: { $0.id == kept.id }) else { return }
+        worktreeTerminals.append(kept)
+        terminals[worktreeID] = worktreeTerminals
     }
 
     /// Send text to a terminal.
