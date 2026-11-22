@@ -1,12 +1,18 @@
 import Foundation
 
-/// A parsed CSV or TSV file. `titles` and every row are padded with "" to `columnCount`.
+/// A parsed CSV or TSV file. `titles` is padded with "" to `columnCount`. A
+/// row keeps its own length, so it may be shorter than `columnCount`; the
+/// view shows its missing cells empty.
 struct DelimitedTable: Equatable, Sendable {
     let titles: [String]
     let rows: [[String]]
+    /// The widest row's field count, at most the parser's column limit.
     let columnCount: Int
     /// True when the row limit or the byte limit stopped the reading.
     let stoppedAtLimit: Bool
+    /// True when a row had more fields than the column limit. The fields past
+    /// the limit are not kept.
+    var stoppedAtColumnLimit: Bool = false
 }
 
 enum DelimitedParseResult: Equatable, Sendable {
@@ -34,6 +40,7 @@ enum DelimitedParseResult: Equatable, Sendable {
 enum DelimitedTextParser {
     static let tableExtensions: Set<String> = ["csv", "tsv"]
     static let defaultRowLimit = 100_000
+    static let defaultColumnLimit = 1_000
 
     /// `,` (0x2C) for csv, tab (0x09) for tsv, case-insensitive; nil otherwise.
     nonisolated static func delimiter(forPath path: String) -> UInt8? {
@@ -44,20 +51,25 @@ enum DelimitedTextParser {
         }
     }
 
-    /// Parses at most `rowLimit` data rows (the title row is not counted).
+    /// Parses at most `rowLimit` data rows (the title row is not counted),
+    /// and keeps at most `columnLimit` fields of any row, the title row
+    /// included; a limit under 1 counts as 1.
     ///
     /// `cutAtByteLimit` says the bytes stop where the reader's byte limit cut
     /// the file, so the last row may be partial: it is dropped, even when the
     /// cut lands inside a quoted field, and the table is marked as stopped.
     nonisolated static func parse(
         _ bytes: Data, delimiter: UInt8,
-        rowLimit: Int = DelimitedTextParser.defaultRowLimit, cutAtByteLimit: Bool = false
+        rowLimit: Int = DelimitedTextParser.defaultRowLimit,
+        columnLimit: Int = DelimitedTextParser.defaultColumnLimit,
+        cutAtByteLimit: Bool = false
     ) -> DelimitedParseResult {
         bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> DelimitedParseResult in
             var scan = DelimitedByteScan(
                 bytes: raw.bindMemory(to: UInt8.self),
                 delimiter: delimiter,
                 rowLimit: rowLimit,
+                columnLimit: columnLimit,
                 cutAtByteLimit: cutAtByteLimit
             )
             return scan.run()
@@ -75,6 +87,9 @@ private struct DelimitedByteScan {
     let bytes: UnsafeBufferPointer<UInt8>
     let delimiter: UInt8
     let rowLimit: Int
+    /// At least 1, so the first field of a row is always kept and an empty
+    /// `fields` always means no field of the row has been read yet.
+    let columnLimit: Int
     let cutAtByteLimit: Bool
 
     private var index = 0
@@ -86,11 +101,21 @@ private struct DelimitedByteScan {
     private var fields: [String] = []
     /// Reused for every quoted field, which has to be unescaped byte by byte.
     private var quotedValue: [UInt8] = []
+    /// Whether the row being read has had a field past `columnLimit`.
+    private var rowIsOverColumnLimit = false
+    /// How many finished rows, the title row included, had a field past
+    /// `columnLimit`. A row dropped after a cut is taken back out.
+    private var finishedRowsOverColumnLimit = 0
+    private var lastFinishedRowWasOverColumnLimit = false
 
-    init(bytes: UnsafeBufferPointer<UInt8>, delimiter: UInt8, rowLimit: Int, cutAtByteLimit: Bool) {
+    init(
+        bytes: UnsafeBufferPointer<UInt8>, delimiter: UInt8,
+        rowLimit: Int, columnLimit: Int, cutAtByteLimit: Bool
+    ) {
         self.bytes = bytes
         self.delimiter = delimiter
         self.rowLimit = rowLimit
+        self.columnLimit = max(columnLimit, 1)
         self.cutAtByteLimit = cutAtByteLimit
     }
 
@@ -116,7 +141,9 @@ private struct DelimitedByteScan {
             } else {
                 let start = index
                 advanceToFieldEnd()
-                fields.append(decode(start..<index))
+                if hasRoomForField() {
+                    fields.append(decode(start..<index))
+                }
             }
 
             if index == count { break scanning }
@@ -148,7 +175,12 @@ private struct DelimitedByteScan {
                 // The last row may be cut short: drop the unfinished row, or,
                 // when the bytes end at a line break, the last finished one.
                 if fields.isEmpty {
-                    if dataRows.isEmpty { header = nil } else { dataRows.removeLast() }
+                    if dataRows.isEmpty {
+                        header = nil
+                    } else {
+                        dataRows.removeLast()
+                        if lastFinishedRowWasOverColumnLimit { finishedRowsOverColumnLimit -= 1 }
+                    }
                 }
             } else if !fields.isEmpty {
                 finishRow()
@@ -162,6 +194,7 @@ private struct DelimitedByteScan {
                 ? .table(DelimitedTable(titles: [], rows: [], columnCount: 0, stoppedAtLimit: true))
                 : .empty
         }
+        // No kept row is longer than `columnLimit`, so neither is this.
         var columnCount = titles.count
         for row in dataRows where row.count > columnCount {
             columnCount = row.count
@@ -169,17 +202,15 @@ private struct DelimitedByteScan {
         if titles.count < columnCount {
             titles.append(contentsOf: repeatElement("", count: columnCount - titles.count))
         }
-        for rowIndex in dataRows.indices where dataRows[rowIndex].count < columnCount {
-            dataRows[rowIndex].append(contentsOf: repeatElement("", count: columnCount - dataRows[rowIndex].count))
-        }
         return .table(DelimitedTable(
-            titles: titles, rows: dataRows, columnCount: columnCount, stoppedAtLimit: stoppedAtLimit
+            titles: titles, rows: dataRows, columnCount: columnCount, stoppedAtLimit: stoppedAtLimit,
+            stoppedAtColumnLimit: finishedRowsOverColumnLimit > 0
         ))
     }
 
     /// Scans the quoted field opening at `index` and appends its value to
-    /// `fields`. Returns false when the input ends before the closing quote;
-    /// the partial value is appended then too.
+    /// `fields` when the row has room for it. Returns false when the input
+    /// ends before the closing quote; the partial value is appended then too.
     private mutating func scanQuotedField() -> Bool {
         let count = bytes.count
         quotedValue.removeAll(keepingCapacity: true)
@@ -214,9 +245,19 @@ private struct DelimitedByteScan {
         }
         // Lossy on purpose: invalid UTF-8 shows as U+FFFD and the rest of the
         // file still shows.
-        // swiftlint:disable:next optional_data_string_conversion
-        fields.append(String(decoding: quotedValue, as: UTF8.self))
+        if hasRoomForField() {
+            // swiftlint:disable:next optional_data_string_conversion
+            fields.append(String(decoding: quotedValue, as: UTF8.self))
+        }
         return closed
+    }
+
+    /// Whether the row being read can keep one more field. When it cannot,
+    /// the field is skipped and the row is marked as over the column limit.
+    private mutating func hasRoomForField() -> Bool {
+        if fields.count < columnLimit { return true }
+        rowIsOverColumnLimit = true
+        return false
     }
 
     private mutating func advanceToFieldEnd() {
@@ -244,6 +285,9 @@ private struct DelimitedByteScan {
             dataRows.append(fields)
         }
         fields = []
+        lastFinishedRowWasOverColumnLimit = rowIsOverColumnLimit
+        if rowIsOverColumnLimit { finishedRowsOverColumnLimit += 1 }
+        rowIsOverColumnLimit = false
     }
 
     /// Whether any byte other than a line break follows `index`.

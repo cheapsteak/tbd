@@ -8,9 +8,11 @@ struct DelimitedTextParserTests {
     private static let byteOrderMark = Data([0xEF, 0xBB, 0xBF])
 
     private func parse(
-        _ s: String, _ d: UInt8 = 0x2C, rowLimit: Int = 100_000, cut: Bool = false
+        _ s: String, _ d: UInt8 = 0x2C, rowLimit: Int = 100_000,
+        columnLimit: Int = DelimitedTextParser.defaultColumnLimit, cut: Bool = false
     ) -> DelimitedParseResult {
-        DelimitedTextParser.parse(Data(s.utf8), delimiter: d, rowLimit: rowLimit, cutAtByteLimit: cut)
+        DelimitedTextParser.parse(
+            Data(s.utf8), delimiter: d, rowLimit: rowLimit, columnLimit: columnLimit, cutAtByteLimit: cut)
     }
 
     private func table(_ r: DelimitedParseResult) throws -> DelimitedTable {
@@ -87,12 +89,42 @@ struct DelimitedTextParserTests {
         #expect(t.rows == [["5\"9", "x"]])
     }
 
-    @Test("rows shorter and longer than the header are padded to the widest")
-    func raggedRowsArePadded() throws {
+    @Test("rows shorter and longer than the header keep their own length")
+    func raggedRowsKeepTheirLength() throws {
         let t = try table(parse("a,b\n1\n1,2,3\n"))
         #expect(t.columnCount == 3)
         #expect(t.titles == ["a", "b", ""])
-        #expect(t.rows == [["1", "", ""], ["1", "2", "3"]])
+        #expect(t.rows == [["1"], ["1", "2", "3"]])
+    }
+
+    /// The row's fourth field is quoted, so both the quoted and the unquoted
+    /// field paths skip a field past the limit.
+    @Test("fields past the column limit are dropped and the table is marked")
+    func columnLimitStops() throws {
+        let t = try table(parse("a,b,c,d,e\n1,2,3,\"4,4\",5\n", columnLimit: 3))
+        #expect(t.columnCount == 3)
+        #expect(t.titles == ["a", "b", "c"])
+        #expect(t.rows == [["1", "2", "3"]])
+        #expect(t.stoppedAtColumnLimit == true)
+        #expect(t.stoppedAtLimit == false)
+    }
+
+    @Test("rows exactly as wide as the column limit are not marked")
+    func withinColumnLimitIsNotStopped() throws {
+        let t = try table(parse("a,b,c\n1,2,3\n", columnLimit: 3))
+        #expect(t.columnCount == 3)
+        #expect(t.rows == [["1", "2", "3"]])
+        #expect(t.stoppedAtColumnLimit == false)
+    }
+
+    /// The only row past the limit is the one a cut drops, so no row the
+    /// table holds lost a field.
+    @Test("a row past the column limit that a cut drops does not mark the table")
+    func droppedRowPastColumnLimitIsNotMarked() throws {
+        let t = try table(parse("a\n1\n2,3\n", columnLimit: 1, cut: true))
+        #expect(t.rows == [["1"]])
+        #expect(t.stoppedAtLimit == true)
+        #expect(t.stoppedAtColumnLimit == false)
     }
 
     @Test("a quote that never closes names the line it opens on")

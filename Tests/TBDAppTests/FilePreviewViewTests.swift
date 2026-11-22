@@ -111,10 +111,10 @@ private struct ViewportSwitchRoot: View {
 /// `FilePreviewView` mounted offscreen: a playable audio file gets one paused
 /// player framed to its control bar, an audio file that does not load falls
 /// back to the "Cannot preview" screen, a player stays the same view when the
-/// selection goes from one file to several, and a CSV file shows the table
-/// unless the pane is in source mode. A source file whose extension
-/// looks up as a playable type is covered by `FilePreviewTextTests`, which
-/// reads the accessibility tree.
+/// selection goes from one file to several, and a CSV file shows the table.
+/// A source file whose extension looks up as a playable type, and a CSV file
+/// in source mode, are covered by `FilePreviewTextTests`, which reads the
+/// accessibility tree.
 @MainActor
 @Suite("FilePreviewView", .fastPassBounded)
 struct FilePreviewViewTests {
@@ -209,26 +209,6 @@ struct FilePreviewViewTests {
         #expect(titles == ["name", "age"])
     }
 
-    /// In source mode the same CSV file is text: the classifier says so, and
-    /// the mounted preview holds no table.
-    @Test func aCsvFileInSourceModeIsText() async throws {
-        let fixtures = try PreviewFixtures()
-        defer { fixtures.remove() }
-        let url = try fixtures.text("name,age\nAda,36\n", named: "data.csv")
-        let kind = await FilePreviewClassifier.shared.kind(forPath: url.path, rendersRichView: false)
-        #expect(kind == .text)
-        let host = OffscreenHost(
-            root: PreviewRoot(
-                path: url.path, worktreePath: fixtures.directory.path,
-                coordinator: MediaPlaybackCoordinator(),
-                rendersRichView: true, showSourceCode: true),
-            size: Self.paneSize)
-        defer { host.tearDown() }
-
-        await host.pump(times: 20)
-        #expect(host.descendants(TableHostView.self).isEmpty)
-    }
-
     /// Selecting a second file while one plays flips `fillsViewport` from
     /// true to false. The player must stay the same view through the flip: a
     /// new one means SwiftUI dismantled the old, which stops and resets
@@ -285,7 +265,8 @@ struct FilePreviewViewTests {
 
 extension AccessibilityBridgeSerialized {
     /// A source file whose extension looks up as a playable type shows its
-    /// text and no player. The evidence that the text rendered is the file's
+    /// text and no player, and a CSV file in source mode shows its text and
+    /// no table. The evidence that the text rendered is the file's
     /// own words in the accessibility tree, which needs the process-global
     /// bridge switch, so this suite is nested here to run serialized with the
     /// others that flip it.
@@ -330,6 +311,38 @@ extension AccessibilityBridgeSerialized {
                 let mediaHosts = host.descendants(MediaPlayerHostView.self).count
                 #expect(avPlayers == 0, "a TypeScript file mounted \(avPlayers) AVPlayerView(s)")
                 #expect(mediaHosts == 0)
+            }
+        }
+
+        /// In source mode a CSV file shows its text and no table, even when
+        /// the pane asks for a rich view.
+        @Test func aCsvFileInSourceModeIsText() async throws {
+            try await withAccessibilityBridge {
+                let fixtures = try PreviewFixtures()
+                defer { fixtures.remove() }
+                let url = try fixtures.text("name,age\nAda,36\n", named: "data.csv")
+                let host = OffscreenHost(
+                    root: PreviewRoot(
+                        path: url.path, worktreePath: fixtures.directory.path,
+                        coordinator: MediaPlaybackCoordinator(),
+                        rendersRichView: true, showSourceCode: true),
+                    size: Self.paneSize)
+                defer { host.tearDown() }
+
+                // The 1 pt placeholder shown until classification lands holds
+                // no table either, so wait for the file's own text first.
+                let rendered = await pollUntilTrue(
+                    timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+                ) { @Sendable in
+                    await host.pump()
+                    return await accessibilityTree(of: host, contains: "name,age")
+                }
+                let tree = host.accessibilityTreeDescription()
+                try #require(
+                    rendered == .satisfied,
+                    Comment(rawValue: "the file's text never rendered (\(rendered)); accessibility tree:\n\(tree)"))
+
+                #expect(host.descendants(TableHostView.self).isEmpty)
             }
         }
     }

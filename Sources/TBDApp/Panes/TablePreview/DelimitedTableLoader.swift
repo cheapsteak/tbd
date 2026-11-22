@@ -23,6 +23,7 @@ enum DelimitedTableLoader {
     nonisolated static func load(
         path: String,
         rowLimit: Int = DelimitedTextParser.defaultRowLimit,
+        columnLimit: Int = DelimitedTextParser.defaultColumnLimit,
         byteLimit: Int = DelimitedTableLoader.byteLimit
     ) -> DelimitedTableLoad {
         var info = stat()
@@ -42,9 +43,12 @@ enum DelimitedTableLoader {
         let delimiter = DelimitedTextParser.delimiter(forPath: path) ?? 0x2C
         if data.count > byteLimit {
             return .loaded(DelimitedTextParser.parse(
-                data.prefix(byteLimit), delimiter: delimiter, rowLimit: rowLimit, cutAtByteLimit: true
+                data.prefix(byteLimit), delimiter: delimiter,
+                rowLimit: rowLimit, columnLimit: columnLimit, cutAtByteLimit: true
             ))
         }
-        return .loaded(DelimitedTextParser.parse(data, delimiter: delimiter, rowLimit: rowLimit))
+        return .loaded(DelimitedTextParser.parse(
+            data, delimiter: delimiter, rowLimit: rowLimit, columnLimit: columnLimit
+        ))
     }
 }

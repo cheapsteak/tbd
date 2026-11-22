@@ -59,14 +59,21 @@ struct DelimitedTablePreview: View {
         case .loaded(.table(let table)):
             VStack(spacing: 0) {
                 TablePreviewView(table: table, loadID: loaded.loadID)
-                if table.stoppedAtLimit {
+                if table.stoppedAtLimit || table.stoppedAtColumnLimit {
                     Divider()
-                    Text(limitNote(rowCount: table.rows.count))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 2) {
+                        if table.stoppedAtLimit {
+                            Text(rowLimitNote(rowCount: table.rows.count))
+                        }
+                        if table.stoppedAtColumnLimit {
+                            Text(columnLimitNote(columnCount: table.columnCount))
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
@@ -80,8 +87,12 @@ struct DelimitedTablePreview: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func limitNote(rowCount: Int) -> String {
+    private func rowLimitNote(rowCount: Int) -> String {
         "Showing the first \(rowCount.formatted()) rows. The rest of the file is not shown."
+    }
+
+    private func columnLimitNote(columnCount: Int) -> String {
+        "Showing the first \(columnCount.formatted()) columns. The other columns are not shown."
     }
 
     private func load() async {

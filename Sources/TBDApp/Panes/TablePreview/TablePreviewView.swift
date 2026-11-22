@@ -12,9 +12,16 @@ import SwiftUI
 final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     static let minColumnWidth: CGFloat = 48
     static let maxColumnWidth: CGFloat = 320
-    /// How many rows, after the header row, a column's starting width is
-    /// measured from.
+    /// The most rows, after the header row, a column's starting width is
+    /// measured from. A wide table measures fewer: see `sampledRowCount`.
     static let measuredRowSample = 200
+    /// The most values the starting widths are measured from, across all
+    /// columns, so a table of 1,000 columns measures 20 rows.
+    static let measurementBudget = 20_000
+    /// A value longer than this many characters shows only its first this
+    /// many and "…". A text field lays out its whole string each time it is
+    /// drawn, so a cell holding megabytes would stall scrolling.
+    nonisolated static let maxDisplayedCharacters = 1_000
     /// The system font with fixed-width digits, so numbers in a column line up.
     static let cellFont: NSFont = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
 
@@ -33,8 +40,9 @@ final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private static let columnPadding: CGFloat = 16
     /// A value longer than this many UTF-16 units is taken to reach
     /// `maxColumnWidth` without being laid out: at 12 pt it would need
-    /// glyphs under 1 pt wide on average to fit, and a single cell can hold
-    /// megabytes, which would hang the main actor to measure.
+    /// glyphs under 1 pt wide on average to fit, so laying out its display
+    /// string, up to `maxDisplayedCharacters` long, would spend main-actor
+    /// time to learn nothing.
     private static let measuredLengthLimit = 400
 
     /// The titles and column count the current columns were built for.
@@ -96,12 +104,19 @@ final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         tableView.reloadData()
     }
 
-    /// `\r\n`, `\n`, `\r` each → "↵".
+    /// The first `maxDisplayedCharacters` characters of `value`, then "…"
+    /// when it is longer; `\r\n`, `\n`, `\r` each → "↵".
     nonisolated static func displayString(_ value: String) -> String {
-        guard value.utf8.contains(where: { $0 == 0x0A || $0 == 0x0D }) else { return value }
+        // `prefix` walks at most that many characters, so a value of
+        // megabytes costs no more than one at the limit.
+        let head = value.prefix(maxDisplayedCharacters)
+        let isCut = head.endIndex != value.endIndex
+        guard head.utf8.contains(where: { $0 == 0x0A || $0 == 0x0D }) else {
+            return isCut ? String(head) + "…" : value
+        }
         var result = ""
-        result.reserveCapacity(value.utf8.count)
-        for character in value {
+        result.reserveCapacity(head.utf8.count + 3)
+        for character in head {
             switch character {
             case "\r\n", "\n", "\r":
                 result.append("↵")
@@ -109,11 +124,22 @@ final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
                 result.append(character)
             }
         }
+        if isCut {
+            result.append("…")
+        }
         return result
     }
 
-    /// Per column: max text width of title and the first `measuredRowSample`
-    /// rows' display strings in `cellFont`, plus 16 pt padding, clamped.
+    /// How many rows, after the header row, a table of `columnCount` columns
+    /// measures: `measuredRowSample`, or fewer when that many rows would hold
+    /// more than `measurementBudget` values, and always at least one.
+    static func sampledRowCount(columnCount: Int) -> Int {
+        min(measuredRowSample, max(1, measurementBudget / max(columnCount, 1)))
+    }
+
+    /// Per column: max text width of title and the first
+    /// `sampledRowCount(columnCount:)` rows' display strings in `cellFont`,
+    /// plus 16 pt padding, clamped.
     static func columnWidths(for table: DelimitedTable) -> [CGFloat] {
         let count = table.columnCount
         guard count > 0 else { return [] }
@@ -124,7 +150,7 @@ final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         for (index, title) in table.titles.prefix(count).enumerated() {
             widest[index] = textWidth(of: title, enough: enough)
         }
-        for row in table.rows.prefix(measuredRowSample) {
+        for row in table.rows.prefix(sampledRowCount(columnCount: count)) {
             for (index, value) in row.prefix(count).enumerated()
             where widest[index] < enough && !value.isEmpty {
                 widest[index] = max(widest[index], textWidth(of: value, enough: enough))

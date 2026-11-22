@@ -103,11 +103,43 @@ struct TablePreviewViewTests {
         #expect(tablePreviewCellText(in: scene.host, row: 0, column: 0) == "one↵two")
     }
 
+    @Test func longValueIsCut() {
+        let shown = TableHostView.displayString(String(repeating: "x", count: 5_000))
+        #expect(shown == String(repeating: "x", count: 1_000) + "…")
+        // A line break inside the kept part still shows as the return symbol.
+        let withBreak = TableHostView.displayString(String(repeating: "x", count: 999) + "\nyz")
+        #expect(withBreak == String(repeating: "x", count: 999) + "↵…")
+
+        let scene = TablePreviewScene()
+        defer { scene.tearDown() }
+        scene.host.show(DelimitedTable(
+            titles: ["blob"], rows: [[String(repeating: "y", count: 5_000)]], columnCount: 1,
+            stoppedAtLimit: false))
+
+        let cellText = tablePreviewCellText(in: scene.host, row: 0, column: 0)
+        #expect(cellText == String(repeating: "y", count: 1_000) + "…")
+    }
+
+    @Test func valueAtTheLimitIsWhole() {
+        let value = String(repeating: "x", count: 1_000)
+        #expect(TableHostView.maxDisplayedCharacters == 1_000)
+        #expect(TableHostView.displayString(value) == value)
+    }
+
+    /// The rows measured shrink so that rows × columns stays within the
+    /// measuring budget, and never below one row.
+    @Test func sampledRowsShrinkForWideTables() {
+        #expect(TableHostView.sampledRowCount(columnCount: 2) == 200)
+        #expect(TableHostView.sampledRowCount(columnCount: 1_000) == 20)
+        #expect(TableHostView.sampledRowCount(columnCount: 100_000) == 1)
+    }
+
     @Test func cellBeyondShortRowIsEmpty() {
         let scene = TablePreviewScene()
         defer { scene.tearDown() }
 
-        // The row is left unpadded on purpose: the host must not index past it.
+        // The parser keeps a short row's own length, so the host must not
+        // index past it.
         scene.host.show(DelimitedTable(
             titles: ["a", "b"], rows: [["x"]], columnCount: 2, stoppedAtLimit: false))
 
