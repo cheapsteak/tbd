@@ -1,5 +1,12 @@
 # Design: Pending-typed-input detection without TUI scraping
 
+Status: **retired.** The pending-input veto is retired: it stamped typed input
+where tmux control mode's input router received it (`FDSidecarClient.sendInput`
+into `ControlModeInputRouter`), both have been removed, and this document is
+kept as the design record. A park's guard for unsent composer text is the
+session mod, which saves the draft through Claude Code's own API
+([`docs/specs/2026-10-24-mod-only-park-guard-design.md`](../../specs/2026-10-24-mod-only-park-guard-design.md)).
+
 *2026-07-09. Grounded in a read of the live hibernation stack on `upstream/main`
 (`HibernationSafetyChecks.swift`, `HibernationGate.swift`,
 `HibernationCoordinator.swift`, the v39/v50 migrations), the Claude-hook overlay

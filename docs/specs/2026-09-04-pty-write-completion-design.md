@@ -148,11 +148,10 @@ its common path.
 
 The brief's belief is confirmed by the code. The route:
 
-- `TBDTerminalView.paste` (`Sources/TBDApp/Terminal/TBDTerminalView.swift:103`)
-  hands the pasteboard to `onControlModePaste`, whose decision
-  (`Sources/TBDApp/Terminal/PasteInterception.swift:46`) is `.passthrough`
-  whenever no control-mode attach is live — which is every holder-backed
-  panel — so `super.paste` runs (`TBDTerminalView.swift:117`).
+- `TBDTerminalView.paste` (`Sources/TBDApp/Terminal/TBDTerminalView.swift`)
+  picks the paste's route from the pasteboard (`pasteAction`): a text paste,
+  which is every paste this case concerns, runs `super.paste`, SwiftTerm's own
+  paste path.
 - SwiftTerm's paste path, when the child has enabled bracketed-paste mode,
   makes **three separate `send` calls**: the start marker, the payload as one
   chunk, the end marker
@@ -182,14 +181,15 @@ within 20 ms is written short. What the user then sees and does not see:
 - **It is a regression on both predecessors.** The local-PTY path hands the
   payload to `LocalProcess.send`, which writes through `DispatchIO`
   (`.build/checkouts/SwiftTerm/Sources/SwiftTerm/LocalProcess.swift:222-245`)
-  — a queued, completing write that never truncates. The control-mode path
-  ships the paste as a `.paste` frame that tmux completes. The holder path is
-  the first of the three in which a paste can be cut short.
+  — a queued, completing write that never truncates — and tmux completed
+  every paste it was handed. The holder path is the first of the three in
+  which a paste can be cut short.
 - **The gap between permitted and delivered is large.** Nothing caps a
-  passthrough paste; `SidecarFrameCodec.maxPasteBytes`
-  (`Sources/TBDShared/SidecarFraming.swift:133`) is just under 4 MiB and
-  applies to the control-mode frame, so a multi-megabyte paste is accepted at
-  the view and delivered to the extent of the child's draining in 20 ms.
+  paste at the view, so a multi-megabyte paste is accepted there and
+  delivered to the extent of the child's draining in 20 ms. The one cap near
+  this path, `SidecarFrameCodec.maxTaggedPayloadBytes`
+  (`Sources/TBDShared/SidecarFraming.swift`), just under 4 MiB, bounds a
+  daemon injection's tagged frame on the fd sidecar, not a person's paste.
 
 What could not be measured, and is stated as a judgment: how often 20 ms
 suffices for a paste of a few KiB into an *idle* agent. The budget allows four
@@ -610,16 +610,12 @@ above, not an orphan.
 ## Flag
 
 **No flag of its own.** The change is confined to holder-backed panels, which
-exist only under `pty_holder_enabled` (`Config.ptyHolderDefault` in
-`Sources/TBDShared/Models.swift`). It replaces the panel's write step, which
-the repo's rule names as flag-worthy — and the flag it sits behind is the one
-wrapped around the entire transport, for the reason single-typist gives: a
-second column would keep selectable a quadrant (holder on, completion off)
-that is known-defective in the three ways this document records. Both branches
-remain testable, because a tmux panel's write path is untouched. That
-judgement rests on the quadrant being worthless rather than on how the
-transport's own flag is defaulted: a later change to holder panels that did
-have a usable off state would need a column of its own, with the tri-state
+is every panel. It replaces the panel's write step, which the repo's rule names
+as flag-worthy, but an off position would keep selectable a state (holder
+writes without completion) that is known-defective in the three ways this
+document records, for the reason single-typist gives. That judgement rests on
+the off state being worthless: a later change to holder panels that did have a
+usable off state would need a column of its own, with the tri-state
 discipline.
 
 ## Testing
@@ -703,7 +699,7 @@ discipline.
 8. **The inline budget.** Drop `PTYWrite.defaultBudgetMilliseconds` to zero
    once the outbox exists, so no keystroke ever polls on the main actor.
    *Recommended: zero.*
-9. **Flag.** No column of its own; ships under `pty_holder_enabled`.
+9. **Flag.** No column of its own, since its off state is known-defective.
    *Recommended: none.*
 10. **The backpressure indicator's form.** A panel-level indicator with the
     pending byte count after about a second, not an in-pane status line.

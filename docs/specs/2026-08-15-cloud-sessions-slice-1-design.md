@@ -443,18 +443,15 @@ pane's own PTY, which the app already allocates.
 
 **The provider allocates the PTY through the engine that already bounds every
 other spawn.** `runBoundedProcess`
-(`Sources/TBDDaemon/Tmux/BoundedProcessRunner.swift`:283) is what `ProviderRunner`
+(`Sources/TBDDaemon/Process/BoundedProcessRunner.swift`) is what `ProviderRunner`
 uses, and it owns the properties this call needs as much as any other: a
 watchdog-backed deadline that survives executor starvation, incremental draining
 so a chatty child cannot deadlock on a full buffer, and a single-resume guard.
-It builds its own `Pipe()`s, so it gains one opt-in stdio mode that substitutes
-an `openpty(3)` pair for them, handing the replica to the child as stdin, stdout
-and stderr and reading the primary. That is the same allocation
-`TmuxControlConnection.start()`
-(`Sources/TBDDaemon/Tmux/ControlMode/TmuxControlConnection.swift`:63-111, `openpty`
-at :70) already performs for the control-mode connection, including the detail
-that matters: the parent closes its copy of the replica after spawn so the
-primary sees EOF when the child exits.
+It builds its own `Pipe()`s, so it gains one opt-in stdio mode
+(`.pseudoTerminal`) that substitutes an `openpty(3)` pair for them, handing the
+replica to the child as stdin, stdout and stderr and reading the primary,
+including the detail that matters: the parent closes its copy of the replica
+after spawn so the primary sees EOF when the child exits.
 
 A second bounded runner is the alternative, and it is the wrong one — the
 deadline discipline in that function took a starvation bug and a regression

@@ -1,6 +1,12 @@
 # Installer-seeded tmux fallback — design
 
-Status: **implemented**.
+Status: **retired.** TBD runs no tmux command, so the fallback no longer
+decides which tmux TBD runs, and the Locate tmux prompt and Settings surface it
+mentions have been removed; this document is kept as the design record. The
+seeding itself remains: `scripts/restart.sh` and `scripts/update.sh` still write
+`tmux-executable-path`, and the leftover-tmux probe reads it only for the name
+of the tmux binary, to recognize a tmux server an earlier version started
+([`2026-10-11-holder-transport-migration-design.md`](2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update)).
 
 Extends [`2026-08-11-tmux-executable-resolution-design.md`](2026-08-11-tmux-executable-resolution-design.md),
 which defines how TBD resolves tmux (inherited `PATH` first, then the saved fallback
