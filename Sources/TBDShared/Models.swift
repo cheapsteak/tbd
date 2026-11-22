@@ -35,6 +35,13 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     /// through to the global map, then to the field's provider-declared
     /// `default` (see `RemoteCreateFormLogic.plan`).
     public var remoteCreateDefaults: [String: String]
+    /// Whether this repo's lists, the Mac sidebar and the phone's Sessions
+    /// list, hide the sessions of registry providers (every provider but
+    /// `ClaudeCloudProvider.name`). Nil when nobody has chosen, which reads as
+    /// off; `false` when somebody turned the filter off; `true` when it is on.
+    /// The Mac app's one-time copy of its old saved choices writes only onto
+    /// a nil repo, so the third state is load-bearing.
+    public var registryRemoteHidden: Bool?
 
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
                 displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
@@ -44,7 +51,8 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
                 status: RepoStatus = .ok, hidden: Bool = false,
                 expanded: Bool = true,
                 envOverrides: [String: String] = [:],
-                remoteCreateDefaults: [String: String] = [:]) {
+                remoteCreateDefaults: [String: String] = [:],
+                registryRemoteHidden: Bool? = nil) {
         self.id = id
         self.path = path
         self.remoteURL = remoteURL
@@ -61,13 +69,14 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         self.expanded = expanded
         self.envOverrides = envOverrides
         self.remoteCreateDefaults = remoteCreateDefaults
+        self.registryRemoteHidden = registryRemoteHidden
     }
 
     enum CodingKeys: String, CodingKey {
         case id, path, remoteURL, displayName, defaultBranch, createdAt
         case renamePrompt, customInstructions, profileOverrideID
         case worktreeSlot, worktreeRoot, status, hidden, expanded
-        case envOverrides, remoteCreateDefaults
+        case envOverrides, remoteCreateDefaults, registryRemoteHidden
     }
 
     public init(from decoder: Decoder) throws {
@@ -93,6 +102,9 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         // as an empty map: no opinion, defer to the global map.
         remoteCreateDefaults = try c.decodeIfPresent(
             [String: String].self, forKey: .remoteCreateDefaults) ?? [:]
+        // Absent (an older daemon, older persisted JSON) is nobody having
+        // chosen, the same as a NULL column.
+        registryRemoteHidden = try c.decodeIfPresent(Bool.self, forKey: .registryRemoteHidden)
     }
 }
 

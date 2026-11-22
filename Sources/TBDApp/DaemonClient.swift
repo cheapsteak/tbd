@@ -605,6 +605,16 @@ actor DaemonClient {
         )
     }
 
+    /// Set whether a repo's lists hide registry-provider sessions
+    /// (`repo.setRegistryRemoteHidden`), the setting the Mac sidebar and the
+    /// phone share.
+    func setRepoRegistryRemoteHidden(id: UUID, hidden: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.repoSetRegistryRemoteHidden,
+            params: RepoSetRegistryRemoteHiddenParams(repoID: id, hidden: hidden)
+        )
+    }
+
     /// Update per-repo instruction fields.
     func repoUpdateInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async throws -> Repo {
         return try await callAsync(

@@ -360,6 +360,7 @@ extension StateDelta {
         case .devServersChanged: return "devServersChanged"
         case .worktreeSiblingsReordered: return "worktreeSiblingsReordered"
         case .phoneStatusChanged: return "phoneStatusChanged"
+        case .repoRegistryRemoteHiddenChanged: return "repoRegistryRemoteHiddenChanged"
         }
     }
 }

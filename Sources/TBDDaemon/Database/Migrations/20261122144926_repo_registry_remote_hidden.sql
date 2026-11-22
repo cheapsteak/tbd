@@ -1,0 +1,11 @@
+-- Whether a repo's lists hide the sessions of registry providers, every
+-- provider but the compiled `claude-cloud` one. The Mac sidebar and the
+-- phone's Sessions list share this one setting
+-- (docs/specs/2026-11-22-phone-remote-session-filter-design.md).
+--
+-- No DEFAULT clause, deliberately. NULL means nobody has chosen for this repo
+-- and reads as off; 0 means somebody turned the filter off; 1 means it is on.
+-- ADD COLUMN ... DEFAULT would backfill every existing row and lose the
+-- difference between NULL and 0, which the Mac app's one-time copy of choices
+-- it saved before this column reads: it copies only onto a repo still NULL.
+ALTER TABLE repo ADD COLUMN registry_remote_hidden INTEGER;

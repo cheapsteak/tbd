@@ -292,6 +292,30 @@ extension RPCRouter {
         return .ok()
     }
 
+    func handleRepoSetRegistryRemoteHidden(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(RepoSetRegistryRemoteHiddenParams.self, from: paramsData)
+        return try await setRegistryRemoteHidden(repoID: params.repoID, hidden: params.hidden)
+    }
+
+    /// Sets whether a repo's lists hide registry-provider sessions, and
+    /// broadcasts the change, so a running phone sessions list gathers again.
+    /// The one core behind the socket RPC (`repo.setRegistryRemoteHidden`) and
+    /// the phone's `repo.setRemoteFilter` (`phoneSetRegistryRemoteHidden`). An
+    /// unknown repo is an error and writes nothing.
+    func setRegistryRemoteHidden(repoID: UUID, hidden: Bool) async throws -> RPCResponse {
+        guard try await db.repos.get(id: repoID) != nil else {
+            return RPCResponse(error: "Repository not found: \(repoID)")
+        }
+
+        try await db.repos.setRegistryRemoteHidden(id: repoID, hidden: hidden)
+
+        subscriptions.broadcast(delta: .repoRegistryRemoteHiddenChanged(RepoRegistryRemoteHiddenDelta(
+            repoID: repoID, hidden: hidden
+        )))
+
+        return .ok()
+    }
+
     func handleRepoListBranches(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(RepoListBranchesParams.self, from: paramsData)
 

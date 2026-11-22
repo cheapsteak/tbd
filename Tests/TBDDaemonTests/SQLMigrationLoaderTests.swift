@@ -616,6 +616,7 @@ import Testing
             "20261113231818_config_ghostty_daemon_emulator",
             "20261120205010_terminal_history_live_on_tmux_server",
             "20261120232500_terminal_tmux_session_index",
+            "20261122144926_repo_registry_remote_hidden",
         ]
         let expectedInline = ["20261101170100_side_panel_notes"]
         let found = try SQLMigrationLoader.bundled.get()
