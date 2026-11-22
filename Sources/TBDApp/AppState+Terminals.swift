@@ -397,32 +397,33 @@ extension AppState {
             return merged
         }
         let visibleIDs = Set(visible.map(\.id))
-        for terminal in existing where !visibleIDs.contains(terminal.id) {
-            terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
-            terminalReplacementObservedGeneration.removeValue(forKey: terminal.id)
-            lastForwardedProgramStatusReports.removeValue(forKey: terminal.id)
-            // A Switch Terminal Engine choice goes with the terminal here as
-            // in `recordTerminalRemoval`, so a row recreated under this id
-            // after a missed removal opens on the flag's engine. Written only
-            // when there is one: the dictionary is observed.
-            if terminalEngineOverrides[terminal.id] != nil {
-                terminalEngineOverrides.removeValue(forKey: terminal.id)
-            }
-            // A terminal a tab close holds after its delete got no answer has
-            // no removal broadcast coming, so this list is the word that the
-            // daemon deleted it, and what the close kept for it goes. Any
-            // other terminal's composer state stays: a list answered before a
-            // terminal was created can arrive after it, so absence from one
-            // list does not prove the terminal ended, and forgetting would
-            // fail the session-start waiters of a terminal just created.
-            if closingTerminals[terminal.id] != nil {
-                letGoOfDroppedTerminal(terminal.id)
-            }
+        // A terminal a tab close holds after its delete got no answer has no
+        // removal broadcast coming, so this list is the word that the daemon
+        // deleted it, and what the close kept for it goes — whether this list
+        // drops it or an earlier one, which landed while its delete was in
+        // flight, already took it out of `terminals` (`settleTerminalClose`).
+        // Before the guard below, since such a list can be otherwise
+        // unchanged.
+        for (terminalID, closing) in closingTerminals
+        where closing.worktreeID == worktreeID && closing.awaitingList && !visibleIDs.contains(terminalID) {
+            letGoOfDroppedTerminal(terminalID)
+        }
+        // Any other terminal the list drops loses only its list bookkeeping.
+        // Its composer state stays: a list answered before a terminal was
+        // created can arrive after it, so absence from one list does not
+        // prove the terminal ended, and forgetting would fail the
+        // session-start waiters of a terminal just created. A terminal whose
+        // delete is still in flight keeps its list bookkeeping too: the list
+        // may predate the daemon's answer, and a refusal brings it back as it
+        // was.
+        for terminal in existing
+        where !visibleIDs.contains(terminal.id) && closingTerminals[terminal.id] == nil {
+            forgetListedTerminalBookkeeping(terminal.id)
         }
         // A closed tab's terminal whose delete got no answer waits on a list
         // (`ClosingTerminal.awaitingList`), and this is one: a terminal it
         // holds was kept by the daemon and comes back as a tab, even when the
-        // list is otherwise unchanged; one it lacks went with the loop above.
+        // list is otherwise unchanged; one it lacks was let go above.
         let listChanged = visible != existing
         let returning = visible.map(\.id).filter { closingTerminals[$0]?.awaitingList == true }
         guard listChanged || !returning.isEmpty else { return }
@@ -435,11 +436,30 @@ extension AppState {
     /// Lets go of what the app holds for a terminal a tab close held when it
     /// left the app's state without passing through
     /// `removeDeletedTerminalFromState`: the close's hold, its composer's
-    /// draft and bookkeeping, and its unread bold.
+    /// draft and bookkeeping, its unread bold, and the list bookkeeping and
+    /// engine choice the close kept while its delete was in flight.
     func letGoOfDroppedTerminal(_ terminalID: UUID) {
         finishClosingTerminal(terminalID)
         forgetComposerState(for: terminalID)
         if unreadTerminals.contains(terminalID) { unreadTerminals.remove(terminalID) }
+        forgetListedTerminalBookkeeping(terminalID)
+    }
+
+    /// Forgets the per-terminal state that goes when a list stops holding a
+    /// terminal no tab close holds: the session-order and replacement
+    /// observations `adoptTerminalSnapshot` merges rows against, the last
+    /// forwarded program status report, and the Switch Terminal Engine choice.
+    private func forgetListedTerminalBookkeeping(_ terminalID: UUID) {
+        terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
+        terminalReplacementObservedGeneration.removeValue(forKey: terminalID)
+        lastForwardedProgramStatusReports.removeValue(forKey: terminalID)
+        // A Switch Terminal Engine choice goes with the terminal here as in
+        // `recordTerminalRemoval`, so a row recreated under this id after a
+        // missed removal opens on the flag's engine. Written only when there
+        // is one: the dictionary is observed.
+        if terminalEngineOverrides[terminalID] != nil {
+            terminalEngineOverrides.removeValue(forKey: terminalID)
+        }
     }
 
     /// Merge a terminal returned by an explicit creation action and select

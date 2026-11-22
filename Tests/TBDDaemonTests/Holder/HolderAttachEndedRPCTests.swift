@@ -126,6 +126,35 @@ struct HolderAttachEndedRPCTests {
         #expect(!response.success)
     }
 
+    /// A person's wake of a row parked on tmux moves the row to the holder and
+    /// publishes it before the wake spawns the holder, so the pinned dock can
+    /// mount a panel that asks to attach in between. The answer must be an
+    /// error, which the app retries until the wake's holder is up, and never
+    /// the ended status, which it does not retry: the panel's identity does
+    /// not change when the wake lands, so the retry is what attaches it.
+    @Test("a row a wake moved off tmux, not yet woken, keeps the attach error")
+    func rowMovedOffTmuxBeforeItsWakeIsAnError() async throws {
+        let (router, worktreeID, _) = try await makeRouter(holderPID: nil)
+        router.holderProcessIsLive = { _ in false }
+        router.holderChildSignaller = deadChild()
+        let tmuxRow = try await router.db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude,
+            transport: .tmux)
+        try await router.db.terminals.setHibernated(id: tmuxRow.id, sessionID: "acme-session")
+        let parked = try #require(try await router.db.terminals.get(id: tmuxRow.id))
+        let moved = try #require(try await router.db.terminals.setParkedTransport(
+            id: parked.id, expectedState: TerminalReplacementSnapshot(terminal: parked),
+            transport: .holder))
+        #expect(moved.transport == .holder)
+        #expect(moved.isParked)
+        #expect(moved.holderPID == nil)
+
+        let response = try await attach(router, worktreeID: worktreeID, terminalID: moved.id)
+
+        #expect(!response.success, "an error, which the app retries")
+        #expect(response.error?.contains("no live holder reader") == true)
+    }
+
     /// The registry checks a viewer claim and a pending attach before it looks
     /// for a reader, so a dead holder can be refused with either of those
     /// first. All three mean ended when the holder is gone, and none of them

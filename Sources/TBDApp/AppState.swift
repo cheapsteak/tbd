@@ -1255,6 +1255,13 @@ final class AppState {
     /// latch before registering, so a already-arrived start is a same-frame
     /// `true` rather than a wait.
     @ObservationIgnored var lastStartedIncarnation: [UUID: UUID] = [:]
+    /// Every incarnation whose `SessionStart` landed while a tab close held
+    /// the terminal (`closingTerminals`), keyed by terminal. The latch above
+    /// keeps only the latest, and a close answers every send it held: a
+    /// terminal the daemon kept releases each waiter one of these matches as
+    /// it comes back (`releaseSessionStartWaitersHeldByClose`), and a deletion
+    /// drops them with the waiters (`releaseSessionStartWaiters`).
+    @ObservationIgnored var sessionStartsDuringClose: [UUID: Set<UUID>] = [:]
     /// Terminals whose account "Switch account" is changing in place, keyed by
     /// terminal id. Set by `swapTerminalProfile` before the RPC, for a row the
     /// cache holds awake and only by the first swap to claim it, and cleared
@@ -2829,6 +2836,16 @@ final class AppState {
     /// same reason as `terminalDeleter`.
     @ObservationIgnored lazy var worktreeTerminalsFetcher: @MainActor (UUID) async throws -> [TBDShared.Terminal] =
         { [daemonClient] worktreeID in try await daemonClient.listTerminals(worktreeID: worktreeID) }
+    /// How a tab's label override reaches the daemon (`tab.setLabel`): a
+    /// rename, and the label a closed tab's terminal takes back when the
+    /// daemon keeps it — injectable for the same reason as `terminalDeleter`,
+    /// so a test can see which labels were persisted.
+    @ObservationIgnored lazy var tabLabelSetter: @MainActor (
+        _ tabID: UUID, _ worktreeID: UUID, _ label: String?
+    ) async throws -> Void =
+        { [daemonClient] tabID, worktreeID, label in
+            try await daemonClient.setTabLabel(tabID: tabID, worktreeID: worktreeID, label: label)
+        }
     /// How `refreshArchivedScratch()` lists the archived scratch spaces —
     /// injectable for the same reason as `worktreesFetcher`, so a test can
     /// tell whether an archive asked for the refresh.
@@ -3310,6 +3327,12 @@ final class AppState {
     /// tabs and must not keep their slot histories alive forever (#477).
     /// `gridLayouts` (presentation-only, never persisted) is scanned
     /// separately since its entries are legitimately live but not tab-keyed.
+    /// A closed tab one of whose terminals a close still holds
+    /// (`closedTabsAwaitingDeletes`) keeps its slot histories too, as
+    /// `panel.syncTabs` keeps listing it: its delete has not answered, and
+    /// the daemon may keep its terminal. The close prunes once it lets go of
+    /// the tab (`finishClosingTerminal`), which drops them unless an open tab
+    /// shows those panes.
     func prunePaneHistories() {
         guard !paneHistories.isEmpty else { return }
         var liveIDs = Set<UUID>()
@@ -3320,6 +3343,9 @@ final class AppState {
                     liveIDs.formUnion(layout.allPaneIDs())
                 }
             }
+        }
+        for closedTab in closedTabsAwaitingDeletes.values.joined() {
+            liveIDs.formUnion((closedTab.layout ?? .pane(closedTab.content)).allPaneIDs())
         }
         for layout in gridLayouts.values { liveIDs.formUnion(layout.allPaneIDs()) }
         let pruned = paneHistories.filter { liveIDs.contains($0.key) }
@@ -3366,6 +3392,7 @@ final class AppState {
         let openTabIDs = Set(wtTabs.map(\.id))
         for closed in closedTabsAwaitingDeletes[worktreeID] ?? [] where !openTabIDs.contains(closed.tabID) {
             legacyTabs.append(closed)
+            includedPaneIDs.formUnion((closed.layout ?? .pane(closed.content)).allPaneIDs())
         }
         let includedPaneHistories = paneHistories.filter { includedPaneIDs.contains($0.key) }
         return PanelSyncTabsParams(
@@ -4638,6 +4665,13 @@ final class AppState {
                 from: allWts,
                 tombstones: Set(recentlyArchivedWorktreeIDs.keys)
             )
+            // Only the unscoped list names every worktree: a tab close whose
+            // delete got no answer, in a worktree it no longer holds, has no
+            // terminal list coming to settle it. Read under the same fence as
+            // the tombstones, as the daemon's current state.
+            if repoID == nil, !listsAreFenced {
+                letGoOfUnansweredCloses(outside: Set(fetched.map(\.id)).union(pendingWorktreeIDs))
+            }
 
             // Seed PR status from the persisted value so the PR icon shows immediately
             // on cold start. Only fill gaps — never overwrite a fresher live entry
