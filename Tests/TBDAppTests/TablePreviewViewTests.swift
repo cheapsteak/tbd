@@ -120,6 +120,23 @@ struct TablePreviewViewTests {
         #expect(cellText == String(repeating: "y", count: 1_000) + "…")
     }
 
+    /// One character of 100,000 combining marks is under the character
+    /// limit, so only the byte limit cuts it, and the cut falls between two
+    /// marks (each two bytes of UTF-8), never inside one.
+    @Test func longCharacterIsCutByBytes() {
+        let value = "a" + String(repeating: "\u{0301}", count: 100_000)
+        #expect(value.count == 1)
+
+        let shown = TableHostView.displayString(value)
+
+        let ellipsisBytes = "…".utf8.count
+        #expect(shown.utf8.count <= TableHostView.maxDisplayedUTF8Bytes + ellipsisBytes)
+        #expect(shown.hasSuffix("…"))
+        let marksKept = (TableHostView.maxDisplayedUTF8Bytes - 1) / 2
+        let expected = "a" + String(repeating: "\u{0301}", count: marksKept) + "…"
+        #expect(shown.unicodeScalars.elementsEqual(expected.unicodeScalars))
+    }
+
     @Test func valueAtTheLimitIsWhole() {
         let value = String(repeating: "x", count: 1_000)
         #expect(TableHostView.maxDisplayedCharacters == 1_000)

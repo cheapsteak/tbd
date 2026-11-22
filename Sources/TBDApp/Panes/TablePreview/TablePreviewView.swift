@@ -22,6 +22,10 @@ final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     /// many and "…". A text field lays out its whole string each time it is
     /// drawn, so a cell holding megabytes would stall scrolling.
     nonisolated static let maxDisplayedCharacters = 1_000
+    /// A value is also cut where its shown part would pass this many bytes
+    /// of UTF-8. One character can carry any number of combining marks, so
+    /// a count of characters alone does not bound what a cell lays out.
+    nonisolated static let maxDisplayedUTF8Bytes = maxDisplayedCharacters * 4
     /// The system font with fixed-width digits, so numbers in a column line up.
     static let cellFont: NSFont = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
 
@@ -38,11 +42,16 @@ final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     /// Room a column keeps beside its widest measured text: the cell's
     /// insets and the text field's own margins.
     private static let columnPadding: CGFloat = 16
-    /// A value longer than this many UTF-16 units is taken to reach
-    /// `maxColumnWidth` without being laid out: at 12 pt it would need
-    /// glyphs under 1 pt wide on average to fit, so laying out its display
-    /// string, up to `maxDisplayedCharacters` long, would spend main-actor
-    /// time to learn nothing.
+    /// A value longer than this many bytes of UTF-8 is taken to reach
+    /// `maxColumnWidth` without being laid out. The byte count is known
+    /// without walking the string (`utf8.count` is constant time for a native
+    /// string, where `utf16.count` walks a non-ASCII one), and it is never
+    /// smaller than the UTF-16 count. At 12 pt, text this long fits under the
+    /// clamp only when its glyphs average under 1 pt for each byte they take:
+    /// under 1 pt for an ASCII letter, under 3 pt for a 4-byte emoji, far
+    /// narrower than the font draws either. So laying out its display string,
+    /// up to `maxDisplayedCharacters` long, would spend main-actor time to
+    /// learn nothing.
     private static let measuredLengthLimit = 400
 
     /// The titles and column count the current columns were built for.
@@ -104,13 +113,18 @@ final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         tableView.reloadData()
     }
 
-    /// The first `maxDisplayedCharacters` characters of `value`, then "…"
-    /// when it is longer; `\r\n`, `\n`, `\r` each → "↵".
+    /// The first `maxDisplayedCharacters` characters of `value`, cut sooner,
+    /// between two Unicode scalars, where they would pass
+    /// `maxDisplayedUTF8Bytes` bytes of UTF-8; then "…" when anything was
+    /// cut. `\r\n`, `\n`, `\r` each → "↵".
     nonisolated static func displayString(_ value: String) -> String {
-        // `prefix` walks at most that many characters, so a value of
-        // megabytes costs no more than one at the limit.
-        let head = value.prefix(maxDisplayedCharacters)
-        let isCut = head.endIndex != value.endIndex
+        // The byte cut walks at most `maxDisplayedUTF8Bytes` bytes, and
+        // `prefix` at most that many characters of what it keeps, so a value
+        // of megabytes costs no more than one at the limits, even when it is
+        // a single character of a million combining marks.
+        let (bounded, isByteCut) = utf8Prefix(of: value)
+        let head = bounded.prefix(maxDisplayedCharacters)
+        let isCut = isByteCut || head.endIndex != bounded.endIndex
         guard head.utf8.contains(where: { $0 == 0x0A || $0 == 0x0D }) else {
             return isCut ? String(head) + "…" : value
         }
@@ -128,6 +142,26 @@ final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             result.append("…")
         }
         return result
+    }
+
+    /// `value`'s longest run of whole Unicode scalars from the start that
+    /// fits in `maxDisplayedUTF8Bytes` bytes of UTF-8, and whether that is
+    /// shorter than `value`. The cut falls between two scalars, so the result
+    /// is always valid Unicode, though it may end partway through a
+    /// character's combining marks.
+    private nonisolated static func utf8Prefix(of value: String) -> (prefix: String, isCut: Bool) {
+        // Constant time for a native string, which every parsed value is.
+        guard value.utf8.count > maxDisplayedUTF8Bytes else { return (value, false) }
+        let scalars = value.unicodeScalars
+        var end = scalars.startIndex
+        var size = 0
+        while end != scalars.endIndex {
+            let width = Unicode.UTF8.width(scalars[end])
+            if size + width > maxDisplayedUTF8Bytes { break }
+            size += width
+            scalars.formIndex(after: &end)
+        }
+        return (String(scalars[..<end]), true)
     }
 
     /// How many rows, after the header row, a table of `columnCount` columns
@@ -244,7 +278,7 @@ final class TableHostView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     /// The width of `value`'s display string in `cellFont`, or `enough` for a
     /// value too long to be narrower than that.
     private static func textWidth(of value: String, enough: CGFloat) -> CGFloat {
-        guard value.utf16.count <= measuredLengthLimit else { return enough }
+        guard value.utf8.count <= measuredLengthLimit else { return enough }
         let shown = displayString(value) as NSString
         return shown.size(withAttributes: [.font: cellFont]).width
     }
