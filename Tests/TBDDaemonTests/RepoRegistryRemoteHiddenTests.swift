@@ -109,6 +109,28 @@ struct RepoRegistryRemoteHiddenTests {
         #expect(stored == 0)
     }
 
+    /// The setter reports whether a repo row took the value: true for a repo,
+    /// twice over for the same value, and false for an unknown repo or one
+    /// removed before the write, which leaves no row behind.
+    @Test func theSetterReportsWhetherARepoTookTheValue() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/rrh-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+
+        let first = try await db.repos.setRegistryRemoteHidden(id: repo.id, hidden: true)
+        let again = try await db.repos.setRegistryRemoteHidden(id: repo.id, hidden: true)
+        #expect(first)
+        #expect(again)
+
+        let unknown = try await db.repos.setRegistryRemoteHidden(id: UUID(), hidden: true)
+        #expect(!unknown)
+
+        try await db.repos.remove(id: repo.id)
+        let removed = try await db.repos.setRegistryRemoteHidden(id: repo.id, hidden: false)
+        #expect(!removed)
+        #expect(try await db.repos.get(id: repo.id) == nil)
+    }
+
     /// A record update for another field, as a rename makes, keeps the value.
     @Test func aRenameKeepsTheChoice() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -202,6 +224,26 @@ struct RepoRegistryRemoteHiddenTests {
         #expect(!response.success)
         #expect(response.error?.contains("Repository not found") == true)
         #expect(deltas.all.isEmpty)
+    }
+
+    /// A repo removed before the write is refused as unknown, and no delta
+    /// goes out for it: the write that sets the value is the one that finds
+    /// the repo, so no success can follow a removal.
+    @Test func theRPCRefusesARemovedRepoAndBroadcastsNothing() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (router, deltas) = makeRouter(db: db)
+        let repo = try await db.repos.create(
+            path: "/tmp/rrh-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        try await db.repos.remove(id: repo.id)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.repoSetRegistryRemoteHidden,
+            params: RepoSetRegistryRemoteHiddenParams(repoID: repo.id, hidden: true)))
+
+        #expect(!response.success)
+        #expect(response.error?.contains("Repository not found") == true)
+        #expect(deltas.all.isEmpty)
+        #expect(try await db.repos.get(id: repo.id) == nil)
     }
 
     /// The delta round-trips under the name the app and the phone publisher

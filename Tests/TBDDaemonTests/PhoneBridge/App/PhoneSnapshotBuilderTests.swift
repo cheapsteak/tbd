@@ -290,6 +290,33 @@ struct PhoneSnapshotBuilderTests {
         #expect(turnedOff.remoteFilterOn == nil)
     }
 
+    /// A repo whose column is a deliberate 0 (`registryRemoteHidden ==
+    /// false`) goes on the wire with no `remoteFilterOn` key at all, in the
+    /// layout a snapshot carries and in the `sessions.changed` that turns the
+    /// filter off: the encoder leaves the nil out, never writing `false`.
+    @Test func anExplicitlyOffRepoGroupHasNoFilterKeyOnTheWire() throws {
+        let scene = FilterScene()
+        let on = PhoneSnapshotBuilder.build(scene.input(unsetValue: true))
+        let off = PhoneSnapshotBuilder.build(scene.input(unsetValue: false))
+        let found = PhoneSessionsPublisher.diff(old: on, new: off)
+        let diff = try #require(found)
+        let encoder = PhoneAppCoding.makeEncoder()
+
+        let snapshotJSON = try JSONSerialization.jsonObject(with: encoder.encode(off.layout)) as? [[String: Any]]
+        let snapshotGroups = try #require(snapshotJSON)
+        let eventJSON = try JSONSerialization.jsonObject(with: encoder.encode(diff)) as? [String: Any]
+        let eventLayout = try #require(eventJSON?["layout"] as? [[String: Any]])
+
+        // `off` was always a deliberate 0; `unset` has just been turned off.
+        for groups in [snapshotGroups, eventLayout] {
+            for id in ["repo:\(scene.off)", "repo:\(scene.unset)"] {
+                let match = groups.first { ($0["id"] as? String) == id }
+                let group = try #require(match, "no group \(id)")
+                #expect(!group.keys.contains("remoteFilterOn"), "\(id) carries remoteFilterOn: \(group)")
+            }
+        }
+    }
+
     /// A remote lane's row stands for its remote session, which then gets no
     /// row of its own.
     @Test func aRemoteLaneRowCarriesItsRemoteSession() throws {

@@ -229,12 +229,19 @@ public struct RepoStore: Sendable {
     /// Set whether the repo's lists hide registry-provider sessions, on the
     /// Mac sidebar and the phone alike. Writes 0 or 1; nothing writes NULL
     /// back, so once somebody has chosen, the choice stays a choice.
-    public func setRegistryRemoteHidden(id: UUID, hidden: Bool) async throws {
+    ///
+    /// Returns whether a repo row took the value. It is false when no repo
+    /// has `id`, even one removed a moment before, because the write that
+    /// sets the value is the one that finds the row. A row that holds the
+    /// value already still takes it, so setting a value twice is true twice.
+    @discardableResult
+    public func setRegistryRemoteHidden(id: UUID, hidden: Bool) async throws -> Bool {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE repo SET registry_remote_hidden = ? WHERE id = ?",
                 arguments: [hidden, id.uuidString]
             )
+            return db.changesCount > 0
         }
     }
 

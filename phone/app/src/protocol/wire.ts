@@ -211,17 +211,21 @@ export const decodePhoneRowPlacement = obj<PhoneRowPlacement>({ id: str, depth: 
 
 export const decodePhoneGroupKind: Decoder<PhoneGroupKind> = oneOf(PHONE_GROUP_KINDS);
 
-/**
- * `true`, the only value of a flag the daemon writes when it is on and leaves out when it is off,
- * such as `PhoneGroupLayout.remoteFilterOn`. A `false` is refused: the daemon never writes one.
- */
-export const onlyTrue: Decoder<true> = (raw, path = '') => {
-  if (bool(raw, path) !== true) throw new DecodeError(path, 'is false; the daemon leaves the field out instead');
-  return true;
-};
+/** A group layout as it may come on the wire, with `remoteFilterOn` any boolean. */
+type WireGroupLayout = Omit<PhoneGroupLayout, 'remoteFilterOn'> & { remoteFilterOn?: boolean };
 
-export const decodePhoneGroupLayout = obj<PhoneGroupLayout>(
-  { id: str, kind: decodePhoneGroupKind, name: str, rows: arr(decodePhoneRowPlacement) }, { remoteFilterOn: onlyTrue });
+const decodeWireGroupLayout = obj<WireGroupLayout>(
+  { id: str, kind: decodePhoneGroupKind, name: str, rows: arr(decodePhoneRowPlacement) }, { remoteFilterOn: bool });
+
+/**
+ * A group layout. The daemon writes `remoteFilterOn` only as `true` and leaves it out when the
+ * filter is off, but a `false` reads as absent all the same, so one stray flag never fails the
+ * whole list it came in. A `null` or a value of another type is refused.
+ */
+export const decodePhoneGroupLayout: Decoder<PhoneGroupLayout> = (raw, path = '') => {
+  const { remoteFilterOn, ...group } = decodeWireGroupLayout(raw, path);
+  return remoteFilterOn === true ? { ...group, remoteFilterOn } : group;
+};
 
 // MARK: - sessions.subscribe and sessions.changed
 

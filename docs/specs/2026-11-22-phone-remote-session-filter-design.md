@@ -107,8 +107,20 @@ more providers. The chip carries `aria-pressed`.
 ### A tap
 
 A tap flips the chip at once and sends the change to the laptop. The phone holds its own value for
-that repo until the laptop's list reports the same value, or until the request fails. On a failure
-the chip flips back and a toast gives the laptop's reason.
+that repo until one of these settles it:
+
+- **The list agrees.** A layout that reports the same value ends the wait, before the reply or
+  after, and so does a reply that finds the list agreeing already. A repo's requests go one at a
+  time, so a tap made while an earlier request is unanswered sends its own after that one's reply.
+  Until that tap's own reply, a layout that agrees with it may come from before the earlier write,
+  which can still turn the filter the other way, so such a layout ends nothing.
+- **The laptop took the request.** The first `sessions.changed` after the reply ends the wait,
+  whatever it carries, and the chip shows the list's value, so a change another client made in
+  the meantime shows. The laptop sends a layout only when it differs from the phone's, so a change
+  another client undoes before the laptop gathers its list again sends no layout, and perhaps no
+  event at all. So the wait also ends one second after the reply: twice the sessions publisher's
+  500 ms debounce, time for the list gathered after the write to arrive.
+- **The request fails.** The chip flips back and a toast gives the laptop's reason.
 
 ## The shared setting
 
@@ -131,17 +143,20 @@ The column is deleted with its repo row, so no saved set needs pruning when a re
 
 - **Socket RPC `repo.setRegistryRemoteHidden`** – takes `repoID` and `hidden`, writes 0 or 1, and
   broadcasts a state delta, as `repo.setHidden` does, so a running phone list wakes and gathers
-  again. An unknown repo is an error.
+  again. An unknown repo is an error, and nothing is broadcast. The write that sets the value is the
+  one that finds the row, so a repo removed just before it is unknown too.
 - **Phone request `repo.setRemoteFilter`** – takes `repoID` and `hidden`, and calls the same core
   function. It answers `not_found` for a repo the phone's list does not show: an unknown repo or a
-  hidden one. It answers `phone_control_off` while phone control is off, like every request.
+  hidden one. A repo removed after that check and before the write is `not_found` too. It answers
+  `phone_control_off` while phone control is off, like every request.
 
 ### The phone's list
 
 `PhoneGroupLayout` gains `remoteFilterOn`, present and `true` on a repo group whose column is 1,
-and absent otherwise. A change to the column changes the layout, so the sessions publisher sends
-the new layout in a `sessions.changed` event. The protocol fixtures under `phone/protocol/` gain the
-new request, its reply and a layout that carries the field.
+and absent otherwise. The phone reads a `false` as absent, so a layout that carries one still
+decodes rather than costing the phone its whole list. A change to the column changes the layout,
+so the sessions publisher sends the new layout in a `sessions.changed` event. The protocol fixtures
+under `phone/protocol/` gain the new request, its reply and a layout that carries the field.
 
 ### The Mac
 
@@ -194,14 +209,20 @@ that row.
 - **Phone, the chip:** absent with no registry rows and with only cloud rows; present when off with
   one registry row; present when folded; absent when on with nothing left to hide; the one-provider
   and two-provider wording; the count.
-- **Phone, a tap:** the chip flips at once, stays flipped until the layout agrees, and flips back
-  with a toast on a refusal.
+- **Phone, a tap:** the chip flips at once and stays flipped until the layout agrees; a layout that
+  agrees with a tap queued behind an unanswered request leaves it flipped; after a successful
+  reply, any `sessions.changed` ends the wait, and so does the one-second timer when none comes; a
+  refusal flips it back with a toast.
+- **Phone, the protocol:** a `remoteFilterOn` of `false` decodes as absent, and `null` or another
+  type is refused.
 - **Daemon:**
   - a repo row from before the migration reads NULL, not 0
-  - the RPC writes 0 and 1 and broadcasts a delta
-  - the phone request sets the column, and refuses an unknown or hidden repo
-  - the snapshot carries `remoteFilterOn` only on a filtered repo group, and a change to the column
-    changes the layout
+  - the RPC writes 0 and 1 and broadcasts a delta, and refuses a repo removed before its write
+    without broadcasting
+  - the phone request sets the column, and refuses an unknown or hidden repo, and one removed after
+    its check, as `not_found`
+  - the snapshot carries `remoteFilterOn` only on a filtered repo group, a repo turned off sends no
+    such key on the wire, and a change to the column changes the layout
   - the protocol fixtures round-trip
 - **Mac:**
   - the filter reads from the repo list

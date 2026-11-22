@@ -465,12 +465,26 @@ test('a layout keeps remoteFilterOn when it is true, and leaves it absent when t
   assert.deepEqual(JSON.parse(JSON.stringify(data)).layout, [on, LAYOUT]);
 });
 
-test('a remoteFilterOn of false, null or another type is refused: the daemon writes it only as true', () => {
-  for (const value of [false, null, 'true', 1]) {
+test('a remoteFilterOn of false reads as absent, and the list it came in still decodes', () => {
+  const off = decodePhoneGroupLayout({ ...LAYOUT, remoteFilterOn: false });
+  assert.deepEqual(off, LAYOUT);
+  assert.equal('remoteFilterOn' in off, false);
+  const on = { ...LAYOUT, id: 'repo:8A1E503C-B1A3-59EE-9AFE-5DE564EE906B', remoteFilterOn: true };
+  const result = decodeResult('sessions.subscribe', {
+    stream: 's1', seq: 1, replayed: false, omittedRows: 0, more: false, layout: [{ ...LAYOUT, remoteFilterOn: false }, on],
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)).layout, [LAYOUT, on]);
+  assert.equal('remoteFilterOn' in result.layout![0]!, false);
+  const data = decodeEventData('sessions.changed', { layout: [{ ...LAYOUT, remoteFilterOn: false }], rows: [], removedRowIDs: [] });
+  assert.deepEqual(JSON.parse(JSON.stringify(data)).layout, [LAYOUT]);
+});
+
+test('a remoteFilterOn of null or another type is refused', () => {
+  for (const value of [null, 'true', 'false', 1, 0]) {
     assert.throws(() => decodePhoneGroupLayout({ ...LAYOUT, remoteFilterOn: value }), at('remoteFilterOn'), String(value));
   }
   assert.throws(() => decodeResult('sessions.subscribe', {
-    stream: 's1', seq: 1, replayed: false, omittedRows: 0, more: false, layout: [{ ...LAYOUT, remoteFilterOn: false }],
+    stream: 's1', seq: 1, replayed: false, omittedRows: 0, more: false, layout: [{ ...LAYOUT, remoteFilterOn: 0 }],
   }), at('layout[0].remoteFilterOn'));
 });
 

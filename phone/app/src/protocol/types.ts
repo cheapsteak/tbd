@@ -138,8 +138,8 @@ export type PhoneGroupLayout = {
   rows: PhoneRowPlacement[];
   /**
    * Set on a repo group whose filter for registry-provider sessions is on, the setting the laptop
-   * sidebar shares. The daemon leaves it out when the filter is off, and on every other group, so
-   * it is never `false`.
+   * sidebar shares. The daemon leaves it out when the filter is off, and on every other group, and
+   * the decoder reads a `false` as absent (`decodePhoneGroupLayout`), so it is never `false` here.
    */
   remoteFilterOn?: true;
 };

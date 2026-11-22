@@ -76,6 +76,32 @@ struct PhoneRemoteFilterTests {
         #expect(h.actions.registryRemoteHiddenSets.isEmpty)
     }
 
+    /// A repo removed after the phone's own check and before the core's write
+    /// is still `not_found`, not `refused`: the core refuses it as unknown,
+    /// and the request reads the repo again before it answers.
+    @Test func aRepoRemovedBeforeTheCoreIsNotFound() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h.db)
+        let db = h.db
+        let repoKey = repo.id.uuidString
+        h.actions.handle(.setRegistryRemoteHidden) {
+            // The handler is synchronous, so the removal is a synchronous
+            // write; nothing else holds the database at this point.
+            _ = try? db.writerForTests.write { conn in
+                try conn.execute(sql: "DELETE FROM repo WHERE id = ?", arguments: [repoKey])
+            }
+            return RPCResponse(error: "Repository not found: \(repoKey)")
+        }
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.request(
+            .repoSetRemoteFilter, params: PhoneRepoSetRemoteFilterParams(repoID: repo.id, hidden: true), on: outbox)
+
+        #expect(reply.error == PhoneAppError(code: .notFound, message: PhoneAppService.noSuchRepoReason))
+        #expect(h.actions.registryRemoteHiddenSets == [RepoSetRegistryRemoteHiddenParams(repoID: repo.id, hidden: true)])
+        #expect(try await h.db.repos.get(id: repo.id) == nil)
+    }
+
     /// A refusal from the core is `refused` with the core's reason.
     @Test func aRefusalFromTheCoreIsRefused() async throws {
         let h = try await PhoneServiceHarness.make()

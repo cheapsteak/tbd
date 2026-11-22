@@ -42,6 +42,11 @@ export interface ActionContext {
   entries: Pick<HistoryLink, 'push' | 'replace' | 'back'>;
   /** The time in milliseconds, for anything that ages. */
   now: () => number;
+  /**
+   * Runs `run` once `ms` milliseconds have passed, for anything that waits. Defaults to
+   * `setTimeout`; a test passes its own, which runs `run` when the test says, without sleeping.
+   */
+  after?: (ms: number, run: () => void) => void;
 }
 
 export type Actions = ReturnType<typeof shellActions> & ReturnType<typeof transcriptActions>

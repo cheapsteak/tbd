@@ -4,7 +4,8 @@
 // and links, and the sessions list's filter chips. A fake client records each request and hands
 // back a promise the test settles; the transcript actions are replaced on the actions object,
 // which `self()` returns, so the test sees each call. A fake `entries` records what the shell asks of the loader's history, and a test
-// plays the loader's answers by calling `onRoute`.
+// plays the loader's answers by calling `onRoute`. A fake `after` keeps each wait, and a test
+// runs it when it chooses, so nothing sleeps.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,7 +15,7 @@ import type {
   SessionsSubscribeResult,
 } from '../protocol/types.ts';
 import { refKey } from '../protocol/wire.ts';
-import { pendingValues } from '../state/remoteFilter.ts';
+import { pendingValues, TAKEN_WAIT_MS } from '../state/remoteFilter.ts';
 import { encodeRoute } from '../state/routeState.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
 import { sessionsView } from '../state/sessionsView.ts';
@@ -84,7 +85,11 @@ function harness() {
     back() { entryCalls.push(['back']); },
   };
   const store = createStore();
-  const ctx: ActionContext = { store, client, link: { openLink: (url) => { links.push(url); } }, entries, now: () => 0 };
+  const waits: Array<{ ms: number; run: () => void }> = [];
+  const ctx: ActionContext = {
+    store, client, link: { openLink: (url) => { links.push(url); } }, entries, now: () => 0,
+    after: (ms, run) => { waits.push({ ms, run }); },
+  };
   const actions = createActions(ctx);
   const calls: unknown[][] = [];
   actions.openTranscript = (ref) => { calls.push(['openTranscript', ref]); };
@@ -92,7 +97,7 @@ function harness() {
   actions.resumeTranscriptOnUp = () => { calls.push(['resumeTranscriptOnUp', sent.length]); };
   actions.onShowDetailsChanged = () => { calls.push(['onShowDetailsChanged', store.get().ui.showDetails]); };
   const requests = () => sent.map((s): [Method, unknown] => [s.method, s.params]);
-  return { sent, requests, client, store, actions, calls, links, entryCalls, state: (): AppState => store.get() };
+  return { sent, requests, client, store, actions, calls, links, entryCalls, waits, state: (): AppState => store.get() };
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -1133,7 +1138,7 @@ test('a tap flips the chip at once and sends the flipped value', async () => {
   assert.equal(chipOn(h), true);
   assert.deepEqual(shownRows(h), ['W1']);
   assert.deepEqual(h.requests(), [['repo.setRemoteFilter', { repoID: REPO, hidden: true }]]);
-  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: true, seq: 1, confirmed: false });
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: true, seq: 1, stage: 'sent' });
   // The store keeps every row.
   assert.deepEqual(Object.keys(h.state().sessions.rows).sort(), ['BOX', 'W1']);
   h.sent[0]!.resolve({});
@@ -1193,7 +1198,7 @@ test('a layout after a successful reply wins over the pending value', async () =
   h.sent[0]!.resolve({});
   await done;
   // The laptop took it; the chip waits for the next layout.
-  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: true, seq: 1, confirmed: true });
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: true, seq: 1, stage: 'taken' });
   assert.equal(chipOn(h), true);
   // Another client turned it off since: the layout says off, and the chip follows it.
   h.actions.onEvent(layoutEvent(false));
@@ -1227,12 +1232,12 @@ test('a stale failure does not undo a newer tap', async () => {
   const first = h.actions.toggleRemoteFilter(REPO);
   const second = h.actions.toggleRemoteFilter(REPO);
   assert.equal(chipOn(h), false);
-  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, confirmed: false });
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, stage: 'queued' });
   // The first request fails: the second tap stands, and says nothing yet.
   h.sent[0]!.reject(new AppError('refused', 'The laptop refused the change.'));
   await first;
   await flush();
-  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, confirmed: false });
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, stage: 'queued' });
   assert.equal(h.state().ui.toast, null);
   // The second succeeds, and the list says off already, so the wait ends.
   h.sent[1]!.resolve({});
@@ -1248,8 +1253,8 @@ test('a stale success does not settle a newer tap', async () => {
   h.sent[0]!.resolve({});
   await first;
   await flush();
-  // Still the second tap's, and not confirmed: a layout that says on, from the first request, leaves it.
-  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, confirmed: false });
+  // Still the second tap's, and not taken: a layout that says on, from the first request, leaves it.
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, stage: 'queued' });
   h.actions.onEvent(layoutEvent(true));
   assert.equal(chipOn(h), false);
   // The second's own failure flips it back to what the list says.
@@ -1297,7 +1302,7 @@ test('each queued request carries its own tap\'s value, not the chip\'s when it 
     ['repo.setRemoteFilter', { repoID: REPO, hidden: false }],
     ['repo.setRemoteFilter', { repoID: REPO, hidden: true }],
   ]);
-  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: true, seq: 3, confirmed: true });
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: true, seq: 3, stage: 'taken' });
 });
 
 test('a failed first send still sends the second', async () => {
@@ -1314,7 +1319,7 @@ test('a failed first send still sends the second', async () => {
     ['repo.setRemoteFilter', { repoID: REPO, hidden: false }],
   ]);
   // The failure is the first tap's, so the second tap stands and nothing is toasted.
-  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, confirmed: false });
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, stage: 'queued' });
   assert.equal(h.state().ui.toast, null);
   h.sent[1]!.resolve({});
   await second;
@@ -1357,6 +1362,82 @@ test('a tap on another repo is not held behind this repo\'s unanswered request',
   await other;
   h.sent[0]!.resolve({});
   await first;
+});
+
+test('a layout that agrees with a queued tap leaves the chip on it until its own write lands', async () => {
+  const h = await filterHarness();
+  // Off; a tap on goes out, and a tap off waits behind it.
+  const first = h.actions.toggleRemoteFilter(REPO);
+  const second = h.actions.toggleRemoteFilter(REPO);
+  assert.equal(chipOn(h), false);
+  // A layout from before the first write still says off. It agrees with the second tap, but the
+  // first write can still turn the filter on, so the second tap waits for its own reply.
+  h.actions.onEvent(layoutEvent(false));
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, stage: 'queued' });
+  // The first write lands, and the laptop's list says on: the chip stays off, and no row hides.
+  h.sent[0]!.resolve({});
+  await first;
+  await flush();
+  h.actions.onEvent(layoutEvent(true));
+  assert.equal(chipOn(h), false);
+  assert.deepEqual(shownRows(h), ['W1', 'BOX']);
+  // The second write lands; the list says on until it is gathered again, so the value waits as taken.
+  h.sent[1]!.resolve({});
+  await second;
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, stage: 'taken' });
+  assert.equal(chipOn(h), false);
+  h.actions.onEvent(layoutEvent(false));
+  assert.deepEqual(Object.keys(h.state().ui.remoteFilterPending), []);
+  assert.equal(chipOn(h), false);
+  assert.deepEqual(shownRows(h), ['W1', 'BOX']);
+});
+
+test('a sessions.changed without a layout after the reply ends the wait, and the chip shows the list', async () => {
+  const h = await filterHarness();
+  const done = h.actions.toggleRemoteFilter(REPO);
+  h.sent[0]!.resolve({});
+  await done;
+  assert.equal(chipOn(h), true);
+  // Another client turned it off again before the laptop gathered its list, so the layout the
+  // phone has is still right and none comes: only rows.
+  h.actions.onEvent(changed([]));
+  assert.deepEqual(Object.keys(h.state().ui.remoteFilterPending), []);
+  assert.equal(chipOn(h), false);
+  assert.deepEqual(shownRows(h), ['W1', 'BOX']);
+});
+
+test('a taken value with no sessions.changed after it goes once its wait is up', async () => {
+  const h = await filterHarness();
+  const done = h.actions.toggleRemoteFilter(REPO);
+  assert.deepEqual(h.waits, []);
+  h.sent[0]!.resolve({});
+  await done;
+  assert.deepEqual(h.waits.map((w) => w.ms), [TAKEN_WAIT_MS]);
+  assert.equal(chipOn(h), true);
+  h.waits[0]!.run();
+  assert.deepEqual(Object.keys(h.state().ui.remoteFilterPending), []);
+  assert.equal(chipOn(h), false);
+});
+
+test("an earlier tap's wait running out leaves a newer tap's value", async () => {
+  const h = await filterHarness();
+  const first = h.actions.toggleRemoteFilter(REPO);
+  h.sent[0]!.resolve({});
+  await first;
+  const second = h.actions.toggleRemoteFilter(REPO);
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, stage: 'sent' });
+  h.waits[0]!.run();
+  assert.deepEqual(h.state().ui.remoteFilterPending[REPO], { value: false, seq: 2, stage: 'sent' });
+  h.sent[1]!.resolve({});
+  await second;
+});
+
+test('a failed request starts no wait', async () => {
+  const h = await filterHarness();
+  const done = h.actions.toggleRemoteFilter(REPO);
+  h.sent[0]!.reject(new AppError('refused', 'The laptop refused the change.'));
+  await done;
+  assert.deepEqual(h.waits, []);
 });
 
 test('a layout that no longer lists the repo ends its wait', async () => {
