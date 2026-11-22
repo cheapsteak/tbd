@@ -492,6 +492,43 @@ struct TerminalTabCloseFailureTests {
         }
     }
 
+    @Test("panel.syncTabs keeps listing a closed tab until its delete answers, so a refused terminal keeps its surface")
+    func closedTabStaysInTheSyncUntilItsDeleteAnswers() async {
+        await Self.withState { state, daemon in
+            let (kept, gone, agent) = (UUID(), UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [kept, gone, agent],
+                tabs: [Self.tab(kept), Self.tab(gone), Self.tab(agent)])
+            let syncs = PanelTabsFixture.collectSyncs(state)
+            state.markPanelSyncReady(worktreeIDs: [worktreeID])
+            await PanelTabsFixture.drainMainActor()
+            syncs.reset()
+            daemon.hold([kept, gone])
+            daemon.failures[kept] = DaemonClientError.rpcError(Self.refusal, code: nil)
+
+            state.closeTab(worktreeID: worktreeID, index: 0)
+            state.closeTab(worktreeID: worktreeID, index: 0)
+            await PanelTabsFixture.drainMainActor()
+
+            let whileClosing = syncs.sent.last?.tabs.map(\.tabID)
+            let heldAfterTheOpenTabs: [UUID] = [agent, kept, gone]
+            #expect(whileClosing == heldAfterTheOpenTabs)
+
+            daemon.release(gone)
+            await PanelTabsFixture.drainMainActor()
+            let afterTheDelete = syncs.sent.last?.tabs.map(\.tabID)
+            let goneOmitted: [UUID] = [agent, kept]
+            #expect(afterTheDelete == goneOmitted, "a deleted terminal's tab leaves the sync")
+
+            daemon.release(kept)
+            await PanelTabsFixture.drainMainActor()
+            let afterTheRefusal = syncs.sent.last?.tabs.map(\.tabID)
+            #expect(afterTheRefusal == goneOmitted, "the refused terminal's tab is open again, under the same ID")
+            let syncsOmittingKept = syncs.sent.filter { !$0.tabs.map(\.tabID).contains(kept) }
+            #expect(syncsOmittingKept.isEmpty, "no sync ever deleted the kept tab's surface")
+        }
+    }
+
     @Test("a terminal list lacking a terminal no close holds leaves its composer state, since the list may predate it")
     func listLackingAnUnheldTerminalKeepsItsComposer() async throws {
         try await Self.withState { state, daemon in

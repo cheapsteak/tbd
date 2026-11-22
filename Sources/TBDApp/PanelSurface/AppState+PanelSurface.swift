@@ -585,6 +585,14 @@ extension AppState {
         markPanelSyncDirty(dirty)
     }
 
+    /// Called when a closed tab stops being held in `panel.syncTabs`
+    /// (`closedTabsAwaitingDeletes`). `tabs` did not change, so its observer
+    /// marks nothing, yet the worktree's next sync has to omit the tab — or
+    /// list it in its place, if it came back.
+    func notePanelHeldTabsChanged(worktreeID: UUID) {
+        markPanelSyncDirty([worktreeID])
+    }
+
     /// Retakes `panelSkippedTabLayouts` for the skipped set as it now stands.
     func snapshotPanelSkippedTabLayouts() {
         var snapshot: [UUID: LayoutNode] = [:]

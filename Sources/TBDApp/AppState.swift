@@ -1114,6 +1114,11 @@ final class AppState {
     /// while it is being torn down (`settleTerminalClose` and
     /// `finishClosingTerminal` let them go).
     @ObservationIgnored var closingTerminals: [UUID: ClosingTerminal] = [:]
+    /// Per worktree, in close order, each closed tab one of whose terminals
+    /// `closingTerminals` still holds. `panel.syncTabs` keeps listing it
+    /// after the open tabs, so the sync does not delete the surface a
+    /// terminal the daemon keeps comes back to (`buildPanelSyncParams`).
+    @ObservationIgnored var closedTabsAwaitingDeletes: [UUID: [LegacyTabPayload]] = [:]
     /// Worktrees whose persisted tab order / active tab has been hydrated from
     /// the daemon with actual content. Distinct from `worktreeTabOrders[id] != nil`,
     /// which is also true for the empty response a poll gets while the daemon is
@@ -3341,14 +3346,26 @@ final class AppState {
     /// `layouts.values`. `paneHistories` is filtered to pane IDs that actually
     /// appear in the included tabs, absorbing the #477 over-retention concern
     /// at the sync boundary rather than trusting the caller.
+    ///
+    /// A closed tab one of whose terminals is still closing is listed after
+    /// the open tabs, as it was when it closed (`closedTabsAwaitingDeletes`),
+    /// so the sync keeps its surface. A terminal the daemon refuses to delete
+    /// comes back as a tab whose ID is the terminal's, which is the closed
+    /// tab's own whenever the tab was made for that terminal, so the tab
+    /// comes back to its surface. Once open again it is listed in its place
+    /// among the open tabs, and only there.
     func buildPanelSyncParams(worktreeID: UUID) -> PanelSyncTabsParams? {
         guard let wtTabs = tabs[worktreeID] else { return nil }
         var includedPaneIDs = Set<UUID>()
-        let legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
+        var legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
             let payload = legacyTabPayload(for: tab)
             includedPaneIDs.insert(tab.content.paneID)
             if let layout = payload.layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
             return payload
+        }
+        let openTabIDs = Set(wtTabs.map(\.id))
+        for closed in closedTabsAwaitingDeletes[worktreeID] ?? [] where !openTabIDs.contains(closed.tabID) {
+            legacyTabs.append(closed)
         }
         let includedPaneHistories = paneHistories.filter { includedPaneIDs.contains($0.key) }
         return PanelSyncTabsParams(

@@ -368,6 +368,10 @@ extension AppState {
     /// What a tab close holds for one of its terminals until the terminal is
     /// settled (`closingTerminals`).
     struct ClosingTerminal: Sendable {
+        let worktreeID: UUID
+        /// The closed tab, which `panel.syncTabs` keeps listing while any of
+        /// its terminals is held (`closedTabsAwaitingDeletes`).
+        let tabID: UUID
         /// The closed tab's label, carried by the terminal the tab was rooted
         /// at, so the tab that terminal comes back as keeps its name.
         let tabLabel: String?
@@ -430,6 +434,9 @@ extension AppState {
             forgetComposerState(for: terminalID)
         }
 
+        // Read before the layout goes: `panel.syncTabs` lists the tab as it
+        // was while any of its terminals is still closing.
+        let closedTabPayload = legacyTabPayload(for: tab)
         layouts.removeValue(forKey: tab.id)
         arr.remove(at: index)
         tabs[worktreeID] = arr
@@ -437,6 +444,7 @@ extension AppState {
         prunePaneHistories()
 
         if !terminalIDsInTab.isEmpty {
+            closedTabsAwaitingDeletes[worktreeID, default: []].append(closedTabPayload)
             var rootTerminalID: UUID?
             if case .terminal(let id) = tab.content { rootTerminalID = id }
             let refusals = TabCloseRefusals()
@@ -444,6 +452,7 @@ extension AppState {
             // terminal of the tab is held before any of them settles.
             for terminalID in terminalIDsInTab {
                 closingTerminals[terminalID] = ClosingTerminal(
+                    worktreeID: worktreeID, tabID: tab.id,
                     tabLabel: terminalID == rootTerminalID ? tab.label : nil)
                 Task {
                     let outcome = await deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
@@ -546,9 +555,17 @@ extension AppState {
         }
     }
 
-    /// Ends the close's hold on one terminal (`closingTerminals`).
+    /// Ends the close's hold on one terminal (`closingTerminals`). Once no
+    /// terminal of the closed tab is held, `panel.syncTabs` stops listing
+    /// the tab, so the worktree's next sync omits it — or lists it in its
+    /// place, if it came back.
     func finishClosingTerminal(_ terminalID: UUID) {
-        closingTerminals.removeValue(forKey: terminalID)
+        guard let closing = closingTerminals.removeValue(forKey: terminalID),
+              !closingTerminals.values.contains(where: { $0.tabID == closing.tabID }),
+              var closedTabs = closedTabsAwaitingDeletes[closing.worktreeID] else { return }
+        closedTabs.removeAll { $0.tabID == closing.tabID }
+        closedTabsAwaitingDeletes[closing.worktreeID] = closedTabs.isEmpty ? nil : closedTabs
+        notePanelHeldTabsChanged(worktreeID: closing.worktreeID)
     }
 
     /// Shows a refusal in its close's one alert. A refusal that lands while
