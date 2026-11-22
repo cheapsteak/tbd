@@ -411,13 +411,15 @@ record a start the gate then refuses:
 Each of these RPCs answers a refusal with the code and records the act as
 refused, `not-eligible`. A revive's handler asks the gate itself, ahead of
 start admission, and the lifecycle asks again, and `spawnTerminal` again for
-each tab. A refusal from one of those later asks reaches the handler after the
-revive may have written, re-added the checkout or opened other tabs, so it is
-answered with the same code but recorded as `transport-failed`, not as a
-declined act. A Closed Terminals reopen of a Claude entry whose parked tmux tab
-is still open is refused, `not-eligible`, before the gate: the session comes
-back in that tab when it is woken, and the gate, which does not read a parked
-row, would not stop it.
+each tab. The lifecycle asks before the revive writes anything, so its refusal
+is recorded as refused, `not-eligible`, like the handler's. A refusal from
+`spawnTerminal` reaches the handler after the revive may have written,
+re-added the checkout or opened other tabs, so it is answered with the same
+code but recorded as `transport-failed`, not as a declined act. A Closed
+Terminals reopen of a Claude entry whose parked tmux tab is still open is
+refused, `not-eligible`, before the gate: the session comes back in that tab
+when it is woken, and the gate, which does not read a parked row, would not
+stop it.
 
 The gate is keyed by session id rather than by row or worktree, because the
 requests that resume a session reach it from different records: an archived

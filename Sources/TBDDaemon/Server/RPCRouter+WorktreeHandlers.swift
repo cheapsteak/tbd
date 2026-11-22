@@ -753,15 +753,20 @@ extension RPCRouter {
                 preferredSessionID: params.preferredSessionID,
                 preferredSession: params.preferredSession
             )
+        } catch let declined as ReviveRefusedBeforeWriting {
+            // The lifecycle's own gate, asked again after the gate above let
+            // the revive through: the server came back between the two. It is
+            // asked before the revive writes anything, so the act is declined.
+            await finishActuation(
+                actuationID, .refused(.notEligible), error: declined.refusal.message)
+            return declined.refusal.coded.response
         } catch let refusal as TmuxResumeRefusal {
-            // The gate above let the revive through, so this refusal is one
-            // the lifecycle raised after it: its own gate, asked again, or
             // `spawnTerminal`'s, which asks for each tab it opens, after the
             // revive may have re-added the checkout, revived the row and
-            // opened other tabs. Which one cannot be told from here, so the
-            // act is recorded as failed rather than declined, which would
-            // claim nothing was written. The person is still told the same
-            // thing: `terminalOnTmux` and the command that ends the server.
+            // opened other tabs. So the act is recorded as failed rather than
+            // declined, which would claim nothing was written. The person is
+            // told the same thing either way: `terminalOnTmux` and the
+            // command that ends the server.
             await finishActuation(actuationID, .transportFailed, error: refusal.message)
             return refusal.coded.response
         } catch {

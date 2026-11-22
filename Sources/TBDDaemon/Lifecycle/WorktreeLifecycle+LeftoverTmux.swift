@@ -393,6 +393,22 @@ struct TmuxResumeRefusal: Error, Equatable, LocalizedError, CustomStringConverti
     var description: String { message }
 }
 
+/// The resume gate's refusal of a revive, raised by `beginReviveWorktree`
+/// from its own gate, which it asks before it writes anything: the restore
+/// plan, any Codex launch, git and the disk are all as they were.
+///
+/// Told apart from the bare `TmuxResumeRefusal` that `spawnTerminal` raises
+/// for a tab the revive opens later, after the revive may have re-added the
+/// checkout, revived the row and opened other tabs. `worktree.revive` records
+/// this one as a declined act and that one as a failed one. `reviveWorktree`
+/// unwraps it, so its callers see the `TmuxResumeRefusal` itself.
+struct ReviveRefusedBeforeWriting: Error, Equatable, LocalizedError, CustomStringConvertible {
+    let refusal: TmuxResumeRefusal
+
+    var errorDescription: String? { refusal.message }
+    var description: String { refusal.message }
+}
+
 /// A tmux row's close that could not mark its Closed Terminals entry with the
 /// server its session may still be running in
 /// (`WorktreeLifecycle.closeLeftoverTmuxRow`). Thrown before the caller

@@ -492,10 +492,10 @@ struct TmuxResumeGateRPCTests {
 
     /// The gate the lifecycle asks again, after the handler's let the revive
     /// through and admission admitted it: the server came back between the
-    /// two. The person is told the same thing, with the same code, but the act
-    /// is recorded as failed rather than declined, because a refusal from the
-    /// lifecycle may come after the revive wrote something.
-    @Test func aRefusalTheLifecycleRaisesAfterAdmissionIsRecordedAsFailed() async throws {
+    /// two. The lifecycle asks its gate before it writes anything, so the
+    /// person is told the same thing, with the same code, and the act is
+    /// recorded as declined, as the handler's own refusal is.
+    @Test func aRefusalTheLifecycleGateRaisesAfterAdmissionIsRecordedAsDeclined() async throws {
         let f = try await fixture()
         defer { f.tearDown() }
         try await archiveNamingTheMarkedSession(f)
@@ -507,7 +507,9 @@ struct TmuxResumeGateRPCTests {
         #expect(!refused.success)
         #expect(refused.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
         #expect(refused.error == LeftoverTmuxSession.resumeRefusal(server: "tbd-acme"))
-        #expect(try f.lastOutcome().result == .synchronous(.transportFailed))
+        let outcome = try f.lastOutcome()
+        #expect(outcome.result == .synchronous(.refused))
+        #expect(outcome.reason == .notEligible)
         #expect(f.probe.servers == ["tbd-acme", "tbd-acme"])
         #expect(f.admission.requests.count == 1)
         #expect(f.holder.launches.isEmpty)
