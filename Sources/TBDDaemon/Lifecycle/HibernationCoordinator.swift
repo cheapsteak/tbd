@@ -422,7 +422,7 @@ public actor HibernationCoordinator {
     /// The wake asks the row's plan only once the row is on the pty holder.
     /// A person's wake of a parked tmux row asks it before the move
     /// (`RPCRouter.moveParkedTmuxRowBeforeWake`), and answers this, so it
-    /// never moves a row that the wake after the move would refuse.
+    /// never moves a row with no resume plan.
     static func wakeResultWithoutResumePlan(_ terminal: Terminal) -> WakeResult {
         if case .notAClaudeTab(let kind) = terminal.claudeResumeDecision {
             return .notAClaudeTab(kind: kind)
