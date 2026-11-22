@@ -721,8 +721,9 @@ extension RPCRouter {
 
     /// `claude.fableCreditsOut` — a session's StopFailure hook reported the
     /// out-of-usage-credits error message. Marks the terminal's profile out,
-    /// but only when the terminal's model is a Fable model: the same message
-    /// on another model would mean something else. Fire-and-forget, so every
+    /// but only when the session runs a Fable model (the terminal's spawn
+    /// model, else its profile's configured model): the same message on
+    /// another model would mean something else. Fire-and-forget, so every
     /// miss is a quiet no-op.
     func handleFableCreditsOut(
         _ paramsData: Data, connection: RPCConnectionContext? = nil
