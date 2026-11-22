@@ -39,7 +39,7 @@ struct TerminalTabCloseFailureTests {
         state.terminalDeleter = { @MainActor terminalID in try await daemon.delete(terminalID) }
         state.worktreeTerminalsFetcher = { @MainActor worktreeID in daemon.list(worktreeID: worktreeID) }
         state.tabLabelSetter = { @MainActor tabID, worktreeID, label in
-            daemon.setLabel(tabID: tabID, worktreeID: worktreeID, label: label)
+            await daemon.setLabel(tabID: tabID, worktreeID: worktreeID, label: label)
         }
         state.composerDraftsSetter = { @MainActor _ in }
         state.tabStatesFetcher = { @MainActor _ in
@@ -721,7 +721,7 @@ struct TerminalTabCloseFailureTests {
         }
     }
 
-    @Test("a refused split pane takes the closed tab's label under its own tab ID, persisted")
+    @Test("a refused split pane takes the closed tab's label under its own tab ID, persisted, and clears it from the split's")
     func refusedSplitPanePersistsItsLabel() async throws {
         try await Self.withState { state, daemon in
             let (left, right, agent) = (UUID(), UUID(), UUID())
@@ -738,9 +738,43 @@ struct TerminalTabCloseFailureTests {
             let returned = try #require(state.tabs[worktreeID]?.last)
             #expect(returned.id == left, "the split's own tab ID does not come back")
             #expect(returned.label == "build pair")
-            let persisted = [TabLabelWrite(tabID: left, worktreeID: worktreeID, label: "build pair")]
-            #expect(daemon.labelWrites == persisted,
-                    "the label is stored under the returning tab's ID, so it survives a restart")
+            let persisted: Set = [
+                TabLabelWrite(tabID: left, worktreeID: worktreeID, label: "build pair"),
+                TabLabelWrite(tabID: split.id, worktreeID: worktreeID, label: nil),
+            ]
+            #expect(daemon.labelWrites.count == persisted.count)
+            #expect(Set(daemon.labelWrites) == persisted,
+                    "the label moves to the returning tab's ID, so it survives a restart, and no row is left under the split's")
+        }
+    }
+
+    @Test("a rename of a returning tab made while its label is still being saved is the label the daemon keeps")
+    func renameDuringTheReturningLabelSaveWins() async throws {
+        try await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build],
+                tabs: [Self.tab(claude), Self.tab(build, label: "build server")])
+            daemon.failures[build] = DaemonClientError.rpcError(Self.refusal, code: nil)
+            let returningLabelSave = daemon.holdNextLabelWrite(tabID: build)
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            await PanelTabsFixture.drainMainActor()
+            try #require(returningLabelSave.isHolding, "the returning tab's label save is in flight")
+
+            state.renameTab(tabID: build, worktreeID: worktreeID, newLabel: "web")
+            await PanelTabsFixture.drainMainActor()
+            returningLabelSave.release()
+            await PanelTabsFixture.drainMainActor()
+
+            let writes = [
+                TabLabelWrite(tabID: build, worktreeID: worktreeID, label: "build server"),
+                TabLabelWrite(tabID: build, worktreeID: worktreeID, label: "web"),
+            ]
+            #expect(daemon.labelWrites == writes, "the rename reaches the daemon after the save it followed")
+            #expect(state.tabs[worktreeID]?.last?.label == "web")
+            #expect(state.tabLabelWriteTails.isEmpty, "a finished write leaves nothing behind")
         }
     }
 
@@ -975,7 +1009,7 @@ struct TerminalTabCloseFailureTests {
 }
 
 /// One `tab.setLabel` the app sent.
-struct TabLabelWrite: Equatable {
+struct TabLabelWrite: Hashable {
     let tabID: UUID
     let worktreeID: UUID
     let label: String?
@@ -986,7 +1020,8 @@ struct TabLabelWrite: Equatable {
 /// fails those named in `failures`; every other delete succeeds. `rows` is
 /// what its terminal list answers with: a delete that succeeds removes the
 /// row, and a failing one keeps it unless `rowGoneBeforeFailure` names it.
-/// Every tab label the app persists is recorded in `labelWrites`.
+/// Every tab label the app persists is recorded in `labelWrites`, in the
+/// order the writes reach it; `holdNextLabelWrite` makes one arrive late.
 @MainActor
 final class TerminalCloseDaemon {
     var failures: [UUID: any Error] = [:]
@@ -995,9 +1030,22 @@ final class TerminalCloseDaemon {
     private(set) var asked: [UUID] = []
     private(set) var labelWrites: [TabLabelWrite] = []
     private var gates: [UUID: PanelCallGate] = [:]
+    private var labelWriteGates: [UUID: PanelCallGate] = [:]
 
-    func setLabel(tabID: UUID, worktreeID: UUID, label: String?) {
+    func setLabel(tabID: UUID, worktreeID: UUID, label: String?) async {
+        if let gate = labelWriteGates.removeValue(forKey: tabID) {
+            await gate.wait()
+        }
         labelWrites.append(TabLabelWrite(tabID: tabID, worktreeID: worktreeID, label: label))
+    }
+
+    /// Holds the next label write for `tabID` until the returned gate is
+    /// released, the way a write sent on its own connection can reach the
+    /// daemon after one sent behind it. Later writes for the tab are not held.
+    func holdNextLabelWrite(tabID: UUID) -> PanelCallGate {
+        let gate = PanelCallGate()
+        labelWriteGates[tabID] = gate
+        return gate
     }
 
     func hold(_ terminalIDs: [UUID]) {

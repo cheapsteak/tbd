@@ -1119,6 +1119,11 @@ final class AppState {
     /// after the open tabs, so the sync does not delete the surface a
     /// terminal the daemon keeps comes back to (`buildPanelSyncParams`).
     @ObservationIgnored var closedTabsAwaitingDeletes: [UUID: [LegacyTabPayload]] = [:]
+    /// Per tab, the last label write `persistTabLabel` started and not yet
+    /// finished, which the next write for that tab waits on, so the daemon
+    /// keeps the label asked for last. The token tells a finishing write
+    /// whether a later one has replaced it here.
+    @ObservationIgnored var tabLabelWriteTails: [UUID: (token: UUID, write: Task<Void, Never>)] = [:]
     /// Worktrees whose persisted tab order / active tab has been hydrated from
     /// the daemon with actual content. Distinct from `worktreeTabOrders[id] != nil`,
     /// which is also true for the empty response a poll gets while the daemon is
