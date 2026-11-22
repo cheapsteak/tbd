@@ -1,5 +1,13 @@
 # Auto-suspend/resume Claude Code on worktree switch
 
+Status: **retired.** Suspending Claude on a worktree switch is retired: its
+idle detection read tmux pane text, which TBD no longer reads, its
+implementation has been removed, and this document is kept as the design
+record. Parking and waking are `HibernationCoordinator`'s, on the pty holder,
+and an agent's idle state comes from its own status reports
+([`docs/specs/2026-10-30-osc-only-agent-status-design.md`](../../specs/2026-10-30-osc-only-agent-status-design.md)).
+`ClaudeStateDetector` keeps only its session-id helpers.
+
 ## Problem
 
 Claude Code processes consume 500MB–1GB+ of memory each. With multiple worktrees open, idle Claude instances accumulate significant memory pressure even when only one worktree is actively in use. Users see system slowdown from swap pressure despite most Claude instances sitting at an idle prompt.
@@ -41,7 +49,7 @@ Add to the `Terminal` model and database:
 
 ### `ClaudeStateDetector`
 
-New file: `Sources/TBDDaemon/Tmux/ClaudeStateDetector.swift`
+New file: `Sources/TBDDaemon/Claude/ClaudeStateDetector.swift`
 
 Takes a `TmuxManager` dependency. `TmuxManager` needs new public methods: `capturePaneOutput(server:paneID:)` (wraps `capture-pane -p`) and `paneCurrentCommand(server:paneID:)` (wraps `list-panes -F "#{pane_current_command}"`).
 

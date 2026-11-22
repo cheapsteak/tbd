@@ -4723,7 +4723,7 @@ public struct TerminalOutputParams: Codable, Sendable {
     }
 }
 
-/// The answer to `terminal.output`, on both transports.
+/// The answer to `terminal.output`.
 ///
 /// `output` is the string every existing consumer already reads, and it is
 /// always the same string they read before — the CLI prints it, scripts match
@@ -4732,29 +4732,20 @@ public struct TerminalOutputParams: Codable, Sendable {
 /// a second method would have left this one answering wrongly for every
 /// attached session until the last consumer migrated.
 ///
-/// **`screen` is present on the holder transport and absent on tmux**, and the
-/// asymmetry is honest rather than an omission. The screen contract is the
-/// holder transport's: `source` names which of that transport's two stores
-/// answered, `modes` come from the emulator that produced the lines, and
-/// `ageMilliseconds` is measured on the daemon's monotonic clock against that
-/// emulator's last byte. `capture-pane` supplies none of them — it returns text
-/// from a server that keeps no such record — so a `screen` on the tmux arm
-/// could only be fabricated, and a fabricated `source` is worse than an absent
-/// one, because a consumer's policy is keyed on exactly that field.
+/// The daemon answers only for a session on the pty holder, so every result
+/// it sends carries `screen`: `source` names which of the holder transport's
+/// two stores answered, `modes` come from the emulator that produced the
+/// lines, and `ageMilliseconds` is measured on the daemon's monotonic clock
+/// against that emulator's last byte. A session still on tmux is refused
+/// instead, because TBD reads no tmux pane. `screen` stays optional so a
+/// result without one still decodes rather than failing the read.
 public struct TerminalOutputResult: Codable, Sendable {
     public let output: String
     public let screen: TerminalScreen?
 
-    /// The tmux arm: text and nothing else.
-    public init(output: String) {
-        self.output = output
-        self.screen = nil
-    }
-
-    /// The holder arm. `output` is derived from the screen, so the two can
-    /// never disagree — and this is the only place the joined string crosses
-    /// the wire, since `TerminalScreen` encodes its `lines` and no copy of
-    /// them.
+    /// `output` is derived from the screen, so the two can never disagree —
+    /// and this is the only place the joined string crosses the wire, since
+    /// `TerminalScreen` encodes its `lines` and no copy of them.
     public init(screen: TerminalScreen) {
         self.output = screen.output
         self.screen = screen

@@ -46,7 +46,7 @@ struct DevServerTabObservation: Sendable {
 }
 
 protocol DevServerTabInspecting: Sendable {
-    func status(of terminal: Terminal, tmuxServer: String) async -> DevServerTabStatus
+    func status(of terminal: Terminal) async -> DevServerTabStatus
 }
 
 /// A tab still on the tmux transport is unknown: TBD runs no tmux command, and
@@ -69,7 +69,7 @@ struct ProductionDevServerTabInspector: DevServerTabInspecting {
     /// Reads the kernel's start time for a pid checked against the row's.
     var probe: DevServerProcessProbe = .live
 
-    func status(of terminal: Terminal, tmuxServer: String) async -> DevServerTabStatus {
+    func status(of terminal: Terminal) async -> DevServerTabStatus {
         switch terminal.transport {
         case .tmux:
             return .unknown(reason: Self.tmuxTabReason)

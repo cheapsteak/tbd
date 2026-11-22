@@ -39,7 +39,7 @@ import TBDShared
 // `kind` names the act, and both are spelled once, per surface.
 //
 // The mechanical guard is the SwiftLint custom rule `actuation_primitive_allowlist`
-// in `.swiftlint.yml`: calling a tmux/park primitive from a daemon file outside
+// in `.swiftlint.yml`: calling a park primitive from a daemon file outside
 // the audited set fails the build, so a new actuation surface has to be wired
 // here before it can be written.
 

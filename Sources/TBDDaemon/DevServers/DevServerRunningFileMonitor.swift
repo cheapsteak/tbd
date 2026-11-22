@@ -99,10 +99,8 @@ actor DevServerRunningFileMonitor {
             return
         }
         var paths: [UUID: String] = [:]
-        var tmuxServers: [UUID: String] = [:]
         for worktree in worktrees {
             paths[worktree.id] = worktree.path
-            tmuxServers[worktree.id] = worktree.tmuxServer
         }
 
         var next = Set<UUID>()
@@ -132,9 +130,9 @@ actor DevServerRunningFileMonitor {
         // tab's exit changes what the server list shows either way.
         let serverTabs = ((try? await db.terminals.list()) ?? []).filter { $0.serverName != nil }
         for tab in serverTabs {
-            guard let tmuxServer = tmuxServers[tab.worktreeID], let name = tab.serverName else { continue }
+            guard paths[tab.worktreeID] != nil, let name = tab.serverName else { continue }
             let state: String
-            switch await tabInspector.status(of: tab, tmuxServer: tmuxServer) {
+            switch await tabInspector.status(of: tab) {
             case .running(let pid, _), .runningUnverifiable(let pid):
                 next.insert(tab.worktreeID)
                 state = "running \(pid)"

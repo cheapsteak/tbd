@@ -106,7 +106,7 @@ func tableRow(_ cells: [(value: String, width: Int)]) -> String {
 /// already carries `hibernatedAt`/`hibernateReason` verbatim; this is the one
 /// place a human reading the table learns a row is parked at all — without it,
 /// a row exit-stamped by a dead process (or parked any other way) looks
-/// exactly like a live one, pane id included, even after that pane is gone.
+/// exactly like a live one.
 func parkedStateMarker(for terminal: Terminal) -> String {
     guard terminal.hibernatedAt != nil else { return "-" }
     guard let reason = terminal.hibernateReason else { return "parked" }

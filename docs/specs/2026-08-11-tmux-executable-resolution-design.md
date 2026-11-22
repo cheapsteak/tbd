@@ -1,6 +1,14 @@
 # tmux executable resolution and saved fallback — design
 
-Status: **implemented**.
+Status: **retired.** Resolving a tmux executable is retired: TBD runs no tmux
+command, so it neither resolves tmux nor asks a person to locate it, its
+implementation has been removed, and this document is kept as the design
+record. The saved fallback file, `tmux-executable-path` under the TBD home,
+remains: the installer still writes it
+([`2026-09-22-tmux-fallback-install-seeding-design.md`](2026-09-22-tmux-fallback-install-seeding-design.md)),
+and the leftover-tmux probe reads it only for the name of the tmux binary, to
+recognize a tmux server an earlier version started
+([`2026-10-11-holder-transport-migration-design.md`](2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update)).
 
 Related: [`2026-09-22-tmux-fallback-install-seeding-design.md`](2026-09-22-tmux-fallback-install-seeding-design.md)
 lets the installer write the saved fallback, because a login relaunch does not

@@ -86,7 +86,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 
 ### Lifecycle/
 - `WorktreeLifecycle.swift` (+`Create`/`Archive`/`Reconcile`/`Adopt`/`Forget`/`PreSession`/`Recovery`/`LeftoverTmux`) — worktree create/archive/revive/adopt/reconcile orchestration; `+Forget` untracks without deleting from disk, `+PreSession` runs pre-session hook terminals, `+Recovery` resolves rows stuck in `.creating` on restart, `+LeftoverTmux` parks a live tmux row once its tmux server is gone
-- `LeftoverTmuxServerProbe.swift` — whether a tmux row's server is still running, read from one `AF_UNIX` connect to its socket (no tmux binary); asked by reconcile (at startup, on demand, and hourly for scratch worktrees' rows while GC is on), Check Again and the transport migration. A transition measure, replaced by parking on sight on 2027-01-15
+- `LeftoverTmuxServerProbe.swift` — whether a tmux row's server is still running, read from `AF_UNIX` connects to its socket and this user's tmux processes in the process table (no tmux binary); asked by reconcile (at startup, on demand, and hourly for scratch worktrees' rows while GC is on), Check Again and the transport migration. A transition measure, replaced by parking on sight on 2027-01-15
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
 - `HibernationCoordinator.swift` (+`Holder`) — parks Claude sessions on the pty holder and wakes them there (it refuses to park a live tmux row, and refuses to wake a session parked on tmux, naming the gestures that move it; the router moves such a session first on a person's wake): manual hibernate, the idle sweep, park-on-merge, and the park the profile swap composes
@@ -125,12 +125,20 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `ModelProfileHealthProbe.swift` — validates a profile's credentials
 - `EnvOverrideResolver.swift` — merges free-form env overrides across scopes (global → repo → profile) with precedence
 
+### Holder/
+- `HolderSpawner.swift` — starts one `TBDHolder` per session, the launch request on a descriptor rather than argv, and handshakes over its rendezvous socket
+- `HolderRegistry.swift` — the single owner of every live `HolderReader`; re-adopts every live holder at daemon startup
+- `HolderReader.swift` — the daemon's drain loop and headless emulator for one holder-backed session (`HolderEmulator`: SwiftTerm or libghostty)
+- `HolderClient.swift` — the daemon's end of one holder's Unix socket
+- `HolderScreenResolver.swift` — answers `terminal.output` from whichever store is live: the daemon's reader, or the app's screen pulled over the fd sidecar
+- `HolderInjectionCourier.swift` — delivers a daemon-originated write to a session, through the app while a viewer holds the pty
+
 ### Process/
 - `AgentReaper.swift` — reaps the orphaned children of dead pty holders, by each session's recorded child pid (`sweepHolderChildren`)
 - `ProcessSignaller.swift` — injectable protocol wrapping OS process operations (signals, liveness checks)
-- `BoundedProcessRunner.swift` — `runBoundedProcess`: runs a subprocess under a deadline that a dedicated watchdog thread enforces; git, tmux, GC and remote-provider subprocesses run through it
+- `BoundedProcessRunner.swift` — `runBoundedProcess`: runs a subprocess under a deadline that a dedicated watchdog thread enforces; git, GC and remote-provider subprocesses run through it
 - `PipeDataAccumulator.swift` — thread-safe pipe reader that drains without waiting for EOF, so a grandchild holding the write end leaks nothing
-- `ShellLaunchComposer.swift` — the `export KEY='value'; ` env prefix and the `$SHELL <flags> <command>` argv that both the tmux spawn builders and the pty-holder launch run
+- `ShellLaunchComposer.swift` — the `export KEY='value'; ` env prefix and the `$SHELL <flags> <command>` argv that the pty-holder launch runs
 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references
@@ -178,7 +186,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `FileViewer/ChangesPanelView.swift` — the Changes side-panel tab: git status and branch files
 
 ## Tests/
-Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, tmux, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDKernelTests/` (holder protocol, framing, rendezvous and lock; peer frames and records; process start time), `TBDAppTests/` (layout, pane content).
+Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, pty holders and the leftover-tmux probe, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDKernelTests/` (holder protocol, framing, rendezvous and lock; peer frames and records; process start time), `TBDAppTests/` (layout, pane content).
 
 ## SessionMod/
 The session mod's TypeScript source: `hooks/register.ts` (entry point), `hooks/shared/session.ts` (environment, per-session directory, heartbeat), `hooks/features/composer-draft.tsx`, `types/index.d.ts` (the `$.state` contract) and `tests/` (`claude plugin test SessionMod`). Validate with `claude plugin validate --strict SessionMod`; regenerate `Sources/TBDShared/SessionModContent.swift` after every change.

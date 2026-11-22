@@ -41,10 +41,9 @@ struct PeerList: AsyncParsableCommand {
               unattributed   the daemon did not answer, so nothing could be joined.
 
             A local row is joined to its terminal by the Claude session id TBD captured
-            at `SessionStart`, falling back to its tmux pane when none was captured. A
-            holder-backed session has no pane; one whose session id TBD has not captured
-            — a launcher run in a tab, a `claude` typed at a shell prompt — is joined to
-            the tab whose live job it descends from, read from one snapshot of the
+            at `SessionStart`. A session whose id TBD has not captured — a launcher run
+            in a tab, a `claude` typed at a shell prompt — is joined to the pty-holder
+            tab whose live job it descends from, read from one snapshot of the
             process table. Only descent counts, never a working directory or an
             environment variable. A tab whose own session is joined by session id is not
             handed to a second one, a Claude tab whose session TBD captured is joined only

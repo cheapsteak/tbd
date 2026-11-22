@@ -6,15 +6,16 @@ How TBD integrated with tmux, what we tried, what worked, and why.
 
 TBD opens every session on the pty holder
 ([`specs/2026-08-30-pty-holder-session-transport-design.md`](specs/2026-08-30-pty-holder-session-transport-design.md))
-and does not drive tmux: it cannot show a tmux session, send to one or park
-one, and it ends one only by killing its window when the row is torn down. A
-row still recorded as `tmux` is either parked — a person's wake moves it to the
-holder and resumes it there, as `tbd terminal migrate` moves it, while a wake
-the daemon makes on its own is refused — or live. A live tmux
-row is judged by its tmux server's socket and by this user's tmux processes
-that name the server: once the server is gone the row is parked with its session kept (a
-row with nothing to resume is removed), and while it may still be running the
-app shows a notice in place of the terminal with the command that ends it. The current rule is in
+and runs no tmux command: it cannot show, send to, park or end a tmux session,
+and closing a tmux row's tab deletes the row and leaves its session where it
+is. A row still recorded as `tmux` is either parked — a person's wake moves it
+to the holder and resumes it there, as `tbd terminal migrate` moves it, while a
+wake the daemon makes on its own is refused — or live. A live tmux row is
+judged, without a tmux binary, by its tmux server's socket and by this user's
+tmux processes that name the server: once the server is gone the row is parked
+with its session kept (a row with nothing to resume is removed), and while it
+may still be running the app shows a notice in place of the terminal with the
+command that ends it. The current rule is in
 [`specs/2026-10-11-holder-transport-migration-design.md`](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update),
 "A live row whose tmux server outlived the update".
 
@@ -74,8 +75,7 @@ current-window pointer.
 6. **On app close/reopen**: all viewer sessions die, `main` persists. The app
    creates new viewer sessions on demand.
 
-The command builders for each step live in `TmuxBridge`
-(`Sources/TBDApp/Terminal/TmuxBridge.swift`).
+The app's `TmuxBridge` built the command for each step.
 
 ### Why one linked window per session
 
@@ -101,9 +101,6 @@ whole window list. TBD does not use them. Grouping hands a viewer every window
 on the repo's server — including windows belonging to other worktrees — where
 linking hands it exactly the one it should show. The narrower grant is worth
 more here than the shared window list, which no TBD viewer has any use for.
-
-Some identifiers and comments in the app still say "grouped sessions" for this
-path; read them as "the direct-PTY viewer path".
 
 ## What We Tried First: Control Mode (-CC)
 
@@ -220,8 +217,8 @@ tbd-ext-abcd1234` destroyed `tbd-ext-abcd1234-notes` and exited 0.
 Prefix the target with `=` to demand an exact match. Two target kinds need a
 trailing colon as well — `set-option` and `if-shell` take a *pane* target, so
 `'=<name>'` either errors or silently takes the wrong branch, and `'=<name>:'`
-is required. `TmuxBridge`'s viewer commands do not pin their targets, which
-is safe only because a `tbd-view-<8hex>` prefix collision would have to be
+is required. `TmuxBridge`'s viewer commands did not pin their targets, which
+was safe only because a `tbd-view-<8hex>` prefix collision would have to be
 created by hand.
 
 ### Linking windows
@@ -244,63 +241,37 @@ the window alive.
 - [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) — the terminal emulator library we use
 - [tmux man page](https://man.openbsd.org/tmux.1) — authoritative reference
 
-## Known issues
+## What sending into a tmux pane taught
 
-### A pane can be alive but no longer running an agent
+These are tmux facts the send and wake paths ran into, measured on the tmux
+transport. On the pty holder the same questions are process facts — whether the
+session's child is alive, and which terminal a session belongs to — and no pane
+is asked.
 
-A pane can be alive (`pane_dead=0`) after its Claude process exits, leaving a
-bare `zsh` prompt — `terminal send` then types into a shell, not a session, and
-that is a real send into a real pane, so nothing refuses it. Ground truth still
-requires raw tmux:
-
-```sh
-tmux -L <server> list-panes -a -F '#{pane_id} dead=#{pane_dead} cmd=#{pane_current_command}'
-```
-
-Worth doing: surface `pane_current_command` in `terminal list` / `output` so
-callers can tell "Claude running" from "shell prompt" without raw tmux.
-
-The two neighbouring failures are fixed. `terminal.send` consults its target
-before typing (one `list-panes` reading `#{pane_id}`, `#{pane_dead}`, the
-`@tbd_terminal_id` pane option and `#{pane_start_command}`) and returns an error
-rather than reporting success when the pane is gone, when the pane's process has
-exited, or when the pane answers with a different terminal's id than the caller
-named. `#{pane_id}` is in that list because `list-panes -t %N` answers for every
-pane in `%N`'s **window** — `%N` only picks the window — so in a hand-split
-window the send has to select its own pane's line rather than the first one.
-`send-keys` into a `remain-on-exit` dead pane exits **0**, so tmux's own status
-was never the signal; and pane ids are reused, so a stale DB coordinate used to
-type into a live stranger (issue #384). Refusal requires *positive*
-disagreement — a pane carrying no identity is sent to as before.
-
-### `terminal wake` answered the same question without asking
-
-`terminal.wake` decided "is there anything to wake?" from the database's parked
-flags alone, and answered "already awake (no-op)" whenever they were clear.
-That is a claim about a live session made without consulting tmux. Measured on
-a live fleet, **34 of 49** rows the database called awake had no pane. Because
-a wake no-op never delivers its `--prompt`, an autonomous caller got neither a
-wake nor an error.
-
-Wake now asks the same question `terminal.send` asks, through the same
-`paneSendTarget` probe, and reports what it finds:
-
-- **`.missing` / `.dead`** — no live session behind the row. Wake returns an
-  error naming the state instead of a successful no-op, so a caller can tell a
-  benign "already awake" from a terminal that needs recovery.
-- **`.live` answering a different terminal's id** — the row's pane coordinate
-  has gone stale and now points at a stranger's pane (#384). Also an error;
-  wake must not treat someone else's live pane as evidence that this session is
-  healthy.
-- **`.live` with a matching id, or none at all** — the benign no-op, unchanged.
-  As with send, refusal requires *positive* disagreement.
-- **The probe threw** — unchanged benign no-op. A tmux call that merely failed
-  proves nothing, and tmux calls fail spuriously exactly when the machine is
-  loaded enough for the session to be alive.
-
-**Wake reports here; it does not repair.** Respawning a row the database calls
-awake would make tmux authoritative over the parked flag, and one false-negative
-probe would then destroy a live session's in-flight work. Recovery for a tmux
-session is `tbd terminal migrate`, which moves it to the pty holder. Reusing send's
-probe rather than adding a second one is deliberate: two liveness primitives
-would drift, and this is the one that already carries pane identity.
+- **A live pane is not a live agent.** A pane stays alive (`pane_dead=0`)
+  after its Claude process exits, leaving a bare `zsh` prompt, so a send typed
+  into a shell rather than a session, and nothing refused it. Only
+  `#{pane_current_command}` told the two apart.
+- **`send-keys` into a `remain-on-exit` dead pane exits 0**, so tmux's own
+  status never said whether a send landed. The send therefore read
+  `#{pane_dead}` and `#{pane_start_command}` before typing, and refused when the
+  pane was gone or its process had exited.
+- **Pane ids are reused**, so a stale coordinate in the database typed into a
+  live stranger's pane (issue #384). TBD tagged each pane with the terminal's
+  id (an `@tbd_terminal_id` pane option) and refused a send to a pane that
+  answered with a different terminal's id. Refusal required *positive*
+  disagreement: a pane carrying no identity was sent to as before.
+- **`list-panes -t %N` answers for every pane in `%N`'s window**, because
+  `%N` only picks the window. A check against a hand-split window had to read
+  `#{pane_id}` and select its own pane's line rather than the first one.
+- **The database's parked flags are not a liveness reading.** Measured on a
+  live fleet, 34 of 49 rows the database called awake had no pane, and a wake
+  that answered "already awake" from the flags alone dropped its `--prompt`
+  without an error. Wake asked the same question the send asked, through the
+  same probe, and reported a missing or dead pane, or one answering for another
+  terminal, as an error. It did not repair: respawning a row the database
+  called awake would have made tmux authoritative over the parked flag, and one
+  false-negative probe would then have destroyed a live session's in-flight
+  work. A probe that merely failed proved nothing, since tmux calls fail
+  spuriously exactly when the machine is loaded enough for the session to be
+  alive, so a failed probe kept the benign answer.

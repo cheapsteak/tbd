@@ -2,7 +2,8 @@
 set -e
 
 # TBD restart script
-# Rebuilds, restarts daemon and app. Tmux sessions survive.
+# Rebuilds, restarts daemon and app. Sessions survive: each runs in its own pty
+# holder, which the new daemon re-adopts.
 #
 # Usage:
 #   scripts/restart.sh          # rebuild + restart everything
@@ -476,4 +477,4 @@ if [ "$install_to_applications" = false ] && [ "$daemon_only" = false ]; then
     echo "intended worktree to make it the handler for tbd:// URLs."
 fi
 
-echo "Done. Tmux sessions preserved."
+echo "Done. Sessions kept running in their pty holders."

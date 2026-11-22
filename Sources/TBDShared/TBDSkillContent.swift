@@ -55,7 +55,7 @@ that the new session can make judgment calls rather than follow narrow steps.
 EOF
 ```
 
-`--model` follows `--type`: with `--type claude` it is the Claude model, and with `--type codex` it is the Codex model. Add `--model <id>` to start that one Codex terminal on a specific model (TBD passes it to Codex as `-c model="<id>"`; Codex validates the name). `tbd worktree create --codex-model <id>` is the Codex form for a new worktree whose primary agent is Codex. Add `--codex-disable <feature>` (repeatable, e.g. `--codex-disable computer_use`) to turn a Codex feature off for that one terminal; TBD passes it to Codex as `--disable <feature>` and leaves the user's own Codex config untouched. `tbd worktree create` has no equivalent yet. TBD keeps a terminal's `--model` and `--codex-disable` choices with that terminal, so if its window dies and is recreated, Codex relaunches with them. Inside a running Codex session, Codex's own `/model` switches the model, but it also saves the choice to the shared `tbd` Codex profile, so it becomes the default for every later TBD Codex terminal.
+`--model` follows `--type`: with `--type claude` it is the Claude model, and with `--type codex` it is the Codex model. Add `--model <id>` to start that one Codex terminal on a specific model (TBD passes it to Codex as `-c model="<id>"`; Codex validates the name). `tbd worktree create --codex-model <id>` is the Codex form for a new worktree whose primary agent is Codex. Add `--codex-disable <feature>` (repeatable, e.g. `--codex-disable computer_use`) to turn a Codex feature off for that one terminal; TBD passes it to Codex as `--disable <feature>` and leaves the user's own Codex config untouched. `tbd worktree create` has no equivalent yet. TBD keeps a terminal's `--model` and `--codex-disable` choices with that terminal, so when TBD starts that session again (a wake, a reopen or a revive), Codex relaunches with them. Inside a running Codex session, Codex's own `/model` switches the model, but it also saves the choice to the shared `tbd` Codex profile, so it becomes the default for every later TBD Codex terminal.
 
 ### Create a new worktree with an initial task
 
@@ -132,10 +132,9 @@ goes to stderr, or to `screen.source` and `screen.ageMilliseconds` under
   time, so this is the daemon's emulator as it stood when they attached.
   `screen.ageMilliseconds` says how long ago that was.
 
-`screen` is there only for sessions on the pty-holder transport. A tmux-backed
-session answers with `output` alone, so a missing `screen` key means a tmux
-session rather than an error, and there is no staleness question to ask about
-one — tmux captures its pane live.
+A session an earlier version of TBD left on tmux cannot be read: the command
+fails and says what to do, which is `tbd terminal migrate <id>` to move it to
+the pty holder, after ending its tmux server if that server still runs.
 
 ### Message a sibling session
 

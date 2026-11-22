@@ -349,7 +349,7 @@ struct GeneralSettingsTab: View {
             .disabled(migrating)
             if migrating { ProgressView().controlSize(.small) }
         }
-        .help("Moves running tmux sessions onto the holder in place. Sessions that are busy are skipped and can be retried.")
+        .help("Moves sessions an earlier version of TBD left on tmux onto the holder in place. A session still running in tmux is refused until its tmux server ends; busy sessions are skipped and can be retried.")
         if let result = migrationResult {
             let report = TransportMigrationMenu.report(
                 result, label: { appState.transportMigrationLabel(for: $0) })

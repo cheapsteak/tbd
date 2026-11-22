@@ -113,12 +113,12 @@ documented here. Treat the rest as informational.
 
 **Do not log or persist the envelope verbatim.** The env-override fields —
 `globalEnvOverrides` at the top level and `envOverrides` on each profile — are
-exactly the values the daemon routes through tmux's sensitive environment
-channel specifically to keep them out of `ps` output, and they routinely carry
-auth tokens and proxy keys. A capacity consumer needs none of them. Read the
-fields you interpret and drop the rest; if a program keeps the envelope — a
-debug dump, a cached readout, a log line — redact the env-override fields
-first. They stay in the output because removing them would break the additive
+exactly the values the daemon hands each session's pty holder over a file
+descriptor rather than a command line, specifically to keep them out of `ps`
+output, and they routinely carry auth tokens and proxy keys. A capacity
+consumer needs none of them. Read the fields you interpret and drop the rest;
+if a program keeps the envelope — a debug dump, a cached readout, a log line —
+redact the env-override fields first. They stay in the output because removing them would break the additive
 promise, not because they are safe to hold onto.
 
 ## Per profile

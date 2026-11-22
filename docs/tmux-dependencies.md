@@ -6,6 +6,22 @@ what invokes tmux, which user-visible capability each invocation backs, and what
 would break without it. Every claim is cited to `file:line` in this worktree. If
 the code and this document disagree, the code wins; then fix the document.
 
+*Read against the tree on 2026-11-22: none of the four seams below exists, and
+TBD runs no tmux command. Every session opens on the pty holder, and neither
+path described below runs. What the tree still has is the handling of rows an
+earlier version left on tmux: `LeftoverTmuxServerProbe`, which judges whether a
+row's tmux server still runs from `AF_UNIX` connects to its socket and from
+this user's tmux processes in the process table, without a tmux binary;
+`TmuxResumeGate`, which refuses a start that could put a second agent on a
+session such a server may still run; the data the two read
+(`worktree.tmuxServer`, a terminal's `transport`, `tmuxWindowID` and
+`tmuxPaneID`, `terminal_history.liveOnTmuxServer`); the saved
+`tmux-executable-path`, which `scripts/restart.sh` and `scripts/update.sh`
+write and the probe reads for the tmux binary's name; and the test fence
+(`TMUX_TMPDIR`, and the sweep of tmux servers in `scripts/test.sh`), kept for
+the live tests that start a real tmux server to exercise the probe. Every
+citation below is from the readings this document names.*
+
 *Re-read against the tree on 2026-10-25 in the entries for the key-name
 `send-keys`, `capture-pane -p -e -J`, `windowExists`, `pane_current_command`
 and `pane_pid`, and in the section on which capabilities serve supervision:

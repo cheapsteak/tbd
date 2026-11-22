@@ -11,7 +11,7 @@ struct DevServerTabInspectorTests {
     @Test func aTmuxTabIsUnknown() async {
         var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "@3", tmuxPaneID: "%3", transport: .tmux)
         terminal.serverName = "web"
-        #expect(await holderInspector().status(of: terminal, tmuxServer: "tbd-acme")
+        #expect(await holderInspector().status(of: terminal)
             == .unknown(reason: ProductionDevServerTabInspector.tmuxTabReason))
     }
 
@@ -26,7 +26,7 @@ struct DevServerTabInspectorTests {
         await registry.recordStatusForTesting(.exited(code: 3), for: terminal.id)
         let inspector = ProductionDevServerTabInspector(
             holderRegistry: registry, signaller: ProductionProcessSignaller())
-        #expect(await inspector.status(of: terminal, tmuxServer: "unused") == .exited(code: 3))
+        #expect(await inspector.status(of: terminal) == .exited(code: 3))
     }
     private func holderRegistry() -> HolderRegistry {
         HolderRegistry(
@@ -48,7 +48,7 @@ struct DevServerTabInspectorTests {
         var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
                                 childPID: getpid())
         terminal.serverName = "web"
-        #expect(await holderInspector().status(of: terminal, tmuxServer: "unused")
+        #expect(await holderInspector().status(of: terminal)
             == .runningUnverifiable(pid: getpid()))
     }
 
@@ -57,7 +57,7 @@ struct DevServerTabInspectorTests {
         var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
                                 childPID: getpid(), holderChildStartedAt: started)
         terminal.serverName = "web"
-        #expect(await holderInspector().status(of: terminal, tmuxServer: "unused")
+        #expect(await holderInspector().status(of: terminal)
             == .running(pid: getpid(), expectedStart: started))
     }
 
@@ -68,7 +68,7 @@ struct DevServerTabInspectorTests {
         var terminal = Terminal(worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", transport: .holder,
                                 childPID: getpid(), holderChildStartedAt: actual.addingTimeInterval(-86_400))
         terminal.serverName = "web"
-        #expect(await holderInspector().status(of: terminal, tmuxServer: "unused") == .exited(code: nil))
+        #expect(await holderInspector().status(of: terminal) == .exited(code: nil))
     }
 
     /// The registry's adopted child carries no start time of its own, so a
@@ -82,7 +82,7 @@ struct DevServerTabInspectorTests {
         terminal.serverName = "web"
         await registry.recordAdoptedProcessForTesting(
             .init(holderPID: nil, childPID: getpid()), for: terminal.id)
-        #expect(await holderInspector(registry).status(of: terminal, tmuxServer: "unused")
+        #expect(await holderInspector(registry).status(of: terminal)
             == .runningUnverifiable(pid: getpid()))
     }
 
@@ -96,7 +96,7 @@ struct DevServerTabInspectorTests {
         terminal.serverName = "web"
         await registry.recordAdoptedProcessForTesting(
             .init(holderPID: nil, childPID: getpid()), for: terminal.id)
-        #expect(await holderInspector(registry).status(of: terminal, tmuxServer: "unused")
+        #expect(await holderInspector(registry).status(of: terminal)
             == .running(pid: getpid(), expectedStart: started))
     }
 }

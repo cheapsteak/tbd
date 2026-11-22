@@ -1,6 +1,6 @@
 ---
 name: tbd-project
-description: TBD project knowledge — architecture, components, and conventions. Use when working on the TBD codebase, adding features, fixing bugs, or understanding how the system works. Triggers on questions about the daemon, CLI, SwiftUI app, tmux integration, worktree lifecycle, session instrumentation, or RPC protocol.
+description: TBD project knowledge — architecture, components, and conventions. Use when working on the TBD codebase, adding features, fixing bugs, or understanding how the system works. Triggers on questions about the daemon, CLI, SwiftUI app, pty holders and leftover tmux rows, worktree lifecycle, session instrumentation, or RPC protocol.
 ---
 
 <!-- skill-synced-through: 7c9ba0f (2026-05-21) -->
@@ -45,9 +45,9 @@ The `TBDDaemon` and `TBDDaemonLib` targets share `Sources/TBDDaemon/` — `TBDDa
 
 JSON over Unix socket. `RPCRequest` has `method: String` and `params: String` (raw JSON). `RPCResponse` has `success: Bool`, `result: String?` (raw JSON), `error: String?`. Each param/result struct is independently Codable. The router decodes params based on the method string.
 
-### Tmux Integration
+### Session Transport
 
-Every session opens on the pty holder, and TBD cannot show, send to, park or end a tmux session. A row still recorded as `tmux` is parked once its tmux server is gone; while the server may still be running, the app shows a notice with the `tmux -L <server> kill-server` command that ends it. Closing a tmux row's tab deletes the row and runs no tmux command. Details: the "Tmux Architecture" section of `references/architecture.md`; the old viewer's design record is `docs/tmux-integration.md`.
+Every session opens on the pty holder: one `TBDHolder` process per session owns its pty master, so the session survives daemon and app restarts, and the daemon re-adopts every holder at startup. TBD runs no tmux command, and cannot show, send to, park or end a tmux session. A row still recorded as `tmux` is parked once its tmux server is gone; while the server may still be running, the app shows a notice with the `tmux -L <server> kill-server` command that ends it. Closing a tmux row's tab deletes the row and runs no tmux command. Details: the "Session Transport" section of `references/architecture.md`; the old viewer's design record is `docs/tmux-integration.md`.
 
 ### Git Operations
 
