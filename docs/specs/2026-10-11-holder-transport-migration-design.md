@@ -283,12 +283,14 @@ the session to the resume gate (below) as the mark would. So the write throws
   marks of live rows. A worktree archive whose marks are all written and whose
   status write then fails leaves every tmux row's entry the same way; a holder
   row's entry is written only after the status flip. Closed Terminals lists
-  each beside its open tab, and will not reopen a Claude entry while its tab is
-  still open, since that would start a second agent on the session the tab
-  runs or comes back to. A retry closes the same rows again and still leaves
-  one entry per terminal: an entry written with a screen is written again with
-  that screen and a new closing time, and one written without a screen is kept
-  as it is, its mark set again.
+  each beside its open tab. It will not reopen a parked row's Claude entry
+  while that tab is still open: the entry is unmarked and the gate does not
+  read a parked row, so the reopen would go ahead, and waking the tab later
+  would start the session a second time. A live row's entry is marked, and the
+  gate reads both the mark and the open row. A retry closes the same rows
+  again and still leaves one entry per terminal: an entry written with a screen
+  is written again with that screen and a new closing time, and one written
+  without a screen is kept as it is, its mark set again.
 - **Forgetting a worktree, deleting a scratch space and removing a repo** are
   refused the same way, before anything else is done: the tmux rows are closed
   first, ahead of the tombstone, every holder's disposal and every deletion. A
@@ -403,9 +405,10 @@ start admission, and the lifecycle asks again, and `spawnTerminal` again for
 each tab. A refusal from one of those later asks reaches the handler after the
 revive may have written, re-added the checkout or opened other tabs, so it is
 answered with the same code but recorded as `transport-failed`, not as a
-declined act. A Closed Terminals reopen of a Claude entry whose tab is still
-open is refused, `not-eligible`, before the gate: the session runs in that tab
-or comes back there when it is woken.
+declined act. A Closed Terminals reopen of a Claude entry whose parked tmux tab
+is still open is refused, `not-eligible`, before the gate: the session comes
+back in that tab when it is woken, and the gate, which does not read a parked
+row, would not stop it.
 
 The gate is keyed by session id rather than by row or worktree, because the
 requests that resume a session reach it from different records: an archived

@@ -1114,19 +1114,23 @@ extension RPCRouter {
         // Claude-kind with a live session id → resume it. Mirrors the
         // archived-session restore spawn in WorktreeLifecycle+Create.
         if entry.kind == .claude, let sessionID = entry.claudeSessionID {
-            // An entry whose tab is still open is not reopened: its session
-            // still runs in that tab, or comes back there when the tab is
-            // woken, and a second start would put a second agent on it. A
-            // close that wrote the entry and then failed leaves such a pair:
-            // an archive refused after its tmux rows' entries were written
-            // (`beginArchiveWorktree`), or a holder row whose delete failed.
-            // The entry can be reopened once the tab is closed.
+            // An entry whose parked tmux tab is still open is not reopened.
+            // An archive closes its tmux rows first and writes each one's
+            // entry, and when a later row's mark cannot be written the archive
+            // is refused with every row kept (`beginArchiveWorktree`). A
+            // parked row's entry is unmarked, and the gate below does not
+            // read a parked row, so the reopen would go ahead; waking the
+            // still-open tab afterwards would then start the session a second
+            // time. The entry can be reopened once that tab is closed. A live
+            // tmux row's entry is marked, and the gate reads both the mark and
+            // the open row.
             let openTab = try await actuating(actuationID) {
                 try await db.terminals.get(id: entry.id)
             }
-            if openTab != nil {
-                let message = "Terminal \(entry.id) is still open, so its session runs there. "
-                    + "Close that tab before reopening it from Closed Terminals."
+            if let openTab, openTab.transport != .holder, openTab.isParked {
+                let message = "Terminal \(entry.id) is still open, parked on tmux, and its "
+                    + "session comes back there when it is woken. Close that tab before "
+                    + "reopening it from Closed Terminals."
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }

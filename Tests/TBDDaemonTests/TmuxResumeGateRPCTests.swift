@@ -711,39 +711,43 @@ struct TmuxResumeGateRPCTests {
         #expect(reopened.success, "error: \(reopened.error ?? "nil")")
     }
 
-    /// An entry whose tab is still open is not reopened: a second start would
-    /// put a second agent on the session that tab runs. The probe answers
-    /// `.absent`, so the gate alone would let the reopen through; the refusal
-    /// comes before the gate is asked. Once the tab is gone, the same reopen
-    /// goes ahead.
-    @Test func closedTerminalsReopenOfAnEntryWhoseTabIsStillOpenIsRefused() async throws {
+    /// The entry of a parked tmux tab that is still open, as an archive
+    /// refused after it closed that row leaves it, is not reopened: waking the
+    /// tab afterwards would start the session a second time. The entry is
+    /// unmarked and the gate does not read a parked row, so the gate alone
+    /// would let the reopen through, though the probe answers `.running`. The
+    /// refusal writes nothing. Once the tab is closed, the same reopen goes
+    /// ahead.
+    @Test func closedTerminalsReopenOfAnEntryWhoseParkedTmuxTabIsStillOpenIsRefused() async throws {
         let f = try await fixture()
         defer { f.tearDown() }
-        f.server.state = .absent
-        let row = try await f.db.terminals.create(
-            worktreeID: f.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
-            label: TerminalLabel.claudeCode, claudeSessionID: Self.sessionID, kind: .claude,
-            transport: .holder)
-        await f.db.terminalHistory.recordOnClose(terminal: row, capture: nil)
+        let row = try await openATmuxRow(f, in: f.worktree, state: .parked)
+        await f.db.terminalHistory.recordOnClose(terminal: row, capture: row.suspendedSnapshot)
+        let entry = try #require(try await f.db.terminalHistory.list(worktreeID: f.worktree.id)
+            .first { $0.id == row.id })
+        #expect(entry.liveOnTmuxServer == nil)
         let params = TerminalHistoryReviveParams(worktreeID: f.worktree.id, id: row.id)
 
         let refused = try await f.send(RPCMethod.terminalHistoryRevive, params)
 
         #expect(!refused.success)
-        #expect(refused.error == "Terminal \(row.id) is still open, so its session runs there. "
-            + "Close that tab before reopening it from Closed Terminals.")
+        #expect(refused.error == "Terminal \(row.id) is still open, parked on tmux, and its "
+            + "session comes back there when it is woken. Close that tab before "
+            + "reopening it from Closed Terminals.")
         let outcome = try f.lastOutcome()
         #expect(outcome.result == .synchronous(.refused))
         #expect(outcome.reason == .notEligible)
         #expect(f.holder.launches.isEmpty)
         #expect(f.probe.servers.isEmpty)
         #expect(try await f.db.terminals.list(worktreeID: f.worktree.id) == [row])
+        #expect(try await f.db.terminalHistory.list(worktreeID: f.worktree.id).map(\.id) == [row.id])
         #expect(f.admission.requests.isEmpty)
 
         try await f.db.terminals.delete(id: row.id)
         let reopened = try await f.send(RPCMethod.terminalHistoryRevive, params)
         #expect(reopened.success, "error: \(reopened.error ?? "nil")")
         #expect(f.holder.launches.count == 1)
+        #expect(f.probe.servers.isEmpty)
     }
 
     // MARK: - A session the worktree's archived record names
