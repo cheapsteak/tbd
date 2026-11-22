@@ -6,8 +6,10 @@ import TestSupport
 
 /// Where the per-repo "hide registry remote sessions" filter is kept: the
 /// daemon's repo row, mirrored from the repo list; a toggle's optimistic
-/// write, its fence against stale fetches and its failure restore; the
-/// one-time copy of the old `UserDefaults` set; and cache invalidation.
+/// write, its fence against stale fetches, its failure restore and alert;
+/// overlapping repo fetches; the one-time copy of the old `UserDefaults` set,
+/// the saved choice shown until it settles, and its ordering with clicks;
+/// and cache invalidation.
 /// Specs: docs/specs/2026-11-19-sidebar-remote-session-filter-design.md and
 /// docs/specs/2026-11-22-phone-remote-session-filter-design.md.
 @MainActor
@@ -72,6 +74,18 @@ struct SidebarRegistryFilterStorageTests {
     }
 
     private static let refused = DaemonClientError.rpcError("Unknown method: repo.setRegistryRemoteHidden", code: nil)
+
+    /// Waits for the one-time copy's latest run, if one was started.
+    private static func copied(_ state: AppState) async {
+        await state.registryFilterLegacyCopyTask?.value
+    }
+
+    /// Starts a state subscription, as a connect does, answered by no daemon.
+    private static func startSubscription(_ state: AppState) {
+        state.programStatusListFetcher = { @MainActor in [] }
+        state.deltaSubscriber = { _, _ in }
+        state.startSubscription()
+    }
 
     // MARK: - The mirror
 
@@ -142,8 +156,9 @@ struct SidebarRegistryFilterStorageTests {
     }
 
     /// A failed call puts the old value back, keeping its third state: a repo
-    /// turned off stays off, and one nobody chose for stays unset.
-    @Test func aFailedToggleRestoresTheOldValue() async throws {
+    /// turned off stays off, and one nobody chose for stays unset. The person
+    /// is told why the button flipped back.
+    @Test func aFailedToggleRestoresTheOldValueAndSaysSo() async throws {
         let (state, suite, rpc) = makeState()
         defer { suite.tearDown() }
         let off = Self.repo("off", false), unset = Self.repo("unset", nil)
@@ -153,6 +168,7 @@ struct SidebarRegistryFilterStorageTests {
         state.toggleSidebarRegistryRemoteFilter(repoID: off.id)
         state.toggleSidebarRegistryRemoteFilter(repoID: unset.id)
         #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [off.id, unset.id])
+        #expect(state.alertMessage == nil)
         let offSend = try Self.send(state, off.id), unsetSend = try Self.send(state, unset.id)
         await offSend.value
         await unsetSend.value
@@ -161,6 +177,50 @@ struct SidebarRegistryFilterStorageTests {
         #expect(Self.value(state, off.id) == false)
         #expect(Self.value(state, unset.id) == nil)
         #expect(state.pendingRegistryFilterToggles.isEmpty)
+        #expect(state.alertIsError)
+        let message = try #require(state.alertMessage, "a failed toggle reverted silently")
+        #expect(message.hasPrefix("Couldn't turn on the remote session filter for "))
+        #expect(message.contains("Unknown method"))
+    }
+
+    /// A call lost because the daemon could not be reached still puts the old
+    /// value back, but raises no alert: the connection state already shows it.
+    @Test func aToggleLostToADisconnectRaisesNoAlert() async throws {
+        let (state, suite, rpc) = makeState()
+        defer { suite.tearDown() }
+        let on = Self.repo("on", true)
+        state.repos = [on]
+        state.syncSidebarRegistryRemoteHiddenRepoIDs()
+        rpc.failure = DaemonClientError.connectionFailed("boom")
+
+        state.toggleSidebarRegistryRemoteFilter(repoID: on.id)
+        #expect(!state.isSidebarRegistryRemoteFilterOn(repoID: on.id))
+        try await Self.send(state, on.id).value
+
+        #expect(state.isSidebarRegistryRemoteFilterOn(repoID: on.id))
+        #expect(Self.value(state, on.id) == true)
+        #expect(state.alertMessage == nil, "a disconnect raised an alert")
+    }
+
+    /// A click overtaken by a later one raises nothing when its call fails:
+    /// the later call decides what the button shows, and it succeeded.
+    @Test func anOvertakenToggleFailingRaisesNoAlert() async throws {
+        let (state, suite, rpc) = makeState()
+        defer { suite.tearDown() }
+        let a = Self.repo("a", nil)
+        state.repos = [a]
+        rpc.holds = true
+
+        state.toggleSidebarRegistryRemoteFilter(repoID: a.id)
+        state.toggleSidebarRegistryRemoteFilter(repoID: a.id)
+        let send = try Self.send(state, a.id)
+        await rpc.answer(throwing: Self.refused)
+        await rpc.answer()
+        await send.value
+
+        #expect(!state.isSidebarRegistryRemoteFilterOn(repoID: a.id))
+        #expect(Self.value(state, a.id) == false)
+        #expect(state.alertMessage == nil, "an overtaken click's failure raised an alert")
     }
 
     /// A repo refresh that lands while the toggle's call is in flight, or that
@@ -210,6 +270,36 @@ struct SidebarRegistryFilterStorageTests {
         #expect(!state.isSidebarRegistryRemoteFilterOn(repoID: a.id))
         #expect(Self.value(state, a.id) == false)
         #expect(state.pendingRegistryFilterToggles.isEmpty)
+    }
+
+    /// Refreshes overlap. A fetch sent before the toggle committed that lands
+    /// after a later fetch has been applied, and has retired the toggle, is
+    /// dropped: it read the daemon earlier and would flip the button back.
+    @Test func anOlderFetchLandingAfterANewerOneIsDropped() async throws {
+        let (state, suite, rpc) = makeState()
+        defer { suite.tearDown() }
+        let a = Self.repo("a", nil)
+        state.repos = [a]
+        rpc.holds = true
+
+        state.toggleSidebarRegistryRemoteFilter(repoID: a.id)
+        let send = try Self.send(state, a.id)
+        // Read before the commit: the daemon still holds nothing for `a`.
+        let older = RepoFetchGate(answer: [a])
+        state.reposFetcher = { await older.fetch() }
+        let olderRefresh = Task { await state.refreshRepos() }
+        await older.waitForCall()
+        await rpc.answer()
+        await send.value
+
+        state.reposFetcher = { rpc.listed([a]) }
+        await state.refreshRepos()
+        #expect(state.pendingRegistryFilterToggles.isEmpty, "the newer fetch did not retire the toggle")
+        older.release()
+        await olderRefresh.value
+
+        #expect(state.isSidebarRegistryRemoteFilterOn(repoID: a.id), "an older fetch flipped the button back")
+        #expect(Self.value(state, a.id) == true)
     }
 
     /// Two quick clicks send in click order, the second only once the first
@@ -278,9 +368,10 @@ struct SidebarRegistryFilterStorageTests {
         suite.defaults.set(
             [unset.id.uuidString, off.id.uuidString, on.id.uuidString, UUID().uuidString, "not-a-uuid"],
             forKey: Self.key)
-        state.reposFetcher = { [unset, off, on, unlisted] }
+        state.reposFetcher = { rpc.listed([unset, off, on, unlisted]) }
 
         await state.refreshRepos()
+        await Self.copied(state)
 
         #expect(rpc.calls == [FilterRPC.Call(repoID: unset.id, hidden: true)])
         #expect(Self.value(state, unset.id) == true)
@@ -291,32 +382,47 @@ struct SidebarRegistryFilterStorageTests {
         #expect(suite.defaults.object(forKey: Self.key) == nil)
 
         suite.defaults.set([unlisted.id.uuidString], forKey: Self.key)
+        Self.startSubscription(state)
         await state.refreshRepos()
+        await Self.copied(state)
         #expect(rpc.calls.count == 1, "the copy ran again after it succeeded")
+        #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [unset.id, on.id], "the key was read again")
     }
 
     /// A daemon that refuses the call, such as one too old to know it, loses
     /// nothing: the key stays as it was, no repo with a value is touched, and
-    /// the copy runs again at the next refresh, once the daemon takes it.
-    @Test func aRefusedCopyKeepsTheKeyAndLosesNothing() async {
+    /// the saved choice still shows. The poll's refreshes do not ask again;
+    /// the copy runs again once a state subscription starts, as after a
+    /// reconnect, and then the daemon takes it.
+    @Test func aRefusedCopyKeepsTheKeyAndRunsAgainAtTheNextSubscription() async {
         let (state, suite, rpc) = makeState()
         defer { suite.tearDown() }
         let unset = Self.repo("unset", nil), off = Self.repo("off", false)
         let saved = [unset.id.uuidString, off.id.uuidString]
         suite.defaults.set(saved, forKey: Self.key)
-        state.reposFetcher = { [unset, off] }
+        state.reposFetcher = { rpc.listed([unset, off]) }
         rpc.failure = Self.refused
 
         await state.refreshRepos()
+        await Self.copied(state)
 
         #expect(rpc.calls == [FilterRPC.Call(repoID: unset.id, hidden: true)])
         #expect(suite.defaults.stringArray(forKey: Self.key) == saved)
         #expect(Self.value(state, unset.id) == nil)
         #expect(Self.value(state, off.id) == false)
-        #expect(state.sidebarRegistryRemoteHiddenRepoIDs.isEmpty)
+        #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [unset.id], "the saved choice is hidden while the copy fails")
 
         rpc.failure = nil
         await state.refreshRepos()
+        await Self.copied(state)
+        await state.refreshRepos()
+        await Self.copied(state)
+        #expect(rpc.calls.count == 1, "a poll's refresh ran the failed copy again")
+        #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [unset.id])
+
+        Self.startSubscription(state)
+        await state.refreshRepos()
+        await Self.copied(state)
         #expect(rpc.calls == [
             FilterRPC.Call(repoID: unset.id, hidden: true), FilterRPC.Call(repoID: unset.id, hidden: true),
         ])
@@ -324,7 +430,9 @@ struct SidebarRegistryFilterStorageTests {
         #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [unset.id])
         #expect(suite.defaults.object(forKey: Self.key) == nil)
 
+        Self.startSubscription(state)
         await state.refreshRepos()
+        await Self.copied(state)
         #expect(rpc.calls.count == 2, "the copy ran again after it succeeded")
     }
 
@@ -336,9 +444,131 @@ struct SidebarRegistryFilterStorageTests {
         state.reposFetcher = { [unset] }
 
         await state.refreshRepos()
+        await Self.copied(state)
 
         #expect(rpc.calls.isEmpty)
         #expect(Self.value(state, unset.id) == nil)
+        #expect(state.sidebarRegistryRemoteHiddenRepoIDs.isEmpty)
+    }
+
+    /// The saved choice shows from the first refresh, before the copy's call
+    /// has returned, and the refresh does not wait for that call. A list read
+    /// before the call committed still shows it; once a fetch sent after the
+    /// copy succeeded is applied, the daemon's values alone decide, so a
+    /// listed ID whose repo was not there when the copy ran stays dropped.
+    @Test func theSavedChoiceShowsUntilTheCopyHasSettled() async {
+        let (state, suite, rpc) = makeState()
+        defer { suite.tearDown() }
+        let a = Self.repo("a", nil), b = Self.repo("b", nil), late = Self.repo("late", nil)
+        suite.defaults.set([a.id.uuidString, late.id.uuidString], forKey: Self.key)
+        state.reposFetcher = { rpc.listed([a, b]) }
+        rpc.holds = true
+
+        let returned = Flag()
+        let firstRefresh = Task {
+            await state.refreshRepos()
+            returned.isSet = true
+        }
+        await rpc.waitForHeld()
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { returned.isSet }
+        }
+        if outcome == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "refreshRepos() returning while the copy's call is held",
+                observed: "it had not returned",
+                deadline: TestDeadlines.saturatedPass))
+        }
+        #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [a.id], "the saved choice waited for the copy")
+        #expect(Self.value(state, a.id) == nil)
+
+        // Sent before the copy's call commits, applied after it returned.
+        let older = RepoFetchGate(answer: [a, b])
+        state.reposFetcher = { await older.fetch() }
+        let olderRefresh = Task { await state.refreshRepos() }
+        await older.waitForCall()
+        await rpc.answer()
+        await Self.copied(state)
+        await firstRefresh.value
+        older.release()
+        await olderRefresh.value
+        #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [a.id], "a list read before the commit hid the saved choice")
+
+        state.reposFetcher = { rpc.listed([a, b]) }
+        await state.refreshRepos()
+        #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [a.id])
+        state.reposFetcher = { rpc.listed([a, b, late]) }
+        await state.refreshRepos()
+        #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [a.id], "a repo the copy dropped showed the saved choice")
+        #expect(rpc.calls == [FilterRPC.Call(repoID: a.id, hidden: true)])
+    }
+
+    /// A click on a repo whose copy call is in flight is sent only once that
+    /// call has returned, and the daemon's `true` from the copy is what the
+    /// click's failure puts back.
+    @Test func aClickDuringTheCopysCallIsSentAfterIt() async throws {
+        let (state, suite, rpc) = makeState()
+        defer { suite.tearDown() }
+        let a = Self.repo("a", nil)
+        suite.defaults.set([a.id.uuidString], forKey: Self.key)
+        state.reposFetcher = { rpc.listed([a]) }
+        rpc.holds = true
+
+        await state.refreshRepos()
+        await rpc.waitForHeld()
+        #expect(state.isSidebarRegistryRemoteFilterOn(repoID: a.id))
+        state.toggleSidebarRegistryRemoteFilter(repoID: a.id)
+        #expect(!state.isSidebarRegistryRemoteFilterOn(repoID: a.id))
+        let click = try Self.send(state, a.id)
+        await rpc.answer()
+        await rpc.answer(throwing: Self.refused)
+        await click.value
+        await Self.copied(state)
+
+        #expect(rpc.calls == [FilterRPC.Call(repoID: a.id, hidden: true), FilterRPC.Call(repoID: a.id, hidden: false)])
+        #expect(rpc.mostHeldAtOnce == 1, "the click was sent while the copy's call was in flight")
+        #expect(state.isSidebarRegistryRemoteFilterOn(repoID: a.id))
+        #expect(Self.value(state, a.id) == true, "the failed click put back a value the daemon no longer holds")
+    }
+
+    /// A repo clicked while the copy is busy with another is decided just
+    /// before its own call: once the click's call has returned, a click that
+    /// succeeded stands, and the repo of a click that failed is copied.
+    @Test func theCopyLeavesARepoClickedDuringItToTheClick() async throws {
+        let (state, suite, rpc) = makeState()
+        defer { suite.tearDown() }
+        let a = Self.repo("a", nil), clicked = Self.repo("clicked", nil), lost = Self.repo("lost", nil)
+        suite.defaults.set([a.id.uuidString, clicked.id.uuidString, lost.id.uuidString], forKey: Self.key)
+        state.reposFetcher = { rpc.listed([a, clicked, lost]) }
+        rpc.holds = true
+
+        await state.refreshRepos()
+        await rpc.waitForHeld()
+        state.toggleSidebarRegistryRemoteFilter(repoID: clicked.id)
+        let clickedSend = try Self.send(state, clicked.id)
+        await rpc.waitForHeld(count: 2)
+        state.toggleSidebarRegistryRemoteFilter(repoID: lost.id)
+        let lostSend = try Self.send(state, lost.id)
+        await rpc.waitForHeld(count: 3)
+
+        await rpc.answer()
+        await rpc.answer()
+        await clickedSend.value
+        await rpc.answer(throwing: Self.refused)
+        await lostSend.value
+        await rpc.answer()
+        await Self.copied(state)
+
+        #expect(rpc.calls == [
+            FilterRPC.Call(repoID: a.id, hidden: true),
+            FilterRPC.Call(repoID: clicked.id, hidden: false),
+            FilterRPC.Call(repoID: lost.id, hidden: false),
+            FilterRPC.Call(repoID: lost.id, hidden: true),
+        ])
+        #expect(Self.value(state, clicked.id) == false, "the copy overwrote a click")
+        #expect(Self.value(state, lost.id) == true)
+        #expect(state.sidebarRegistryRemoteHiddenRepoIDs == [a.id, lost.id])
+        #expect(suite.defaults.object(forKey: Self.key) == nil)
     }
 
     @Test func absentEmptyAndUnreadableEntriesMeanNoFilter() {
@@ -438,7 +668,8 @@ struct SidebarRegistryFilterStorageTests {
 
 /// Stands in for `repo.setRegistryRemoteHidden`: records each call, and
 /// answers it at once (throwing `failure` when set) or, while `holds`, holds
-/// it until the test answers.
+/// it until the test answers. Keeps what the daemon would hold, so a fetch
+/// can list it (`listed`).
 @MainActor
 private final class FilterRPC {
     struct Call: Equatable {
@@ -447,6 +678,10 @@ private final class FilterRPC {
     }
 
     private(set) var calls: [Call] = []
+    /// Each repo's value from its last call that succeeded.
+    private(set) var stored: [UUID: Bool] = [:]
+    /// The most calls held at the same time.
+    private(set) var mostHeldAtOnce = 0
     var holds = false
     var failure: (any Error)?
     private var held: [CheckedContinuation<Void, any Error>] = []
@@ -456,21 +691,36 @@ private final class FilterRPC {
         if holds {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 held.append(continuation)
+                mostHeldAtOnce = max(mostHeldAtOnce, held.count)
             }
-            return
+        } else if let failure {
+            throw failure
         }
-        if let failure { throw failure }
+        stored[repoID] = hidden
     }
 
-    /// Returns once a call is held, recording a timeout instead of hanging.
-    func waitForHeld(sourceLocation: SourceLocation = #_sourceLocation) async {
+    /// `repos` as the daemon would list them, with each stored value in its
+    /// column.
+    func listed(_ repos: [Repo]) -> [Repo] {
+        repos.map { repo in
+            guard let value = stored[repo.id] else { return repo }
+            var listed = repo
+            listed.registryRemoteHidden = value
+            return listed
+        }
+    }
+
+    /// Returns once `count` calls are held, recording a timeout instead of
+    /// hanging.
+    func waitForHeld(count: Int = 1, sourceLocation: SourceLocation = #_sourceLocation) async {
         let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
-            await MainActor.run { !self.held.isEmpty }
+            await MainActor.run { self.held.count >= count }
         }
         if outcome == .timedOut {
             Issue.record(
                 BoundedWaitTimeout(
-                    what: "a held repo.setRegistryRemoteHidden call", observed: "\(calls.count) call(s) made",
+                    what: "\(count) held repo.setRegistryRemoteHidden call(s)",
+                    observed: "\(calls.count) call(s) made, \(held.count) held",
                     deadline: TestDeadlines.saturatedPass),
                 sourceLocation: sourceLocation)
         }
@@ -526,4 +776,10 @@ private final class RepoFetchGate {
         self.held = nil
         held.resume(returning: answer)
     }
+}
+
+/// Set once a task the test started has got past the call it wraps.
+@MainActor
+private final class Flag {
+    var isSet = false
 }
