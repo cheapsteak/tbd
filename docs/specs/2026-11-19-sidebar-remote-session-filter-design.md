@@ -11,8 +11,8 @@
 A repo whose sidebar list carries sessions from a registry provider gets a
 filter button on its header row. Turned on, the button hides that repo's
 registry-provider rows and sessions and keeps its local and cloud rows. The
-choice is saved per repo in the app's settings. Repos with no
-registry-provider sessions never show the button.
+choice is saved per repo on the daemon's `repo` row, and the phone's Sessions
+list shares it. Repos with no registry-provider sessions never show the button.
 
 ## Problem
 
@@ -168,27 +168,28 @@ menu item is the path that does not depend on hover.
   visible row. A row still being created is never the anchor of a move.
 - **Folded or hidden repo.** No change: the filter acts only on rows the repo
   would otherwise show.
-- **Repo removed.** Removing a repo from TBD removes its ID from the saved set,
-  and so does every successful refresh of the repo list, which catches a repo
-  removed from the CLI. A failed refresh prunes nothing.
+- **Repo removed.** The setting is a column on the repo's row, so it goes
+  with the repo, from the app or from the CLI.
 
 ## Design
 
 ### Storage
 
-One `UserDefaults` key, `sidebarRegistryRemoteHiddenRepoIDs`, holds an array
-of repo UUID strings. Absent and empty both mean no repo is filtered, which is
-the shipped behaviour.
+A nullable column on `repo`, `registry_remote_hidden`, holds the choice: NULL
+when nobody has chosen, 0 for off, 1 for on. NULL reads as off, which is the
+shipped behaviour. `Repo.registryRemoteHidden` carries it to the app, and the
+socket RPC `repo.setRegistryRemoteHidden` writes it.
 
-`AppState` owns the value as an observed property, loaded from and written to
-`AppState.userDefaults`. Views read it through `AppState`, never through
-`@AppStorage`, because views under the detail pagers read `@AppStorage` from
-`.standard` rather than from the store `AppState` uses.
+The setting lives on the daemon because the phone's Sessions list reads it and
+can change it: [`2026-11-22-phone-remote-session-filter-design.md`](2026-11-22-phone-remote-session-filter-design.md)
+gives the column, the RPC, the phone's chip and the one-time copy of choices
+saved by app builds that kept them in the `UserDefaults` key
+`sidebarRegistryRemoteHiddenRepoIDs`.
 
-The setting is presentation only. The daemon never reads it, no RPC carries
-it, and the CLI cannot see it. A database column on `repo` was considered and
-rejected: it would cost a migration, a model change and an RPC for state that
-no process outside the app consults.
+`AppState` derives the set of filtered repos from its repo list. A click flips
+the repo in that list at once and calls the RPC; a failed call puts the old
+value back. Views read the set through `AppState`, never through
+`@AppStorage`.
 
 ### The rule in one place
 
@@ -211,7 +212,8 @@ repeats the rule.
 - **`AppState+SidebarGroups.swift`** – `sidebarRepositoryLayout`,
   `sidebarMatchedRemoteSessions(repoID:)` and
   `sidebarRemoteGroups(parentID:)` drop what the filter hides. Each cache those
-  functions keep is cleared when the saved set or the selection changes.
+  functions keep is cleared when the set of filtered repos or the selection
+  changes.
 - **`SidebarTreeBuilder`** – the repo header model gains the button's state:
   absent, off with a label, or on with a label and count.
 - **`SectionHeaderCell`** – a third control laid out after the chevron, with its
@@ -227,8 +229,8 @@ person clicks, and the button appears only where there is something to hide.
 That makes the change additive UI rather than a change to where existing rows
 appear by default, which is the case the flag rule in `CLAUDE.md` covers.
 
-No daemon change, no migration, and no new durable external resource. The
-only state is the app setting, which the app prunes against the repo list.
+No new durable external resource. The only state is a column on an existing
+repo row, deleted with that row.
 
 ## Testing
 
@@ -248,8 +250,8 @@ only state is the app setting, which the app prunes against the repo list.
   registry session, and absent once the filter has nothing left to hide.
 - **Wording:** one registry provider names it; two or more fall back to the
   generic text.
-- **Storage:** a round trip through a `TestDefaultsSuite`, and removal of a
-  repo's ID when the repo is removed.
+- **Storage:** the filter reads from the repo list, and a toggle calls the
+  RPC and restores the old value when the call fails.
 - **Layouts:** the filter applied with grouping on (an emptied Remote group
   does not render; its summary counts kept rows only) and with grouping off.
 - **Drop mapping:** a drop between two visible rows with hidden rows between
