@@ -242,11 +242,12 @@ worktree's `tmuxServer`, so no model field is added.
 
 **Closing.** Closing a tmux row's tab deletes the row and runs no tmux
 command, and so do archiving or forgetting its worktree, deleting or archiving
-a scratch space, reconcile's archive of a worktree gone from git, and removing
+a scratch space, reconcile's archive of a worktree gone from git, removing
 a repo, which closes the rows of its main worktree and of any worktree its
-cascade does not archive before it deletes them. Each is recorded as
-dispatched, but for those repo-removal closes, which touch no process and
-have no actuation row of their own. What else happens depends on whether the
+cascade does not archive before it deletes them, and startup recovery's delete
+of a worktree left `.creating`. Each is recorded as dispatched, but for those
+repo-removal closes and recovery's, which touch no process and have no
+actuation row of their own. What else happens depends on whether the
 row's session ended (`WorktreeLifecycle.sessionHasEnded`):
 
 - **Live, or parked with its park in flight** – the session keeps running in
@@ -302,6 +303,13 @@ the session to the resume gate (below) as the mark would. So the write throws
   servers and every holder, and on a failure leaves the worktree for its next
   sweep with every session running, as it does a teardown it could not record,
   recording the failure on that row's dispose.
+- **Startup recovery's delete of a `.creating` worktree** (a checkout that
+  never appeared, a directory git does not list, or a repo row that is gone)
+  closes the tmux rows first too, ahead of every deletion. A create by an
+  earlier build may have started their agents in a server that still runs
+  them. On a failure it logs that the worktree waits for the next recovery
+  pass, at the next daemon start, and leaves the row `.creating` with every
+  record it had.
 - **A hook tab's close** keeps the tab.
 
 Each refusal of a whole act says which act did not happen: the worktree was
@@ -319,11 +327,12 @@ writing a mark that would refuse the session for good.
 
 Either entry is written on every one of these paths. The one close that writes
 none is a close of a row whose worktree the daemon has no local row for,
-`terminal.delete` included (above). Forgetting a worktree and deleting a
-scratch space go on to remove the entries the worktree had, but keep the
-marked ones (`TerminalHistoryStore.deleteForWorktree`), so a mark outlives its
-worktree and every resume of its session still asks first, however it is
-reached. No view lists such an entry once its worktree row is gone.
+`terminal.delete` included (above). Forgetting a worktree, deleting a scratch
+space and recovery's delete go on to remove the entries the worktree had, but
+keep the marked ones (`TerminalHistoryStore.deleteForWorktree`), so a mark
+outlives its worktree and every resume of its session still asks first,
+however it is reached. No view lists such an entry once its worktree row is
+gone.
 
 `terminal.delete`'s activity rails apply to holder rows only: closing a tmux
 row ends no process, so there is no turn in flight to protect.

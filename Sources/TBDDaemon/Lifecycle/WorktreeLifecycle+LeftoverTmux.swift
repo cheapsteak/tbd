@@ -118,9 +118,10 @@ extension WorktreeLifecycle {
     /// The tmux half of every teardown that deletes a tmux row: closing its
     /// tab (`terminal.delete`, and `server.stop`'s tab close), archiving its
     /// worktree, reconcile's archive of a vanished worktree, closing a hook
-    /// tab, tearing down a scratch space, forgetting a worktree and removing a
-    /// repo. It runs no tmux command, and the caller deletes the row
-    /// afterwards unless it throws.
+    /// tab, tearing down a scratch space, forgetting a worktree, removing a
+    /// repo and startup recovery's delete of a `.creating` worktree. It runs
+    /// no tmux command, and the caller deletes the row afterwards unless it
+    /// throws.
     ///
     /// **A live row's session keeps running.** So may the session of a row
     /// parked with its park still in flight (`pendingSessionIncarnationID`
@@ -148,7 +149,7 @@ extension WorktreeLifecycle {
     /// Closed Terminals entry keeps, with its session id.
     ///
     /// Either entry is written only when `history` is given. The hard-delete
-    /// paths (forget, scratch delete) give it too: their
+    /// paths (forget, scratch delete, recovery's delete) give it too: their
     /// `TerminalHistoryStore.deleteForWorktree` then removes every entry the
     /// worktree had except the marked ones, so a mark outlives its worktree.
     ///
@@ -162,7 +163,8 @@ extension WorktreeLifecycle {
     /// repo are refused with every row as it was, keeping the entries already
     /// written for the tmux rows closed ahead of the failing one
     /// (`beginArchiveWorktree`); reconcile's archive leaves the worktree for
-    /// its next sweep; a hook tab's close keeps the tab. The notice is logged
+    /// its next sweep; recovery leaves a `.creating` worktree for its next
+    /// pass; a hook tab's close keeps the tab. The notice is logged
     /// only once the mark is written. A parked row's entry carries no mark, so
     /// a failure to write it is logged and the close goes ahead, as any other
     /// close's is.
