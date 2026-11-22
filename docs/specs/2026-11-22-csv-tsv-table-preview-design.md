@@ -61,13 +61,15 @@ write TSV also follow (Python's `excel-tab` dialect, pandas):
 
 - The first row gives the column titles. A file with no header row shows its
   first data row as titles.
-- The table has as many columns as its widest row. A shorter row leaves its
-  last cells empty. A column past the end of the header row has an empty
-  title.
+- The table has as many columns as its widest row, up to 1,000. A shorter row
+  leaves its last cells empty. A column past the end of the header row has an
+  empty title. Fields past the 1,000th in a row are not shown.
 - Each column starts at a width measured from its title and the values in the
-  first 200 rows, between 48 and 320 points. The user can drag a column wider
-  or narrower. When the columns need less width than the pane has, the last
-  column takes the rest. When they need more, the table scrolls sideways.
+  first 200 rows, between 48 and 320 points. A wide table measures fewer rows,
+  so that measuring never reads more than 20,000 values: a table of 1,000
+  columns measures 20 rows. The user can drag a column wider or narrower. When
+  the columns need less width than the pane has, the last column takes the
+  rest. When they need more, the table scrolls sideways.
 
 ### Cells
 
@@ -78,6 +80,10 @@ write TSV also follow (Python's `excel-tab` dialect, pandas):
 - A value too wide for its column ends in an ellipsis. Pointing at it shows
   the whole value in an expansion tooltip, the way Finder's list view does
   (`allowsExpansionToolTips`).
+- A value longer than 1,000 characters shows its first 1,000 and an ellipsis,
+  in the cell and in its tooltip. A text field lays out its whole string each
+  time it is drawn, so one cell holding megabytes, such as a base64 blob,
+  would stall scrolling.
 - Rows alternate their background colour, and thin lines separate the
   columns.
 - The user can click a row to highlight it. Nothing else happens on a click.
@@ -99,6 +105,11 @@ cannot fill memory before it reaches the row limit. When reading stops at
 When either limit stops the reading, a line under the table says:
 "Showing the first N rows. The rest of the file is not shown." N is the
 number of rows the table holds.
+
+When a row has more than 1,000 fields, a line under the table says:
+"Showing the first 1,000 columns. The other columns are not shown." The
+column limit keeps one very wide row from adding thousands of columns to the
+table, and with them thousands of width measurements on the main thread.
 
 The table draws only the rows in view, so scrolling does not slow down as the
 row count grows.
@@ -128,11 +139,13 @@ New files live in `Sources/TBDApp/Panes/TablePreview/`, so
 - **`DelimitedTextParser`**
   - **What it does:** turns bytes into rows under the rules in "Reading the
     file".
-  - **Inputs:** the bytes, the delimiter, the row limit, and whether the bytes
-    were cut short by the byte limit.
+  - **Inputs:** the bytes, the delimiter, the row and column limits, and
+    whether the bytes were cut short by the byte limit.
   - **Output:** a `DelimitedTable` (the titles, the rows, the column count,
     and whether the reading stopped at a limit), or an error that names the
-    line of a quote that never closes.
+    line of a quote that never closes. The titles are padded to the column
+    count; the rows are not, so one wide row does not multiply the memory of
+    every other row. The table view shows a missing cell as empty.
   - **Pure:** no file access and no actor isolation, so tests feed it strings.
 - **`DelimitedTableLoader`**
   - **What it does:** reads a file off the main actor and hands the bytes to
@@ -142,9 +155,11 @@ New files live in `Sources/TBDApp/Panes/TablePreview/`, so
     `read(upToCount:)`, which throws on a read error where `readData` raises
     an exception Swift cannot catch.
 - **`TablePreviewView`**
-  - **What it is:** an `NSViewRepresentable` around an `NSScrollView` that
-    holds one `NSTableView`, with the table's data source and delegate on its
-    coordinator.
+  - **What it is:** an `NSViewRepresentable` that creates a host `NSView`,
+    `TableHostView`. The host holds an `NSScrollView` with one `NSTableView`,
+    and is the table's data source and delegate. The representable's
+    coordinator remembers which load the host last showed, so a SwiftUI update
+    that brings no new load does not reload the rows.
   - **Cells:** view-based, with plain `NSTextField` cells the table reuses.
     No SwiftUI view is hosted in a cell (the root `CLAUDE.md`, "SwiftUI or
     AppKit").
@@ -194,7 +209,9 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
   - an empty line in the middle is a row with one empty field
   - a byte order mark is removed from the first title
   - a quote in the middle of an unquoted field is kept as a character
-  - rows shorter and longer than the header give the widest row's column count
+  - rows shorter and longer than the header give the widest row's column
+    count, and keep their own length
+  - a row past the column limit stops at the limit and marks the table
   - a quote that never closes is an error naming the line where it opens
   - the row limit stops at N rows and marks the table as stopped
   - input cut short by the byte limit drops its last row and marks the table
@@ -213,6 +230,9 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
 - **`TablePreviewView`**, in an offscreen window:
   - the column titles are the header row and the row count is the data rows
   - a cell shows its value, and a value with a line break shows `↵`
+  - a value longer than 1,000 characters shows its first 1,000 and `…`
+  - a cell past the end of a short row is empty
+  - a wide table measures fewer rows
   - a rewrite with the same columns keeps a column width the test changed
 - **`FilePreviewView`:** a CSV file shows the table, and with `showSourceCode`
   shows the text view.
