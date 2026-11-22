@@ -143,7 +143,7 @@ A start opens a terminal tab titled with the server's label, running `exec /bin/
 - `TBD_WORKTREE_ID`, `TBD_WORKTREE_NAME`, `TBD_WORKTREE_PATH`
 - `TBD_REPO_PATH`, `TBD_TERMINAL_ID`
 
-Starting a server that is already running does nothing and says so. Start with no name starts every declared server. A server that reads Unknown is not started, rather than risk a second copy of a server that may still be running: when TBD cannot read the state of its tab — a tmux query that timed out or failed without saying the pane is gone — the start fails and asks you to try again, and when its `status` command timed out the start fails with "state unknown (status command timed out); try again or stop it first".
+Starting a server that is already running does nothing and says so. Start with no name starts every declared server. A server that reads Unknown is not started, rather than risk a second copy of a server that may still be running: when TBD cannot read the state of its tab — a process it could not read, or a tab still on the tmux transport, which TBD does not read — the start fails, names the reason and asks you to try again, and when its `status` command timed out the start fails with "state unknown (status command timed out); try again or stop it first".
 
 ### States
 

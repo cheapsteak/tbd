@@ -41,7 +41,7 @@ work:
   the tool that holds them.
 - **A mechanism** — how a paste lands in a composer, how two sends to one
   target serialize. Differing isn't meaningful; no project's convention
-  changes what a dead tmux pane is.
+  changes what an exited process is.
 - **An invariant** — the record is append-only; one supervisor per
   project. Differing is corruption, not customization.
 

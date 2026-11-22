@@ -25,7 +25,8 @@ tbd agents background status [--json] # active, when it ends, how many processes
 ## What it touches
 
 For each agent (Claude Code or Codex) tab that is not parked, TBD finds the root of the tab's process
-tree and lowers that process and everything below it. It never lowers the holder or the tmux server.
+tree and lowers that process and everything below it. It never lowers the pty holder that owns the tab,
+and it skips a tab an earlier version of TBD left on tmux, whose processes it does not read.
 It never lowers the TBD daemon either: if the daemon was started from inside an agent tab, that tab's
 walk leaves out the daemon, everything below it and every process it runs under.
 A process already in the background is left alone, and TBD restores only what it lowered itself.
