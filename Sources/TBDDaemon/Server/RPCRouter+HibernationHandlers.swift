@@ -87,8 +87,12 @@ extension RPCRouter {
     ///
     /// `condition` is for the in-process caller that chose its rows earlier, the
     /// session restore pass. `terminal.wake` has no parameter for it.
+    ///
+    /// `actor` has no default: no declared actor reads as a person's, which
+    /// moves a parked tmux row (`TransportMigrationOnWake.isPersonStarted`), so
+    /// a caller inside the daemon names the actor it acts for.
     func handleTerminalWake(
-        _ paramsData: Data, actor: ActuationActor? = nil,
+        _ paramsData: Data, actor: ActuationActor?,
         condition: SessionRestoreCondition? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalWakeParams.self, from: paramsData)
