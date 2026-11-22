@@ -228,6 +228,8 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
 - **`DelimitedTableLoader`:**
   - a directory and a FIFO are refused, and the FIFO check returns without
     blocking
+  - a FIFO reached past the `stat`, as when one replaces the file after it,
+    is refused at the open, and the open returns without blocking
   - a symlink to a CSV file loads the file
 - **`FilePreviewClassifier`:**
   - `csv`, `CSV` and `tsv` that read as text are `.table` when the rendered

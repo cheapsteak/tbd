@@ -105,12 +105,16 @@ struct DelimitedTableLoaderTests {
         func finish(_ value: DelimitedTableLoad) { lock.withLock { _result = value } }
     }
 
-    /// Runs the load on a dedicated thread, so a load that blocks in
+    /// Runs `load` on a dedicated thread, so a load that blocks in
     /// `open(2)` parks that thread rather than the cooperative pool.
-    private static func startLoadThread(path: String, into probe: TableLoadProbe) -> Thread {
+    private static func startLoadThread(
+        path: String,
+        into probe: TableLoadProbe,
+        load: @escaping @Sendable (String) -> DelimitedTableLoad = { DelimitedTableLoader.load(path: $0) }
+    ) -> Thread {
         let worker = Thread {
             probe.markStarted()
-            probe.finish(DelimitedTableLoader.load(path: path))
+            probe.finish(load(path))
         }
         worker.name = "fifo-table-load-probe"
         worker.start()
@@ -122,10 +126,12 @@ struct DelimitedTableLoaderTests {
     private struct LoadDidNotReturn: Error, CustomStringConvertible {
         let started: Bool
         let elapsed: Duration
+        /// What a blocked open says is missing from the load.
+        var missingDefence = "the regular-file check is gone"
         var description: String {
             started
                 ? "the table load started but had not returned after \(elapsed) — it blocked " +
-                  "opening a FIFO, so the regular-file check is gone"
+                  "opening a FIFO, so \(missingDefence)"
                 : "the table load thread never got to run within \(elapsed) — a scheduling " +
                   "starvation, not a blocked open"
         }
@@ -162,6 +168,54 @@ struct DelimitedTableLoaderTests {
             let writeEnd = open(path, O_WRONLY | O_NONBLOCK)
             if writeEnd >= 0 { close(writeEnd) }
             Issue.record(LoadDidNotReturn(started: didStart, elapsed: ContinuousClock.now - started))
+            return
+        }
+        guard outcome == .satisfied else { return }
+        let result = probe.result
+        #expect(result == .unreadable)
+    }
+
+    /// `load` refuses a FIFO at its `stat`, so the test above never reaches
+    /// the open. This one calls `loadOpening` directly, as `load` would if
+    /// the path became a FIFO after the `stat`: the `O_NONBLOCK` open must
+    /// return at once and `fstat` must refuse the descriptor. Without
+    /// `O_NONBLOCK` the open blocks and the bounded wait reports it; without
+    /// the `fstat` check the read finds no writer, reads no bytes, and the
+    /// FIFO loads as an empty file instead of `.unreadable`.
+    @Test("a FIFO opened after the stat is unreadable, and opening it does not block")
+    func openedFifoIsUnreadableWithoutBlocking() async throws {
+        let dir = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("pipe.csv").path
+        try #require(mkfifo(path, 0o600) == 0,
+                     Comment(rawValue: "mkfifo failed: \(String(cString: strerror(errno)))"))
+
+        let probe = TableLoadProbe()
+        let started = ContinuousClock.now
+        _ = Self.startLoadThread(path: path, into: probe) {
+            DelimitedTableLoader.loadOpening(
+                path: $0,
+                rowLimit: DelimitedTextParser.defaultRowLimit,
+                columnLimit: DelimitedTextParser.defaultColumnLimit,
+                byteLimit: DelimitedTableLoader.byteLimit
+            )
+        }
+
+        let outcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+        ) { @Sendable in
+            probe.result != nil
+        }
+        if outcome == .timedOut {
+            let didStart = probe.started
+            // Release a stuck `open(2)` so the worker thread is not leaked in a
+            // permanently blocking syscall, then report what was observed.
+            let writeEnd = open(path, O_WRONLY | O_NONBLOCK)
+            if writeEnd >= 0 { close(writeEnd) }
+            Issue.record(LoadDidNotReturn(
+                started: didStart, elapsed: ContinuousClock.now - started,
+                missingDefence: "the open no longer passes O_NONBLOCK"
+            ))
             return
         }
         guard outcome == .satisfied else { return }
