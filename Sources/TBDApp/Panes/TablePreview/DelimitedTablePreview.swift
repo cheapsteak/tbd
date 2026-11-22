@@ -35,7 +35,6 @@ struct DelimitedTablePreview: View {
                 content(loaded)
             } else {
                 ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

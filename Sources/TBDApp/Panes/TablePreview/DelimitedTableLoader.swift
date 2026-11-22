@@ -41,14 +41,9 @@ enum DelimitedTableLoader {
             return .unreadable
         }
         let delimiter = DelimitedTextParser.delimiter(forPath: path) ?? 0x2C
-        if data.count > byteLimit {
-            return .loaded(DelimitedTextParser.parse(
-                data.prefix(byteLimit), delimiter: delimiter,
-                rowLimit: rowLimit, columnLimit: columnLimit, cutAtByteLimit: true
-            ))
-        }
         return .loaded(DelimitedTextParser.parse(
-            data, delimiter: delimiter, rowLimit: rowLimit, columnLimit: columnLimit
+            data.prefix(byteLimit), delimiter: delimiter,
+            rowLimit: rowLimit, columnLimit: columnLimit, cutAtByteLimit: data.count > byteLimit
         ))
     }
 }
