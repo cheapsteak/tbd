@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// Which view the file viewer shows for a file.
 enum FilePreviewKind: Equatable, Sendable {
-    case renderedMarkdown, image, text, audio, video, unpreviewable
+    case renderedMarkdown, table, image, text, audio, video, unpreviewable
 }
 
 /// Decides whether a byte sample is text. Text is a UTF-8 sample with no NUL
@@ -48,9 +48,11 @@ enum TextSniff {
 }
 
 /// Classifies a file for the viewer, outside any SwiftUI `body`.
-/// Order: rendered markdown, image, text, media, unpreviewable. Only the text
-/// sniff, which reads the file, runs off the main actor; the extension checks,
-/// the media lookup and its cache stay on it.
+/// Order: rendered markdown, image, then the text sniff, media, unpreviewable.
+/// A file that reads as text is a table when it is a CSV or TSV file and the
+/// pane asks for a rich view, and text otherwise. Only the text sniff, which
+/// reads the file, runs off the main actor; the extension checks, the media
+/// lookup and its cache stay on it.
 @MainActor
 final class FilePreviewClassifier {
     static let shared = FilePreviewClassifier()
@@ -69,14 +71,19 @@ final class FilePreviewClassifier {
         self.sniffsAsText = sniffsAsText
     }
 
-    func kind(forPath path: String, rendersMarkdown: Bool) async -> FilePreviewKind {
+    /// `rendersRichView` is true when the pane can give the file its rich
+    /// view: a rendered markdown document, or a table for a CSV or TSV file.
+    func kind(forPath path: String, rendersRichView: Bool) async -> FilePreviewKind {
         let ext = (path as NSString).pathExtension.lowercased()
-        if rendersMarkdown && MarkdownWebViewConfiguration.renderableExtensions.contains(ext) {
+        if rendersRichView && MarkdownWebViewConfiguration.renderableExtensions.contains(ext) {
             return .renderedMarkdown
         }
         if Self.imageExtensions.contains(ext) { return .image }
         let sniff = sniffsAsText
-        if await Task.detached(priority: .utility, operation: { sniff(path) }).value { return .text }
+        if await Task.detached(priority: .utility, operation: { sniff(path) }).value {
+            if rendersRichView && DelimitedTextParser.tableExtensions.contains(ext) { return .table }
+            return .text
+        }
         return mediaKind(forExtension: ext) ?? .unpreviewable
     }
 

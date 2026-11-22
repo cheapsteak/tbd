@@ -13,30 +13,38 @@ struct HasRenderableContentKey: PreferenceKey {
     }
 }
 
-/// Files that have a rich rendered view in addition to raw source code.
+/// Files that have a rich view in addition to their highlighted source: a
+/// markdown file renders as a document, and a CSV or TSV file shows as a
+/// table.
 ///
-/// Reads the same set the navigation policy uses to decide that a link should
-/// navigate this pane, so the pane can always render what a click routes here.
+/// The markdown half reads the same set the navigation policy uses to decide
+/// that a link should navigate this pane, so the pane can always render what a
+/// click routes here. The table half reads `DelimitedTextParser.tableExtensions`;
+/// no link routes a table here, because the policy opens only markdown in the
+/// pane.
 private func isRenderableFile(_ path: String) -> Bool {
     let ext = (path as NSString).pathExtension.lowercased()
     return MarkdownWebViewConfiguration.renderableExtensions.contains(ext)
+        || DelimitedTextParser.tableExtensions.contains(ext)
 }
 
-/// Decides whether a rendered markdown document owns the whole code-viewer
-/// pane instead of being stacked inside the pane's `ScrollView`.
+/// Decides whether a file's rich view, a rendered markdown document or a
+/// CSV or TSV table, owns the whole code-viewer pane instead of being stacked
+/// inside the pane's `ScrollView`.
 ///
-/// `WKWebView` reports `noIntrinsicMetric` for height. Inside a `ScrollView`
-/// the vertical proposal is unbounded, so the webview resolves to its ideal
-/// height — zero — and the pane paints nothing but its background. A rendered
-/// document therefore replaces the `ScrollView` outright and scrolls
+/// Both views scroll themselves: the document is a `WKWebView` and the table
+/// an `NSScrollView`, and neither has a height of its own. Inside a
+/// `ScrollView` the vertical proposal is unbounded, so the view resolves to
+/// its ideal height — zero — and the pane paints nothing but its background.
+/// A rich view therefore replaces the `ScrollView` outright and scrolls
 /// internally.
 ///
-/// Only a *single* selected markdown file qualifies. A multi-file selection
-/// would hit the same zero-height collapse, and stacking N internally-scrolling
-/// webviews needs a layout design of its own, so a markdown file in a
+/// Only a *single* selected file qualifies. A multi-file selection would hit
+/// the same zero-height collapse, and stacking N internally-scrolling views
+/// needs a layout design of its own, so a markdown, CSV or TSV file in a
 /// multi-file selection shows its highlighted source instead.
-enum MarkdownPaneLayout {
-    static func usesFullPaneWebView(
+enum RichViewPaneLayout {
+    static func usesFullPane(
         showSourceCode: Bool,
         selectedFiles: [String]
     ) -> Bool {
@@ -62,8 +70,8 @@ struct CodeViewerPaneView: View {
     /// Computed rather than stored: a `private` stored property would drag the
     /// synthesized memberwise initializer down to `private` too, breaking the
     /// pane's call sites.
-    private var usesFullPaneWebView: Bool {
-        MarkdownPaneLayout.usesFullPaneWebView(
+    private var usesFullPane: Bool {
+        RichViewPaneLayout.usesFullPane(
             showSourceCode: showSourceCode,
             selectedFiles: selectedFiles
         )
@@ -85,23 +93,25 @@ struct CodeViewerPaneView: View {
             }
 
             // Code preview
-            if usesFullPaneWebView {
+            if usesFullPane {
                 // Deliberately OUTSIDE the `.colorScheme(.dark)` forcing below:
                 // that modifier propagates into AppKit-hosted views (SwiftUI
                 // sets the hosted NSView's NSAppearance from it), which would
-                // make this WKWebView resolve `prefers-color-scheme: dark`
+                // make the markdown WKWebView resolve `prefers-color-scheme:
+                // dark`, and the table's NSTableView draw in dark colours,
                 // regardless of the user's actual system setting. Leaving this
                 // branch on the ambient appearance lets the rendered document
-                // track light/dark live, the way `MarkdownWebView` intends.
+                // and the table track light/dark live, the way
+                // `MarkdownWebView` intends.
                 //
-                // The webview scrolls itself; wrapping it in the pane's
+                // Both views scroll themselves; wrapping either in the pane's
                 // ScrollView collapses it to zero height. See
-                // `MarkdownPaneLayout`.
+                // `RichViewPaneLayout`.
                 FilePreviewView(
                     filePath: selectedFiles[0],
                     worktreePath: worktreePath,
                     showSourceCode: showSourceCode,
-                    rendersMarkdown: true,
+                    rendersRichView: true,
                     onOpenFile: { openLinkedFile($0) },
                     fillsViewport: true
                 )
@@ -117,16 +127,17 @@ struct CodeViewerPaneView: View {
                                     if selectedFiles.count > 1 {
                                         fileHeader(filePath)
                                     }
-                                    // Never rendered markdown here: a webview
-                                    // nested in this ScrollView has no height.
-                                    // A markdown file reaches this stack only
-                                    // in source mode or a multi-file selection
-                                    // — see `MarkdownPaneLayout`.
+                                    // Never a rich view here: a webview or a
+                                    // table nested in this ScrollView has no
+                                    // height. A markdown, CSV or TSV file
+                                    // reaches this stack only in source mode
+                                    // or a multi-file selection — see
+                                    // `RichViewPaneLayout`.
                                     FilePreviewView(
                                         filePath: filePath,
                                         worktreePath: worktreePath,
                                         showSourceCode: showSourceCode,
-                                        rendersMarkdown: false,
+                                        rendersRichView: false,
                                         onOpenFile: { openLinkedFile($0) },
                                         fillsViewport: selectedFiles.count == 1
                                     )
@@ -139,8 +150,9 @@ struct CodeViewerPaneView: View {
                 .colorScheme(.dark)
             }
         }
-        // Only a single markdown selection has a rendered view to toggle to;
-        // a multi-file selection always shows source (see `MarkdownPaneLayout`).
+        // Only a single markdown, CSV or TSV selection has a rich view to
+        // toggle to; a multi-file selection always shows source (see
+        // `RichViewPaneLayout`).
         .preference(
             key: HasRenderableContentKey.self,
             value: selectedFiles.count == 1 && isRenderableFile(selectedFiles[0])
@@ -204,22 +216,25 @@ struct CodeViewerPaneView: View {
 // MARK: - FilePreviewView
 
 /// Routes a file to its preview, in this order: rendered markdown (when the
-/// pane asks for it) → `RenderedContentView`, images → native NSImage, text →
+/// pane asks for a rich view) → `RenderedContentView`, a CSV or TSV file that
+/// reads as text (when the pane asks for a rich view) →
+/// `DelimitedTablePreview`, images → native NSImage, text →
 /// syntax-highlighted code, audio or video the system can play →
 /// `MediaPreviewView`, anything else → `BinaryFallbackView`, with Quick Look
 /// and Reveal in Finder.
 ///
 /// `FilePreviewClassifier` makes that decision in a `.task` keyed on the path,
-/// the revision and whether markdown renders, never in `body`: the text sniff
-/// reads the file on a detached task, off the main actor, and the media check
-/// queries Launch Services once per extension. A task cancelled while the
-/// sniff runs drops its result. The result is kept with the path it was made
-/// for, and `body` uses it only while that path is still the one shown; until
-/// then it shows a 1 pt placeholder rather than the previous file's view. It
-/// deliberately does not compare the revision. A rewrite keeps the previous
-/// kind until the new one arrives, so the same branch, and with it the same
-/// `RenderedContentView` or `MediaPlayerView`, stays mounted and reloads in
-/// place instead of being rebuilt on every write.
+/// the revision and whether the pane asks for a rich view, never in `body`:
+/// the text sniff reads the file on a detached task, off the main actor, and
+/// the media check queries Launch Services once per extension. A task
+/// cancelled while the sniff runs drops its result. The result is kept with
+/// the path it was made for, and `body` uses it only while that path is still
+/// the one shown; until then it shows a 1 pt placeholder rather than the
+/// previous file's view. It deliberately does not compare the revision. A
+/// rewrite keeps the previous kind until the new one arrives, so the same
+/// branch, and with it the same `RenderedContentView`, `DelimitedTablePreview`
+/// or `MediaPlayerView`, stays mounted and reloads in place instead of being
+/// rebuilt on every write.
 ///
 /// File-watching plumbing intentionally avoids `@StateObject` /
 /// `ObservableObject` / `@Published` — see the doc-comment on
@@ -234,10 +249,10 @@ struct FilePreviewView: View {
     let worktreePath: String
     let showSourceCode: Bool
     /// Decided by the pane: only the pane knows whether this preview owns the
-    /// full height the markdown webview needs. When false, a markdown file is
-    /// classified like any other file, so a text one shows its highlighted
-    /// source.
-    let rendersMarkdown: Bool
+    /// full height a rich view needs, the markdown webview or the table. When
+    /// false, a markdown, CSV or TSV file is classified like any other file,
+    /// so a text one shows its highlighted source.
+    let rendersRichView: Bool
     /// Where a repo-local markdown link goes. Only the rendered path raises it.
     let onOpenFile: (URL) -> Void
     /// True when this is the only file in the pane, so a video or the audio
@@ -267,6 +282,8 @@ struct FilePreviewView: View {
                         revision: revision,
                         onOpenFile: onOpenFile
                     )
+                case .table:
+                    DelimitedTablePreview(filePath: filePath, revision: revision)
                 case .image:
                     ImagePreviewView(filePath: filePath, revision: revision)
                 case .text:
@@ -286,10 +303,10 @@ struct FilePreviewView: View {
                 Color.clear.frame(height: 1)
             }
         }
-        .task(id: "\(filePath)#\(revision)#\(rendersMarkdown && !showSourceCode)") {
+        .task(id: "\(filePath)#\(revision)#\(rendersRichView && !showSourceCode)") {
             let kind = await FilePreviewClassifier.shared.kind(
                 forPath: filePath,
-                rendersMarkdown: rendersMarkdown && !showSourceCode
+                rendersRichView: rendersRichView && !showSourceCode
             )
             // Cancelled while the sniff ran: a newer task owns `classified`.
             guard !Task.isCancelled else { return }

@@ -20,7 +20,7 @@ struct FilePreviewKindTests {
     func audioExtensionsClassifyAsAudio() async {
         let c = classifier(sniff: false)
         for name in ["a.m4a", "a.mp3", "a.wav", "a.flac"] {
-            let k = await c.kind(forPath: "/x/\(name)", rendersMarkdown: false)
+            let k = await c.kind(forPath: "/x/\(name)", rendersRichView: false)
             #expect(k == .audio, "\(name)")
         }
     }
@@ -28,25 +28,25 @@ struct FilePreviewKindTests {
     @Test("video extensions classify as video")
     func videoExtensionsClassifyAsVideo() async {
         let c = classifier(sniff: false)
-        let mov = await c.kind(forPath: "/x/a.mov", rendersMarkdown: false)
+        let mov = await c.kind(forPath: "/x/a.mov", rendersRichView: false)
         #expect(mov == .video)
-        let mp4 = await c.kind(forPath: "/x/a.mp4", rendersMarkdown: false)
+        let mp4 = await c.kind(forPath: "/x/a.mp4", rendersRichView: false)
         #expect(mp4 == .video)
     }
 
     @Test("mkv outside the playable set is unpreviewable")
     func mkvNotInTheSetIsUnpreviewable() async {
         let c = classifier(sniff: false)
-        let k = await c.kind(forPath: "/x/a.mkv", rendersMarkdown: false)
+        let k = await c.kind(forPath: "/x/a.mkv", rendersRichView: false)
         #expect(k == .unpreviewable)
     }
 
     @Test("playlists and captions are text")
     func playlistsAndCaptionsAreText() async {
         let c = classifier(sniff: true)
-        let m3u = await c.kind(forPath: "/x/a.m3u", rendersMarkdown: false)
+        let m3u = await c.kind(forPath: "/x/a.m3u", rendersRichView: false)
         #expect(m3u == .text)
-        let vtt = await c.kind(forPath: "/x/a.vtt", rendersMarkdown: false)
+        let vtt = await c.kind(forPath: "/x/a.vtt", rendersRichView: false)
         #expect(vtt == .text)
     }
 
@@ -54,7 +54,7 @@ struct FilePreviewKindTests {
     func sourceFilesWithMediaExtensionsAreText() async {
         let c = classifier(sniff: true)
         for name in ["index.ts", "mod.mts", "go.mod"] {
-            let k = await c.kind(forPath: "/x/\(name)", rendersMarkdown: false)
+            let k = await c.kind(forPath: "/x/\(name)", rendersRichView: false)
             #expect(k == .text, "\(name)")
         }
     }
@@ -62,36 +62,66 @@ struct FilePreviewKindTests {
     @Test("png is an image")
     func pngIsImage() async {
         let c = classifier(sniff: true)
-        let k = await c.kind(forPath: "/x/a.png", rendersMarkdown: false)
+        let k = await c.kind(forPath: "/x/a.png", rendersRichView: false)
         #expect(k == .image)
     }
 
     @Test("markdown renders only when asked")
     func markdownRendersOnlyWhenAsked() async {
         let c = classifier(sniff: true)
-        let rendered = await c.kind(forPath: "/x/a.md", rendersMarkdown: true)
+        let rendered = await c.kind(forPath: "/x/a.md", rendersRichView: true)
         #expect(rendered == .renderedMarkdown)
-        let source = await c.kind(forPath: "/x/a.md", rendersMarkdown: false)
+        let source = await c.kind(forPath: "/x/a.md", rendersRichView: false)
         #expect(source == .text)
+    }
+
+    @Test("csv and tsv files that read as text are tables when a rich view is asked for")
+    func csvAndTsvAreTablesWhenRendered() async {
+        let c = classifier(sniff: true)
+        for name in ["a.csv", "B.CSV", "c.tsv"] {
+            let k = await c.kind(forPath: "/x/\(name)", rendersRichView: true)
+            #expect(k == .table, "\(name)")
+        }
+    }
+
+    @Test("a csv file is text in source mode")
+    func csvIsTextInSourceMode() async {
+        let c = classifier(sniff: true)
+        let k = await c.kind(forPath: "/x/a.csv", rendersRichView: false)
+        #expect(k == .text)
+    }
+
+    @Test("a csv file that fails the text sniff is not a table")
+    func binaryCsvIsNotATable() async {
+        let c = classifier(sniff: false)
+        let k = await c.kind(forPath: "/x/a.csv", rendersRichView: true)
+        #expect(k == .unpreviewable)
+    }
+
+    @Test("markdown still renders when a rich view is asked for")
+    func markdownStillRenders() async {
+        let c = classifier(sniff: true)
+        let k = await c.kind(forPath: "/x/a.md", rendersRichView: true)
+        #expect(k == .renderedMarkdown)
     }
 
     @Test("upper-case extensions match")
     func upperCaseExtensionsMatch() async {
         let c = classifier(sniff: false)
-        let song = await c.kind(forPath: "/x/SONG.MP3", rendersMarkdown: false)
+        let song = await c.kind(forPath: "/x/SONG.MP3", rendersRichView: false)
         #expect(song == .audio)
-        let clip = await c.kind(forPath: "/x/CLIP.MOV", rendersMarkdown: false)
+        let clip = await c.kind(forPath: "/x/CLIP.MOV", rendersRichView: false)
         #expect(clip == .video)
     }
 
     @Test("the real system list plays common media")
     func realSystemListPlaysCommonMedia() async {
         let c = FilePreviewClassifier(sniffsAsText: { _ in false })
-        let m4a = await c.kind(forPath: "/x/a.m4a", rendersMarkdown: false)
+        let m4a = await c.kind(forPath: "/x/a.m4a", rendersRichView: false)
         #expect(m4a == .audio)
-        let wav = await c.kind(forPath: "/x/a.wav", rendersMarkdown: false)
+        let wav = await c.kind(forPath: "/x/a.wav", rendersRichView: false)
         #expect(wav == .audio)
-        let mov = await c.kind(forPath: "/x/a.mov", rendersMarkdown: false)
+        let mov = await c.kind(forPath: "/x/a.mov", rendersRichView: false)
         #expect(mov == .video)
     }
 }

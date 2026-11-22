@@ -165,7 +165,7 @@ struct MarkdownWebViewConfigurationTests {
             let url = URL(fileURLWithPath: "/repo/file.\(ext)")
             let routesToPane = MarkdownWebViewConfiguration.policy(
                 for: url, isOwnLoad: false, isLinkActivation: true) == .openInPane(url)
-            let paneRendersIt = MarkdownPaneLayout.usesFullPaneWebView(
+            let paneRendersIt = RichViewPaneLayout.usesFullPane(
                 showSourceCode: false, selectedFiles: [url.path])
             #expect(routesToPane == paneRendersIt, "disagreement on .\(ext)")
         }
