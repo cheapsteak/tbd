@@ -186,9 +186,9 @@ The terminal behind a session is what tells them apart — `tbd peer list`
 names it by its id — and the `[ref]` is how you say which one you meant.
 Carrying one over to the other is the hard part, because a `ListAgents`
 row prints no terminal id. Among rows that share a name, a session on the
-tmux transport can still be matched by its pane, which `ListAgents` and
-`tbd terminal list` print, and `tbd peer list` prints for a row it joined
-to a TBD terminal. A holder-backed
+tmux transport can still be matched by its pane, which `ListAgents` prints,
+`tbd terminal list --json` carries as `tmuxPaneID`, and `tbd peer list`
+prints for a row it joined to a TBD terminal. A holder-backed
 session prints no pane, so among same-named holder rows only status and
 start time are left, and they narrow the field without identifying a row.
 Rather than guess a ref there, ask the user. `tbd terminal send
@@ -240,8 +240,8 @@ transport, where a pane cannot: a holder-backed session has no tmux pane,
 and a shadow peer standing in for a session on another machine carries no
 local coordinates by design. A session on the tmux transport additionally
 shows its pane (`tmux <server>:<window>.<pane>` in `ListAgents`,
-`tmux %<pane>` in `tbd peer list`, the PANE column in `tbd terminal
-list`) — a legacy coordinate that still
+`tmux %<pane>` in `tbd peer list`, `tmuxPaneID` in `tbd terminal list
+--json`) — a legacy coordinate that still
 tells same-named tmux rows apart, as described under [Addressing a
 peer](#addressing-a-peer), but not an identity.
 

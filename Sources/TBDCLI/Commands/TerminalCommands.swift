@@ -140,8 +140,6 @@ struct TerminalCreate: AsyncParsableCommand {
         } else {
             print("Created terminal:")
             print("  ID:     \(terminal.id)")
-            print("  Window: \(terminal.tmuxWindowID)")
-            print("  Pane:   \(terminal.tmuxPaneID)")
             if let profileChoice {
                 print("  Profile: \(profileChoice.name)")
             }
@@ -201,16 +199,17 @@ struct TerminalList: AsyncParsableCommand {
                 print("No terminals found.")
                 return
             }
+            // TRANSPORT rather than tmux's window and pane: a holder row has
+            // neither, and the pane of a row still on tmux is in `--json`.
             let header = tableRow([
-                ("ID", 36), ("WINDOW", 10), ("PANE", 10), ("LABEL", 20), ("STATE", 0)
+                ("ID", 36), ("TRANSPORT", 10), ("LABEL", 20), ("STATE", 0)
             ])
             print(header)
-            print(String(repeating: "-", count: 96))
+            print(String(repeating: "-", count: 84))
             for term in terminals {
                 let line = tableRow([
                     (term.id.uuidString, 36),
-                    (term.tmuxWindowID, 10),
-                    (term.tmuxPaneID, 10),
+                    (term.transport.rawValue, 10),
                     (term.label ?? "-", 20),
                     (parkedStateMarker(for: term), 0)
                 ])
@@ -476,9 +475,9 @@ struct TerminalMigrate: AsyncParsableCommand {
 struct TerminalClose: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "close",
-        abstract: "Close a terminal: capture its scrollback to Closed Terminals history, kill its tmux window, remove it from TBD. Idempotent: closing an already-closed terminal is a no-op.",
+        abstract: "Close a terminal: capture its scrollback to Closed Terminals history, end its session, remove it from TBD. Idempotent: closing an already-closed terminal is a no-op.",
         discussion: """
-            Closing is immediate and final for the terminal row. The pane's
+            Closing is immediate and final for the terminal row. The terminal's
             scrollback is captured into Session History → Closed Terminals
             (best-effort), any pending session-limit auto-resume is cancelled,
             and the tab disappears from the app. A Claude session's transcript
@@ -487,15 +486,19 @@ struct TerminalClose: AsyncParsableCommand {
 
             By default a terminal that is mid-turn or holding a permission
             prompt is refused (exit 2) — pass --force to close it anyway. That
-            check applies only while the pane's window is alive, so a session
-            that died mid-turn stays closeable without --force.
+            check applies only while the session may still be running, so a
+            session that died mid-turn stays closeable without --force.
 
             A terminal whose composer in the TBD app holds an unsent draft is
             refused the same way (exit 2), because the draft lives only in the
             app and closing discards it. `tbd terminal list --json` shows it as
             `hasComposerDraft`.
 
-            A terminal cannot close itself: killing the window SIGHUPs the
+            A terminal an earlier version of TBD left on tmux is removed without
+            ending its session: TBD runs no tmux command, so a session still
+            running in its tmux server keeps running there.
+
+            A terminal cannot close itself: ending the session hangs up the
             calling shell, so this command could never report its own result.
             Spawn a successor and have it close you.
 
