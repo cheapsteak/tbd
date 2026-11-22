@@ -122,6 +122,44 @@ second-guessed; the reading is shown in `tbd profile list` for them to see.
 - RPC: `modelProfile.fableCheck`, `claude.fableCreditsOut`, and an optional
   `fable` on `ModelProfileWithUsage`, all backwards-compatible.
 
+## No flag
+
+This ships without a default-off flag. Here is each case in which the repo's
+CLAUDE.md asks for one, checked against this design:
+
+- **Acting without a user gesture** – a probe runs only when something asks
+  for a reading: a Fable spawn, `tbd profile fable-check`, or
+  `tbd profile list --refresh-fable`. Nothing probes on a timer or in the
+  background. The one signal that arrives unasked, the StopFailure hook's
+  credits message, runs no probe; it only updates the in-memory reading.
+- **Killing processes** – the only process TBD signals is its own probe. A
+  `claude -p` probe still running after 60 seconds gets SIGTERM, then
+  SIGKILL. No session and no other process is touched.
+- **Deleting or changing persisted state** – readings live in memory only,
+  and a probe does not move the profile's last-used time. A probe prepares
+  the profile's config directory the way `tbd profile exec` does, and Claude
+  Code leaves one small session transcript there (see Cost). Nothing is
+  deleted or rewritten.
+- **Sending input to a session** – none. A probe is its own headless process
+  with no stdin, and the hook path only records a reading.
+- **Replacing a load-bearing path** – balancing gains one verdict,
+  `.fableOut`, which the picker gives only when the spawn asks for a Fable
+  model, and the global-default step, which runs whether or not balancing is
+  on, gains the same check. A spawn that does not ask for Fable takes the
+  same path as before.
+- **Moving existing UI** – the `FABLE` column is new, after the usage columns
+  in `tbd profile list`, and `fable` is a new field in its JSON. Existing
+  columns and fields keep their order and meaning; the trailing markers such
+  as `[default]` now come after the new column.
+
+What it does cost:
+
+- Each probe bills a few tokens on an account that has credits.
+- A Fable spawn is refused, not started, when every profile it could land on
+  reads `out`.
+- A Fable spawn with unchecked profiles waits for their probes before it
+  starts, at most 45 seconds per wait (see Balancing).
+
 ## Not verified yet
 
 The StopFailure hook's delivery of the credits error message for a Fable turn
