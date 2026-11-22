@@ -414,6 +414,22 @@ public actor HibernationCoordinator {
         + "`tbd terminal migrate \(terminalID.uuidString)`."
     }
 
+    /// What a wake answers for a parked row with no recovery resume plan: a
+    /// tab that is not Claude's but carries a session id, such as a shell
+    /// whose hand-started Claude recorded one, or a row with no session to
+    /// resume. Nothing is respawned and the row stays as it was.
+    ///
+    /// The wake asks the row's plan only once the row is on the pty holder.
+    /// A person's wake of a parked tmux row asks it before the move
+    /// (`RPCRouter.moveParkedTmuxRowBeforeWake`), and answers this, so it
+    /// never moves a row with no resume plan.
+    static func wakeResultWithoutResumePlan(_ terminal: Terminal) -> WakeResult {
+        if case .notAClaudeTab(let kind) = terminal.claudeResumeDecision {
+            return .notAClaudeTab(kind: kind)
+        }
+        return .noSessionID
+    }
+
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
@@ -1152,10 +1168,7 @@ public actor HibernationCoordinator {
         // Recovery and wake share provider identity; parking a live process
         // continues to use the stricter Claude-only eligibility policy.
         guard let resumePlan = terminal.recoveryResumePlan else {
-            if case .notAClaudeTab(let kind) = terminal.claudeResumeDecision {
-                return .notAClaudeTab(kind: kind)
-            }
-            return .noSessionID
+            return Self.wakeResultWithoutResumePlan(terminal)
         }
         let sessionID = resumePlan.identity.sessionID
         if resumePlan.identity.agentKind == .codex, let initialPrompt, !initialPrompt.isEmpty {

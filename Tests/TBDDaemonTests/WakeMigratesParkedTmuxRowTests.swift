@@ -219,6 +219,257 @@ struct WakeMigratesParkedTmuxRowTests {
         }
     }
 
+    /// No declared actor reads as a person's, which moves a parked tmux row,
+    /// so a caller inside the daemon that forgot to name its actor would move
+    /// rows as a person. The handlers take the actor with no default, so
+    /// leaving it out does not compile; this pins what each caller passes,
+    /// and that no default comes back.
+    ///
+    /// A rail passes `.daemon(...)`. The socket dispatch passes the actor the
+    /// client declared, the handlers forward their own caller's, and the
+    /// phone surface passes the phone's, which is a person's gesture. Anything
+    /// else is reported, so a new caller is a decision rather than a default.
+    ///
+    /// A default for `actor` is reported too, wherever it would let a caller
+    /// leave the actor out: on an entry point's own declaration, and on any
+    /// function that forwards its `actor` to one, which is how a wrapper in a
+    /// file allowed to forward `actor` would hand a person's wake to a caller
+    /// that never named one. A source pin, because the property is about every
+    /// call site.
+    @Test("every caller inside the daemon names the actor it wakes for")
+    func everyInProcessWakeCallerNamesItsActor() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/TBDDaemonTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // repo root
+        let entryPoints = [
+            "handleTerminalWake", "handleTerminalResume", "handleWorktreeResume",
+            "moveParkedTmuxRowBeforeWake", "holdWakeIfDenied",
+        ]
+        let files = FileManager.default.enumerator(
+            at: root.appendingPathComponent("Sources/TBDDaemon"), includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" } ?? []
+        var scanned = 0
+        var calls: [String] = []
+        var offenders: [String] = []
+        var declarations: [String] = []
+        var forwarders: [String] = []
+        var defaulted: [String] = []
+        for file in files {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            scanned += 1
+            let fileName = file.lastPathComponent
+            for entryPoint in entryPoints {
+                for parameters in Self.declaredParameters(of: entryPoint, in: text) {
+                    declarations.append("\(fileName): \(entryPoint)")
+                    if Self.defaultsActor(parameters) {
+                        defaulted.append("\(fileName): func \(entryPoint)")
+                    }
+                }
+                for call in Self.calls(of: entryPoint, in: text) {
+                    let site = "\(fileName): \(entryPoint)(\(call.arguments))"
+                    calls.append(site)
+                    let actor = Self.argument("actor", in: call.arguments)
+                    if !Self.isAllowedWakeActor(actor, file: fileName) {
+                        offenders.append(site)
+                    }
+                    guard actor == "actor" else { continue }
+                    guard let enclosing = Self.enclosingDeclaration(before: call.start, in: text) else {
+                        offenders.append("\(site), in no function the scan could find")
+                        continue
+                    }
+                    forwarders.append("\(fileName): \(enclosing.name)")
+                    if Self.defaultsActor(enclosing.parameters) {
+                        defaulted.append("\(fileName): func \(enclosing.name), which passes its actor to \(entryPoint)")
+                    }
+                }
+            }
+        }
+
+        #expect(scanned > 100, "the source scan found almost nothing to read — it is passing vacuously")
+        #expect(calls.count >= 11, "the scan missed calls it should find: \(calls)")
+        #expect(offenders.isEmpty,
+                "these wake or resume without naming a rail, the client's actor or the phone's: \(offenders.joined(separator: "; "))")
+        #expect(declarations.count == entryPoints.count,
+                "the scan did not find each entry point declared once: \(declarations)")
+        #expect(Set(forwarders).isSuperset(of: [
+            "RPCRouter+HibernationHandlers.swift: handleTerminalWake",
+            "RPCRouter+ManualSuspendHandlers.swift: handleTerminalResume",
+            "RPCRouter+ManualSuspendHandlers.swift: handleWorktreeResume",
+        ]), "the scan missed a handler that forwards its actor: \(forwarders)")
+        #expect(defaulted.isEmpty,
+                "these give the actor a wake runs for a default, so a caller can leave it out: \(defaulted.joined(separator: "; "))")
+    }
+
+    /// The scan's reading of a declaration's `actor` parameter, on the shapes
+    /// a default can take and the ones that are not defaults, so a scan that
+    /// stopped recognising one would not pass by finding nothing.
+    @Test("the source scan tells a defaulted actor parameter from one without a default")
+    func theSourceScanReadsActorDefaults() throws {
+        let source = """
+            func handleTerminalWake(
+                _ paramsData: Data, actor: ActuationActor? = nil,
+                condition: SessionRestoreCondition? = nil
+            ) async throws -> RPCResponse {
+                // func holdWakeIfDenied(actor: ActuationActor? = nil)
+                let held = await holdWakeIfDenied(actuationID, actor: actor, terminalID: id)
+            }
+            func holdWakeIfDenied(_ id: String, by actor: ActuationActor = .anonymous) async {}
+            func moveParkedTmuxRowBeforeWake(_ id: String, actor: ActuationActor?, terminalID: UUID) {}
+            """
+        #expect(Self.declaredParameters(of: "handleTerminalWake", in: source).map(Self.defaultsActor) == [true])
+        #expect(Self.declaredParameters(of: "holdWakeIfDenied", in: source).map(Self.defaultsActor) == [true])
+        #expect(Self.declaredParameters(of: "moveParkedTmuxRowBeforeWake", in: source)
+            .map(Self.defaultsActor) == [false])
+        let calls = Self.calls(of: "holdWakeIfDenied", in: source)
+        #expect(calls.count == 1, "the scan read the declaration or the comment as a call: \(calls)")
+        let call = try #require(calls.first)
+        #expect(Self.argument("actor", in: call.arguments) == "actor")
+        let enclosing = try #require(Self.enclosingDeclaration(before: call.start, in: source))
+        #expect(enclosing.name == "handleTerminalWake")
+        #expect(Self.defaultsActor(enclosing.parameters))
+        #expect(!Self.defaultsActor("_ paramsData: Data, actor: ActuationActor?, condition: X? = nil"))
+    }
+
+    /// The actor each daemon file may pass to a wake or resume entry point.
+    private static func isAllowedWakeActor(_ actor: String?, file: String) -> Bool {
+        guard let actor else { return false }
+        if actor.hasPrefix(".daemon(") { return true }
+        switch file {
+        case "RPCRouter.swift":
+            return actor == "request.actor"
+        case "RPCRouter+HibernationHandlers.swift", "RPCRouter+ManualSuspendHandlers.swift":
+            return actor == "actor"
+        case "RPCRouter+PhoneSessionActions.swift":
+            return actor.hasPrefix(".phone(deviceID:")
+        default:
+            return false
+        }
+    }
+
+    /// Every mention of `name(` in `text` that is not part of a longer name
+    /// or on a comment line, with whether `func ` precedes it on its line,
+    /// which makes it the declaration rather than a call.
+    private static func mentions(
+        of name: String, in text: String
+    ) -> [(start: String.Index, isDeclaration: Bool, arguments: String)] {
+        var found: [(start: String.Index, isDeclaration: Bool, arguments: String)] = []
+        var searchStart = text.startIndex
+        while let match = text.range(of: name + "(", range: searchStart..<text.endIndex) {
+            searchStart = match.upperBound
+            if match.lowerBound > text.startIndex {
+                let previous = text[text.index(before: match.lowerBound)]
+                if previous.isLetter || previous.isNumber || previous == "_" { continue }
+            }
+            let lead = text[lineStart(of: match.lowerBound, in: text)..<match.lowerBound]
+            if lead.trimmingCharacters(in: .whitespaces).hasPrefix("//") { continue }
+            found.append((
+                start: match.lowerBound, isDeclaration: lead.hasSuffix("func "),
+                arguments: balancedContents(from: match.upperBound, in: text)))
+        }
+        return found
+    }
+
+    /// The argument text of every call of `name` in `text`, with where the
+    /// call starts, leaving out its declaration, comment lines, and longer
+    /// names that end in it.
+    private static func calls(
+        of name: String, in text: String
+    ) -> [(start: String.Index, arguments: String)] {
+        mentions(of: name, in: text)
+            .filter { !$0.isDeclaration }
+            .map { (start: $0.start, arguments: $0.arguments) }
+    }
+
+    /// The parameter list of every declaration of `name` in `text`.
+    private static func declaredParameters(of name: String, in text: String) -> [String] {
+        mentions(of: name, in: text).filter(\.isDeclaration).map(\.arguments)
+    }
+
+    /// The name and parameter list of the last function declared before
+    /// `position`, passing over comment lines: the function a call there is
+    /// in, for the declarations this scan reads.
+    private static func enclosingDeclaration(
+        before position: String.Index, in text: String
+    ) -> (name: String, parameters: String)? {
+        var end = position
+        while let keyword = text.range(of: "func ", options: .backwards, range: text.startIndex..<end) {
+            end = keyword.lowerBound
+            let lead = text[lineStart(of: keyword.lowerBound, in: text)..<keyword.lowerBound]
+            if lead.trimmingCharacters(in: .whitespaces).hasPrefix("//") { continue }
+            guard let open = text[keyword.upperBound..<position].firstIndex(where: { $0 == "(" || $0 == "<" }),
+                  let paren = text[open..<position].firstIndex(of: "(") else { continue }
+            let name = text[keyword.upperBound..<open].trimmingCharacters(in: .whitespaces)
+            return (name: name, parameters: balancedContents(from: text.index(after: paren), in: text))
+        }
+        return nil
+    }
+
+    /// Whether a parameter list gives the parameter named `actor` a default.
+    private static func defaultsActor(_ parameters: String) -> Bool {
+        for piece in topLevelPieces(parameters) {
+            let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let colon = trimmed.firstIndex(of: ":") else { continue }
+            let names = trimmed[..<colon].split(separator: " ").map(String.init)
+            guard names.last == "actor" else { continue }
+            return trimmed[colon...].contains("=")
+        }
+        return false
+    }
+
+    /// The text of the argument labelled `label` in a call's argument text,
+    /// whitespace trimmed, or nil when the call has none.
+    private static func argument(_ label: String, in arguments: String) -> String? {
+        for piece in topLevelPieces(arguments) {
+            let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix(label + ":") {
+                return trimmed.dropFirst(label.count + 1)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return nil
+    }
+
+    /// An argument or parameter list split at its top-level commas.
+    private static func topLevelPieces(_ list: String) -> [String] {
+        var pieces: [String] = []
+        var current = ""
+        var depth = 0
+        for character in list {
+            if "([{".contains(character) { depth += 1 }
+            if ")]}".contains(character) { depth -= 1 }
+            if character == ",", depth == 0 {
+                pieces.append(current)
+                current = ""
+            } else {
+                current.append(character)
+            }
+        }
+        pieces.append(current)
+        return pieces
+    }
+
+    /// The text from `start`, just past an opening parenthesis, to the one
+    /// that closes it.
+    private static func balancedContents(from start: String.Index, in text: String) -> String {
+        var depth = 1
+        var cursor = start
+        while cursor < text.endIndex {
+            let character = text[cursor]
+            if character == "(" { depth += 1 }
+            if character == ")" { depth -= 1 }
+            if depth == 0 { break }
+            cursor = text.index(after: cursor)
+        }
+        return String(text[start..<cursor])
+    }
+
+    /// Where the line holding `index` starts.
+    private static func lineStart(of index: String.Index, in text: String) -> String.Index {
+        text[..<index].lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex
+    }
+
     // MARK: - A person's wake
 
     /// The app's wake, by each request that wakes a parked row, moves it to
@@ -296,14 +547,17 @@ struct WakeMigratesParkedTmuxRowTests {
     /// A row whose park is still in flight may still be running its agent in
     /// tmux, so while its server may run the move is refused, as
     /// `terminal.migrateTransport` refuses it, and the wake with it: nothing is
-    /// rewritten and nothing is spawned.
-    @Test("a person's wake of a row whose park is in flight is refused while its server may run")
-    func aParkInFlightRowIsRefusedWhileItsServerMayRun() async throws {
+    /// rewritten and nothing is spawned. Every request that wakes a parked row
+    /// answers with the move's refusal and closes its actuation exactly once:
+    /// `worktree.resume` goes on to its next terminal without waking this one.
+    @Test("a person's wake of a row whose park is in flight is refused while its server may run",
+          arguments: Entry.allCases)
+    func aParkInFlightRowIsRefusedWhileItsServerMayRun(_ entry: Entry) async throws {
         let f = try await Self.makeFixture(probe: LeftoverTmuxServerProbe { _ in .running })
         defer { f.tearDown() }
         let row = try await Self.parkInFlightTmuxRow(f)
 
-        let response = await f.router.handle(try Entry.terminalWake.request(row, actor: .app))
+        let response = await f.router.handle(try entry.request(row, actor: .app))
 
         #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
         #expect(response.error == LeftoverTmuxSession.stillRunningRefusal(
@@ -311,9 +565,10 @@ struct WakeMigratesParkedTmuxRowTests {
         #expect(try await f.db.terminals.get(id: row.id) == row, "a refused move rewrote the row")
         #expect(f.holder.launches.isEmpty, "a refused move started a holder")
         #expect(f.replaced(row.id).isEmpty, "a refused move published a move")
-        let outcome = try #require(try f.actuationOutcomes().last)
-        #expect(outcome["result"] as? String == "refused")
-        #expect(outcome["reason"] as? String == "not-eligible")
+        let outcomes = try f.actuationOutcomes()
+        #expect(outcomes.count == 1, "the actuation was not closed exactly once: \(outcomes)")
+        #expect(outcomes.first?["result"] as? String == "refused")
+        #expect(outcomes.first?["reason"] as? String == "not-eligible")
     }
 
     /// A row the move turns away for having nothing to resume is refused with
@@ -339,6 +594,135 @@ struct WakeMigratesParkedTmuxRowTests {
         #expect(response.error == skip)
         #expect(try await f.db.terminals.get(id: row.id) == row, "a refused move rewrote the row")
         #expect(f.holder.launches.isEmpty, "a refused move started a holder")
+        #expect(f.replaced(row.id).isEmpty, "a refused move published a move")
+        let outcomes = try f.actuationOutcomes()
+        #expect(outcomes.count == 1, "the actuation was not closed exactly once: \(outcomes)")
+        #expect(outcomes.first?["result"] as? String == "refused")
+        #expect(outcomes.first?["reason"] as? String == "not-eligible")
+    }
+
+    /// A parked shell — one with no session, or one carrying the id a Claude
+    /// started by hand inside it recorded — would move, but no wake resumes
+    /// it on the holder either. So a person's wake does not move it: it is
+    /// refused as its wake on the holder is refused, and the row stays on tmux
+    /// exactly as it was, rather than moving and then staying asleep.
+    @Test("a person's wake of a parked tmux shell is refused without moving it",
+          arguments: [Entry.terminalWake, .terminalResume], [nil, "sess-hand-started"] as [String?])
+    func aParkedShellIsRefusedWithoutMovingIt(entry: Entry, session: String?) async throws {
+        let f = try await Self.makeFixture()
+        defer { f.tearDown() }
+        let created = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@4", tmuxPaneID: "%4",
+            label: TerminalLabel.shell, claudeSessionID: session, kind: .shell, transport: .tmux)
+        try await f.db.terminals.setHibernated(
+            id: created.id, sessionID: session ?? "sess-cleared", reason: .recovery)
+        if session == nil {
+            try await f.db.writerForTests.write { db in
+                try db.execute(
+                    sql: "UPDATE terminal SET claudeSessionID = NULL WHERE id = ?",
+                    arguments: [created.id.uuidString])
+            }
+        }
+        let row = try #require(try await f.db.terminals.get(id: created.id))
+        #expect(row.isParked && row.transport == .tmux && row.recoveryResumePlan == nil,
+                "the fixture is not a parked tmux shell with nothing to resume")
+        #expect(TransportMigrationEligibility.nothingToResumeSkip(row) == nil,
+                "the migration would skip the fixture, so it proves nothing about a shell it moves")
+
+        let response = await f.router.handle(try entry.request(row, actor: .app))
+
+        #expect(!response.success)
+        #expect(response.error == (session == nil
+            ? "No session ID to resume" : ClaudeResumeDecision.notAClaudeTabReason(.shell)))
+        #expect(response.errorCode == nil)
+        #expect(try await f.db.terminals.get(id: row.id) == row,
+                "a wake that cannot resume the row moved it")
+        #expect(f.holder.launches.isEmpty, "a refused wake started a holder")
+        #expect(f.replaced(row.id).isEmpty, "a refused wake published a move")
+        let outcomes = try f.actuationOutcomes()
+        #expect(outcomes.count == 1, "the actuation was not closed exactly once: \(outcomes)")
+        #expect(outcomes.first?["result"] as? String == "refused")
+        #expect(outcomes.first?["reason"] as? String == "not-eligible")
+    }
+
+    /// A read of the row that fails is not a row that is absent or awake. A
+    /// person's wake is refused with the read error, which says to try again,
+    /// rather than handed on to the coordinator, whose answer for a parked
+    /// tmux row tells the person to do what they just did. Recorded as a
+    /// failure, not a refusal: nothing was declined.
+    @Test("a person's wake whose read of the row fails is refused with the read error")
+    func aRowThatCannotBeReadIsRefusedWithTheReadError() async throws {
+        let f = try await Self.makeFixture()
+        defer { f.tearDown() }
+        let row = try await Self.parkedTmuxRow(f)
+        try await f.db.writerForTests.write { db in
+            try db.execute(sql: "ALTER TABLE terminal RENAME TO terminal_unreadable")
+        }
+
+        let response = await f.router.handle(try Entry.terminalWake.request(row, actor: .app))
+
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.hasPrefix("TBD could not read this session"), "the wake was answered with: \(error)")
+        #expect(response.errorCode == nil)
+        #expect(f.holder.launches.isEmpty, "a wake that could not read the row started a holder")
+        let outcomes = try f.actuationOutcomes()
+        #expect(outcomes.count == 1, "the actuation was not closed exactly once: \(outcomes)")
+        #expect(outcomes.first?["result"] as? String == "transport-failed")
+    }
+
+    /// Start admission that admits every wake, after making the terminal
+    /// table unreadable: the seam between `worktree.resume`'s list of the
+    /// worktree's rows, which must succeed for the call to reach a row at
+    /// all, and the move's own read of that row.
+    private final class UnreadableAfterAdmission: StartAdmissionEvaluating, @unchecked Sendable {
+        private let lock = NSLock()
+        private var asked = 0
+        private let db: TBDDatabase
+
+        init(db: TBDDatabase) { self.db = db }
+
+        var count: Int { lock.withLock { asked } }
+
+        func evaluate(_ request: StartAdmissionRequest) async -> StartAdmissionVerdict {
+            lock.withLock { asked += 1 }
+            do {
+                try await db.writerForTests.write { database in
+                    try database.execute(sql: "ALTER TABLE terminal RENAME TO terminal_unreadable")
+                }
+            } catch {
+                Issue.record("could not make the terminal table unreadable: \(error)")
+            }
+            return .admit
+        }
+    }
+
+    /// `worktree.resume` whose move cannot read the row answers with the read
+    /// error, which says to try again, and no `terminalOnTmux` code: the
+    /// call woke nothing, so it reports the move's own refusal, not the
+    /// coordinator's advice for a row still on tmux. Recorded once, as a
+    /// failure. The row is listed first, so the read fails only once start
+    /// admission, which is asked between the two, has renamed the table.
+    @Test("worktree.resume whose move cannot read the row answers with the read error")
+    func aWorktreeResumeWhoseMoveCannotReadTheRowAnswersWithTheReadError() async throws {
+        let f = try await Self.makeFixture()
+        defer { f.tearDown() }
+        let row = try await Self.parkedTmuxRow(f)
+        let admission = UnreadableAfterAdmission(db: f.db)
+        f.router.startAdmission = admission
+        try await f.db.config.setStartAdmissionEnabled(true)
+
+        let response = await f.router.handle(try Entry.worktreeResume.request(row, actor: nil))
+
+        #expect(admission.count == 1, "start admission was not asked between the list and the move")
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.hasPrefix("TBD could not read this session"), "the resume was answered with: \(error)")
+        #expect(response.errorCode == nil)
+        #expect(f.holder.launches.isEmpty, "a resume that could not read the row started a holder")
+        let outcomes = try f.actuationOutcomes()
+        #expect(outcomes.count == 1, "the actuation was not closed exactly once: \(outcomes)")
+        #expect(outcomes.first?["result"] as? String == "transport-failed")
     }
 
     /// Operations whose server sighting first runs `race`, a write by another
@@ -423,8 +807,40 @@ struct WakeMigratesParkedTmuxRowTests {
                     "the row is not as the other writer left it")
             #expect(f.holder.launches.isEmpty, "a refused move started a holder")
             #expect(f.replaced(row.id).isEmpty, "a refused move published a move")
-            let outcome = try #require(try f.actuationOutcomes().last)
-            #expect(outcome["result"] as? String == "refused")
         }
+        let outcomes = try f.actuationOutcomes()
+        #expect(outcomes.count == 1, "the actuation was not closed exactly once: \(outcomes)")
+        #expect(outcomes.first?["result"] as? String == (endsOnTheHolder ? "dispatched" : "refused"))
+    }
+
+    /// A tab closed while the move ran leaves the rewrite no row to write.
+    /// That is a missing row, so the wake answers it as the missing row it now
+    /// is — "Terminal not found", recorded as not found — and not as a move
+    /// that could not be recorded, whose `terminalOnTmux` code says the
+    /// session is still parked on tmux. `worktree.resume` reports no missing
+    /// row of its own, so the two single-terminal requests are the ones asked.
+    @Test("a person's wake of a row closed while it was being moved answers that it is gone",
+          arguments: [Entry.terminalWake, .terminalResume])
+    func aRowClosedDuringTheMoveIsNotFound(_ entry: Entry) async throws {
+        let f = try await Self.makeFixture()
+        defer { f.tearDown() }
+        let row = try await Self.parkInFlightTmuxRow(f)
+        let db = f.db
+        f.router.transportMigratorOperationsOverride = Self.racingOperations { terminalID in
+            try await db.terminals.delete(id: terminalID)
+        }
+
+        let response = await f.router.handle(try entry.request(row, actor: .app))
+
+        #expect(!response.success)
+        #expect(response.error == "Terminal not found")
+        #expect(response.errorCode != RPCErrorCode.terminalOnTmux.rawValue,
+                "a closed row was answered as one still parked on tmux")
+        #expect(try await f.db.terminals.get(id: row.id) == nil, "the fixture did not close the row")
+        #expect(f.holder.launches.isEmpty, "the wake of a closed row started a holder")
+        let outcomes = try f.actuationOutcomes()
+        #expect(outcomes.count == 1, "the actuation was not closed exactly once: \(outcomes)")
+        #expect(outcomes.first?["result"] as? String == "refused")
+        #expect(outcomes.first?["reason"] as? String == "not-found")
     }
 }

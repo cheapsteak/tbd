@@ -1975,32 +1975,45 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Forget the session id a tab that is not Claude's, still on the tmux
-    /// transport, carries for a Claude started by hand inside it, once that
-    /// Claude's `SessionEnd` says its process left. Returns whether the row
-    /// changed.
+    /// Forget the session id a tab that is not Claude's carries for a Claude
+    /// started by hand inside it, once that Claude's `SessionEnd` says its
+    /// process left. Returns whether the row changed.
     ///
     /// `SessionStart` records such a Claude's id onto the row
-    /// (`applySessionStart`), and `stampSessionExited` leaves the row
-    /// unstamped because no wake resumes Claude in a shell. Kept, the id
-    /// would keep naming a session that no longer runs there to the resume
-    /// gate's open-row lookup (`liveTmuxServers`), so every resume of it
-    /// would be refused while the worktree's tmux server runs — and the shell
-    /// keeps that server running. A hand-started Claude that is still running
-    /// keeps its id, and the gate keeps refusing a second start of it.
+    /// (`applySessionStart`), on either transport, and `stampSessionExited`
+    /// leaves the row unstamped because no wake resumes Claude in a shell.
+    /// Kept, the id would keep naming a session that no longer runs there: on
+    /// tmux to the resume gate's open-row lookup (`liveTmuxServers`), so every
+    /// resume of it would be refused while the worktree's tmux server runs,
+    /// and the shell keeps that server running; on the pty holder to the
+    /// Closed Terminals reopen, which refuses to start a session beside a
+    /// holder tab that carries it. The holder job is the shell, whose exit
+    /// says nothing about a Claude that left inside it, so a holder row is
+    /// cleared the same way. A hand-started Claude that is still running
+    /// keeps its id, and both keep refusing a second start of it.
     ///
-    /// The same guards as the stamp's, but for the tab's kind: a row on the
-    /// pty holder is left alone (its job's exit answers for it, and the gate
-    /// never reads it), as is a Claude or Codex tab, whose id is its own
-    /// session, and a report whose incarnation is not the row's.
+    /// A Claude or Codex tab is left alone, since its id is its own session,
+    /// as is a report whose incarnation is not the row's.
+    ///
+    /// A report that names the session that ended (`endedSessionID`) forgets
+    /// the row's id only when it is that one. One shell can run one
+    /// hand-started Claude after another under the same incarnation, so a
+    /// late `SessionEnd` from an earlier one would otherwise forget the id of
+    /// the one still running, and a second start of it would go through. A
+    /// report that names none (nil or empty) is judged by its incarnation
+    /// alone, as every report was before the field existed: it comes from a
+    /// `tbd` older than the field — the hook runs whatever `tbd` is on the
+    /// PATH — or from a payload with no `session_id`, and refusing it would
+    /// leave such a shell refusing a session that ended in it.
     @discardableResult
     public func clearEndedHandStartedSession(
-        id: UUID, reportedIncarnationID: UUID?
+        id: UUID, reportedIncarnationID: UUID?, endedSessionID: String?
     ) async throws -> Bool {
-        try await writer.write { db in
+        let namedSessionID = endedSessionID.flatMap { $0.isEmpty ? nil : $0 }
+        return try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
-                  record.transport != TerminalTransport.holder.rawValue,
-                  record.claudeSessionID != nil,
+                  let carriedSessionID = record.claudeSessionID,
+                  namedSessionID == nil || namedSessionID == carriedSessionID,
                   let terminal = record.toModel(),
                   !terminal.isClaudeTab, !terminal.isCodexTerminal,
                   record.sessionIncarnationID == reportedIncarnationID?.uuidString else {

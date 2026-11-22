@@ -249,13 +249,31 @@ extension RPCRouter {
         // daemon can have a minimal PATH, and a resolution failure must not
         // leave an orphan terminal row behind. After the resume gate, because
         // preparing writes the Codex home a refused resume must not touch.
+        //
+        // No Codex CLI to run is recorded as a refusal, not a transport
+        // failure: the start lacks what it needs, and nothing of the terminal
+        // exists yet, so it is declined before anything starts, as the
+        // plugin-dir and profile refusals are. A Codex home that cannot be
+        // written is a failure of the start itself, recorded as one; the
+        // ensurer may have written part of the home by then. Either answer is
+        // the error as the caller has always seen it.
         let codexPreparation: CodexLaunchPreparation?
         if params.type == .codex {
-            codexPreparation = try await actuating(actuationID) {
-                try CodexLaunchPreparation.prepare(
+            do {
+                codexPreparation = try CodexLaunchPreparation.prepare(
                     guardedHome: guardedCodexHome?.path,
                     executableResolver: codexExecutableResolver,
                     sharedHomeEnsurer: codexHomeEnsurer)
+            } catch let unresolved as CodexExecutableResolutionError {
+                let message = "\(unresolved)"
+                logger.warning("terminal.create: no Codex CLI to run, so nothing was started: \(message, privacy: .public)")
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            } catch {
+                let message = "\(error)"
+                logger.error("terminal.create: the Codex home could not be prepared, so nothing was started: \(message, privacy: .public)")
+                await finishActuation(actuationID, .transportFailed, error: message)
+                return RPCResponse(error: message)
             }
         } else {
             codexPreparation = nil
@@ -840,8 +858,11 @@ extension RPCRouter {
         // once the close is certain to go ahead: a close that throws keeps
         // the row, and the row keeps its auto-resume with it. For a holder
         // row that is before its holder is disposed of, so no resume fires
-        // into a session being torn down; a tmux row's close can still throw
-        // when its mark cannot be written, so it cancels after that.
+        // into a session being torn down. A tmux row disposes of nothing,
+        // and its close can throw when its mark cannot be written or when the
+        // delete fails, so it cancels once the delete has committed.
+        // `scheduled_resumes` has no foreign key to the row, so the cancel
+        // still finds the pending resume after the row is gone.
         func cancelPendingResume() async {
             if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
                 await limitResumeScheduler?.wake()
@@ -895,14 +916,14 @@ extension RPCRouter {
                     terminal, server: worktree?.tmuxServer,
                     history: worktree == nil ? nil : db.terminalHistory)
             }
-            await cancelPendingResume()
         }
 
         // Delete from DB
-        try await step {
-            try await db.terminals.delete(id: terminal.id)
-            try await db.tabs.delete(tabID: terminal.id)
+        try await step { try await db.terminals.delete(id: terminal.id) }
+        if terminal.transport == .tmux {
+            await cancelPendingResume()
         }
+        try await step { try await db.tabs.delete(tabID: terminal.id) }
         await pendingQuestions.clear(terminalID: terminal.id)
         await broadcastPendingPrompts(terminalID: terminal.id)
         await lifecycle.sessionTitles.forget(terminalID: terminal.id)
@@ -1131,6 +1152,31 @@ extension RPCRouter {
                 let message = "Terminal \(entry.id) is still open, parked on tmux, and its "
                     + "session comes back there when it is woken. Close that tab before "
                     + "reopening it from Closed Terminals."
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+            // A tab on the pty holder that carries the session — running it,
+            // or parked and resuming it when woken — is not joined by a second
+            // one. The reopen mints a new terminal rather than reusing the
+            // entry's, so nothing else stops it starting beside that tab, and
+            // the gate below reads only tmux rows and marks. The entry can be
+            // reopened once that tab is closed.
+            //
+            // A shell tab carries a session while a Claude started by hand in
+            // it runs, and forgets it when that Claude's `SessionEnd` says it
+            // left (`TerminalStore.clearEndedHandStartedSession`). Such a tab
+            // cannot resume the session itself, so it is answered apart.
+            let worktreeRows = try await actuating(actuationID) {
+                try await db.terminals.list(worktreeID: worktree.id)
+            }
+            if let carrier = worktreeRows.first(where: {
+                $0.transport == .holder && $0.claudeSessionID == sessionID
+            }) {
+                let message = carrier.isClaudeTab || carrier.isCodexTerminal
+                    ? "Terminal \(carrier.id) is still open and carries this session, so "
+                        + "reopening it would run the session a second time. Use that tab, or close "
+                        + "it before reopening this entry from Closed Terminals."
+                    : Self.handStartedCarrierRefusal(terminalID: carrier.id)
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
@@ -1398,6 +1444,15 @@ extension RPCRouter {
     static func holderRecreateRefusal(terminalID: UUID) -> String {
         "Terminal \(terminalID) runs on the pty-holder transport, which has no "
             + "tmux window to recreate. Its session is unchanged."
+    }
+
+    /// The refusal a Closed Terminals reopen returns while a holder tab that
+    /// is not an agent's — a shell — carries the entry's session, because a
+    /// Claude started by hand in it has not yet reported its end. That tab
+    /// cannot resume the session, so it is named for what it is.
+    static func handStartedCarrierRefusal(terminalID: UUID) -> String {
+        "A Claude started by hand in shell tab \(terminalID) carries this session; "
+            + "exit it or close that tab first."
     }
 
     /// The refusal `terminal.swapProfile` returns for an in-place switch of a
@@ -5079,16 +5134,21 @@ extension RPCRouter {
         // ended inside a tab that is not Claude's, which the stamp leaves
         // alone because no wake would resume Claude there. The others
         // (holder row, already parked, stale incarnation) are routine. Such a
-        // tab still on tmux forgets the ended session's id, which would
-        // otherwise keep the resume gate refusing it
-        // (`TerminalStore.clearEndedHandStartedSession`).
+        // tab, on either transport, forgets the ended session's id, which
+        // would otherwise keep refusing a start of it — the resume gate for a
+        // tmux tab, a Closed Terminals reopen for a holder tab. A report that
+        // names its session forgets the id only when it is that one, so a late
+        // report from an earlier hand-started Claude leaves a newer one's id
+        // alone; one from an older `tbd`, which names none, is judged by its
+        // incarnation (`TerminalStore.clearEndedHandStartedSession`).
         if !stamped, let row = try? await db.terminals.get(id: params.terminalID),
            !row.isClaudeTab {
             let cleared: Bool
             do {
                 cleared = try await db.terminals.clearEndedHandStartedSession(
                     id: params.terminalID,
-                    reportedIncarnationID: params.sessionIncarnationID)
+                    reportedIncarnationID: params.sessionIncarnationID,
+                    endedSessionID: params.sessionID)
             } catch {
                 logger.error("""
                     sessionEnded: forgetting the ended session id of terminal \

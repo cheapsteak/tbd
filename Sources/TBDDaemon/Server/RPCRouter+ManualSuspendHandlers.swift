@@ -47,8 +47,10 @@ extension RPCRouter {
         }
     }
 
+    /// `actor` has no default, as for `handleTerminalWake`: a caller inside
+    /// the daemon names the actor it acts for.
     func handleTerminalResume(
-        _ paramsData: Data, actor: ActuationActor? = nil
+        _ paramsData: Data, actor: ActuationActor?
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalResumeParams.self, from: paramsData)
         let actuationID = try await beginActuation(
@@ -150,8 +152,9 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// `actor` has no default, as for `handleTerminalWake`.
     func handleWorktreeResume(
-        _ paramsData: Data, actor: ActuationActor? = nil
+        _ paramsData: Data, actor: ActuationActor?
     ) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeResumeParams.self, from: paramsData)
         guard let terminals = try? await db.terminals.list(worktreeID: params.worktreeID) else {
@@ -176,13 +179,15 @@ extension RPCRouter {
         // A row parked on tmux never wakes where it is. A person's resume
         // moves it to the pty holder first and wakes it there
         // (`moveParkedTmuxRowBeforeWake`); a rail's is refused with the reason
-        // that names the move, and so is a person's whose move cannot happen.
-        // When nothing woke, the call answers with the first such refusal and
-        // its `terminalOnTmux` code, so that advice reaches the caller instead
-        // of only the actuation log. A resume that woke another session still
+        // that names the move, and a person's whose move cannot happen with
+        // the move's own answer. A refused move has closed the row's
+        // actuation, so the loop goes on to the next terminal without waking
+        // this one. When nothing woke, the call answers with the first such
+        // refusal and its code, so that advice reaches the caller instead of
+        // only the actuation log. A resume that woke another session still
         // succeeds, as it does when any other row fails.
         var firstHold: RPCResponse?
-        var firstTmuxRefusal: String?
+        var firstTmuxRefusal: RPCResponse?
         var wokeAny = false
         for terminal in parked {
             let actuationID = try await beginActuation(
@@ -196,7 +201,7 @@ extension RPCRouter {
             }
             if let refused = await moveParkedTmuxRowBeforeWake(
                 actuationID, actor: actor, terminalID: terminal.id) {
-                firstTmuxRefusal = firstTmuxRefusal ?? refused.error
+                firstTmuxRefusal = firstTmuxRefusal ?? refused
                 continue
             }
             let result = await hibernationCoordinator.wake(terminalID: terminal.id)
@@ -207,16 +212,15 @@ extension RPCRouter {
             case .ok:
                 wokeAny = true
             case .onTmux(let reason):
-                firstTmuxRefusal = firstTmuxRefusal ?? reason
+                firstTmuxRefusal = firstTmuxRefusal
+                    ?? RPCResponse(error: reason, code: RPCErrorCode.terminalOnTmux.rawValue)
             default:
                 break
             }
         }
 
         if let firstHold { return firstHold }
-        if !wokeAny, let firstTmuxRefusal {
-            return RPCResponse(error: firstTmuxRefusal, code: RPCErrorCode.terminalOnTmux.rawValue)
-        }
+        if !wokeAny, let firstTmuxRefusal { return firstTmuxRefusal }
         return .ok()
     }
 }

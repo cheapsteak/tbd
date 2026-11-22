@@ -80,9 +80,10 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
 public struct TerminalHistoryStore: Sendable {
     // ponytail: hard cap of the newest 50 captures per worktree; make it a
     // config knob only if someone actually asks for more retention. An entry
-    // marked `liveOnTmuxServer` is outside the cap: the mark is what keeps a
-    // resume of its session from starting a second agent, so it stays until
-    // the worktree's history is deleted.
+    // marked `liveOnTmuxServer` is outside the cap, and outlives its worktree:
+    // the mark is what keeps a resume of its session from starting a second
+    // agent, so `deleteForWorktree`, which forget, scratch delete and recovery
+    // cleanup call, keeps it too.
     static let maxEntriesPerWorktree = 50
 
     let writer: any DatabaseWriter

@@ -25,6 +25,16 @@ struct SessionEndCommand: AsyncParsableCommand {
         let reason: String?
     }
 
+    /// The payload's `session_id`, decoded on its own, so a payload whose
+    /// `reason` is malformed still names its session, and the other way round.
+    private struct HookSessionPayload: Decodable {
+        let sessionID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case sessionID = "session_id"
+        }
+    }
+
     static func sessionIncarnationID(environment: [String: String]) -> UUID? {
         environment["TBD_TERMINAL_INCARNATION_ID"].flatMap(UUID.init(uuidString:))
     }
@@ -40,6 +50,18 @@ struct SessionEndCommand: AsyncParsableCommand {
         return payload.reason
     }
 
+    /// Lift `session_id` out of a hook payload, under the same cap as
+    /// `hookReason`. Nil when the payload is empty, oversized, not the object
+    /// this expects, or names no session; the daemon then judges the report by
+    /// its incarnation alone.
+    static func hookSessionID(from data: Data) -> String? {
+        guard !data.isEmpty, data.count <= 1 << 20,
+              let payload = try? JSONDecoder().decode(HookSessionPayload.self, from: data),
+              let sessionID = payload.sessionID, !sessionID.isEmpty
+        else { return nil }
+        return sessionID
+    }
+
     mutating func run() async throws {
         let environment = ProcessInfo.processInfo.environment
 
@@ -47,7 +69,9 @@ struct SessionEndCommand: AsyncParsableCommand {
         // below: Claude Code pipes the payload and waits on the write, so a
         // command that exits without draining it can leave the hook's writer
         // blocked on a full pipe until its timeout.
-        let reason = Self.hookReason(from: FileHandle.standardInput.readDataToEndOfFile())
+        let payload = FileHandle.standardInput.readDataToEndOfFile()
+        let reason = Self.hookReason(from: payload)
+        let sessionID = Self.hookSessionID(from: payload)
 
         guard let terminalIDString = environment["TBD_TERMINAL_ID"],
               let terminalID = UUID(uuidString: terminalIDString) else {
@@ -67,7 +91,8 @@ struct SessionEndCommand: AsyncParsableCommand {
                 params: TerminalSessionEndedParams(
                     terminalID: terminalID,
                     sessionIncarnationID: Self.sessionIncarnationID(environment: environment),
-                    reason: reason)
+                    reason: reason,
+                    sessionID: sessionID)
             )
         } catch {
             sessionEndLogger.debug(

@@ -34,10 +34,12 @@ An agent start is a request that would launch a Claude Code or Codex process on 
   `terminal.create` that resumes a session, whatever its type: that spawns Claude
 - `worktree.create` and `scratch.create`, whose primary terminal is an agent
 - `worktree.revive` and `worktree.reviveConversationFresh`
-- `terminal.wake`, `terminal.resume` and `worktree.resume`, for a parked Claude terminal with
-  a session to resume: one on the pty holder, or one parked on tmux when a person's wake
-  moves it to the holder first. Admission is asked before the move, so a hold leaves the row
-  on tmux.
+- `terminal.wake`, `terminal.resume` and `worktree.resume`, for a parked terminal with
+  something to resume — a Claude terminal with a session, checked as a `claude` start, or a
+  Codex terminal with a recorded thread, checked as a `codex` start: one on the pty holder,
+  or one parked on tmux when a person's wake moves it to the holder first. Admission is asked
+  before the move, so a hold leaves the row on tmux. `worktree.resume` wakes only the
+  worktree's Claude terminals.
 - `terminal.continueInCodex`, `terminal.continueInClaude` and `terminal.swapProfile` when
   it starts a new session; `terminalHistory.revive` when it resumes a Claude session (every
   other kind of history entry reopens as a shell)
@@ -51,7 +53,9 @@ Not checked:
 - Shell terminals, hook terminals and dev-server tabs (`server.start`).
 - A wake of a terminal that is not parked. It starts nothing, and the wake path already
   answers it as a no-op.
-- A wake of a parked Codex terminal. The wake path refuses it and starts nothing.
+- A wake of a parked terminal with nothing to resume: a Codex terminal with no recorded
+  thread, a Claude terminal whose session never began, or a shell. The wake path refuses it
+  and starts nothing.
 - A rail's wake of a terminal parked on tmux, session restore's included. It moves nothing,
   and the wake path refuses it.
 - `terminal.recreateWindow`, which starts nothing: it parks a tmux tab once its tmux server

@@ -36,4 +36,26 @@ struct TerminalSessionEndedParamsTests {
             TerminalSessionEndedParams.self, from: JSONEncoder().encode(params))
         #expect(decoded == params)
     }
+
+    /// An older CLI names no session; its report still decodes, and names
+    /// none.
+    @Test func aPayloadWithoutTheSessionIDStillDecodes() throws {
+        let json = """
+            {"terminalID":"\(terminalID.uuidString)","reason":"logout"}
+            """
+        let params = try JSONDecoder().decode(
+            TerminalSessionEndedParams.self, from: Data(json.utf8))
+        #expect(params.reason == "logout")
+        #expect(params.sessionID == nil)
+    }
+
+    @Test func itRoundTripsTheSessionID() throws {
+        let params = TerminalSessionEndedParams(
+            terminalID: terminalID, sessionIncarnationID: UUID(), reason: "other",
+            sessionID: "sess-acme-ended")
+        let decoded = try JSONDecoder().decode(
+            TerminalSessionEndedParams.self, from: JSONEncoder().encode(params))
+        #expect(decoded == params)
+        #expect(decoded.sessionID == "sess-acme-ended")
+    }
 }

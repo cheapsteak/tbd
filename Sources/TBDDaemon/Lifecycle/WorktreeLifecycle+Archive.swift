@@ -538,10 +538,15 @@ extension WorktreeLifecycle {
     ///   - skipClaude: If true, skip launching the primary agent in the first terminal window.
     /// - Returns: The revived worktree.
     public func reviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil, preferredSession: AgentSessionIdentity? = nil) async throws -> Worktree {
-        let completion = try await beginReviveWorktree(
-            worktreeID: worktreeID, skipClaude: skipClaude,
-            cols: cols, rows: rows, preferredSessionID: preferredSessionID, preferredSession: preferredSession
-        )
+        let completion: WorktreeReviveCompletion
+        do {
+            completion = try await beginReviveWorktree(
+                worktreeID: worktreeID, skipClaude: skipClaude,
+                cols: cols, rows: rows, preferredSessionID: preferredSessionID, preferredSession: preferredSession
+            )
+        } catch let declined as ReviveRefusedBeforeWriting {
+            throw declined.refusal
+        }
         if case .preSessionPending(_, let phase3) = completion {
             await phase3.value
         }
@@ -685,11 +690,14 @@ extension WorktreeLifecycle {
         // the same. With `skipClaude`, or when every archived tab already has
         // its row, no tab is relaunched, so nothing is asked. Each relaunch
         // asks again in `spawnTerminal`, by its session alone.
+        // Thrown wrapped, so a caller can tell this refusal, raised before
+        // anything was written, from `spawnTerminal`'s
+        // (`ReviveRefusedBeforeWriting`).
         if let refusal = try await tmuxResumeRefusal(
             resuming: Self.reviveResumeKeys(skipClaude: skipClaude, missingTabs: missingTabs),
             worktreeServer: worktree.tmuxServer
         ) {
-            throw refusal
+            throw ReviveRefusedBeforeWriting(refusal: refusal)
         }
         let preparedArchivedCodexLaunches = try prepareArchivedCodexLaunches(skipClaude ? [] : missingTabs)
         let config = try await db.config.get()
