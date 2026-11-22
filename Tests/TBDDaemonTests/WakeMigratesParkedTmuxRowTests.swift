@@ -234,8 +234,18 @@ struct WakeMigratesParkedTmuxRowTests {
     /// leave the actor out: on an entry point's own declaration, and on any
     /// function that forwards its `actor` to one, which is how a wrapper in a
     /// file allowed to forward `actor` would hand a person's wake to a caller
-    /// that never named one. A source pin, because the property is about every
+    /// that never named one. So is a forwarded `actor` that no function around
+    /// the call takes as a parameter: a local `let actor` in an allowed file
+    /// names nobody's actor. A source pin, because the property is about every
     /// call site.
+    ///
+    /// The scan reads each file with its comments and strings blanked
+    /// (`codeOnly`), and takes the function a call is in from the braces, so
+    /// a `func ` in a comment or a string, or a local function closed before
+    /// the call, is not read as the call's function. What it does not see: a
+    /// local binding that shadows the parameter (`let actor = ...` in the
+    /// body), and a closure parameter named `actor`. Both would pass as the
+    /// enclosing function's parameter.
     @Test("every caller inside the daemon names the actor it wakes for")
     func everyInProcessWakeCallerNamesItsActor() throws {
         let root = URL(fileURLWithPath: #filePath)
@@ -257,8 +267,10 @@ struct WakeMigratesParkedTmuxRowTests {
         var forwarders: [String] = []
         var defaulted: [String] = []
         for file in files {
-            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            guard let source = try? String(contentsOf: file, encoding: .utf8) else { continue }
             scanned += 1
+            guard entryPoints.contains(where: { source.contains($0) }) else { continue }
+            let text = Self.codeOnly(source)
             let fileName = file.lastPathComponent
             for entryPoint in entryPoints {
                 for parameters in Self.declaredParameters(of: entryPoint, in: text) {
@@ -275,13 +287,13 @@ struct WakeMigratesParkedTmuxRowTests {
                         offenders.append(site)
                     }
                     guard actor == "actor" else { continue }
-                    guard let enclosing = Self.enclosingDeclaration(before: call.start, in: text) else {
-                        offenders.append("\(site), in no function the scan could find")
+                    guard let binding = Self.actorBinding(at: call.start, in: text) else {
+                        offenders.append("\(site), whose `actor` no function around the call takes as a parameter")
                         continue
                     }
-                    forwarders.append("\(fileName): \(enclosing.name)")
-                    if Self.defaultsActor(enclosing.parameters) {
-                        defaulted.append("\(fileName): func \(enclosing.name), which passes its actor to \(entryPoint)")
+                    forwarders.append("\(fileName): \(binding.name)")
+                    if Self.defaultsActor(binding.parameters) {
+                        defaulted.append("\(fileName): func \(binding.name), which passes its actor to \(entryPoint)")
                     }
                 }
             }
@@ -307,7 +319,7 @@ struct WakeMigratesParkedTmuxRowTests {
     /// stopped recognising one would not pass by finding nothing.
     @Test("the source scan tells a defaulted actor parameter from one without a default")
     func theSourceScanReadsActorDefaults() throws {
-        let source = """
+        let written = """
             func handleTerminalWake(
                 _ paramsData: Data, actor: ActuationActor? = nil,
                 condition: SessionRestoreCondition? = nil
@@ -318,6 +330,7 @@ struct WakeMigratesParkedTmuxRowTests {
             func holdWakeIfDenied(_ id: String, by actor: ActuationActor = .anonymous) async {}
             func moveParkedTmuxRowBeforeWake(_ id: String, actor: ActuationActor?, terminalID: UUID) {}
             """
+        let source = Self.codeOnly(written)
         #expect(Self.declaredParameters(of: "handleTerminalWake", in: source).map(Self.defaultsActor) == [true])
         #expect(Self.declaredParameters(of: "holdWakeIfDenied", in: source).map(Self.defaultsActor) == [true])
         #expect(Self.declaredParameters(of: "moveParkedTmuxRowBeforeWake", in: source)
@@ -326,10 +339,55 @@ struct WakeMigratesParkedTmuxRowTests {
         #expect(calls.count == 1, "the scan read the declaration or the comment as a call: \(calls)")
         let call = try #require(calls.first)
         #expect(Self.argument("actor", in: call.arguments) == "actor")
-        let enclosing = try #require(Self.enclosingDeclaration(before: call.start, in: source))
-        #expect(enclosing.name == "handleTerminalWake")
-        #expect(Self.defaultsActor(enclosing.parameters))
+        let binding = try #require(Self.actorBinding(at: call.start, in: source))
+        #expect(binding.name == "handleTerminalWake")
+        #expect(Self.defaultsActor(binding.parameters))
         #expect(!Self.defaultsActor("_ paramsData: Data, actor: ActuationActor?, condition: X? = nil"))
+    }
+
+    /// The scan's reading of which function an `actor` argument comes from,
+    /// on the shapes that misled a nearest-`func` reading: a `func ` in a
+    /// trailing comment or a string, and a local function closed before the
+    /// call. A forwarded `actor` that no function around the call takes as a
+    /// parameter has no binding, and one a local function captures from the
+    /// function around it binds to that function.
+    @Test("the source scan finds the function a forwarded actor comes from")
+    func theSourceScanFindsTheActorsFunction() throws {
+        let written = """
+            func handleTerminalWake(_ paramsData: Data, actor: ActuationActor?) async {
+                func describe(_ id: UUID) -> String { "func decoy(actor: ActuationActor) { \\(id) }" }
+                let note = 1 // ends func decoy(actor: ActuationActor) {
+                /* func decoy(actor: ActuationActor) { */
+                await holdWakeIfDenied(id, actor: actor)
+            }
+            func railWake(_ id: String) async {
+                let actor: ActuationActor? = nil
+                await moveParkedTmuxRowBeforeWake(id, actor: actor, terminalID: id)
+            }
+            func outerWake(actor: ActuationActor?) async {
+                func again() async {
+                    await holdWakeIfDenied(id, actor: actor)
+                }
+            }
+            """
+        let source = Self.codeOnly(written)
+        #expect(written.contains("decoy"))
+        #expect(!source.contains("decoy"), "a comment or a string survived the blanking: \(source)")
+        #expect(source.filter { $0 == "\n" }.count == written.filter { $0 == "\n" }.count)
+        let holds = Self.calls(of: "holdWakeIfDenied", in: source)
+        try #require(holds.count == 2)
+        let handler = Self.enclosingFunctions(around: holds[0].start, in: source).map(\.name)
+        #expect(handler == ["handleTerminalWake"], "a local function closed before the call was read as its function")
+        #expect(Self.actorBinding(at: holds[0].start, in: source)?.name == "handleTerminalWake")
+        let captured = Self.enclosingFunctions(around: holds[1].start, in: source).map(\.name)
+        #expect(captured == ["again", "outerWake"])
+        #expect(Self.actorBinding(at: holds[1].start, in: source)?.name == "outerWake")
+        let moves = Self.calls(of: "moveParkedTmuxRowBeforeWake", in: source)
+        let rail = try #require(moves.first)
+        #expect(Self.argument("actor", in: rail.arguments) == "actor")
+        #expect(Self.enclosingFunctions(around: rail.start, in: source).map(\.name) == ["railWake"])
+        #expect(Self.actorBinding(at: rail.start, in: source)?.name == nil,
+                "a local `let actor` passed for a function that takes none")
     }
 
     /// The actor each daemon file may pass to a wake or resume entry point.
@@ -348,32 +406,155 @@ struct WakeMigratesParkedTmuxRowTests {
         }
     }
 
-    /// Every mention of `name(` in `text` that is not part of a longer name
-    /// or on a comment line, with whether `func ` precedes it on its line,
-    /// which makes it the declaration rather than a call.
+    /// `text` with every comment and every string literal blanked to spaces,
+    /// newlines kept, so the scan reads code alone: a `func ` in a trailing
+    /// comment, or a parenthesis or brace inside a string, cannot pass for a
+    /// declaration or upset the balancing the helpers below rely on. It reads
+    /// line comments, nested block comments, single-line, multi-line and raw
+    /// strings, and interpolations with strings nested inside them. It works
+    /// on UTF-8 bytes: every delimiter is ASCII, and no byte of a multi-byte
+    /// character is ASCII, so a character is blanked whole or not at all.
+    /// Every helper below reads text this has passed over.
+    private static func codeOnly(_ text: String) -> String {
+        enum Context {
+            /// Code; with `parens`, the code of an interpolation inside a
+            /// string, with how many parentheses it has open.
+            case code(parens: Int?)
+            case blockComment(depth: Int)
+            case string(hashes: Int, multiline: Bool)
+        }
+        let newline = UInt8(ascii: "\n"), slash = UInt8(ascii: "/"), star = UInt8(ascii: "*")
+        let quote = UInt8(ascii: "\""), hash = UInt8(ascii: "#"), backslash = UInt8(ascii: "\\")
+        let open = UInt8(ascii: "("), close = UInt8(ascii: ")")
+        let bytes = Array(text.utf8)
+        let count = bytes.count
+        var output = bytes
+        func blank(_ range: Range<Int>) {
+            for index in range where bytes[index] != newline { output[index] = UInt8(ascii: " ") }
+        }
+        func run(of byte: UInt8, at start: Int, length: Int) -> Bool {
+            start + length <= count && bytes[start..<(start + length)].allSatisfy { $0 == byte }
+        }
+        var stack: [Context] = [.code(parens: nil)]
+        var index = 0
+        while index < count {
+            let byte = bytes[index]
+            let next: UInt8? = index + 1 < count ? bytes[index + 1] : nil
+            switch stack[stack.count - 1] {
+            case .code(let parens):
+                if byte == slash, next == slash {
+                    var end = index
+                    while end < count, bytes[end] != newline { end += 1 }
+                    blank(index..<end)
+                    index = end
+                    continue
+                }
+                if byte == slash, next == star {
+                    blank(index..<(index + 2))
+                    stack.append(.blockComment(depth: 0))
+                    index += 2
+                    continue
+                }
+                if byte == hash || byte == quote {
+                    var opening = index
+                    while opening < count, bytes[opening] == hash { opening += 1 }
+                    if opening < count, bytes[opening] == quote {
+                        let multiline = run(of: quote, at: opening, length: 3)
+                        let contentStart = opening + (multiline ? 3 : 1)
+                        blank(index..<contentStart)
+                        stack.append(.string(hashes: opening - index, multiline: multiline))
+                        index = contentStart
+                        continue
+                    }
+                }
+                if let parens {
+                    if byte == open {
+                        stack[stack.count - 1] = .code(parens: parens + 1)
+                    } else if byte == close {
+                        if parens == 0 {
+                            blank(index..<(index + 1))
+                            stack.removeLast()
+                            index += 1
+                            continue
+                        }
+                        stack[stack.count - 1] = .code(parens: parens - 1)
+                    }
+                    blank(index..<(index + 1))
+                }
+                index += 1
+            case .blockComment(let depth):
+                if byte == slash, next == star {
+                    blank(index..<(index + 2))
+                    stack[stack.count - 1] = .blockComment(depth: depth + 1)
+                    index += 2
+                    continue
+                }
+                if byte == star, next == slash {
+                    blank(index..<(index + 2))
+                    if depth == 0 {
+                        stack.removeLast()
+                    } else {
+                        stack[stack.count - 1] = .blockComment(depth: depth - 1)
+                    }
+                    index += 2
+                    continue
+                }
+                blank(index..<(index + 1))
+                index += 1
+            case .string(let hashes, let multiline):
+                if byte == backslash, run(of: hash, at: index + 1, length: hashes) {
+                    let escaped = index + 1 + hashes
+                    if escaped < count, bytes[escaped] == open {
+                        blank(index..<(escaped + 1))
+                        stack.append(.code(parens: 0))
+                        index = escaped + 1
+                        continue
+                    }
+                    blank(index..<min(escaped + 1, count))
+                    index = escaped + 1
+                    continue
+                }
+                let quotes = multiline ? 3 : 1
+                if byte == quote, run(of: quote, at: index, length: quotes),
+                   run(of: hash, at: index + quotes, length: hashes) {
+                    blank(index..<(index + quotes + hashes))
+                    stack.removeLast()
+                    index += quotes + hashes
+                    continue
+                }
+                blank(index..<(index + 1))
+                index += 1
+            }
+        }
+        return String(decoding: output, as: UTF8.self)
+    }
+
+    /// Every mention of `name(` in `code` that is not part of a longer name,
+    /// with whether `func ` precedes it on its line, which makes it the
+    /// declaration rather than a call. `code` is `codeOnly`'s, so no comment
+    /// or string is among them.
     private static func mentions(
-        of name: String, in text: String
+        of name: String, in code: String
     ) -> [(start: String.Index, isDeclaration: Bool, arguments: String)] {
         var found: [(start: String.Index, isDeclaration: Bool, arguments: String)] = []
-        var searchStart = text.startIndex
-        while let match = text.range(of: name + "(", range: searchStart..<text.endIndex) {
+        var searchStart = code.startIndex
+        while let match = code.range(of: name + "(", range: searchStart..<code.endIndex) {
             searchStart = match.upperBound
-            if match.lowerBound > text.startIndex {
-                let previous = text[text.index(before: match.lowerBound)]
+            if match.lowerBound > code.startIndex {
+                let previous = code[code.index(before: match.lowerBound)]
                 if previous.isLetter || previous.isNumber || previous == "_" { continue }
             }
-            let lead = text[lineStart(of: match.lowerBound, in: text)..<match.lowerBound]
-            if lead.trimmingCharacters(in: .whitespaces).hasPrefix("//") { continue }
+            let lead = code[lineStart(of: match.lowerBound, in: code)..<match.lowerBound]
             found.append((
                 start: match.lowerBound, isDeclaration: lead.hasSuffix("func "),
-                arguments: balancedContents(from: match.upperBound, in: text)))
+                arguments: balancedContents(from: match.upperBound, in: code)))
         }
         return found
     }
 
     /// The argument text of every call of `name` in `text`, with where the
-    /// call starts, leaving out its declaration, comment lines, and longer
-    /// names that end in it.
+    /// call starts, leaving out its declaration and longer names that end in
+    /// it.
     private static func calls(
         of name: String, in text: String
     ) -> [(start: String.Index, arguments: String)] {
@@ -387,35 +568,70 @@ struct WakeMigratesParkedTmuxRowTests {
         mentions(of: name, in: text).filter(\.isDeclaration).map(\.arguments)
     }
 
-    /// The name and parameter list of the last function declared before
-    /// `position`, passing over comment lines: the function a call there is
-    /// in, for the declarations this scan reads.
-    private static func enclosingDeclaration(
-        before position: String.Index, in text: String
-    ) -> (name: String, parameters: String)? {
+    /// The name and parameter list of every function whose body holds
+    /// `position`, innermost first. A function's body is the brace-balanced
+    /// block after its signature, so a local function declared and closed
+    /// before `position` is passed over rather than read as the function the
+    /// position is in, and a declaration with no body of its own (a protocol
+    /// requirement) is not credited with the next function's.
+    private static func enclosingFunctions(
+        around position: String.Index, in code: String
+    ) -> [(name: String, parameters: String)] {
+        var found: [(name: String, parameters: String)] = []
         var end = position
-        while let keyword = text.range(of: "func ", options: .backwards, range: text.startIndex..<end) {
+        while let keyword = code.range(of: "func ", options: .backwards, range: code.startIndex..<end) {
             end = keyword.lowerBound
-            let lead = text[lineStart(of: keyword.lowerBound, in: text)..<keyword.lowerBound]
-            if lead.trimmingCharacters(in: .whitespaces).hasPrefix("//") { continue }
-            guard let open = text[keyword.upperBound..<position].firstIndex(where: { $0 == "(" || $0 == "<" }),
-                  let paren = text[open..<position].firstIndex(of: "(") else { continue }
-            let name = text[keyword.upperBound..<open].trimmingCharacters(in: .whitespaces)
-            return (name: name, parameters: balancedContents(from: text.index(after: paren), in: text))
+            if keyword.lowerBound > code.startIndex {
+                let previous = code[code.index(before: keyword.lowerBound)]
+                if previous.isLetter || previous.isNumber || previous == "_" { continue }
+            }
+            guard let open = code[keyword.upperBound..<position].firstIndex(where: { $0 == "(" || $0 == "<" }),
+                  let paren = code[open..<position].firstIndex(of: "(") else { continue }
+            let parametersStart = code.index(after: paren)
+            let parametersEnd = matchingClose(from: parametersStart, opening: "(", closing: ")", in: code)
+            guard parametersEnd < code.endIndex,
+                  let bodyOpen = code[parametersEnd...].firstIndex(of: "{") else { continue }
+            let signatureTail = code[code.index(after: parametersEnd)..<bodyOpen]
+            if ["func ", "}", "var ", "let "].contains(where: { signatureTail.contains($0) }) { continue }
+            let bodyClose = matchingClose(from: code.index(after: bodyOpen), opening: "{", closing: "}", in: code)
+            guard bodyOpen < position, position < bodyClose else { continue }
+            let name = code[keyword.upperBound..<open].trimmingCharacters(in: .whitespaces)
+            found.append((name: name, parameters: String(code[parametersStart..<parametersEnd])))
         }
-        return nil
+        return found
     }
 
-    /// Whether a parameter list gives the parameter named `actor` a default.
-    private static func defaultsActor(_ parameters: String) -> Bool {
+    /// The function an `actor` argument at `position` refers to: the
+    /// innermost function around it that takes a parameter named `actor`,
+    /// which a local function inside it captures. Nil when no function around
+    /// the call takes one, so the `actor` passed there is a local binding.
+    private static func actorBinding(
+        at position: String.Index, in code: String
+    ) -> (name: String, parameters: String)? {
+        enclosingFunctions(around: position, in: code).first { declaresActor($0.parameters) }
+    }
+
+    /// What follows the colon of the parameter named `actor` in a parameter
+    /// list (its type and any default), or nil when the list has none.
+    private static func actorParameter(_ parameters: String) -> Substring? {
         for piece in topLevelPieces(parameters) {
             let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let colon = trimmed.firstIndex(of: ":") else { continue }
             let names = trimmed[..<colon].split(separator: " ").map(String.init)
             guard names.last == "actor" else { continue }
-            return trimmed[colon...].contains("=")
+            return Substring(trimmed[colon...])
         }
-        return false
+        return nil
+    }
+
+    /// Whether a parameter list takes a parameter named `actor`.
+    private static func declaresActor(_ parameters: String) -> Bool {
+        actorParameter(parameters) != nil
+    }
+
+    /// Whether a parameter list gives the parameter named `actor` a default.
+    private static func defaultsActor(_ parameters: String) -> Bool {
+        actorParameter(parameters)?.contains("=") ?? false
     }
 
     /// The text of the argument labelled `label` in a call's argument text,
@@ -453,16 +669,24 @@ struct WakeMigratesParkedTmuxRowTests {
     /// The text from `start`, just past an opening parenthesis, to the one
     /// that closes it.
     private static func balancedContents(from start: String.Index, in text: String) -> String {
+        String(text[start..<matchingClose(from: start, opening: "(", closing: ")", in: text)])
+    }
+
+    /// Where the `closing` that matches an `opening` just before `start` is,
+    /// or the end of `text` when none does.
+    private static func matchingClose(
+        from start: String.Index, opening: Character, closing: Character, in text: String
+    ) -> String.Index {
         var depth = 1
         var cursor = start
         while cursor < text.endIndex {
             let character = text[cursor]
-            if character == "(" { depth += 1 }
-            if character == ")" { depth -= 1 }
+            if character == opening { depth += 1 }
+            if character == closing { depth -= 1 }
             if depth == 0 { break }
             cursor = text.index(after: cursor)
         }
-        return String(text[start..<cursor])
+        return cursor
     }
 
     /// Where the line holding `index` starts.
