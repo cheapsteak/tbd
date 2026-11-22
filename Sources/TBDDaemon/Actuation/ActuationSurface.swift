@@ -41,10 +41,14 @@ import TBDShared
 // The mechanical guard is the SwiftLint custom rule `actuation_primitive_allowlist`
 // in `.swiftlint.yml`: calling a holder primitive — `HolderRegistry.spawn` or
 // `abandon`, `abandonVerifiedJob`, `disposeHolder`, the injection courier's
-// `deliver` — or the park's `setHibernated` from a daemon file outside the
-// audited set fails lint, so a new actuation surface has to be wired here
-// before it can be written. The rule is file-level, so a new call inside an
-// already-audited file is a reviewer's to catch.
+// `deliver` — or the park's `setHibernated`, or one of the wrappers that acts
+// on one session and leaves the row to its caller (`spawnTerminal`,
+// `closeTerminalTab`, the park, wake and transport-move entry points), from a
+// daemon file outside the audited set fails lint, so a new actuation surface
+// has to be wired here before it can be written. The rule is file-level, so a
+// new call inside an already-audited file is a reviewer's to catch, and it
+// cannot see an unapplied reference or a worktree-scale operation; the rule's
+// comment lists what it misses.
 
 /// The public RPC surfaces that actuate a session, and what each one is.
 ///
