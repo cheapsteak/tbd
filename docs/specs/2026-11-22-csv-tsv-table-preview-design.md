@@ -84,6 +84,10 @@ write TSV also follow (Python's `excel-tab` dialect, pandas):
   in the cell and in its tooltip. A text field lays out its whole string each
   time it is drawn, so one cell holding megabytes, such as a base64 blob,
   would stall scrolling.
+- A value is also cut, between two Unicode scalars, where its shown part would
+  pass 4,000 bytes of UTF-8, and ends in the same ellipsis. One character can
+  carry any number of combining marks, so a count of characters alone does not
+  bound the string a cell lays out.
 - Rows alternate their background colour, and thin lines separate the
   columns.
 - The user can click a row to highlight it. Nothing else happens on a click.
@@ -231,6 +235,8 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
   - the column titles are the header row and the row count is the data rows
   - a cell shows its value, and a value with a line break shows `↵`
   - a value longer than 1,000 characters shows its first 1,000 and `…`
+  - one character of 100,000 combining marks keeps at most 4,000 bytes, cut
+    between two marks, and ends in `…`
   - a cell past the end of a short row is empty
   - a wide table measures fewer rows
   - a rewrite with the same columns keeps a column width the test changed

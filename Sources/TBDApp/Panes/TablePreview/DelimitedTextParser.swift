@@ -41,6 +41,8 @@ enum DelimitedTextParser {
     static let tableExtensions: Set<String> = ["csv", "tsv"]
     static let defaultRowLimit = 100_000
     static let defaultColumnLimit = 1_000
+    /// How many rows the scan reads between two checks of `Task.isCancelled`.
+    static let cancellationCheckInterval = 4_096
 
     /// `,` (0x2C) for csv, tab (0x09) for tsv, case-insensitive; nil otherwise.
     nonisolated static func delimiter(forPath path: String) -> UInt8? {
@@ -58,6 +60,11 @@ enum DelimitedTextParser {
     /// `cutAtByteLimit` says the bytes stop where the reader's byte limit cut
     /// the file, so the last row may be partial: it is dropped, even when the
     /// cut lands inside a quoted field, and the table is marked as stopped.
+    ///
+    /// When the calling task is cancelled, the scan stops within
+    /// `cancellationCheckInterval` rows and returns `.empty`, whatever the
+    /// bytes hold. Only a cancelled caller sees that value, and it drops the
+    /// result, so a superseded read of a large file stops early.
     nonisolated static func parse(
         _ bytes: Data, delimiter: UInt8,
         rowLimit: Int = DelimitedTextParser.defaultRowLimit,
@@ -163,13 +170,21 @@ private struct DelimitedByteScan {
                 stoppedAtRowLimit = true
                 break scanning
             }
+            // A cancelled caller drops the result, so the scan returns the
+            // cheapest value rather than finish (see `parse`).
+            if dataRows.count % DelimitedTextParser.cancellationCheckInterval == 0, Task.isCancelled {
+                return .empty
+            }
             if index == count { break scanning }
         }
 
         let stoppedAtLimit: Bool
         if stoppedAtRowLimit {
-            // Every kept row ended at a line break, so none is partial.
-            stoppedAtLimit = cutAtByteLimit || remainderHasContent()
+            // Every kept row ended at a line break, so none is partial. Any
+            // byte after the last kept row's line break starts a row the
+            // table does not hold, even a lone line break, which is a row
+            // with one empty field.
+            stoppedAtLimit = cutAtByteLimit || index < count
         } else {
             if cutAtByteLimit {
                 // The last row may be cut short: drop the unfinished row, or,
@@ -288,16 +303,5 @@ private struct DelimitedByteScan {
         lastFinishedRowWasOverColumnLimit = rowIsOverColumnLimit
         if rowIsOverColumnLimit { finishedRowsOverColumnLimit += 1 }
         rowIsOverColumnLimit = false
-    }
-
-    /// Whether any byte other than a line break follows `index`.
-    private func remainderHasContent() -> Bool {
-        var position = index
-        while position < bytes.count {
-            let byte = bytes[position]
-            if byte != Self.lineFeed && byte != Self.carriageReturn { return true }
-            position += 1
-        }
-        return false
     }
 }

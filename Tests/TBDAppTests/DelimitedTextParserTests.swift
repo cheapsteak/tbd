@@ -140,11 +140,40 @@ struct DelimitedTextParserTests {
         #expect(t.stoppedAtLimit == true)
     }
 
+    /// Without a limit the empty line is a row, so with a limit of one row
+    /// the table does not hold it.
+    @Test("an empty line past the row limit stops the table")
+    func trailingEmptyRowPastLimitIsStopped() throws {
+        let whole = try table(parse("h\n1\n\n"))
+        #expect(whole.rows == [["1"], [""]])
+
+        let t = try table(parse("h\n1\n\n", rowLimit: 1))
+        #expect(t.rows == [["1"]])
+        #expect(t.stoppedAtLimit == true)
+    }
+
     @Test("exactly the row limit plus a final line break is not stopped")
     func exactlyRowLimitIsNotStopped() throws {
         let t = try table(parse("h\n1\n2\n3\n", rowLimit: 3))
         #expect(t.rows.count == 3)
         #expect(t.stoppedAtLimit == false)
+    }
+
+    /// The task cancels itself before it parses, so the scan's first check,
+    /// right after the title row, sees the cancellation on every run, and
+    /// the scan returns `.empty` instead of reading 20,000 rows.
+    @Test("a parse on a cancelled task stops early")
+    func cancelledParseStopsEarly() async throws {
+        let text = "a,b\n" + (1...20_000).map { "\($0),x\n" }.joined()
+        let whole = try table(parse(text))
+        #expect(whole.rows.count == 20_000)
+
+        let bytes = Data(text.utf8)
+        let result = await Task.detached { () -> DelimitedParseResult in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return DelimitedTextParser.parse(bytes, delimiter: 0x2C)
+        }.value
+        #expect(result == .empty)
     }
 
     @Test("input cut by the byte limit drops its last row")

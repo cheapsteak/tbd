@@ -6,7 +6,8 @@ import SwiftUI
 /// The file is read by `DelimitedTableLoader` on a detached task, in a
 /// `.task` keyed on the path and the revision, so neither the read nor the
 /// parse runs in `body` or on the main actor. A task cancelled while the read
-/// runs drops its result.
+/// runs cancels the detached task too, so the parse stops early, and drops
+/// its result.
 ///
 /// The result is kept with the path it was read for, and `body` shows it only
 /// while that path is still the one shown: a switch to another file shows the
@@ -96,9 +97,17 @@ struct DelimitedTablePreview: View {
 
     private func load() async {
         let path = filePath
-        let result = await Task.detached(priority: .userInitiated) {
+        let read = Task.detached(priority: .userInitiated) {
             DelimitedTableLoader.load(path: path)
-        }.value
+        }
+        // A detached task does not inherit cancellation, so the `.task`'s
+        // cancellation is passed on by hand: the parser checks for it and
+        // stops early, rather than finish a read whose result is dropped.
+        let result = await withTaskCancellationHandler {
+            await read.value
+        } onCancel: {
+            read.cancel()
+        }
         // Cancelled while the read ran: a newer task owns `loaded`.
         guard !Task.isCancelled else { return }
         let nextID = (loaded?.loadID ?? 0) &+ 1
