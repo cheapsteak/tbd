@@ -240,12 +240,16 @@ public struct ModelProfileResolver: Sendable {
         worktreeID: UUID? = nil,
         model: String? = nil
     ) async throws -> ResolvedModelProfile? {
-        // A spawn that asks for a Fable model (`model` is the per-spawn
-        // request) is never balanced onto a profile known to be out of Fable
-        // credits, and throws `FableUnavailableError` rather than land on one.
-        // An explicit pin (steps 0 to 1.5) is the person's choice and is not
-        // second-guessed.
-        let requiresFable = FableModel.isFable(model) && fable != nil
+        // A spawn that will run a Fable model is never balanced onto a profile
+        // known to be out of Fable credits, and throws `FableUnavailableError`
+        // rather than land on one. A session runs the spawn's `model`, or its
+        // profile's configured model when the spawn names none (as
+        // `handleFableCreditsOut` reads it), so the rule is decided per
+        // profile; a resume (`balance: false`) naming no model keeps its
+        // account. An explicit pin (steps 0 to 1.5) is the person's choice and
+        // is not second-guessed.
+        let requiresFable = fable != nil
+            && (FableModel.isFable(model) || (model == nil && balance))
         // Step 0: explicit per-creation override — highest priority. If the
         // row/keychain is missing we log and fall through to the normal chain
         // rather than fail the spawn.
@@ -285,14 +289,14 @@ public struct ModelProfileResolver: Sendable {
             do {
                 let candidates: [ProfilePoolCandidate]
                 let decision: ProfilePoolDecision
-                if requiresFable { await probeFablePool(source: source, defaultProfileID: cfg.defaultProfileID) }
+                if requiresFable { await probeFablePool(source: source, defaultProfileID: cfg.defaultProfileID, spawnModel: model) }
                 let pickTime = now()
                 if let reservations {
                     // Every read happens first, and then one non-suspending
                     // call picks and reserves, so a concurrent spawn into
                     // another worktree sees this pick even before its
                     // terminal row exists.
-                    let stored = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
+                    let stored = try await source.candidates(defaultProfileID: cfg.defaultProfileID, spawnModel: model)
                     let outcome = await reservations.pickAndReserve(
                         candidates: stored, pickTime: pickTime, policy: policy,
                         requiresFable: requiresFable)
@@ -300,7 +304,7 @@ public struct ModelProfileResolver: Sendable {
                     decision = outcome.decision
                     reservationID = outcome.reservationID
                 } else {
-                    candidates = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
+                    candidates = try await source.candidates(defaultProfileID: cfg.defaultProfileID, spawnModel: model)
                     decision = ProfilePoolPicker.pick(
                         candidates: candidates,
                         excludingAccountKeys: [],
@@ -424,7 +428,7 @@ public struct ModelProfileResolver: Sendable {
 
         // Fallback to step 2 / step 3: global default or nothing.
         if let defaultID = cfg.defaultProfileID {
-            if requiresFable, let fable {
+            if requiresFable, let fable, try await runsFable(model, on: defaultID) {
                 // The default is a place the session may land too; it is not
                 // exempt from the Fable rule. Probe it if it is unchecked.
                 _ = await fable.refresh([defaultID], deadline: Self.fableProbeDeadline)
@@ -444,16 +448,26 @@ public struct ModelProfileResolver: Sendable {
         return nil
     }
 
-    /// Probe every pool profile whose Fable reading is missing or past its
-    /// TTL, waiting at most `fableProbeDeadline`. Best effort: a profile still
-    /// unchecked afterwards stays eligible, unverified.
-    private func probeFablePool(source: ProfilePoolCandidateSource, defaultProfileID: UUID?) async {
+    /// Probe every pool profile a session from this spawn would run a Fable
+    /// model on, and whose Fable reading is missing or past its TTL, waiting
+    /// at most `fableProbeDeadline`. Best effort: a profile still unchecked
+    /// afterwards stays eligible, unverified.
+    private func probeFablePool(source: ProfilePoolCandidateSource, defaultProfileID: UUID?, spawnModel: String?) async {
         guard let fable,
-              let candidates = try? await source.candidates(defaultProfileID: defaultProfileID)
+              let candidates = try? await source.candidates(defaultProfileID: defaultProfileID, spawnModel: spawnModel)
         else { return }
         let ids = candidates
             .filter { ($0.kind == .oauth || $0.kind == .oauthToken) && $0.hasCredential && !$0.poolOptOut }
+            .filter { FableModel.isFable($0.model) }
             .map(\.profileID)
         await fable.refresh(ids, deadline: Self.fableProbeDeadline)
+    }
+
+    /// Whether a session placed on `profileID` runs a Fable model: the
+    /// spawn's `model`, or the profile's configured model when it names none.
+    private func runsFable(_ model: String?, on profileID: UUID) async throws -> Bool {
+        if let model { return FableModel.isFable(model) }
+        let configured = try await profiles.get(id: profileID)?.model
+        return FableModel.isFable(configured)
     }
 }

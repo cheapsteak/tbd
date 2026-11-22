@@ -56,9 +56,11 @@ public struct ProfilePoolCandidateSource: Sendable {
     /// - Parameters:
     ///   - defaultProfileID: The global configured default profile ID. Used to mark
     ///     `isConfiguredDefault` on the matching candidate.
+    ///   - spawnModel: The model the spawn names, which becomes every candidate's
+    ///     `model`. nil leaves each candidate its profile's configured model.
     ///
     /// - Returns: Array of `ProfilePoolCandidate` objects, one per profile.
-    public func candidates(defaultProfileID: UUID?) async throws -> [ProfilePoolCandidate] {
+    public func candidates(defaultProfileID: UUID?, spawnModel: String? = nil) async throws -> [ProfilePoolCandidate] {
         let allProfiles = try await profiles.list()
         let allSnapshots = try await snapshots.loadAll()
         let liveCounts = try await terminals.liveSessionCountsByProfile()
@@ -96,7 +98,8 @@ public struct ProfilePoolCandidateSource: Sendable {
                 liveSessions: liveCount,
                 sortOrder: row.sortOrder,
                 isConfiguredDefault: isDefault,
-                fable: fableReadings[row.id]
+                fable: fableReadings[row.id],
+                model: spawnModel ?? row.model
             )
         }
     }

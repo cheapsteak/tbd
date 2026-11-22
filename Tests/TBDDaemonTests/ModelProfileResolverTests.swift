@@ -445,11 +445,12 @@ struct ModelProfileResolverTests {
 
     // MARK: - Fable
 
+    /// `profileModel` is the default profile's configured model.
     private func fableHarness(
-        out: Bool
+        out: Bool, profileModel: String? = nil
     ) async throws -> (ModelProfileResolver, ModelProfile) {
         let db = try TBDDatabase(inMemory: true)
-        let profile = try await db.modelProfiles.create(name: "Acct", kind: .oauth)
+        let profile = try await db.modelProfiles.create(name: "Acct", kind: .oauth, model: profileModel)
         try await db.config.setDefaultProfileID(profile.id)
         let probes = Probes()
         let store = FableAvailabilityStore(probe: { id in
@@ -484,6 +485,74 @@ struct ModelProfileResolverTests {
     @Test func fableRequest_defaultProfileAvailable_resolves() async throws {
         let (resolver, profile) = try await fableHarness(out: false)
         #expect(try await resolver.resolve(repoID: nil, model: "fable")?.profileID == profile.id)
+    }
+
+    /// A spawn that names no model runs its profile's configured model, the
+    /// notion `handleFableCreditsOut` records an out reading by, so a default
+    /// profile configured for Fable is held to the Fable rule.
+    @Test func noSpawnModel_defaultProfileConfiguredForFable_out_throws() async throws {
+        let (resolver, profile) = try await fableHarness(out: true, profileModel: FableModel.probeModelID)
+        await #expect(throws: FableUnavailableError(profileNames: [profile.name])) {
+            _ = try await resolver.resolve(repoID: nil)
+        }
+    }
+
+    @Test func noSpawnModel_defaultProfileConfiguredForAnotherModel_out_resolves() async throws {
+        let (resolver, profile) = try await fableHarness(out: true, profileModel: "opus")
+        #expect(try await resolver.resolve(repoID: nil)?.profileID == profile.id)
+    }
+
+    /// The spawn's own model wins over the profile's: a spawn naming another
+    /// model runs no Fable, so the profile's out reading does not matter.
+    @Test func spawnModel_overridesAProfileConfiguredForFable() async throws {
+        let (resolver, profile) = try await fableHarness(out: true, profileModel: "fable")
+        #expect(try await resolver.resolve(repoID: nil, model: "opus")?.profileID == profile.id)
+    }
+
+    /// A resume (`balance: false`) that names no model keeps its account even
+    /// when that profile is configured for Fable and out, as before.
+    @Test func noSpawnModel_resume_keepsAProfileConfiguredForFable() async throws {
+        let (resolver, profile) = try await fableHarness(out: true, profileModel: "fable")
+        #expect(try await resolver.resolve(repoID: nil, balance: false)?.profileID == profile.id)
+    }
+
+    /// The balanced pick holds each profile to its own configured model when
+    /// the spawn names none: an out profile configured for Fable is refused
+    /// though it has more headroom, an out profile configured for another
+    /// model is still chosen, and only the Fable-configured profile is probed.
+    /// A spawn that names another model is not held to the rule anywhere.
+    @Test func balancedPick_noSpawnModel_refusesOnlyProfilesConfiguredForFable() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let fableProfile = try await db.modelProfiles.create(name: "Fable acct", kind: .oauth, model: "fable")
+        let otherProfile = try await db.modelProfiles.create(name: "Opus acct", kind: .oauth, model: "opus")
+        for (id, percent) in [(fableProfile.id, 10.0), (otherProfile.id, 40.0)] {
+            try await db.oauthUsageSnapshots.upsert(profileID: id, snapshot: ProfileUsageSnapshot(
+                buckets: [
+                    .init(kind: "session", percent: percent, resetsAt: Date().addingTimeInterval(3600), isActive: true),
+                ],
+                fetchedAt: Date(), lastAttemptAt: Date(), status: "ok", statusKind: .ok,
+                organizationID: nil))
+        }
+        try await db.config.setProfileBalancingEnabled(true)
+        let probes = Probes()
+        let store = FableAvailabilityStore(probe: { _ in
+            probes.count += 1
+            return FableAvailability(state: .out, reason: nil, checkedAt: Date(), source: .probe)
+        })
+        let source = ProfilePoolCandidateSource(
+            profiles: db.modelProfiles, snapshots: db.oauthUsageSnapshots, terminals: db.terminals,
+            // Distinct identities, so the two profiles are two accounts.
+            loginIdentity: { "\($0.uuidString)@example.com" }, fable: store)
+        let resolver = ModelProfileResolver(
+            profiles: db.modelProfiles, repos: db.repos, config: db.config,
+            keychain: { _ in nil }, candidateSource: source, fable: store)
+
+        #expect(try await resolver.resolve(repoID: nil)?.profileID == otherProfile.id)
+        #expect(probes.count == 1)
+        #expect(await store.current(fableProfile.id)?.state == .out)
+        #expect(await store.current(otherProfile.id) == nil)
+
+        #expect(try await resolver.resolve(repoID: nil, model: "opus")?.profileID == fableProfile.id)
     }
 
     @Test func fableError_namesProfiles_andDoesNotOfferAnotherModel() {

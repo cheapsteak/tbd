@@ -999,9 +999,11 @@ struct ProfilePoolPickerFableTests {
         FableAvailability(state: state, reason: nil, checkedAt: now.addingTimeInterval(-ageSeconds), source: .probe)
     }
 
+    /// `model` is the model a session placed on the candidate runs. The
+    /// default is a Fable model, as for a spawn that names one.
     private func candidate(
         percent: Double?, fetchedAgo: TimeInterval = 10, fable: FableAvailability?,
-        sortOrder: Int = 0
+        sortOrder: Int = 0, model: String? = FableModel.probeModelID
     ) -> ProfilePoolCandidate {
         let snapshot = percent.map {
             ProfileUsageSnapshot(
@@ -1013,7 +1015,7 @@ struct ProfilePoolPickerFableTests {
         return ProfilePoolCandidate(
             profileID: id, kind: .oauth, hasCredential: true, poolOptOut: false,
             accountKey: id.uuidString, snapshot: snapshot, liveSessions: 0,
-            sortOrder: sortOrder, isConfiguredDefault: false, fable: fable)
+            sortOrder: sortOrder, isConfiguredDefault: false, fable: fable, model: model)
     }
 
     @Test func fableRequest_neverChoosesAnOutProfile_evenWithMoreHeadroom() {
@@ -1060,6 +1062,23 @@ struct ProfilePoolPickerFableTests {
         for c in [staleOut, never, unknown] {
             if case .eligible = d.verdicts[c.profileID] {} else { Issue.record("expected eligible") }
         }
+    }
+
+    /// The rule follows each candidate's own model, as it does for a spawn
+    /// that names none and runs each profile's configured model: an out
+    /// candidate whose model is a Fable model is refused, while one whose
+    /// model is another, or unknown to TBD, is not.
+    @Test func fableRequest_refusesOnlyCandidatesWhoseModelIsFable() {
+        let fableOut = candidate(percent: 5, fable: fableReading(.out), model: "fable")
+        let otherOut = candidate(percent: 10, fable: fableReading(.out), model: "opus")
+        let unsetOut = candidate(percent: 20, fable: fableReading(.out), model: nil)
+        let d = ProfilePoolPicker.pick(
+            candidates: [fableOut, otherOut, unsetOut], now: now, requiresFable: true)
+        #expect(d.verdicts[fableOut.profileID] == .fableOut)
+        for c in [otherOut, unsetOut] {
+            if case .eligible = d.verdicts[c.profileID] {} else { Issue.record("expected eligible") }
+        }
+        #expect(d.chosen == otherOut.profileID)
     }
 
     @Test func ranked_alsoExcludesOutProfiles() {
