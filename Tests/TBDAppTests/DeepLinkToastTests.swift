@@ -142,22 +142,20 @@ struct DeepLinkToastTests {
     @Test func navigateToWorktreeMiss_showsLookingToast() async {
         await withState { state in
             state.isInitialStateLoaded = true
-            // Slow lookup so the progress state is observable.
-            state.archivedLookupOverride = { _ in
-                try? await Task.sleep(for: .milliseconds(100))
-                return []
-            }
+            state.archivedLookupOverride = { _ in [] }
 
             state.navigateToWorktree(UUID())
 
-            // A hang guard on a main-queue delivery, so the saturated-pass
-            // budget (`Tests/CLAUDE.md`, "Population is the scheduler").
-            let looking = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
-                await MainActor.run { state.activeToast?.style == .progress }
-            }
-            #expect(looking != .timedOut, "the lookup's progress toast never showed")
-            guard looking == .satisfied else { return }
+            // The progress toast goes up in the same main-actor turn as the
+            // call, so it is checked before any await: the lookup cannot run
+            // until the test suspends, and once it has, the toast is its answer.
+            #expect(state.activeToast?.style == .progress)
             #expect(state.activeToast?.message == "Looking for worktree…")
+
+            await state.archivedLookupTask?.value
+
+            #expect(state.activeToast?.style == .error)
+            #expect(state.activeToast?.message == "Worktree not found — it may have been deleted.")
         }
     }
 
