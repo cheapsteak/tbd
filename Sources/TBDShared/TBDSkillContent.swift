@@ -134,7 +134,10 @@ goes to stderr, or to `screen.source` and `screen.ageMilliseconds` under
 
 A session an earlier version of TBD left on tmux cannot be read: the command
 fails and says what to do, which is `tbd terminal migrate <id>` to move it to
-the pty holder, after ending its tmux server if that server still runs.
+the pty holder, after ending its tmux server if that server still runs. Then
+run `tbd terminal wake --terminal <id>` to start it on the holder: a
+migration only rewrites a parked session's row and starts nothing, and a wake
+of a session that is already running does nothing.
 
 ### Message a sibling session
 
