@@ -752,6 +752,48 @@ struct TmuxResumeGateRPCTests {
         #expect(f.probe.servers.isEmpty)
     }
 
+    /// A tab on the pty holder that still carries the entry's session —
+    /// running it, or parked and resuming it when woken — is not joined by a
+    /// second one: the reopen mints a new terminal, so nothing else would stop
+    /// it starting beside that tab, and the gate reads only tmux rows and
+    /// marks. The refusal writes nothing and asks no probe. Once that tab is
+    /// closed, the same reopen goes ahead.
+    @Test("Closed Terminals' reopen is refused while a holder tab carries the session",
+          arguments: [false, true])
+    func closedTerminalsReopenBesideAHolderTabCarryingTheSessionIsRefused(parked: Bool) async throws {
+        let f = try await fixture()
+        defer { f.tearDown() }
+        let entry = try await closedHolderEntry(f)
+        let created = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: Self.sessionID, kind: .claude,
+            transport: .holder)
+        if parked {
+            try await f.db.terminals.setHibernated(id: created.id, sessionID: Self.sessionID, reason: .auto)
+        }
+        let carrier = try #require(try await f.db.terminals.get(id: created.id))
+        let params = TerminalHistoryReviveParams(worktreeID: f.worktree.id, id: entry.id)
+
+        let refused = try await f.send(RPCMethod.terminalHistoryRevive, params)
+
+        #expect(!refused.success)
+        #expect(refused.error == "Terminal \(carrier.id) is still open and carries this session, so "
+            + "reopening it would run the session a second time. Use that tab, or close "
+            + "it before reopening this entry from Closed Terminals.")
+        let outcome = try f.lastOutcome()
+        #expect(outcome.result == .synchronous(.refused))
+        #expect(outcome.reason == .notEligible)
+        #expect(f.holder.launches.isEmpty)
+        #expect(f.probe.servers.isEmpty)
+        #expect(f.admission.requests.isEmpty)
+        #expect(try await f.db.terminals.list(worktreeID: f.worktree.id) == [carrier])
+
+        try await f.db.terminals.delete(id: carrier.id)
+        let reopened = try await f.send(RPCMethod.terminalHistoryRevive, params)
+        #expect(reopened.success, "error: \(reopened.error ?? "nil")")
+        #expect(f.holder.launches.count == 1)
+    }
+
     // MARK: - A session the worktree's archived record names
 
     /// An active worktree that still carries its archived record, as adopting

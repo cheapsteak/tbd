@@ -423,7 +423,9 @@ code but recorded as `transport-failed`, not as a declined act. A Closed
 Terminals reopen of a Claude entry whose parked tmux tab is still open is
 refused, `not-eligible`, before the gate: the session comes back in that tab
 when it is woken, and the gate, which does not read a parked row, would not
-stop it.
+stop it. So is a reopen while a tab on the pty holder in the same worktree
+carries the entry's session, running it or parked: the reopen opens a new
+terminal beside that tab, and the gate reads no holder row.
 
 The gate is keyed by session id rather than by row or worktree, because the
 requests that resume a session reach it from different records: an archived

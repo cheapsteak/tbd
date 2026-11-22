@@ -1146,6 +1146,24 @@ extension RPCRouter {
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
+            // A tab on the pty holder that carries the session — running it,
+            // or parked and resuming it when woken — is not joined by a second
+            // one. The reopen mints a new terminal rather than reusing the
+            // entry's, so nothing else stops it starting beside that tab, and
+            // the gate below reads only tmux rows and marks. The entry can be
+            // reopened once that tab is closed.
+            let worktreeRows = try await actuating(actuationID) {
+                try await db.terminals.list(worktreeID: worktree.id)
+            }
+            if let carrier = worktreeRows.first(where: {
+                $0.transport == .holder && $0.claudeSessionID == sessionID
+            }) {
+                let message = "Terminal \(carrier.id) is still open and carries this session, so "
+                    + "reopening it would run the session a second time. Use that tab, or close "
+                    + "it before reopening this entry from Closed Terminals."
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
             // The resume gate (`TmuxResumeGate`), before start admission and
             // before the trust seed, the transcript sync, the session title
             // and the session mod's spawn record: an entry a live tmux row's
