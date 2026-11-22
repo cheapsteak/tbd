@@ -218,12 +218,17 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
   - a row past the column limit stops at the limit and marks the table
   - a quote that never closes is an error naming the line where it opens
   - the row limit stops at N rows and marks the table as stopped
+  - an empty line past the row limit marks the table as stopped
   - input cut short by the byte limit drops its last row and marks the table
     as stopped
   - an empty input, and a header with no rows
   - invalid UTF-8 shows as `�`
-- **`DelimitedTableLoader`:** a directory and a FIFO are refused, and the FIFO
-  check returns without blocking.
+  - a parse cancelled before it starts returns no table
+  - a parse cancelled partway through stops early and returns no table
+- **`DelimitedTableLoader`:**
+  - a directory and a FIFO are refused, and the FIFO check returns without
+    blocking
+  - a symlink to a CSV file loads the file
 - **`FilePreviewClassifier`:**
   - `csv`, `CSV` and `tsv` that read as text are `.table` when the rendered
     view is asked for, and `.text` when it is not
