@@ -429,9 +429,10 @@ struct PhoneSnapshotBuilderTests {
 
     /// A Claude session still on the tmux transport loses what TBD no longer
     /// does there, as the laptop's tab menu does. A running one cannot switch
-    /// in place, since the switch restarts its process, but can fork; a
-    /// parked one takes no message or model, since either would wake it, but
-    /// can switch, which moves the row and starts nothing.
+    /// in place, since the switch restarts its process, but can fork. A
+    /// parked one keeps everything: a message or a model wakes it, and the
+    /// phone's wake moves it to the pty holder first; its switch moves the
+    /// row and starts nothing.
     @Test func aTmuxSessionOffersOnlyWhatTmuxStillDoes() throws {
         let a = UUID()
         let w = Self.worktree("fix-login", repo: a)
@@ -450,13 +451,10 @@ struct PhoneSnapshotBuilderTests {
         #expect(sessions[0].capabilities == PhoneCapabilities(
             transcript: Self.available, send: Self.available, answer: Self.available,
             switchProfile: noSwitch, fork: Self.available, model: Self.available))
-        let noWake = PhoneCapability(available: false, reason: PhoneSessionStatus.parkedOnTmuxReason)
         #expect(sessions[1].capabilities == PhoneCapabilities(
-            transcript: Self.available, send: noWake, answer: Self.available,
-            switchProfile: Self.available, fork: Self.available, model: noWake))
-        #expect(PhoneSessionStatus.parkedOnTmuxReason.utf8.count <= PhoneText.fieldLimit)
-        #expect(PhoneSessionStatus.parkedOnTmuxReason.contains(TransportMigrationVocabulary.menuTitle),
-                "the phone names a menu item the app does not have")
+            transcript: Self.available, send: Self.available, answer: Self.available,
+            switchProfile: Self.available, fork: Self.available, model: Self.available),
+                "a parked tmux session does not offer what its wake now does")
         #expect(PhoneSessionStatus.switchOnTmuxReason.utf8.count <= PhoneText.fieldLimit)
     }
 

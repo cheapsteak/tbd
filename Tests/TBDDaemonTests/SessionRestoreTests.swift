@@ -416,10 +416,10 @@ struct SessionRestoreTests {
     }
 
     /// A tmux row this startup parked for recovery, as reconcile parks one
-    /// whose server is gone. It moves to the holder through `tbd terminal
-    /// migrate`, and its wake is refused with `terminalOnTmux`, so the pass
-    /// neither wakes it nor counts it: selected, it would read as a failure on
-    /// the restart that parked it.
+    /// whose server is gone. It moves to the holder when a person wakes it or
+    /// through `tbd terminal migrate`, never on a rail's wake, so the pass
+    /// neither wakes it nor counts it: selected, its wake would be refused with
+    /// `terminalOnTmux` and read as a failure on the restart that parked it.
     @Test("a tmux row parked for recovery stays parked and is not counted")
     func tmuxRowIsLeftOut() async throws {
         let fixture = try await makeFixture()

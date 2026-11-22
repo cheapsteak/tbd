@@ -83,8 +83,9 @@ struct StartAdmissionRouterTests {
     }
 
     /// A parked Claude session, on the pty holder unless `transport` says
-    /// otherwise. A row parked on the holder is the only kind a wake can
-    /// start, and so the only kind a wake asks admission about.
+    /// otherwise. A wake starts a row parked on the holder, and a person's
+    /// wake starts one parked on tmux too, once it has moved it to the holder;
+    /// those are the wakes that ask admission.
     private func makeParkedClaude(
         in db: TBDDatabase, worktree: Worktree, kind: TerminalKind = .claude,
         transport: TerminalTransport = .holder
@@ -344,34 +345,90 @@ struct StartAdmissionRouterTests {
         case worktreeResume
     }
 
-    /// A row parked on tmux never wakes where it is, so a wake of one starts
-    /// nothing and is not checked, even with admission set to hold. The person
-    /// gets the refusal that names `tbd terminal migrate`, which a hold would
-    /// otherwise hide, and the row is not marked start-held: no wake will ever
-    /// start it there, so there is no start to hold.
-    @Test("a wake of a row parked on tmux is refused with the migration, and never held",
+    /// One wake of `terminal` through `entry`, declared by `actor`.
+    private func wake(
+        _ fixture: Fixture, _ entry: WakeEntry, terminal: Terminal, actor: ActuationActor?
+    ) async throws -> RPCResponse {
+        switch entry {
+        case .terminalWake:
+            return await fixture.router.handle(try RPCRequest(
+                method: RPCMethod.terminalWake,
+                params: TerminalWakeParams(terminalID: terminal.id), actor: actor))
+        case .terminalResume:
+            return await fixture.router.handle(try RPCRequest(
+                method: RPCMethod.terminalResume,
+                params: TerminalResumeParams(terminalID: terminal.id), actor: actor))
+        case .worktreeResume:
+            return await fixture.router.handle(try RPCRequest(
+                method: RPCMethod.worktreeResume,
+                params: WorktreeResumeParams(worktreeID: terminal.worktreeID), actor: actor))
+        }
+    }
+
+    /// A person's wake of a row parked on tmux moves it to the pty holder and
+    /// starts its agent there, so admission is asked, as a wake, before the
+    /// move. A hold leaves the row parked on tmux, unmoved, with the hold
+    /// recorded on it as on any held wake. No declared actor reads as
+    /// anonymous, which is checked.
+    @Test("a person's wake of a row parked on tmux is asked before the move, and a hold leaves it on tmux",
           arguments: WakeEntry.allCases)
-    func tmuxParkedWakeIsRefusedAndNeverHeld(_ entry: WakeEntry) async throws {
+    func tmuxParkedWakeIsAskedAndAHoldLeavesItOnTmux(_ entry: WakeEntry) async throws {
         let fixture = try await makeFixture()
         let worktree = try await makeWorktree(in: fixture.db)
         let terminal = try await makeParkedClaude(
             in: fixture.db, worktree: worktree, transport: .tmux)
 
-        let response: RPCResponse
-        switch entry {
-        case .terminalWake:
-            response = await fixture.router.handle(try RPCRequest(
-                method: RPCMethod.terminalWake,
-                params: TerminalWakeParams(terminalID: terminal.id)))
-        case .terminalResume:
-            response = await fixture.router.handle(try RPCRequest(
-                method: RPCMethod.terminalResume,
-                params: TerminalResumeParams(terminalID: terminal.id)))
-        case .worktreeResume:
-            response = await fixture.router.handle(try RPCRequest(
-                method: RPCMethod.worktreeResume,
-                params: WorktreeResumeParams(worktreeID: worktree.id)))
-        }
+        let response = try await wake(fixture, entry, terminal: terminal, actor: nil)
+
+        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue,
+                "the wake was not held: \(response.error ?? "nil")")
+        #expect(response.error == Self.holdReason)
+        #expect(fixture.stub.requests.map(\.kind) == [.wake])
+        #expect(fixture.stub.requests.first?.agent == .claude)
+        #expect(fixture.stub.requests.first?.terminalID == terminal.id)
+        #expect(fixture.stub.requests.first?.actorKind == ActuationActor.Kind.anonymous)
+        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(row.isParked)
+        #expect(row.transport == .tmux, "a held wake moved the row")
+        #expect(row.tmuxWindowID == "@1", "a held wake rewrote the row")
+        #expect(row.startHeldReason == Self.holdReason)
+        let outcome = try #require(try rows(at: fixture.logPath).last)
+        #expect(outcome["reason"] as? String == "held")
+    }
+
+    /// The CLI's own declaration, a session actor, is a person's request too:
+    /// checked, and asked before the move.
+    @Test("a session actor's wake of a row parked on tmux is asked before the move")
+    func sessionActorsTmuxParkedWakeIsAsked() async throws {
+        let fixture = try await makeFixture()
+        let worktree = try await makeWorktree(in: fixture.db)
+        let terminal = try await makeParkedClaude(
+            in: fixture.db, worktree: worktree, transport: .tmux)
+        let actor = try #require(ActuationActor.session(
+            worktree: worktree.id.uuidString, terminal: UUID().uuidString))
+
+        let response = try await wake(fixture, .terminalWake, terminal: terminal, actor: actor)
+
+        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
+        #expect(fixture.stub.requests.map(\.actorKind) == [ActuationActor.Kind.session])
+        #expect(try await fixture.db.terminals.get(id: terminal.id)?.transport == .tmux)
+    }
+
+    /// A rail's wake of a row parked on tmux moves nothing and starts nothing,
+    /// so it is not asked, even by the one rail that is checked. It gets the
+    /// refusal that names the move, which a hold would otherwise hide, and the
+    /// row is not marked start-held.
+    @Test("the restore rail's wake of a row parked on tmux is refused with the move, and never asked",
+          arguments: WakeEntry.allCases)
+    func railsTmuxParkedWakeIsRefusedAndNeverAsked(_ entry: WakeEntry) async throws {
+        let fixture = try await makeFixture()
+        let worktree = try await makeWorktree(in: fixture.db)
+        let terminal = try await makeParkedClaude(
+            in: fixture.db, worktree: worktree, transport: .tmux)
+
+        let response = try await wake(
+            fixture, entry, terminal: terminal,
+            actor: .daemon(rail: ActuationRail.sessionRestore))
 
         #expect(fixture.stub.requests.isEmpty, "admission was asked about a wake that starts nothing")
         #expect(response.errorCode == RPCErrorCode.terminalOnTmux.rawValue)
@@ -408,22 +465,31 @@ struct StartAdmissionRouterTests {
                 claudeSessionID: session, kind: kind,
                 hibernatedAt: parked ? Date() : nil, transport: transport)
         }
-        #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .claude, session: "s")) == .claude)
+        func agent(_ terminal: Terminal, migratesFromTmux: Bool = false) -> StartAdmissionAgent? {
+            RPCRouter.startAdmissionAgent(forWaking: terminal, migratesFromTmux: migratesFromTmux)
+        }
+        #expect(agent(row(kind: .claude, session: "s")) == .claude)
         // A row written before kinds were recorded, with a Claude session id.
-        #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: nil, session: "s")) == .claude)
+        #expect(agent(row(kind: nil, session: "s")) == .claude)
         // An explicit Codex kind resumes its native thread.
-        #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .codex, session: "t")) == .codex)
+        #expect(agent(row(kind: .codex, session: "t")) == .codex)
         // Nothing to resume, so the wake starts nothing; and a shell is no agent.
-        #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .claude, session: nil)) == nil)
-        #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .shell, session: "s")) == nil)
+        #expect(agent(row(kind: .claude, session: nil)) == nil)
+        #expect(agent(row(kind: .shell, session: "s")) == nil)
         // A live row starts nothing when "woken".
-        #expect(RPCRouter.startAdmissionAgent(
-            forWaking: row(kind: .claude, session: "s", parked: false)) == nil)
-        // A row parked on tmux starts nothing: its wake is refused.
-        #expect(RPCRouter.startAdmissionAgent(
-            forWaking: row(kind: .claude, session: "s", transport: .tmux)) == nil)
-        #expect(RPCRouter.startAdmissionAgent(
-            forWaking: row(kind: .codex, session: "t", transport: .tmux)) == nil)
+        #expect(agent(row(kind: .claude, session: "s", parked: false)) == nil)
+        #expect(agent(row(kind: .claude, session: "s", parked: false), migratesFromTmux: true) == nil)
+        // A row parked on tmux starts nothing when the wake does not move it:
+        // a rail's is refused.
+        #expect(agent(row(kind: .claude, session: "s", transport: .tmux)) == nil)
+        #expect(agent(row(kind: .codex, session: "t", transport: .tmux)) == nil)
+        // A person's wake moves it to the holder and starts its agent there.
+        #expect(agent(row(kind: .claude, session: "s", transport: .tmux), migratesFromTmux: true) == .claude)
+        #expect(agent(row(kind: .codex, session: "t", transport: .tmux), migratesFromTmux: true) == .codex)
+        // Moving one with nothing to resume still starts nothing.
+        #expect(agent(row(kind: .claude, session: nil, transport: .tmux), migratesFromTmux: true) == nil)
+        // A holder row's answer does not depend on the move.
+        #expect(agent(row(kind: .claude, session: "s"), migratesFromTmux: true) == .claude)
     }
 
     @Test("terminal.resume is held like a wake")

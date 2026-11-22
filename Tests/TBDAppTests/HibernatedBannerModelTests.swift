@@ -16,7 +16,7 @@ import TBDShared
 struct HibernatedBannerModelTests {
     /// A holder-backed row unless `transport` says otherwise: every session TBD
     /// starts is on the holder, and a row parked on tmux gets a notice of its
-    /// own (`parkedOnTmuxRowGetsTheMoveNotice`).
+    /// own (`parkedOnTmuxRowGetsTheClickToResumeNotice`).
     private func terminal(hibernatedAt: Date? = nil,
                           hibernateReason: HibernateReason? = nil,
                           suspendedAt: Date? = nil,
@@ -179,25 +179,36 @@ struct HibernatedBannerModelTests {
 
     // MARK: - A row parked on tmux
 
-    /// A row parked on tmux cannot be woken where it is, so its notice says how
-    /// to move it instead of promising a click resumes it — whatever the park
-    /// reason, including the dead-window re-park, which records none.
+    /// A row parked on tmux resumes on a click, as any parked row does: the
+    /// click's wake moves it to the pty holder first. So its notice promises
+    /// the click and says where the session resumes, and sends nobody to the
+    /// tab's menu or the CLI — whatever the park reason, including the
+    /// dead-window re-park, which records none.
     @Test(arguments: [nil, .manual, .auto, .recovery, .merged, .exited] as [HibernateReason?])
-    func parkedOnTmuxRowGetsTheMoveNotice(reason: HibernateReason?) {
+    func parkedOnTmuxRowGetsTheClickToResumeNotice(reason: HibernateReason?) {
         let banner = HibernatedBannerModel.banner(
             for: terminal(hibernatedAt: Date(), hibernateReason: reason, transport: .tmux))
         #expect(banner == .hibernatedOverlay(message: HibernatedBannerModel.parkedOnTmuxMessage))
-        #expect(HibernatedBannerModel.parkedOnTmuxMessage.contains(TransportMigrationVocabulary.menuTitle))
-        #expect(HibernatedBannerModel.parkedOnTmuxMessage.contains("tbd terminal migrate"))
+        let message = HibernatedBannerModel.parkedOnTmuxMessage
+        #expect(message.hasPrefix(HibernatedBannerModel.parkedOnTmuxLead))
+        #expect(message.contains("click anywhere in the pane to resume"))
+        #expect(message.contains("pty holder"))
+        #expect(!message.contains(TransportMigrationVocabulary.menuTitle))
+        #expect(!message.contains("tbd terminal migrate"))
     }
 
-    /// A start-admission hold is not appended to a tmux row's notice: no wake
-    /// of it can start anything until it is moved.
-    @Test func parkedOnTmuxRowIgnoresAHold() {
+    /// A start-admission hold is appended to a tmux row's notice as to a holder
+    /// row's: a wake of it starts an agent, so the gate can hold it.
+    @Test func parkedOnTmuxRowShowsAHold() {
         var held = terminal(hibernatedAt: Date(), hibernateReason: .manual, transport: .tmux)
         held.startHeldReason = "camera in use"
         held.startHeldAt = Self.nineTwelveUTC
-        #expect(heldMessage(held) == HibernatedBannerModel.parkedOnTmuxMessage)
+        // The clock's own spacing before "AM" varies by OS, so pin the parts
+        // around it rather than the whole string.
+        let message = heldMessage(held)
+        #expect(message.hasPrefix(
+            HibernatedBannerModel.parkedOnTmuxMessage + " · Automatic wake held at 9:12"))
+        #expect(message.hasSuffix("M: camera in use"))
     }
 
     /// The other branch: the same row on the holder keeps its reason's
