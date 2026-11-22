@@ -51,6 +51,13 @@ extension WorktreeLifecycle {
     /// parked in the row is saved to `unsent-prompts/` rather than deleted or
     /// left behind; `unsentPromptsReposDir` is that save's test seam.
     ///
+    /// Every delete here closes the row's tmux rows first, as every other
+    /// teardown that deletes a tmux row does
+    /// (`closeTmuxRowsBeforeRecoveryDelete`). When a live row's Closed
+    /// Terminals entry cannot be marked with the worktree's tmux server, the
+    /// row is left `.creating` with all its records, for the next recovery
+    /// pass.
+    ///
     /// Returns the detached phase-3 resume tasks (for tests); the daemon
     /// ignores them.
     @discardableResult
@@ -95,6 +102,7 @@ extension WorktreeLifecycle {
             // completed" case as a missing checkout.
             guard FileManager.default.fileExists(atPath: row.localPath),
                   let worktree = LocalWorktree(row) else {
+                guard await closeTmuxRowsBeforeRecoveryDelete(row) else { continue }
                 logger.warning("recovery: deleting .creating worktree \(row.id, privacy: .public) — checkout missing at \(row.localPath, privacy: .public)")
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: row.id)
@@ -145,7 +153,33 @@ extension WorktreeLifecycle {
                     }
                     continue
                 }
+                // The resume gate a revive asks before it relaunches anything
+                // (`beginReviveWorktree`), asked again here because this
+                // finishes a revive whose own ask may predate the gate: the
+                // sessions it relaunches, and the worktree's own tmux server,
+                // which an earlier build's archive could leave running one of
+                // them with no row or mark naming it. `spawnTerminal` asks
+                // only by session. Refused, or unable to ask, the revive is
+                // left as a failed restore leaves it: active, with its full
+                // unfinished record, for an explicit retry.
+                let relaunched = Self.reviveResumeKeys(
+                    skipClaude: false,
+                    missingTabs: missingArchivedAgentTabs(restoreTabs, terminals: terminals))
                 let task = Task.detached { [self] in
+                    let refusal: TmuxResumeRefusal?
+                    do {
+                        refusal = try await tmuxResumeRefusal(
+                            resuming: relaunched, worktreeServer: worktree.tmuxServer)
+                    } catch {
+                        logger.error("recovery: the resume gate could not be asked for \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public); preserving archive for explicit retry")
+                        try? await db.worktrees.revive(id: worktree.id, clearSessions: false)
+                        return
+                    }
+                    if let refusal {
+                        logger.notice("recovery: archived restore of \(worktree.id, privacy: .public) waits for tmux server \(refusal.server, privacy: .public); preserving archive for explicit retry")
+                        try? await db.worktrees.revive(id: worktree.id, clearSessions: false)
+                        return
+                    }
                     do {
                         _ = try await completeArchivedRestore(worktree: worktree.worktree, repo: repo, tabs: restoreTabs)
                     } catch {
@@ -178,7 +212,7 @@ extension WorktreeLifecycle {
                 // directory itself.
                 if await gitListsCheckout(row) {
                     await activateTerminalLessCreate(row, reposDir: unsentPromptsReposDir)
-                } else {
+                } else if await closeTmuxRowsBeforeRecoveryDelete(row) {
                     logger.warning("recovery: deleting terminal-less .creating worktree \(worktree.id, privacy: .public) — git does not list \(row.localPath, privacy: .public) as a worktree of its repo, so it is not a checkout TBD can vouch for; the directory is left alone")
                     do {
                         try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
@@ -195,6 +229,7 @@ extension WorktreeLifecycle {
             }
 
             guard let rid = worktree.repoID, let repo = (try? await db.repos.get(id: rid)) ?? nil else {
+                guard await closeTmuxRowsBeforeRecoveryDelete(row) else { continue }
                 logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — repo \(String(describing: worktree.repoID), privacy: .public) row is missing, so the pre-session wait can never be resumed")
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
@@ -283,6 +318,33 @@ extension WorktreeLifecycle {
             return false
         }
         return listed.contains { $0.path == row.localPath }
+    }
+
+    /// Close every tmux row of a `.creating` row that recovery is about to
+    /// delete. Each is closed as every other teardown that deletes a tmux
+    /// row closes it (`closeLeftoverTmuxRow`), running no tmux command. A live
+    /// row's Closed Terminals entry is marked with the worktree's tmux server,
+    /// and the delete's `TerminalHistoryStore.deleteForWorktree` keeps it. A
+    /// create by an earlier build may have started that row's agent in a
+    /// server that still runs it, and the mark is what every later resume of
+    /// the session asks about first (`TmuxResumeGate`).
+    ///
+    /// False when the rows cannot be read or a mark cannot be written. The
+    /// caller then deletes nothing and leaves the row `.creating` for the
+    /// next recovery pass, at the next daemon start. The kept tmux row names
+    /// its session to the gate, as the mark would.
+    private func closeTmuxRowsBeforeRecoveryDelete(_ row: Worktree) async -> Bool {
+        do {
+            for terminal in try await db.terminals.list(worktreeID: row.id)
+            where terminal.transport == .tmux {
+                try await Self.closeLeftoverTmuxRow(
+                    terminal, server: row.tmuxServer, history: db.terminalHistory)
+            }
+            return true
+        } catch {
+            logger.warning("recovery: leaving .creating worktree \(row.id, privacy: .public) for the next recovery pass, at the next daemon start — a tmux row could not be closed: its rows could not be read, or its Closed Terminals entry could not be marked with tmux server \(row.tmuxServer, privacy: .public). Its rows are kept to guard its sessions, and nothing was deleted: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     /// Keep a terminal-less `.creating` row whose checkout exists and flip it to

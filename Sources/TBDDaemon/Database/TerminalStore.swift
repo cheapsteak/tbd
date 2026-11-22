@@ -1339,10 +1339,25 @@ public struct TerminalStore: Sendable {
     /// Two writes that could land separately might leave a holder row still
     /// naming a pane, the stale-coordinate hazard that let daemon keystrokes
     /// reach the wrong session.
+    ///
+    /// **A park still in flight is finished in the same write.** A row parked
+    /// with `pendingSessionIncarnationID` set is one an earlier build's tmux
+    /// hibernate left when its respawn failed after it signalled the agent.
+    /// The only caller, `TerminalTransportMigrator.rewriteToHolder`, moves
+    /// such a row only once its tmux server is positively gone, and with it
+    /// the agent, so the park is complete: the pending token is promoted to
+    /// `sessionIncarnationID` and cleared, with the ordering and activity
+    /// facts `finalizeHibernatedShellRespawn` clears, exactly as that fence
+    /// would have. Left set, it would read on the holder row as a session
+    /// that may still run (`WorktreeLifecycle.sessionHasEnded`) though nothing
+    /// runs it, and `applySessionStart` would refuse every hook until a wake
+    /// reset it. A wake does not read it, so a wake after the move is
+    /// unchanged either way.
     func setParkedTransport(
         id: UUID,
         expectedState: TerminalReplacementSnapshot,
-        transport: TerminalTransport
+        transport: TerminalTransport,
+        at date: Date = Date()
     ) async throws -> Terminal? {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
@@ -1355,6 +1370,18 @@ public struct TerminalStore: Sendable {
             record.transport = transport.rawValue
             record.tmuxWindowID = ""
             record.tmuxPaneID = ""
+            if let pending = record.pendingSessionIncarnationID {
+                record.sessionOrderObservedAt = nil
+                record.codexTranscriptBoundaryOffset = nil
+                record.sessionIncarnationID = pending
+                record.pendingSessionIncarnationID = nil
+                record.activityState = TerminalActivityState.idle.rawValue
+                record.activityStateSource = FactColumnJSON.encode(FactSource.database)
+                record.activityStateObservedAt = date
+                record.activityStateOrderObservedAt = date
+                record.awaitingInputReason = nil
+                record.awaitingInputObservedAt = nil
+            }
             try record.update(db)
             return record.toModel()
         }
@@ -1943,6 +1970,43 @@ public struct TerminalStore: Sendable {
             record.activityStateSource = FactColumnJSON.encode(FactSource.hookEvent("SessionEnd"))
             record.activityStateObservedAt = date
             record.activityStateOrderObservedAt = date
+            try record.update(db)
+            return true
+        }
+    }
+
+    /// Forget the session id a tab that is not Claude's, still on the tmux
+    /// transport, carries for a Claude started by hand inside it, once that
+    /// Claude's `SessionEnd` says its process left. Returns whether the row
+    /// changed.
+    ///
+    /// `SessionStart` records such a Claude's id onto the row
+    /// (`applySessionStart`), and `stampSessionExited` leaves the row
+    /// unstamped because no wake resumes Claude in a shell. Kept, the id
+    /// would keep naming a session that no longer runs there to the resume
+    /// gate's open-row lookup (`liveTmuxServers`), so every resume of it
+    /// would be refused while the worktree's tmux server runs — and the shell
+    /// keeps that server running. A hand-started Claude that is still running
+    /// keeps its id, and the gate keeps refusing a second start of it.
+    ///
+    /// The same guards as the stamp's, but for the tab's kind: a row on the
+    /// pty holder is left alone (its job's exit answers for it, and the gate
+    /// never reads it), as is a Claude or Codex tab, whose id is its own
+    /// session, and a report whose incarnation is not the row's.
+    @discardableResult
+    public func clearEndedHandStartedSession(
+        id: UUID, reportedIncarnationID: UUID?
+    ) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
+                  record.transport != TerminalTransport.holder.rawValue,
+                  record.claudeSessionID != nil,
+                  let terminal = record.toModel(),
+                  !terminal.isClaudeTab, !terminal.isCodexTerminal,
+                  record.sessionIncarnationID == reportedIncarnationID?.uuidString else {
+                return false
+            }
+            record.claudeSessionID = nil
             try record.update(db)
             return true
         }

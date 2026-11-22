@@ -94,6 +94,26 @@ extension RPCRouter {
         // behind.
         let localActiveWorktrees = activeWorktrees.compactMap(LocalWorktree.init)
 
+        guard activeWorktrees.isEmpty || params.force else {
+            return RPCResponse(
+                error: "Repository has \(activeWorktrees.count) active worktree(s). Use force to archive them first."
+            )
+        }
+
+        // The tmux rows the cascade below does not reach — the main
+        // worktree's, and any other row's that no archive closes — are closed
+        // first, before anything is archived, as an archive closes its own
+        // (`closeTmuxRowsOutsideTheCascade`). Their rows go with the worktree
+        // rows in `completeRepoRemoval`, and a mark that cannot be written
+        // refuses the whole removal here, with every worktree and row as it
+        // was.
+        do {
+            try await closeTmuxRowsOutsideTheCascade(
+                repoID: repo.id, cascading: Set(localActiveWorktrees.map(\.id)))
+        } catch let unwritable as LeftoverTmuxMarkUnwritable {
+            return RPCResponse(error: unwritable.during(.removingRepo).message)
+        }
+
         guard !activeWorktrees.isEmpty else {
             // Nothing to archive, so nothing to wait for: the removal finishes
             // inline and this RPC returns with the rows already deleted and
@@ -101,12 +121,6 @@ extension RPCRouter {
             // delay that announcement for no gain.
             try await completeRepoRemoval(repo: repo)
             return .ok()
-        }
-
-        guard params.force else {
-            return RPCResponse(
-                error: "Repository has \(activeWorktrees.count) active worktree(s). Use force to archive them first."
-            )
         }
 
         // A forced removal tears down every active worktree's sessions,
@@ -169,6 +183,15 @@ extension RPCRouter {
                 for pending in actuationIDs[index...] {
                     await finishActuation(pending, .transportFailed, error: "\(error)")
                 }
+                // The worktrees archived ahead of this one stay archived, so
+                // each still needs the phase 2 every archive gets: their
+                // archive hooks have not run and their folders are still on
+                // disk. The repo and its other rows stay, so there is no
+                // `completeRepoRemoval` to run.
+                finishArchivesOfAStoppedCascade(pendingCompletions)
+                if let unwritable = error as? LeftoverTmuxMarkUnwritable {
+                    throw unwritable.during(.removingRepo)
+                }
                 throw error
             }
             await finishActuation(actuationIDs[index], .dispatched)
@@ -201,6 +224,45 @@ extension RPCRouter {
         }
 
         return .ok()
+    }
+
+    /// Phase 2 (`completeArchiveWorktree`) of the worktrees a `repo.remove`
+    /// cascade archived before one of its phase 1s threw, run one at a time
+    /// in a detached task, as the cascade's own tail runs them.
+    private func finishArchivesOfAStoppedCascade(
+        _ archived: [(worktree: Worktree, repo: Repo)]
+    ) {
+        guard !archived.isEmpty else { return }
+        Task.detached { [self] in
+            for pending in archived {
+                await self.lifecycle.completeArchiveWorktree(
+                    worktree: pending.worktree, repo: pending.repo, force: true)
+            }
+        }
+    }
+
+    /// Close every tmux row of `repoID`'s local worktrees outside `cascading`,
+    /// the worktrees `repo.remove` archives: the main worktree's rows, and
+    /// those of any row in another status that still has terminals. No
+    /// archive reaches them, and `completeRepoRemoval` deletes them with
+    /// their worktree rows, so each is closed first the way an archive closes
+    /// its own (`WorktreeLifecycle.closeLeftoverTmuxRow`): a live row's
+    /// Closed Terminals entry is marked with the worktree's tmux server, which
+    /// the history keeps after the repo is gone, so a resume of its session
+    /// — from the same folder added again, or by its id — asks about that
+    /// server first. Throws `LeftoverTmuxMarkUnwritable` when a mark cannot be
+    /// written, before any row is deleted.
+    private func closeTmuxRowsOutsideTheCascade(repoID: UUID, cascading: Set<UUID>) async throws {
+        for worktree in try await db.worktrees.list(repoID: repoID)
+        where !cascading.contains(worktree.id) {
+            guard let local = LocalWorktree(worktree) else { continue }
+            for terminal in try await db.terminals.list(worktreeID: local.id)
+            where terminal.transport == .tmux {
+                try await WorktreeLifecycle.closeLeftoverTmuxRow(
+                    terminal, server: local.tmuxServer, history: db.terminalHistory,
+                    during: .removingRepo)
+            }
+        }
     }
 
     /// Everything `repo.remove` does once its worktrees have been dealt with:

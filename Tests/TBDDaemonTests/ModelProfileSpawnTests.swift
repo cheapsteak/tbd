@@ -1970,8 +1970,14 @@ struct ModelProfileSpawnTests {
     ///
     /// `identityPollTimeout` is short by default: only the badge test needs the
     /// watcher alive long enough to see a credential appear.
+    ///
+    /// `touches`, when given, gets every seam `HolderTouchRecorder` covers:
+    /// the router's and the lifecycle's process seams, passed at their
+    /// initializers, the router's screen and input seams, and the registry,
+    /// which still spawns through the fixture's holder spawn double.
     private func makeLoginFixture(
-        identityPollTimeout: Duration = .milliseconds(250)
+        identityPollTimeout: Duration = .milliseconds(250),
+        touches: HolderTouchRecorder? = nil
     ) -> LoginFixture {
         let db = try! TBDDatabase(inMemory: true)
         let configDirManager = isolatedConfigDirManager()
@@ -1984,10 +1990,24 @@ struct ModelProfileSpawnTests {
             return true
         }
         let holder = FakeHolderLaunch()
-        let registry = makeHolderRegistryDouble(launch: holder)
+        // Typed as the initializers take them, and chosen here rather than
+        // inside the calls, so the calls infer nothing.
+        let registry: HolderRegistry
+        let processSignaller: any ProcessSignaller
+        let processTableReader: @Sendable () -> ProcessTableSnapshot?
+        if let touches {
+            registry = touches.registryDouble(launch: holder)
+            processSignaller = touches.signaller
+            processTableReader = touches.processTableReader
+        } else {
+            registry = makeHolderRegistryDouble(launch: holder)
+            processSignaller = ProductionProcessSignaller()
+            processTableReader = { ProcessTableSnapshot.read() }
+        }
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), hooks: HookResolver(),
             configDirManager: configDirManager,
+            processSignaller: processSignaller,
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
             leftoverTmuxProbe: .absent)
@@ -2005,9 +2025,12 @@ struct ModelProfileSpawnTests {
             )),
             codexExecutableResolver: CodexLaunchTestStub.executableResolver,
             codexHomeEnsurer: CodexLaunchTestStub.homeEnsurer,
-            actuationLog: makeTestActuationLog()
+            processSignaller: processSignaller,
+            actuationLog: makeTestActuationLog(),
+            processTableReader: processTableReader
         )
         router.holderRegistry = registry
+        touches?.install(on: router)
         return LoginFixture(
             router: router, db: db, holder: holder, deltas: deltas, configDirManager: configDirManager)
     }
@@ -2176,15 +2199,17 @@ struct ModelProfileSpawnTests {
     /// nor types into it. The badge-flip test below is the positive leg — the
     /// same spawn does arm the identity watcher.
     ///
-    /// Every way the router has to read a holder session's screen or type into
-    /// its pty — the screen resolver and the injection courier — records into
-    /// `touches`, and so do its process probes.
+    /// The fixture wires every seam `HolderTouchRecorder` covers into
+    /// `touches`: the router's screen resolver and injection courier, its
+    /// process probes and process-table reader, the lifecycle's signaller, and
+    /// the registry's own signaller and reader builds. The last assertion
+    /// shows each of them was wired, so the empty record speaks for all of
+    /// them.
     @Test("login session: the screen is never read and nothing is typed into it")
     func loginSessionTypesNothing() async throws {
-        let fixture = makeLoginFixture()
-        defer { Task { await cleanup(fixture.db) } }
         let touches = HolderTouchRecorder()
-        touches.install(on: fixture.router)
+        let fixture = makeLoginFixture(touches: touches)
+        defer { Task { await cleanup(fixture.db) } }
         let (_, wt) = try await seedRepoAndWorktree(fixture.db)
         let profile = try await seedOAuthProfile(fixture.db, name: "Manual")
 
@@ -2218,6 +2243,12 @@ struct ModelProfileSpawnTests {
         #expect(touched != .satisfied,
                 "the login session's screen was read or typed into: \(touches.events)")
         #expect(touches.events.isEmpty)
+
+        // The control: every seam the empty record above speaks for was
+        // wired on this fixture, so reaching it would have recorded.
+        let unwired = await touches.unwiredSeams(of: fixture.router)
+        #expect(unwired.isEmpty,
+                "left unwired, so the empty record says nothing about them: \(unwired)")
     }
 
     /// The identity watcher is what a login tab still arms: once the profile's

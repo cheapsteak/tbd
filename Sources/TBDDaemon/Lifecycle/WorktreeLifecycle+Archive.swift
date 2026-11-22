@@ -233,11 +233,17 @@ extension WorktreeLifecycle {
         // mark is written and the status write below fails, every tmux row's
         // entry stays the same way; a holder row's entry is written only after
         // the status flip. Each names a tab that is still open, and Closed
-        // Terminals lists it beside that tab. A retry writes the same entries
-        // again, one per terminal.
+        // Terminals lists it beside that tab. A retry closes the same rows
+        // again and still leaves one entry per terminal: an entry written
+        // with a screen (a parked row's, or a live row's whose park was in
+        // flight) is written again with that screen and a new closing time,
+        // and one written without a screen is kept as it is, its mark set
+        // again. While such an entry's tab is still open, Closed Terminals
+        // will not reopen it (`handleTerminalHistoryRevive`).
         for terminal in terminals where terminal.transport == .tmux {
             try await Self.closeLeftoverTmuxRow(
-                terminal, server: worktree.tmuxServer, history: db.terminalHistory)
+                terminal, server: worktree.tmuxServer, history: db.terminalHistory,
+                during: .archivingWorktree)
         }
 
         // Capture a branch rename without writing ahead of the archive
@@ -580,6 +586,32 @@ extension WorktreeLifecycle {
             missingTabs: missingArchivedAgentTabs(tabs, terminals: terminals))
     }
 
+    /// The sessions a revive relaunches, the keys it asks the resume gate
+    /// about: every archived tab that has no row yet, and none with
+    /// `skipClaude`, which relaunches nothing.
+    static func reviveResumeKeys(skipClaude: Bool, missingTabs: [ArchivedAgentTab]) -> [String] {
+        skipClaude ? [] : missingTabs.map(\.identity.sessionID)
+    }
+
+    /// The resume gate's answer for a revive of the worktree as it stands
+    /// now, asked as `beginReviveWorktree` asks it, for a caller that asks
+    /// before the revive does: `worktree.revive`'s handler asks it ahead of
+    /// start admission, so a refused revive is answered before admission
+    /// holds or records anything. Nil when the row cannot be read, so the
+    /// revive's own lookup reports the missing row.
+    func reviveResumeRefusal(
+        worktreeID: UUID, skipClaude: Bool = false, preferred: AgentSessionIdentity?
+    ) async throws -> TmuxResumeRefusal? {
+        guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else { return nil }
+        let tabs = try await archivedRestorePlan(worktreeID: worktreeID, preferred: preferred)
+        let terminals = try await db.terminals.list(worktreeID: worktreeID)
+        return try await tmuxResumeRefusal(
+            resuming: Self.reviveResumeKeys(
+                skipClaude: skipClaude,
+                missingTabs: missingArchivedAgentTabs(tabs, terminals: terminals)),
+            worktreeServer: worktree.tmuxServer)
+    }
+
     /// Non-blocking revive. Validates, re-adds the git worktree, then:
     ///
     /// - No `preSession` hook → spawns all terminals inline, flips the row to
@@ -654,7 +686,7 @@ extension WorktreeLifecycle {
         // its row, no tab is relaunched, so nothing is asked. Each relaunch
         // asks again in `spawnTerminal`, by its session alone.
         if let refusal = try await tmuxResumeRefusal(
-            resuming: skipClaude ? [] : missingTabs.map(\.identity.sessionID),
+            resuming: Self.reviveResumeKeys(skipClaude: skipClaude, missingTabs: missingTabs),
             worktreeServer: worktree.tmuxServer
         ) {
             throw refusal

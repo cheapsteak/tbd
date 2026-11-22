@@ -7,9 +7,12 @@ import Foundation
 
 /// Router whose lifecycle and handlers share one StateSubscriptionManager,
 /// with every broadcast delta captured in `deltas`. Spawns go through the
-/// holder spawn double, wired into both the router and the lifecycle it
-/// copies, so `scratch.create` opens its primary terminal as the daemon does.
-private func makeRouter(db: TBDDatabase) -> (router: RPCRouter, deltas: BroadcastDeltas) {
+/// holder spawn double `holder`, wired into both the router and the lifecycle
+/// it copies, so `scratch.create` opens its primary terminal as the daemon
+/// does, and every holder teardown is recorded in `holder.abandonments`.
+private func makeRouter(
+    db: TBDDatabase, holder: FakeHolderLaunch = FakeHolderLaunch()
+) -> (router: RPCRouter, deltas: BroadcastDeltas) {
     let deltas = BroadcastDeltas()
     let subs = StateSubscriptionManager()
     subs.addSubscriber { data in
@@ -18,7 +21,7 @@ private func makeRouter(db: TBDDatabase) -> (router: RPCRouter, deltas: Broadcas
         }
         return true
     }
-    let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+    let registry = makeHolderRegistryDouble(launch: holder)
     var lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(), hooks: HookResolver(),
         leftoverTmuxProbe: .absent)
@@ -172,6 +175,27 @@ private final class BroadcastDeltas: @unchecked Sendable {
     }
 }
 
+extension TBDDatabase {
+    /// Makes every write that would leave a `terminal_history` entry marked
+    /// with a tmux server fail, and only those, as a full disk or a locked
+    /// database would fail it. An unmarked entry, a holder row's among them,
+    /// is written as usual, so a test can see whether one was written before
+    /// a teardown met the mark it could not write. SQLite aborts the statement
+    /// from a trigger, so nothing in the daemon is substituted.
+    fileprivate func failMarkedTerminalHistoryWritesForTests() async throws {
+        try await writerForTests.write { db in
+            try db.execute(sql: """
+                CREATE TRIGGER acme_marked_history_insert_fails BEFORE INSERT ON terminal_history
+                WHEN NEW.liveOnTmuxServer IS NOT NULL
+                BEGIN SELECT RAISE(ABORT, 'acme marked history write failed'); END;
+                CREATE TRIGGER acme_marked_history_update_fails BEFORE UPDATE ON terminal_history
+                WHEN NEW.liveOnTmuxServer IS NOT NULL
+                BEGIN SELECT RAISE(ABORT, 'acme marked history write failed'); END;
+                """)
+        }
+    }
+}
+
 /// `tbd worktree archive <scratch>` used to fail with "Repository not found:
 /// <worktree id>": the repo-worktree archive path resolves a repo before doing
 /// anything, and a scratch row has none. `worktree.archive` and
@@ -288,33 +312,113 @@ struct WorktreeArchiveScratchRoutingRPCTests {
         #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).isEmpty)
     }
 
-    /// A scratch archive whose live tmux row's mark cannot be written fails
-    /// before any session is ended or row deleted: the space stays active,
-    /// every row stays, the tmux row among them to guard its session, and
-    /// nothing is recorded.
-    @Test func archiveWhoseTmuxMarkCannotBeWrittenFailsAndKeepsEveryRow() async throws {
-        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
-        let db = try TBDDatabase(inMemory: true)
-        let (router, _) = makeRouter(db: db)
-        let wt = try await makeScratch(router, name: "wt-archive-unmarkable")
+    /// A scratch space whose terminals are, in list order, a Claude holder
+    /// row and then a live Claude tmux row on the space's own tmux server.
+    /// The terminal list orders by `createdAt` and then by id, so the holder
+    /// row is created first and given the lower id: it is ahead of the tmux
+    /// row whether or not the two share a timestamp.
+    private func scratchWithHolderAheadOfTmuxRow(
+        _ router: RPCRouter, db: TBDDatabase, name: String
+    ) async throws -> (wt: Worktree, holderRow: TBDShared.Terminal, tmuxRow: TBDShared.Terminal) {
+        let wt = try await makeScratch(router, name: name)
+        // scratch.create opens a primary terminal; clear it so the test owns
+        // the scratch space's rows.
+        try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+        let ids = [UUID(), UUID()].sorted { $0.uuidString < $1.uuidString }
+        // Pids above macOS's PID_MAX (99,999). The spawn double's teardown
+        // signals nothing in any case.
+        let holderRow = try await db.terminals.create(
+            id: ids[0], worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-acme-scratch-holder",
+            kind: .claude, transport: .holder, holderPID: 100_001, childPID: 100_002)
         let tmuxRow = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            id: ids[1], worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-acme-scratch",
             kind: .claude, transport: .tmux)
-        let rowsBefore = Set(try await db.terminals.list(worktreeID: wt.id).map(\.id))
-        try await db.failTerminalHistoryWritesForTests()
+        let listed = try await db.terminals.list(worktreeID: wt.id).map(\.id)
+        try #require(listed == [holderRow.id, tmuxRow.id],
+                     "the holder row is not ahead of the tmux row in the terminal list")
+        return (wt, holderRow, tmuxRow)
+    }
+
+    /// A scratch archive whose live tmux row's mark cannot be written is
+    /// refused before any holder is touched or any row deleted.
+    ///
+    /// The holder row is ahead of the tmux row in the terminal list, and only
+    /// marked history writes fail. So a teardown that went down the list in
+    /// order would dispose of the holder and write its unmarked Closed
+    /// Terminals entry before it reached the tmux row; closing every tmux row
+    /// first does neither. The space stays active, every row stays, the tmux
+    /// row among them to guard its session, and nothing is recorded.
+    @Test func archiveWhoseTmuxMarkCannotBeWrittenFailsBeforeTouchingAHolder() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
+        let (router, deltas) = makeRouter(db: db, holder: holder)
+        let (wt, holderRow, tmuxRow) = try await scratchWithHolderAheadOfTmuxRow(
+            router, db: db, name: "wt-archive-unmarkable")
+        try await db.failMarkedTerminalHistoryWritesForTests()
 
         let archive = await router.handle(try RPCRequest(
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: wt.id)))
 
         #expect(!archive.success)
-        #expect(archive.error?.contains("Terminal \(tmuxRow.id) was not closed") == true,
-                "error: \(archive.error ?? "nil")")
-        #expect(try await db.worktrees.get(id: wt.id)?.status == .active)
-        #expect(Set(try await db.terminals.list(worktreeID: wt.id).map(\.id)) == rowsBefore)
-        #expect(rowsBefore.contains(tmuxRow.id))
-        #expect(try await db.terminalHistory.list(worktreeID: wt.id).isEmpty)
+        // The reason in the parentheses is SQLite's, so only the text around
+        // it is pinned.
+        let error = archive.error ?? ""
+        #expect(error.hasPrefix(
+            "Tab \(tmuxRow.id) is on tmux, and its session may still be running in tmux server "
+                + "\(wt.tmuxServer). The record that keeps a second agent from being started on it "
+                + "could not be saved ("),
+            "error: \(error)")
+        #expect(error.hasSuffix(
+            "), so the scratch space was not archived and that tab stays open. Try again."),
+            "error: \(error)")
+
+        #expect(holder.abandonments.isEmpty,
+                "the archive disposed of a holder before the tmux row it could not close: \(holder.abandonments.map(\.terminalID))")
+        let reloaded = try await db.worktrees.get(id: wt.id)
+        #expect(reloaded?.status == .active)
+        #expect(reloaded?.archivedAt == nil)
+        #expect(try await db.terminals.list(worktreeID: wt.id).map(\.id) == [holderRow.id, tmuxRow.id])
+        let entries = try await db.terminalHistory.list(worktreeID: wt.id)
+        #expect(!entries.contains { $0.id == holderRow.id },
+                "the archive wrote the holder row's Closed Terminals entry before the tmux row it could not close")
+        #expect(entries.isEmpty)
+        #expect(!deltas.snapshot().contains {
+            if case .worktreeArchived(let d) = $0 { return d.worktreeID == wt.id }
+            return false
+        })
+    }
+
+    /// The control for the refusal above: with marks writable, the same
+    /// scratch space archives, its holder is disposed of, both rows go, and
+    /// both get Closed Terminals entries, the tmux row's marked with the
+    /// space's tmux server and the holder row's unmarked. So the fixture does
+    /// reach the holder teardown and the unmarked entry, and their absence
+    /// above is the refusal's doing.
+    @Test func archiveWithWritableMarksDisposesTheHolderAndMarksTheTmuxEntry() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
+        let (router, _) = makeRouter(db: db, holder: holder)
+        let (wt, holderRow, tmuxRow) = try await scratchWithHolderAheadOfTmuxRow(
+            router, db: db, name: "wt-archive-markable")
+
+        let archive = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeArchive,
+            params: WorktreeArchiveParams(worktreeID: wt.id)))
+
+        #expect(archive.success, "error: \(archive.error ?? "nil")")
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .archived)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+        #expect(holder.abandonments.map(\.terminalID) == [holderRow.id])
+        let entries = try await db.terminalHistory.list(worktreeID: wt.id)
+        let tmuxEntry = try #require(entries.first { $0.id == tmuxRow.id })
+        #expect(tmuxEntry.liveOnTmuxServer == wt.tmuxServer)
+        let holderEntry = try #require(entries.first { $0.id == holderRow.id })
+        #expect(holderEntry.liveOnTmuxServer == nil)
     }
 
     /// `--force` is accepted and changes nothing on this path. What it governs

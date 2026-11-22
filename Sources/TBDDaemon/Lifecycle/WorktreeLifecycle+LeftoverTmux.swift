@@ -118,8 +118,9 @@ extension WorktreeLifecycle {
     /// The tmux half of every teardown that deletes a tmux row: closing its
     /// tab (`terminal.delete`, and `server.stop`'s tab close), archiving its
     /// worktree, reconcile's archive of a vanished worktree, closing a hook
-    /// tab, tearing down a scratch space and forgetting a worktree. It runs no
-    /// tmux command, and the caller deletes the row afterwards unless it
+    /// tab, tearing down a scratch space, forgetting a worktree, removing a
+    /// repo and startup recovery's delete of a `.creating` worktree. It runs
+    /// no tmux command, and the caller deletes the row afterwards unless it
     /// throws.
     ///
     /// **A live row's session keeps running.** So may the session of a row
@@ -133,50 +134,60 @@ extension WorktreeLifecycle {
     /// show nor end with no way to close it. What the daemon does is
     /// say so, at `.notice`, with the command that ends the server, and keep
     /// the session in the record: a row with a session id gets a Closed
-    /// Terminals entry with no screen, marked with the server
-    /// (`TerminalHistoryStore.recordLiveTmuxClose`). Every resume of that
-    /// session id asks about the mark first (`TmuxResumeGate`), so the entry
-    /// brings the session back on the pty holder once the server is gone, and
-    /// never while it may still be running it. A row with no session id has
-    /// nothing to resume and no screen to keep, so it gets no entry.
+    /// Terminals entry marked with the server
+    /// (`TerminalHistoryStore.recordLiveTmuxClose`). The entry keeps the
+    /// screen a park in flight saved before it signalled the agent
+    /// (`suspendedSnapshot`); an unparked row has none to keep. Every resume
+    /// of that session id asks about the mark first (`TmuxResumeGate`), so
+    /// the entry brings the session back on the pty holder once the server is
+    /// gone, and never while it may still be running it. A row with no
+    /// session id has nothing to resume, so it gets no entry.
     ///
     /// **A parked row's entry comes from the row** when its park is complete
     /// (`WorktreeLifecycle.sessionHasEnded`). Its agent was ended when it was
     /// parked, and the screen the park saved, `suspendedSnapshot`, is what its
     /// Closed Terminals entry keeps, with its session id.
     ///
-    /// Either entry is written only when `history` is given: the hard-delete
-    /// paths (forget, scratch delete) remove the worktree's history right
-    /// after, and with it every session that could be resumed from there.
+    /// Either entry is written only when `history` is given. The hard-delete
+    /// paths (forget, scratch delete, recovery's delete) give it too: their
+    /// `TerminalHistoryStore.deleteForWorktree` then removes every entry the
+    /// worktree had except the marked ones, so a mark outlives its worktree.
     ///
     /// **A mark that cannot be written keeps the row.** Once the row is
     /// deleted the mark is the only record that its session may still be
-    /// running, so a failed write throws `LeftoverTmuxMarkUnwritable` and the
-    /// caller keeps the row, which names the session to the resume gate as
-    /// the mark would (`TerminalStore.liveTmuxServers`). Closing the tab
-    /// fails and says why; an archive of its worktree, repo worktree or
-    /// scratch space, is refused with the worktree, its sessions and every
-    /// row as they were, keeping the entries already written for the tmux
-    /// rows closed ahead of it (`beginArchiveWorktree`); reconcile's archive
-    /// leaves the worktree for its next sweep; a hook tab's close keeps the
-    /// tab. The notice is logged only once the mark is written. A
-    /// parked row's entry carries no mark, so a failure to write it is logged
-    /// and the close goes ahead, as any other close's is.
+    /// running, so a failed write throws `LeftoverTmuxMarkUnwritable`, worded
+    /// for `act`, and the caller keeps the row, which names the session to
+    /// the resume gate as the mark would (`TerminalStore.liveTmuxServers`).
+    /// Closing the tab fails and says why; archiving a worktree or a scratch
+    /// space, forgetting a worktree, deleting a scratch space and removing a
+    /// repo are refused with every row as it was, keeping the entries already
+    /// written for the tmux rows closed ahead of the failing one
+    /// (`beginArchiveWorktree`); reconcile's archive leaves the worktree for
+    /// its next sweep; recovery leaves a `.creating` worktree for its next
+    /// pass; a hook tab's close keeps the tab. The notice is logged
+    /// only once the mark is written. A parked row's entry carries no mark, so
+    /// a failure to write it is logged and the close goes ahead, as any other
+    /// close's is.
     ///
     /// **An unknown server leaves nothing to keep.** A row the caller has no
     /// local worktree row for, because the worktree is gone or remote, names
-    /// no server, so neither record could ever be asked about its session:
-    /// the gate's open-row lookup reads the server from the row's worktree,
-    /// and a mark is a server to probe. A kept row would guard nothing and
-    /// leave a tab nobody could close, and a mark that always refused would
-    /// bar the session for good on evidence that names no server. So the
-    /// close goes ahead with the notice and no entry; the one caller that
-    /// passes no server passes no `history` either.
+    /// no server, and so does a worktree whose server is recorded empty: a nil
+    /// or empty `server` is read here as unknown, the one place a server
+    /// enters a mark. Neither record could ever be asked about such a session:
+    /// the gate's open-row lookup reads the server from the row's worktree and
+    /// skips an empty one, and a mark is a server to probe. A kept row would
+    /// guard nothing and leave a tab nobody could close, and a mark that
+    /// always refused would bar the session for good on evidence that names
+    /// no server. So the close goes ahead with the notice and no entry.
     ///
-    /// - Parameter server: the tmux server the row's worktree names, nil when
-    ///   the caller has no local worktree row for it.
+    /// - Parameters:
+    ///   - server: the tmux server the row's worktree names, nil when the
+    ///     caller has no local worktree row for it.
+    ///   - act: what the caller is doing, which words the refusal when the
+    ///     mark cannot be written.
     static func closeLeftoverTmuxRow(
-        _ terminal: Terminal, server: String?, history: TerminalHistoryStore?
+        _ terminal: Terminal, server: String?, history: TerminalHistoryStore?,
+        during act: LeftoverTmuxMarkUnwritable.Act = .closingTab
     ) async throws {
         if sessionHasEnded(terminal, teardownStoppedIt: false) {
             if let history {
@@ -184,18 +195,20 @@ extension WorktreeLifecycle {
             }
             return
         }
-        guard let server else {
-            logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; there is no local worktree row for it, gone or remote, so its tmux server is unknown, and its session may still be running there")
+        guard let server, !server.isEmpty else {
+            logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; no local worktree row names its tmux server (the worktree is gone or remote, or its server is recorded empty), so the server is unknown, and its session may still be running there")
             return
         }
         if let history, terminal.claudeSessionID != nil {
             do {
-                try await history.recordLiveTmuxClose(terminal: terminal, server: server)
+                try await history.recordLiveTmuxClose(
+                    terminal: terminal, server: server,
+                    capture: terminal.isParked ? terminal.suspendedSnapshot : nil)
             } catch {
                 logger.error("keeping terminal \(terminal.id, privacy: .public) on tmux: its session may still be running in tmux server \(server, privacy: .public), and its Closed Terminals entry could not be marked with it: \(error.localizedDescription, privacy: .public)")
                 throw LeftoverTmuxMarkUnwritable(
                     terminalID: terminal.id, server: server,
-                    reason: error.localizedDescription)
+                    reason: error.localizedDescription, act: act)
             }
         }
         logger.notice("closed terminal \(terminal.id, privacy: .public) on tmux without running tmux; its session may still be running in tmux server \(server, privacy: .public). \(LeftoverTmuxSession.endingAdvice(server: server), privacy: .public)")
@@ -215,6 +228,33 @@ extension WorktreeLifecycle {
             history: db.terminalHistory, terminals: db.terminals, probe: leftoverTmuxProbe
         ).refusal(resuming: sessionIDs, worktreeServer: worktreeServer)
     }
+
+    /// The `worktreeServer` a start of `sessionID` outside a revive gives the
+    /// resume gate: the worktree's own `tmuxServer` while the worktree's
+    /// archived record still names that session, and nil otherwise.
+    ///
+    /// The archived record outlives the archive in two ways: adopting an
+    /// archived row's folder makes the row active and keeps the record, and a
+    /// revive that has not finished keeps it for its retry. An earlier
+    /// build's archive could leave a tab's agent running in the worktree's
+    /// server with no row or mark naming it, so a revive asks about that
+    /// server whatever the records say; a resume of the same session from the
+    /// History pane or Closed Terminals in such a worktree asks the same. A
+    /// worktree whose revive finished has no record, so this costs every
+    /// other resume one read and no probe. A record that cannot be read
+    /// answers the server, so the gate asks rather than skipping it.
+    func resumeGateWorktreeServer(
+        resuming sessionID: String, worktreeID: UUID, tmuxServer: String
+    ) async -> String? {
+        do {
+            let named = try await db.worktrees.archivedAgentTabsForRevive(id: worktreeID)
+                .contains { $0.identity.sessionID == sessionID }
+            return named ? tmuxServer : nil
+        } catch {
+            logger.warning("resume gate: the archived record of worktree \(worktreeID, privacy: .public) could not be read, so its tmux server is asked about: \(error.localizedDescription, privacy: .public)")
+            return tmuxServer
+        }
+    }
 }
 
 /// The one question every start of an existing session on the pty holder
@@ -231,10 +271,12 @@ extension WorktreeLifecycle {
 /// respawn failed, with the agent perhaps still running. And TBD deletes a
 /// live tmux row without running tmux
 /// (`WorktreeLifecycle.closeLeftoverTmuxRow`): closing its tab, archiving its
-/// worktree, reconcile's archive of a worktree whose checkout is gone. The
-/// session the row carried may keep running in that server, and the row's
-/// Closed Terminals entry records the server
-/// (`TerminalHistoryEntry.liveOnTmuxServer`). A start of the same session id
+/// worktree or scratch space, reconcile's archive of a worktree whose
+/// checkout is gone, forgetting a worktree, deleting a scratch space,
+/// removing a repo. The session the row carried may keep running in that
+/// server, and the row's Closed Terminals entry records the server
+/// (`TerminalHistoryEntry.liveOnTmuxServer`); a hard delete keeps a marked
+/// entry when it removes its worktree's history. A start of the same session id
 /// anywhere else would put a second agent on it while the first still runs: a
 /// revive that relaunches the worktree's archived tabs, a History pane
 /// resume, a Closed Terminals reopen, a fresh-branch revive of a Codex
@@ -247,33 +289,37 @@ extension WorktreeLifecycle {
 /// with, writes a new session id and never a second agent on this one.
 ///
 /// What it covers is a session an open tmux row names, one whose row was
-/// closed with a mark — closing its tab, archiving its worktree or scratch
-/// space, reconcile's archive — and every session a revive of an archived
-/// worktree resumes. An archive by an earlier build wrote no mark, and could
-/// leave a tab's agent running in the worktree's tmux server: it killed each
-/// tab's tmux window, but skipped the kill when it could not confirm the pane
-/// was the tab's own, and left the agent running when the kill failed and the
+/// closed with a mark, and every session a revive of an archived worktree
+/// resumes. An archive by an earlier build wrote no mark, and could leave a
+/// tab's agent running in the worktree's tmux server: it killed each tab's
+/// tmux window, but skipped the kill when it could not confirm the pane was
+/// the tab's own, and left the agent running when the kill failed and the
 /// pane's pid could not be read to signal it. No record names such a session.
 /// So a revive that resumes a session also asks about the worktree's own
 /// server (`worktreeServer`), whatever the records say, and is refused while
 /// that server may run: a revive in place, a retry of one (which an adopted
 /// archived row takes too), with the History pane's preferred session or
-/// without, and a fresh-branch revive of a Codex thread. A revive that
-/// resumes nothing asks no probe, and neither does a fresh-branch revive of a
-/// Claude conversation, which forks it. A repo's worktrees share one server,
-/// so while a leftover server runs, every such revive in its repo is refused;
+/// without, recovery's finish of a revive a restart interrupted, and a
+/// fresh-branch revive of a Codex thread. The archived record outlives the
+/// archive when a revive has not finished and when an archived row's folder
+/// is adopted, so a History pane resume or Closed Terminals reopen of a
+/// session that record still names asks about the worktree's server too
+/// (`WorktreeLifecycle.resumeGateWorktreeServer`). A revive that resumes
+/// nothing asks no probe, and neither does a fresh-branch revive of a Claude
+/// conversation, which forks it. A repo's worktrees share one server, so
+/// while a leftover server runs, every such start in its repo is refused;
 /// ending the server, or a restart, lets them through.
 ///
-/// Three cases leave a session that may still run in tmux with neither a row
-/// nor a mark, outside any revive, and this gate lets a start of it through:
+/// Two cases leave a session that may still run in tmux with neither a row
+/// nor a mark nor a question about its worktree's server, and this gate lets
+/// a start of it through:
 ///
-/// - Removing a repo deletes its main worktree's rows with the worktree row
-///   (`WorktreeStore.deleteForRepo`) rather than closing them, so they get
-///   no entry.
-/// - Forgetting a worktree and deleting a scratch space remove every Closed
-///   Terminals entry the worktree had, a mark included.
 /// - A row whose worktree the daemon has no local row for names no server, so
 ///   its close writes no mark (`closeLeftoverTmuxRow`).
+/// - A revive an earlier build began, behind a `preSession` hook, and a
+///   restart interrupted before its tabs opened: recovery finishes it through
+///   the hook's phase 3, whose tabs ask `spawnTerminal`'s gate by session
+///   alone, and not about the worktree's own server.
 ///
 /// In each, a start of the session without this gate puts the same second
 /// agent on it: the gate neither adds these cases nor removes them.
@@ -284,10 +330,11 @@ extension WorktreeLifecycle {
 /// tmux row or its mark may sit in any worktree. The lookup is one read of
 /// each of two partial indexes, the tmux rows' whose session may still run
 /// and the marked entries', across every worktree; the probe is asked only
-/// about a server they name and, on a revive, its worktree's server, so
-/// outside a revive a session neither names costs a start those two reads and
-/// nothing else. A start that resumes no session reads nothing. A refusal
-/// writes nothing.
+/// about a server they name and, where the archived record calls for it, the
+/// worktree's server. So a start of a session neither names costs those two
+/// reads, plus one read of the archived record for a History pane resume or
+/// Closed Terminals reopen, and nothing else outside a revive. A start that
+/// resumes no session reads nothing. A refusal writes nothing.
 ///
 /// A transition measure, like the probe it asks: on 2027-01-15 parking on
 /// sight replaces it. See
@@ -303,9 +350,10 @@ struct TmuxResumeGate: Sendable {
     /// still run or a mark of one of `sessionIDs` names, and `worktreeServer`
     /// when it is not empty; nil when every such server is gone or none is
     /// named. Each server is asked once. With no `sessionIDs` nothing is
-    /// started, so nothing is read or asked, `worktreeServer` included.
-    /// Throws when either record cannot be read, so a caller never starts a
-    /// session it could not check.
+    /// started, so nothing is read or asked, `worktreeServer` included. An
+    /// empty server, from a mark or from `worktreeServer`, names nothing to
+    /// probe and is never asked about. Throws when either record cannot be
+    /// read, so a caller never starts a session it could not check.
     func refusal(
         resuming sessionIDs: [String], worktreeServer: String? = nil
     ) async throws -> TmuxResumeRefusal? {
@@ -313,7 +361,8 @@ struct TmuxResumeGate: Sendable {
         let marked = try await history.liveOnTmuxServers(sessionIDs: sessionIDs)
         let live = try await terminals.liveTmuxServers(sessionIDs: sessionIDs)
         var servers = Set(marked).union(live)
-        if let worktreeServer, !worktreeServer.isEmpty { servers.insert(worktreeServer) }
+        if let worktreeServer { servers.insert(worktreeServer) }
+        servers.remove("")
         for server in servers.sorted() {
             guard await probe.state(server) == .running else { continue }
             logger.notice("resume refused: tmux server \(server, privacy: .public) may still be running this session: a tab on tmux carries it, a tab TBD closed on tmux carried it, or the revived worktree's tabs ran in that server")
@@ -350,17 +399,51 @@ struct TmuxResumeRefusal: Error, Equatable, LocalizedError, CustomStringConverti
 /// deletes anything, so the row stays and keeps naming its session to the
 /// resume gate.
 struct LeftoverTmuxMarkUnwritable: Error, Equatable, LocalizedError, CustomStringConvertible {
+    /// What the close was part of. Closing one tab is refused as that tab;
+    /// the others close every tmux row of a worktree, scratch space or repo
+    /// first, and the refusal says the whole act did not happen.
+    enum Act: Sendable, Equatable {
+        case closingTab
+        case archivingWorktree
+        case archivingScratchSpace
+        case forgettingWorktree
+        case deletingScratchSpace
+        case removingRepo
+    }
+
     let terminalID: UUID
     /// The tmux server, as `tmux -L` takes it.
     let server: String
     /// Why the write failed.
     let reason: String
+    var act: Act = .closingTab
 
     /// What the person is told.
     var message: String {
-        "Terminal \(terminalID) was not closed. Its session may still be running in tmux "
-            + "server \(server), and the record that keeps a second agent from being started "
-            + "on it could not be saved (\(reason)), so the tab stays open. Try again."
+        let record = "record that keeps a second agent from being started on it could not be "
+            + "saved (\(reason))"
+        let outcome: String
+        switch act {
+        case .closingTab:
+            return "Terminal \(terminalID) was not closed. Its session may still be running in "
+                + "tmux server \(server), and the \(record), so the tab stays open. Try again."
+        case .archivingWorktree: outcome = "the worktree was not archived"
+        case .archivingScratchSpace: outcome = "the scratch space was not archived"
+        case .forgettingWorktree: outcome = "the worktree was not forgotten"
+        case .deletingScratchSpace: outcome = "the scratch space was not deleted"
+        case .removingRepo: outcome = "the repository was not removed"
+        }
+        return "Tab \(terminalID) is on tmux, and its session may still be running in tmux "
+            + "server \(server). The \(record), so \(outcome) and that tab stays open. "
+            + "Try again."
+    }
+
+    /// The same failure, worded for `act`: a repo removal reaches it through
+    /// its worktrees' archives, and says the repository was not removed.
+    func during(_ act: Act) -> Self {
+        var copy = self
+        copy.act = act
+        return copy
     }
 
     var errorDescription: String? { message }

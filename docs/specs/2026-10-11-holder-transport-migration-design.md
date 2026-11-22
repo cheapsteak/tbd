@@ -242,21 +242,26 @@ worktree's `tmuxServer`, so no model field is added.
 
 **Closing.** Closing a tmux row's tab deletes the row and runs no tmux
 command, and so do archiving or forgetting its worktree, deleting or archiving
-a scratch space, and reconcile's archive of a worktree gone from git. Each is
-recorded as dispatched. What else happens depends on whether the row's session
-ended (`WorktreeLifecycle.sessionHasEnded`):
+a scratch space, reconcile's archive of a worktree gone from git, removing
+a repo, which closes the rows of its main worktree and of any worktree its
+cascade does not archive before it deletes them, and startup recovery's delete
+of a worktree left `.creating`. Each is recorded as dispatched, but for those
+repo-removal closes and recovery's, which touch no process and have no
+actuation row of their own. What else happens depends on whether the
+row's session ended (`WorktreeLifecycle.sessionHasEnded`):
 
 - **Live, or parked with its park in flight** – the session keeps running in
   its server, or may: a park in flight signalled the agent without seeing it
   end. The daemon logs a notice naming the server and
   `tmux -L <server> kill-server`, and for a live row the notice in the app says
   that closing the tab leaves the session running in tmux. A row with a session
-  id gets a Closed Terminals entry with no screen, marked with the server
+  id gets a Closed Terminals entry marked with the server
   (`TerminalHistoryEntry.liveOnTmuxServer`): the conversation stays resumable
   from it like any other closed tab's, and the mark makes every resume of that
-  session id ask first (below). A row with no session id has nothing to resume
-  and no screen to keep, so it gets no entry. Its session directory is left for
-  `OrphanGC`.
+  session id ask first (below). The entry keeps the screen a park in flight
+  saved before it signalled the agent; an unparked row has none to keep. A row
+  with no session id has nothing to resume, so it gets no entry. Its session
+  directory is left for `OrphanGC`.
 - **Parked, with the park complete** – the session ended when the row was
   parked, so its Closed Terminals entry carries the screen the park stored, and
   no mark.
@@ -279,24 +284,55 @@ the session to the resume gate (below) as the mark would. So the write throws
   marks of live rows. A worktree archive whose marks are all written and whose
   status write then fails leaves every tmux row's entry the same way; a holder
   row's entry is written only after the status flip. Closed Terminals lists
-  each beside its open tab, and a retry writes the same entries again, one per
-  terminal.
-- **Reconcile's archive** leaves the worktree for its next sweep, as it does a
-  teardown it could not record, and records the failure on that row's
-  dispose.
+  each beside its open tab. It will not reopen a parked row's Claude entry
+  while that tab is still open: the entry is unmarked and the gate does not
+  read a parked row, so the reopen would go ahead, and waking the tab later
+  would start the session a second time. A live row's entry is marked, and the
+  gate reads both the mark and the open row. A retry closes the same rows
+  again and still leaves one entry per terminal: an entry written with a screen
+  is written again with that screen and a new closing time, and one written
+  without a screen is kept as it is, its mark set again.
+- **Forgetting a worktree, deleting a scratch space and removing a repo** are
+  refused the same way, before anything else is done: the tmux rows are closed
+  first, ahead of the tombstone, every holder's disposal and every deletion. A
+  repo removal whose cascade has already archived some worktrees when one
+  archive is refused stops there and finishes the archived ones in the
+  background, archive hook and folder removal included; the repo and its
+  other worktrees stay.
+- **Reconcile's archive** closes the tmux rows first too, ahead of the dev
+  servers and every holder, and on a failure leaves the worktree for its next
+  sweep with every session running, as it does a teardown it could not record,
+  recording the failure on that row's dispose.
+- **Startup recovery's delete of a `.creating` worktree** (a checkout that
+  never appeared, a directory git does not list, or a repo row that is gone)
+  closes the tmux rows first too, ahead of every deletion. A create by an
+  earlier build may have started their agents in a server that still runs
+  them. On a failure it logs that the worktree waits for the next recovery
+  pass, at the next daemon start, and leaves the row `.creating` with every
+  record it had.
 - **A hook tab's close** keeps the tab.
+
+Each refusal of a whole act says which act did not happen: the worktree was
+not archived or forgotten, the scratch space was not archived or deleted, the
+repository was not removed.
 
 A parked row's entry carries no mark, so a failure to write it is logged and
 the close goes ahead, as for a holder row's entry. A row whose worktree the
-daemon has no local row for, gone or remote, names no server, so no record
-could guard its session: the gate's lookup takes a row's server from its
-worktree, and a mark is a server to probe. Its close goes ahead with the notice
-and writes nothing, rather than keeping a tab nobody could close or writing a
-mark that would refuse the session for good.
+daemon has no local row for, gone or remote, names no server, and neither
+does a worktree whose server is recorded empty, so no record could guard its
+session: the gate's lookup takes a row's server from its worktree and skips an
+empty one, and a mark is a server to probe. Its close goes ahead with the
+notice and writes nothing, rather than keeping a tab nobody could close or
+writing a mark that would refuse the session for good.
 
-Either entry is written on every one of these paths but two, which remove
-every entry the worktree had: forgetting a worktree and deleting a scratch
-space. Nothing in TBD names the session after those.
+Either entry is written on every one of these paths. The one close that writes
+none is a close of a row whose worktree the daemon has no local row for,
+`terminal.delete` included (above). Forgetting a worktree, deleting a scratch
+space and recovery's delete go on to remove the entries the worktree had, but
+keep the marked ones (`TerminalHistoryStore.deleteForWorktree`), so a mark
+outlives its worktree and every resume of its session still asks first,
+however it is reached. No view lists such an entry once its worktree row is
+gone.
 
 `terminal.delete`'s activity rails apply to holder rows only: closing a tmux
 row ends no process, so there is no turn in flight to protect.
@@ -315,11 +351,16 @@ build's tmux hibernate recorded the park and signalled the agent before it
 respawned the window, and left the park in flight when the respawn failed, so
 the agent may still be running behind such a row. A parked tmux row with no
 park in flight is no reason to ask, since its session ended when it was parked.
+A shell tab in which Claude was started by hand carries that Claude's session
+id while it runs, and forgets it when Claude's `SessionEnd` reports its
+process gone (`TerminalStore.clearEndedHandStartedSession`), so a shell that
+outlives its Claude does not keep the session refused.
 Outside a revive, a session neither names starts without more: one read of each
 of two indexes, each holding only the rows it can match, which is all a wake of
-a parked holder row pays. For each server they name, the start asks the probe,
-and a revive that resumes a session asks about its worktree's own server as
-well (below).
+a parked holder row pays, and a History pane resume or Closed Terminals reopen
+adds one read of the worktree's archived record. For each server they name, the
+start asks the probe, and a revive that resumes a session asks about its
+worktree's own server as well (below).
 
 - **Running** – the start refuses with `terminalOnTmux` and the same ending
   advice, `tmux -L <server> kill-server` or a restart, then try again. Nothing
@@ -345,22 +386,38 @@ new session id and puts no second agent on the one it names. A Codex
 carryover resumes the thread itself and asks.
 
 A request that writes before it reaches `spawnTerminal` asks before its first
-write as well:
+write as well, and before start admission, which would otherwise hold or
+record a start the gate then refuses:
 
 - **A revive in place** – keyed by every archived tab it would relaunch and the
   History pane's preferred session, and asking about the worktree's own tmux
   server as well, the whole revive refuses before it records the restore plan
   or re-adds the checkout, and the worktree stays archived. A retry of a revive,
   which an adopted archived row takes too, asks the same. A revive that skips
-  the agent tabs relaunches none, so it asks nothing.
+  the agent tabs relaunches none, so it asks nothing. Recovery's finish of a
+  revive a restart interrupted asks the same before it opens a tab, and when
+  refused leaves the worktree active with its unfinished record, as a failed
+  restore does, for an explicit retry.
 - **A fresh-branch revive of a Codex thread** – before the new worktree
   exists, asking about the archived worktree's own tmux server as well.
 - **`terminal.create` resuming a session**, which `session.resume` reaches, and
-  **a Closed Terminals reopen of a Claude entry** – before the trust seed, the
-  transcript sync and the spawn record.
+  **a Closed Terminals reopen of a Claude entry** – before the Codex
+  preparation, the trust seed, the transcript sync, the session title and the
+  spawn record. When the worktree's archived record still names the session,
+  which it does after an archived row's folder is adopted and while a revive
+  has not finished, each asks about the worktree's own tmux server as well, as
+  a revive would.
 
 Each of these RPCs answers a refusal with the code and records the act as
-refused, `not-eligible`.
+refused, `not-eligible`. A revive's handler asks the gate itself, ahead of
+start admission, and the lifecycle asks again, and `spawnTerminal` again for
+each tab. A refusal from one of those later asks reaches the handler after the
+revive may have written, re-added the checkout or opened other tabs, so it is
+answered with the same code but recorded as `transport-failed`, not as a
+declined act. A Closed Terminals reopen of a Claude entry whose parked tmux tab
+is still open is refused, `not-eligible`, before the gate: the session comes
+back in that tab when it is woken, and the gate, which does not read a parked
+row, would not stop it.
 
 The gate is keyed by session id rather than by row or worktree, because the
 requests that resume a session reach it from different records: an archived
@@ -377,33 +434,37 @@ worktree's Closed Terminals, since pruning it would drop the mark while the
 session may still be running.
 
 What the gate covers is a session an open tmux row names, one whose row was
-closed with a mark — closing its tab, archiving its worktree or scratch space,
-and reconcile's archive — and every session a revive of an archived worktree
-resumes. An archive by an earlier build wrote no mark, and could leave a tab's
-agent running in the worktree's tmux server: it killed each tab's tmux window,
-but skipped the kill when it could not confirm the pane was the tab's own, and
-left the agent running when the kill failed and the pane's pid could not be
-read to signal it. No record names such a session. So a revive that resumes at
-least one session also asks the probe about the worktree's own server, once,
-whatever the rows and marks say, and is refused while that server may run: a
-revive in place, a retry of one, with the History pane's preferred session or
-without, and a fresh-branch revive of a Codex thread. A revive that resumes
-nothing asks no probe, and a fresh-branch revive of a Claude conversation forks
-the session and asks nothing. The cost is accepted: a repo's worktrees share one
-tmux server, so while a leftover server runs in a repo, every revive there that
-resumes a session is refused, until one `tmux -L <server> kill-server` or a
-restart ends it.
+closed with a mark, which every close above writes for a live row with a
+session unless the daemon has no local row for its worktree, and every session
+a revive of an archived worktree resumes. An archive by an earlier build wrote no mark, and could leave
+a tab's agent running in the worktree's tmux server: it killed each tab's tmux
+window, but skipped the kill when it could not confirm the pane was the tab's
+own, and left the agent running when the kill failed and the pane's pid could
+not be read to signal it. No record names such a session. So a revive that
+resumes at least one session also asks the probe about the worktree's own
+server, whatever the rows and marks say, and is refused while that server may
+run: a revive in place, a retry of one, with the History pane's preferred
+session or without, recovery's finish of an interrupted one, and a
+fresh-branch revive of a Codex thread. The same holds for a History pane
+resume or Closed Terminals reopen of a session the worktree's archived record
+still names. A revive that resumes nothing asks no probe, and a fresh-branch
+revive of a Claude conversation forks the session and asks nothing. The cost
+is accepted: a repo's worktrees share one tmux server, so while a leftover
+server runs in a repo, every such start there is refused, and so is a resume
+of a session an open tmux row or a mark names in that server even after that
+session has ended, until one `tmux -L <server> kill-server` or a restart ends
+the server.
 
-Three cases leave a session that may still run in tmux with neither a row nor a
-mark, outside any revive, and the gate lets a start of it through:
+Two cases leave a session that may still run in tmux with neither a row nor a
+mark nor a question about its worktree's server, and the gate lets a start of
+it through:
 
-- **Removing a repo** – its main worktree's rows go with the worktree row
-  (`WorktreeStore.deleteForRepo`) rather than through a close, so they get no
-  entry.
-- **Forgetting a worktree or deleting a scratch space** – both remove every
-  entry the worktree had, a mark included (above).
 - **A row whose worktree the daemon has no local row for** – it names no
   server, so its close writes no mark (above).
+- **A revive an earlier build began behind a `preSession` hook**, interrupted
+  by a restart before its tabs opened – recovery finishes it through the
+  hook's phase 3, whose tabs ask `spawnTerminal`'s gate by session alone, and
+  not about the worktree's own server.
 
 In each, a start of the session without the gate puts the same second agent on
 it: the gate neither adds these cases nor removes them.
@@ -416,8 +477,9 @@ live tmux rows, and like the rest of that pass it answers to the GC switch.
 Check Again is `terminal.recreateWindow`, which probes the row's server and
 parks the row once it is gone. A migration probes the row it is asked to move,
 and a start of an existing session the servers named by its marks and by the
-tmux rows whose session may still run, with a revive that resumes a session
-adding its worktree's own server.
+tmux rows whose session may still run, with a revive that resumes a session,
+and a resume of a session the worktree's archived record names, adding its
+worktree's own server.
 
 **This probe is a transition measure; on 2027-01-15 it is replaced by parking
 on sight.** No tmux server started before 2026-11-14 should still be running by
