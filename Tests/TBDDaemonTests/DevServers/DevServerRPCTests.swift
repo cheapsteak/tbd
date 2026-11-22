@@ -186,22 +186,61 @@ struct DevServerRPCTests {
         #expect(f.holder.launches.isEmpty)
     }
 
-    /// A tab whose state could not be read may still run the server: a
-    /// start opens no second tab and says to retry.
+    /// A holder tab whose state could not be read this time may still run
+    /// the server: a start opens no second tab and says to retry, since the
+    /// next read may succeed.
     @Test func startRefusesWhenTheServersTabCannotBeRead() async throws {
         let f = try await Self.makeFixture(toml: Self.webTOML)
         defer { f.tearDown() }
         let existing = try await f.db.terminals.create(
-            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", label: "Web app",
-            kind: .shell, serverName: "web")
-        f.inspector.set(.unknown(reason: "tmux timed out"), for: existing.id)
+            worktreeID: f.worktree.id, tmuxWindowID: "", tmuxPaneID: "", label: "Web app",
+            kind: .shell, transport: .holder, serverName: "web")
+        f.inspector.set(.unknown(reason: "the process could not be read"), for: existing.id)
         let result = try await f.call(RPCMethod.serverStart,
                                       DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
             .decodeResult(DevServerActionResult.self)
         #expect(result.outcomes.first?.status == .failed)
         #expect(result.outcomes.first?.message?.contains("try again") == true)
+        #expect(result.outcomes.first?.message?.contains("kill-server") == false)
         #expect(f.holder.launches.isEmpty)
         #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).count == 1)
+    }
+
+    /// A tab still on the tmux transport reads Unknown for as long as it
+    /// exists, so a retry would be refused forever. Start and stop alike name
+    /// what ends the refusal instead: the command that ends the tab's tmux
+    /// server, then closing the tab. Neither opens, signals nor closes
+    /// anything itself.
+    @Test(arguments: [RPCMethod.serverStart, RPCMethod.serverStop])
+    func aTmuxTabIsRefusedWithTheTmuxRemedyNotARetry(method: String) async throws {
+        let runner = FakeDevServerCommandRunner()
+        let signalling = FakeDevServerSignalling()
+        signalling.add(pid: 500, pgid: 500, start: Self.start)
+        let f = try await Self.makeFixture(
+            toml: "[servers.web]\ncommand = \"pnpm dev\"\nstop = \"make stop\"\n",
+            runner: runner, signalling: signalling)
+        defer { f.tearDown() }
+        let existing = try await f.db.terminals.create(
+            worktreeID: f.worktree.id, tmuxWindowID: "@5", tmuxPaneID: "%5", label: "Web app",
+            kind: .shell, transport: .tmux, serverName: "web")
+        f.inspector.set(
+            .unknown(reason: ProductionDevServerTabInspector.tmuxTabReason), for: existing.id)
+
+        let result = try await f.call(method,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+            .decodeResult(DevServerActionResult.self)
+
+        #expect(result.outcomes == [.init(
+            name: "web", status: .failed, terminalID: existing.id,
+            message: RPCRouter.tmuxTabMessage(server: "tbd-srv-test"))])
+        let message = try #require(result.outcomes.first?.message)
+        #expect(message.contains("tmux -L tbd-srv-test kill-server"))
+        #expect(message.contains("Then close the tab"))
+        #expect(!message.contains("try again"))
+        #expect(f.holder.launches.isEmpty)
+        #expect(runner.runs.isEmpty)
+        #expect(signalling.sentSignals.isEmpty)
+        #expect(try await f.db.terminals.get(id: existing.id) != nil)
     }
 
     /// A `status` command that timed out leaves the server Unknown: it may

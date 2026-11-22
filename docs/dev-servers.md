@@ -143,7 +143,7 @@ A start opens a terminal tab titled with the server's label, running `exec /bin/
 - `TBD_WORKTREE_ID`, `TBD_WORKTREE_NAME`, `TBD_WORKTREE_PATH`
 - `TBD_REPO_PATH`, `TBD_TERMINAL_ID`
 
-Starting a server that is already running does nothing and says so. Start with no name starts every declared server. A server that reads Unknown is not started, rather than risk a second copy of a server that may still be running: when TBD cannot read the state of its tab — a process it could not read, or a tab still on the tmux transport, which TBD does not read — the start fails, names the reason and asks you to try again, and when its `status` command timed out the start fails with "state unknown (status command timed out); try again or stop it first".
+Starting a server that is already running does nothing and says so. Start with no name starts every declared server. A server that reads Unknown is not started, rather than risk a second copy of a server that may still be running. When TBD could not read its tab's process, the start fails, names the reason and asks you to try again. A tab still on the tmux transport is never read, so trying again cannot help: the start (and a stop) fails with the command that ends the tab's tmux server, `tmux -L <server> kill-server`, which also ends the repo's other tmux tabs, and asks you to close the tab after it; the next start opens a new tab on the pty holder. Closing the tab first would leave the command running in tmux beside the new one. When its `status` command timed out the start fails with "state unknown (status command timed out); try again or stop it first".
 
 ### States
 
@@ -202,7 +202,7 @@ docker compose -p "acme-$TBD_WORKTREE_NAME" down --remove-orphans || true
 A crashed server's final screen is usually the only explanation of the crash, so it stays readable.
 
 - **holder transport** – every server tab opens on a pty holder. When the command exits, the daemon saves the final screen and scrollback into Session History, Closed Terminals, with the exit code. Both survive a daemon restart. "Show last output" opens that entry.
-- **tmux transport** – a server tab that still runs on tmux, from before TBD opened every session on the holder, keeps its final screen and exit code in its tmux window, because `remain-on-exit` was set when the window was created. TBD cannot show that window: "Show last output" focuses the tab, which shows the notice for a session still running in tmux ([design](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update)). Starting the server again opens it in a fresh tab, on a holder.
+- **tmux transport** – a server tab that still runs on tmux, from before TBD opened every session on the holder, keeps its final screen and exit code in its tmux window, because `remain-on-exit` was set when the window was created. TBD cannot show that window: "Show last output" focuses the tab, which shows the notice for a session still running in tmux ([design](specs/2026-10-11-holder-transport-migration-design.md#a-live-row-whose-tmux-server-outlived-the-update)). TBD reads no tmux tab, so a start is refused until its tmux server is ended and the tab closed, as [How TBD runs a server](#how-tbd-runs-a-server) describes; the next start opens it in a fresh tab, on a holder.
 
 Start opens a fresh tab, and Start or Stop detaches the saved entry from the server; it stays in Closed Terminals as an ordinary entry. An exit caused by Stop is never recorded as the server's last output.
 
