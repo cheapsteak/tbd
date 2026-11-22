@@ -21,7 +21,10 @@ struct ActuationLogWiringTests {
         let logPath: String
     }
 
-    private func makeFixture(logPath: String? = nil) throws -> Fixture {
+    private func makeFixture(
+        logPath: String? = nil,
+        codexExecutableResolver: (@Sendable () throws -> String)? = nil
+    ) throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-actuation-wiring-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -42,6 +45,7 @@ struct ActuationLogWiringTests {
             db: db,
             lifecycle: lifecycle,
             startTime: Date(),
+            codexExecutableResolver: codexExecutableResolver,
             actuationLog: ActuationLog(path: path)
         )
         router.holderRegistry = registry
@@ -225,6 +229,34 @@ struct ActuationLogWiringTests {
         #expect(outcome["reason"] as? String == "not-eligible")
         #expect(outcome["error"] as? String == response.error)
         // Refused means refused: no terminal row came out of it.
+        #expect(try await fixture.db.terminals.list(worktreeID: worktree.id).isEmpty)
+    }
+
+    /// A Codex tab whose CLI cannot be found lacks what its start needs, and
+    /// nothing of it exists yet: a decline, recorded as one, with the error
+    /// the caller has always been answered with. Not a transport failure,
+    /// because no transport was asked to do anything.
+    @Test("a Codex start whose CLI cannot be found reads as refused")
+    func codexPreparationFailureIsConfirmedAsRefused() async throws {
+        let missing = CodexExecutableResolutionError.notFound(
+            searchPath: "/acme/bin", fallbackPath: "/acme/codex")
+        let fixture = try makeFixture(codexExecutableResolver: { throw missing })
+        let worktree = try await makeWorktree(in: fixture.db)
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: worktree.id, type: .codex),
+            actor: .app))
+
+        #expect(!response.success)
+        #expect(response.error == "\(missing)")
+        let written = try rows(at: fixture.logPath)
+        #expect(written.count == 2)
+        #expect(written.first?["kind"] as? String == "spawn")
+        let outcome = try #require(written.last)
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-eligible")
+        #expect(outcome["error"] as? String == response.error)
         #expect(try await fixture.db.terminals.list(worktreeID: worktree.id).isEmpty)
     }
 

@@ -249,13 +249,25 @@ extension RPCRouter {
         // daemon can have a minimal PATH, and a resolution failure must not
         // leave an orphan terminal row behind. After the resume gate, because
         // preparing writes the Codex home a refused resume must not touch.
+        //
+        // A failure is recorded as a refusal, not a transport failure: the
+        // start lacks what it needs — a Codex CLI it can run, or a Codex home
+        // it can use — and nothing of the terminal exists yet, so the start is
+        // declined before anything starts, as the plugin-dir and profile
+        // refusals are. The answer is the error as the caller has always
+        // seen it.
         let codexPreparation: CodexLaunchPreparation?
         if params.type == .codex {
-            codexPreparation = try await actuating(actuationID) {
-                try CodexLaunchPreparation.prepare(
+            do {
+                codexPreparation = try CodexLaunchPreparation.prepare(
                     guardedHome: guardedCodexHome?.path,
                     executableResolver: codexExecutableResolver,
                     sharedHomeEnsurer: codexHomeEnsurer)
+            } catch {
+                let message = "\(error)"
+                logger.warning("terminal.create: Codex could not be prepared, so nothing was started: \(message, privacy: .public)")
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
             }
         } else {
             codexPreparation = nil
