@@ -127,7 +127,7 @@ There should be exactly one `TBDDaemon` and one `TBDApp`, both from the worktree
 ## Critical Rules
 
 ### NEVER delete ~/tbd/state.db
-The database stores worktree display names, custom config, and notification history. Deleting it orphans tmux servers (repo UUID changes → tmux server name changes → old sessions become unreachable). If you encounter DB issues, diagnose and fix the schema/code — don't wipe the DB.
+The database stores worktree display names, custom config, and notification history. Deleting it orphans every running session (terminal rows gone → the daemon adopts none of the pty holders under `~/tbd/holders/`, and with the holder owner token gone the orphan sweep keeps each as another installation's → their jobs run on with no tab, and each tab's Claude session ID is lost, so nothing resumes). If you encounter DB issues, diagnose and fix the schema/code — don't wipe the DB.
 
 ### Tests must not touch ~/tbd
 `TBDConstants.configDir` and `socketPath` honor two env vars so tests, CI, and concurrent `swift test` runs across worktrees never collide with the live daemon or the developer's real config:

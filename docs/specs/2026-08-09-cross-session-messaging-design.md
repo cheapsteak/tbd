@@ -90,7 +90,8 @@ renames are rare, so a mismatched row is short-lived.
 It is not harmless while it lasts. A row in the `ListAgents` tool
 result — the listing a session itself receives — carries the name, a
 per-session `[ref]`, the kind, the status, the tmux
-`server:window.pane`, and how long ago the session started, and no
+`server:window.pane` for a session that runs in tmux (a session on the pty
+holder has none), and how long ago the session started, and no
 working directory, so nothing in a stale row spells out the lane a
 sender is looking for. Field use showed the failure mode: a send
 addressed to a renamed lane's current display name returned a flat
@@ -98,11 +99,13 @@ addressed to a renamed lane's current display name returned a flat
 that session's spawn-time slug went unrecognized, and the sender twice
 concluded that a live session had exited.
 
-The mitigation is the pane, not the name. The `[ref]` addresses a row
-unambiguously once it has been found, and the tmux pane is what finds
-it: `tbd terminal list <worktree-id>` prints the same window and pane
-coordinates from TBD's side, so a TBD-spawned row joins back to its
-worktree whatever name it happens to carry. A stale name therefore costs
+The mitigation is the terminal, not the name. The `[ref]` addresses a row
+unambiguously once it has been found, and the terminal behind the session
+is what finds it: `tbd peer list` prints every peer with the worktree and
+terminal behind it, naming the terminal by the first eight characters of its
+id — a prefix of the id `tbd terminal list <worktree-id>` prints — so a
+TBD-spawned row joins back to its worktree whatever name it happens to carry,
+on either transport. A stale name therefore costs
 a lookup rather than a peer — for a reader who knows to make it, which
 is why `docs/cross-session-messaging.md` documents the not-found refusal
 and that join.
@@ -160,8 +163,8 @@ Profile isolation exists for credentials, not for reachability.
 
 The peer registry is `$CLAUDE_CONFIG_DIR/sessions/`: one small JSON row
 per live session, named `<pid>.json`, holding the pid, session id,
-working directory, tmux pane, the session's message socket path
-(`messagingSocketPath`), its `name` and `nameSource`, and a coarse
+working directory, tmux pane when the session runs in one, the session's
+message socket path (`messagingSocketPath`), its `name` and `nameSource`, and a coarse
 `status` (`idle` / `busy` / `waiting` / `shell`) with an `updatedAt`
 timestamp. No transcript content. The message sockets themselves live
 outside the config dir, at `/tmp/cc-socks/<pid>.sock`, and are therefore
