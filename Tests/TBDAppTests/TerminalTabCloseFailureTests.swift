@@ -7,9 +7,11 @@ import TestSupport
 // Tier 1: deterministic, in-process state only. `terminal.delete` goes
 // through the injected `terminalDeleter`, which can hold each delete until
 // the test releases it (`PanelCallGate`), so the tab strip is read after
-// every answer. The worktree is marked hydrated so no `tab.list` is sent, and
-// the composer-draft report is stubbed. The close's `tab.setOrder` has no
-// seam; it fails against the fenced socket as in the other tab-close suites.
+// every answer, and the terminal list the app reads back after an error goes
+// through `worktreeTerminalsFetcher`. The worktree is marked hydrated so no
+// `tab.list` is sent, and the composer-draft report is stubbed. The close's
+// `tab.setOrder` has no seam; it fails against the fenced socket as in the
+// other tab-close suites.
 
 /// A tab close removes the tab at once and deletes its terminals on the
 /// daemon, all at the same time, and settles each terminal as its own delete
@@ -34,6 +36,7 @@ struct TerminalTabCloseFailureTests {
         let state = AppState(userDefaults: suite.defaults)
         let daemon = TerminalCloseDaemon()
         state.terminalDeleter = { @MainActor terminalID in try await daemon.delete(terminalID) }
+        state.worktreeTerminalsFetcher = { @MainActor worktreeID in daemon.list(worktreeID: worktreeID) }
         state.composerDraftsSetter = { @MainActor _ in }
         state.tabStatesFetcher = { @MainActor _ in
             Issue.record("unexpected tab.list")
@@ -397,6 +400,51 @@ struct TerminalTabCloseFailureTests {
             Self.poll(state, daemon, worktreeID)
             let allBack: [UUID] = [agent, refused, unanswered]
             #expect(Self.tabIDs(state, worktreeID) == allBack, "the list the daemon answers with decides")
+        }
+    }
+
+    @Test("an error the daemon sends after the row is gone is no refusal: the terminal is gone, with no alert")
+    func errorAfterTheRowIsGoneIsNoRefusal() async {
+        await Self.withState { state, daemon in
+            let (claude, build, agent) = (UUID(), UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build, agent],
+                tabs: [Self.tab(claude), Self.tab(build), Self.tab(agent)])
+            state.composerDraft(for: build).text = "half a sentence"
+            state.unreadTerminals = [build]
+            daemon.failures[build] = DaemonClientError.rpcError("tab row delete failed", code: nil)
+            daemon.rowGoneBeforeFailure = [build]
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+
+            let closed: [UUID] = [claude, agent]
+            #expect(Self.tabIDs(state, worktreeID) == closed)
+            #expect(state.alertMessage == nil)
+            #expect(!Self.terminalIDs(state, worktreeID).contains(build))
+            #expect(state.composerDrafts[.terminal(build)] == nil)
+            #expect(!state.unreadTerminals.contains(build))
+            #expect(state.closingTerminals.isEmpty)
+        }
+    }
+
+    @Test("a refusal whose terminal list cannot be read stands as a refusal")
+    func refusalWithAnUnreadableListStands() async {
+        await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build], tabs: [Self.tab(claude), Self.tab(build)])
+            state.worktreeTerminalsFetcher = { @MainActor _ in
+                throw DaemonClientError.receiveFailed("recv timed out")
+            }
+            daemon.failures[build] = DaemonClientError.rpcError(Self.refusal, code: nil)
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+
+            let back: [UUID] = [claude, build]
+            #expect(Self.tabIDs(state, worktreeID) == back)
+            #expect(state.alertMessage == "Couldn't close terminal: \(Self.refusal)")
         }
     }
 

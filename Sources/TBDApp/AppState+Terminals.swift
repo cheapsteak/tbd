@@ -537,7 +537,7 @@ extension AppState {
     enum TerminalDeleteOutcome: Equatable, Sendable {
         /// The daemon deleted the terminal, and the app has dropped it.
         case deleted
-        /// The daemon answered with an error, so it kept the terminal: a tmux
+        /// The daemon answered with an error and kept the terminal: a tmux
         /// row whose Closed Terminals mark cannot be written stays, for one.
         /// Carries the daemon's message.
         case refused(String)
@@ -547,6 +547,15 @@ extension AppState {
     }
 
     /// Delete a terminal: the daemon ends its session and removes its row.
+    ///
+    /// An error the daemon answers with is not by itself a refusal.
+    /// `terminal.delete` can also fail after the terminal's row is gone —
+    /// deleting its tab row is the step after — and then nothing broadcasts
+    /// the removal. No error code tells the two apart: every error
+    /// `terminal.delete` throws reaches the app as a bare message. So the
+    /// daemon's own terminal list decides: a terminal it no longer holds was
+    /// deleted, and one it holds was kept. A list that cannot be read leaves
+    /// the daemon's answer standing, a refusal.
     @discardableResult
     func deleteTerminal(terminalID: UUID, worktreeID: UUID) async -> TerminalDeleteOutcome {
         do {
@@ -556,10 +565,24 @@ extension AppState {
         } catch {
             logger.error("Failed to delete terminal: \(error)")
             handleConnectionError(error)
-            if case .rpcError(let message, _)? = error as? DaemonClientError {
-                return .refused(message)
+            guard case .rpcError(let message, _)? = error as? DaemonClientError else { return .failed }
+            if await daemonHoldsTerminal(terminalID, worktreeID: worktreeID) == false {
+                removeDeletedTerminalFromState(terminalID: terminalID, worktreeID: worktreeID)
+                return .deleted
             }
-            return .failed
+            return .refused(message)
+        }
+    }
+
+    /// Whether the daemon's terminal list for the worktree holds the
+    /// terminal, or nil when the list cannot be read.
+    private func daemonHoldsTerminal(_ terminalID: UUID, worktreeID: UUID) async -> Bool? {
+        do {
+            return try await worktreeTerminalsFetcher(worktreeID).contains { $0.id == terminalID }
+        } catch {
+            logger.error("terminal list after a failed delete of \(terminalID, privacy: .public) failed: \(error, privacy: .public)")
+            handleConnectionError(error)
+            return nil
         }
     }
 

@@ -2818,6 +2818,12 @@ final class AppState {
     /// and script the daemon keeping a terminal.
     @ObservationIgnored lazy var terminalDeleter: @MainActor (UUID) async throws -> Void =
         { [daemonClient] terminalID in try await daemonClient.deleteTerminal(terminalID: terminalID) }
+    /// How `deleteTerminal` reads one worktree's terminals back after the
+    /// daemon answered a `terminal.delete` with an error, to tell a refusal
+    /// from a delete that failed after the row was gone — injectable for the
+    /// same reason as `terminalDeleter`.
+    @ObservationIgnored lazy var worktreeTerminalsFetcher: @MainActor (UUID) async throws -> [TBDShared.Terminal] =
+        { [daemonClient] worktreeID in try await daemonClient.listTerminals(worktreeID: worktreeID) }
     /// How `refreshArchivedScratch()` lists the archived scratch spaces —
     /// injectable for the same reason as `worktreesFetcher`, so a test can
     /// tell whether an archive asked for the refresh.
