@@ -35,7 +35,9 @@ An agent start is a request that would launch a Claude Code or Codex process on 
 - `worktree.create` and `scratch.create`, whose primary terminal is an agent
 - `worktree.revive` and `worktree.reviveConversationFresh`
 - `terminal.wake`, `terminal.resume` and `worktree.resume`, for a parked Claude terminal with
-  a session to resume
+  a session to resume: one on the pty holder, or one parked on tmux when a person's wake
+  moves it to the holder first. Admission is asked before the move, so a hold leaves the row
+  on tmux.
 - `terminal.continueInCodex`, `terminal.continueInClaude` and `terminal.swapProfile` when
   it starts a new session; `terminalHistory.revive` when it resumes a Claude session (every
   other kind of history entry reopens as a shell)
@@ -50,6 +52,8 @@ Not checked:
 - A wake of a terminal that is not parked. It starts nothing, and the wake path already
   answers it as a no-op.
 - A wake of a parked Codex terminal. The wake path refuses it and starts nothing.
+- A rail's wake of a terminal parked on tmux, session restore's included. It moves nothing,
+  and the wake path refuses it.
 - `terminal.recreateWindow`, which starts nothing: it parks a tmux tab once its tmux server
   is gone.
 - The moves in `terminal.migrateTransport` that start no agent: a parked row is only

@@ -89,7 +89,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `LeftoverTmuxServerProbe.swift` — whether a tmux row's server is still running, read from one `AF_UNIX` connect to its socket (no tmux binary); asked by reconcile (at startup, on demand, and hourly for scratch worktrees' rows while GC is on), Check Again and the transport migration. A transition measure, replaced by parking on sight on 2027-01-15
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
-- `HibernationCoordinator.swift` (+`Holder`) — parks Claude sessions on the pty holder and wakes them there (it refuses to park a live tmux row, and a session parked on tmux refuses to wake, naming `tbd terminal migrate`): manual hibernate, the idle sweep, park-on-merge, and the park the profile swap composes
+- `HibernationCoordinator.swift` (+`Holder`) — parks Claude sessions on the pty holder and wakes them there (it refuses to park a live tmux row, and refuses to wake a session parked on tmux, naming the gestures that move it; the router moves such a session first on a person's wake): manual hibernate, the idle sweep, park-on-merge, and the park the profile swap composes
 - `HibernationGate.swift` / `HibernationSafetyChecks.swift` — idle-sweep and park-on-merge eligibility; the transcript-tail check every park but the profile swap's honours
 - `PluginDirWriter.swift` — writes the TBD Claude Code plugin to Application Support: skills always, the session mod's `hooks/` and `types/` only while a session-mod flag is on; called after the database opens and on each flag change
 - `ComposerDraftParkGate.swift` — the park decision the session mod answers (proceed or skip, per policy)
@@ -135,6 +135,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references
 - `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
+- `RPCRouter+WakeMigration.swift` — before a person's wake of a session parked on tmux, moves the row to the pty holder through `TerminalTransportMigrator.migrate` (`TransportMigrationOnWake` names who counts as a person and the race refusal)
 - `SocketServer.swift` — NIO Unix-socket RPC server
 - `RepoSerializer.swift` — repo serialization for RPC results
 - `PacedKeySender.swift` — types a `terminal.send --keys` sequence one key at a time, 150 ms apart, through a send closure the terminal handlers supply

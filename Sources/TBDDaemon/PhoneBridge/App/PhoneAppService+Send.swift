@@ -108,10 +108,10 @@ extension PhoneAppService {
     ///   wake's prompt. `woken` when the wake respawned the session; a wake
     ///   that found it running delivered nothing, so it is `refused` and the
     ///   phone is asked to send again. A wake the daemon refuses is `refused`
-    ///   with its reason. A session parked on the tmux transport is
-    ///   `unsupported` with `PhoneSessionStatus.parkedOnTmuxReason` before
-    ///   any wake, as the sessions list marks its `send` and `model`: only a
-    ///   holder session wakes.
+    ///   with its reason. A session parked on the tmux transport goes the same
+    ///   way: the phone's wake is a person's, so the daemon moves the row to
+    ///   the pty holder and resumes it there, and refuses only while the
+    ///   session's tmux server may still be running it.
     ///
     /// **`woken` means the wake respawned the session with the message as its
     /// first prompt, and no more.** It does not confirm that Claude received
@@ -169,9 +169,6 @@ extension PhoneAppService {
             guard response.success else { throw Self.refusal(response.error) }
             return ActionOutcomeResult(outcome: "sent")
         case .notRunning:
-            guard terminal.transport == .holder else {
-                throw PhoneAppError(code: .unsupported, message: PhoneSessionStatus.parkedOnTmuxReason)
-            }
             try Task.checkCancellation()
             let response = try await actions.phoneWake(
                 TerminalWakeParams(terminalID: terminalID, prompt: text), deviceID: deviceID)

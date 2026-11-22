@@ -15,7 +15,8 @@ therefore in one of three states, and the migration treats each differently:
   set) is the exception: an earlier build's tmux hibernate signalled the agent
   and left the park so when the window's respawn failed, so the agent may still
   be running. It is judged by its tmux server first, as a live row is, and
-  moves as a parked row once the server is gone.
+  moves as a parked row once the server is gone. A person's wake of a parked
+  row does both in one step: it moves the row, then wakes it there.
 - **Live, with its tmux server gone.** The session ended with the server. A
   session with a conversation is parked with its identity kept, rewritten and
   woken on the holder; a shell gets a fresh login shell there.
@@ -24,9 +25,10 @@ therefore in one of three states, and the migration treats each differently:
   reach that session, so it refuses to move it and says how to end the server.
   "A live row whose tmux server outlived the update" below is the rule.
 
-A row nobody moved never breaks obscurely: its wake refuses with a reason naming
-this migration, and a live row whose server still runs shows a notice in place
-of its terminal.
+A row nobody moved never breaks obscurely: a person's wake of a parked one moves
+it and resumes it on the holder, a wake the daemon makes on its own refuses with
+a reason naming the gestures that move it, and a live row whose server still
+runs shows a notice in place of its terminal.
 
 ## Why a gesture rather than a behaviour
 
@@ -41,6 +43,42 @@ to start it now is its owner's choice, at a moment they pick, so the migration
 is an action, surfaced per session and as a fleet-wide run, and the daemon never
 initiates it. Reconcile parks a live row whose tmux server is gone, which keeps
 the session resumable, but it never rewrites a transport.
+
+A person's wake of a parked session is such a choice. Waking it starts its
+program, at a moment its owner picked: selecting it in the app, a click in its
+parked pane, a message sent to it from the composer or the phone,
+`tbd terminal wake`, `tbd terminal resume` or `tbd worktree resume`. Selecting
+is the app's wake on focus, the same wake that resumes any parked session a
+person selects: selecting a worktree wakes the session it shows, or its first
+parked session when the one it shows is not parked, and activating a tab wakes
+the parked sessions in that tab. As it does for a holder session, it passes
+over a session parked by hand or stamped as exited, which wakes only when asked
+for directly. The selection is the person's act, so its wake moves a row as a
+click does.
+
+For a row whose park is complete the move only rewrites the row, so moving it
+first starts nothing the wake would not have started, and the two gestures
+compose: the wake moves the row to the holder and resumes it
+there, in one step, with the wake's own parameters. The move is the one the
+per-session action makes (`TerminalTransportMigrator.migrate`), so a row whose
+park is still in flight is refused while its tmux server may run, and a row the
+action would skip is refused with the same reason. Start admission is asked
+before the move, because the wake that follows starts an agent, and a hold
+leaves the row on tmux untouched. When the move cannot happen, the wake is
+refused with the move's reason and `terminalOnTmux`, and the row is as the move
+found it. A move that loses its compare-and-set to a writer that left the row on
+the holder — a concurrent wake, or a migration — has nothing left to do, and the
+wake resumes the row there.
+
+A wake the daemon decides on its own — session restore, a limit resume, a
+queued prompt — is no owner's choice of moment, so it moves nothing and is
+refused with the reason that names the move (the backstop, below). Nothing
+else that runs without a person moves a row either: reconcile parks a row and
+never rewrites its transport, and `tbd update` wakes only sessions already on
+the holder. Which wakes are a person's is decided by the declared actor's kind
+alone: every kind but `daemon` (`TransportMigrationOnWake.isPersonStarted`).
+The actor is self-declared, so the rule says who chose the moment, not who
+may.
 
 ## What it is not
 
@@ -182,10 +220,10 @@ migration and wake start a second agent on the same session id, beside the one
 tmux still holds. Leaving a dead server's row live costs a notice and a click.
 
 **Gone.** The row is parked with its session id kept, reason `.recovery`, and
-from there the ordinary path moves it: its wake refuses and names
-`tbd terminal migrate`, the migration rewrites it, and a wake opens it on the
-holder. A live tmux row with nothing to resume — a shell, a hook tab, an agent
-tab whose session never began — is deleted by reconcile, as any unreachable
+from there the ordinary path moves it: a person's wake moves it to the holder
+and resumes it there, and so does the migration followed by any wake. A live
+tmux row with nothing to resume — a shell, a hook tab, an agent tab whose
+session never began — is deleted by reconcile, as any unreachable
 non-resumable row is. Check Again refuses it plainly: tmux has stopped, and the
 tab had no conversation to keep, so close it. A migration still moves a shell,
 as a fresh one on the holder.
@@ -474,7 +512,10 @@ reason. Earlier successes are finished sessions, not steps in a transaction.
 One RPC method, exposed three ways: a per-session action in the app's row
 context menu, the CLI equivalent, and a fleet-wide run. The run's report is its
 product — a person needs to know what did not move and why, not merely that
-something did.
+something did. A person's wake of a parked row reaches the same move through the
+wake RPCs, so a row parked on tmux comes back as any parked row does: selecting
+it in the app, a click in its parked pane, or a send from the composer or the
+phone. The parked pane says that it resumes on the pty holder.
 
 **The fleet run is composed from the per-session move on both surfaces**, and
 each surface has its own reason for that. The daemon's `--all` loops its own
@@ -493,14 +534,17 @@ it needs no switch.
 ## The backstop
 
 TBD has no tmux wake: waking a session means starting its program again, and
-TBD starts programs only on the pty holder. So a parked row still recorded as
-`tmux` refuses its wake with a reason naming this migration and the row's own
-id (`tbd terminal migrate <id>`), and that refusal comes before every other
-check a wake makes — a missing session id, a Codex wake asked to deliver a
-prompt — so the person is always told the one thing that unblocks the row. The
-row stays parked with its session id, so a wake after the migration resumes it
-on the holder. Switching a tmux session's account in place would start a
-program too, and it refuses the same way.
+TBD starts programs only on the pty holder. A person's wake of a parked row
+still recorded as `tmux` moves the row first ("Why a gesture rather than a
+behaviour"). Every other wake of one — a rail's, or a call to
+`HibernationCoordinator.wake` that no move preceded — refuses with a reason
+naming the gestures that move it and the row's own id (`tbd terminal wake <id>`,
+`tbd terminal migrate <id>`), and that refusal comes before every other check a
+wake makes — a missing session id, a Codex wake asked to deliver a prompt — so
+whoever reads it is always told the one thing that unblocks the row. The row
+stays parked with its session id, so a wake after the move resumes it on the
+holder. Switching a tmux session's account in place would start a program too,
+and it refuses, naming the migration.
 
 A wake of a live tmux row refuses with the still-running advice, since TBD can
 neither reach the session nor know it has ended without the probe. Check Again
@@ -517,8 +561,9 @@ None of this is migration logic: each is a refusal or a park, with no flag.
 - **Prompting on app launch.** Asking a person to run the migration when they
   open the app is wanted, and is not this design. It acts without a gesture, so
   it ships behind a default-off flag of its own when it is built.
-- **Automatic or wake-time migration.** A session is never moved by the daemon's
-  own decision. The backstop refusal covers the row nobody moved.
+- **Automatic migration.** A session is never moved by the daemon's own
+  decision: no sweep moves one, and no rail's wake does. The backstop refusal
+  covers a parked row no person has woken.
 - **Moving a session back to tmux.** There is no reverse gesture: TBD opens no
   session on tmux.
 
@@ -592,12 +637,25 @@ never unlinks it, and nothing TBD runs creates one any more.
   actuation row per session.
 - A session already on the holder is answered `.alreadyHolder` with nothing
   touched.
-- The backstop refuses a parked `tmux` row's wake with its stated reason, ahead
-  of the resume-plan and Codex-prompt checks, and that reason names the session.
+- The coordinator refuses a parked `tmux` row's wake with its stated reason,
+  ahead of the resume-plan and Codex-prompt checks, and that reason names the
+  session.
+- A person's wake of a parked `tmux` row — the app's, the phone's, and each of
+  `terminal.wake`, `terminal.resume` and `worktree.resume` — moves it and
+  resumes the same row, conversation and label on the holder through the spawn
+  seam, and publishes the move; a Codex tab resumes its thread. A rail's wake,
+  session restore's included, moves nothing and refuses with `terminalOnTmux`.
+  A row whose park is in flight is refused while its server may run, a row with
+  nothing to resume is refused with its skip reason, and a lost compare-and-set
+  refuses unless the other writer left the row on the holder, which the wake
+  then resumes. The person-started rule is pinned per actor kind. Start
+  admission is asked about a person's wake of a parked `tmux` row before the
+  move, and a hold leaves the row on tmux; a rail's wake of one is not asked.
 - Check Again on a live tmux row refuses with the still-running advice while the
   server may run and parks the row once it is gone; a send, a wake or a park
-  of a live tmux row, and a wake of a parked one, refuse with `terminalOnTmux`,
-  and the actuation record calls each wake or park refusal `not-eligible`.
+  of a live tmux row, and a rail's wake of a parked one, refuse with
+  `terminalOnTmux`, and the actuation record calls each wake or park refusal
+  `not-eligible`.
 - The app shows the notice for a live tmux row and not for a parked one or a
   holder row, and the notice says that closing the tab leaves the session
   running in tmux.
@@ -669,11 +727,13 @@ never unlinks it, and nothing TBD runs creates one any more.
 
 ## Rejected alternatives
 
-- **Migrating at wake time.** A parked tmux row could be rewritten as it wakes,
-  which would need no gesture at all. It moves a session at a moment nobody
-  chose and cannot ask: a person waking a session wants it back, not relocated.
-  The backstop refusal gives the same protection for a fraction of the
-  behaviour.
+- **Moving a row on a rail's wake too.** Session restore, a limit resume or a
+  queued prompt could move a parked tmux row as a person's wake does, and reach
+  the rows an earlier build parked. That makes the move the daemon's decision,
+  which this design never allows: the rows a rail would reach are ones nobody
+  has asked about since tmux stopped, and moving one starts a program at a
+  moment no owner chose. Left parked, such a row costs nothing and resumes on
+  its owner's first wake.
 - **A proactive sweep.** A boot or reconcile pass could migrate every parked
   tmux row. Nothing needs that convergence: an unwoken parked row costs nothing.
   A sweep would act on rows nobody asked about, with no person waiting for its

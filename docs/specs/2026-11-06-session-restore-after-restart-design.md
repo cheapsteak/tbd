@@ -47,8 +47,9 @@ A row is selected when all of these hold:
 - `hibernateReason` is `recovery`.
 - `hibernatedAt` is at or after the moment this daemon process began its startup reconcile.
 - Its worktree's status is `active` or `main`.
-- It is on the pty holder. A row on tmux moves to the holder through `tbd terminal migrate`, not a
-  wake: its wake is refused with `terminalOnTmux`, so the pass would only count a failure for it.
+- It is on the pty holder. A row on tmux moves to the holder on a person's wake or through
+  `tbd terminal migrate`, never on a rail's: the pass's wake of it is refused with
+  `terminalOnTmux`, so the pass would only count a failure for it.
 - `claudeResumeDecision` says it can resume.
 
 The time limit is what separates this restart from older ones. Without it, the 25 stale rows above

@@ -128,11 +128,12 @@ struct PhoneSendTests {
         #expect(sends == [Self.composerSend(terminal.id, message)])
     }
 
-    /// A session parked on tmux takes no message and no model: either would
-    /// wake it, and only a holder session wakes. Both are `unsupported` with
-    /// the reason the sessions list shows, and no wake reaches the daemon.
+    /// A session parked on tmux takes a message and a model as a parked
+    /// holder session does: either reaches the daemon as the phone's wake,
+    /// which moves the session to the pty holder and resumes it there. Nothing
+    /// is typed into it and nothing is refused before the wake.
     @Test(arguments: [false, true])
-    func aSessionParkedOnTmuxIsRefusedBeforeAnyWake(setsModel: Bool) async throws {
+    func aSessionParkedOnTmuxIsWokenWithTheMessage(setsModel: Bool) async throws {
         let h = try await PhoneServiceHarness.make()
         let terminal = try await h.seedTerminal(transport: .tmux)
         try await h.park(terminal.id)
@@ -140,18 +141,20 @@ struct PhoneSendTests {
         let outbox = await h.connect()
         let session = PhoneSessionRef.local(terminalID: terminal.id)
 
-        let reply: PhoneTestReply
+        let answer: (reply: PhoneTestReply, bytes: Data)
         if setsModel {
-            reply = try await h.request(
-                .sessionSetModel, params: SessionSetModelParams(session: session, model: "opus"), on: outbox).reply
+            answer = try await h.request(
+                .sessionSetModel, params: SessionSetModelParams(session: session, model: "opus"), on: outbox)
         } else {
-            reply = try await h.request(.messageSend, params: Self.message(session, "hi"), on: outbox).reply
+            answer = try await h.request(.messageSend, params: Self.message(session, "hi"), on: outbox)
         }
 
-        #expect(reply.error == PhoneAppError(code: .unsupported, message: PhoneSessionStatus.parkedOnTmuxReason))
-        #expect(h.actions.wakes.isEmpty)
-        #expect(h.actions.sends.isEmpty)
-        #expect(h.actions.calls.isEmpty)
+        #expect(answer.reply.error == nil,
+                "a parked tmux session's send was refused: \(String(describing: answer.reply.error))")
+        #expect(try Self.outcome(answer.bytes) == "woken")
+        #expect(h.actions.wakes.map(\.terminalID) == [terminal.id])
+        #expect(h.actions.wakes.map(\.prompt) == [setsModel ? "/model opus" : "hi"])
+        #expect(h.actions.sends.isEmpty, "a parked tmux session was typed into")
     }
 
     @Test func aWakeThatFindsItRunningIsRefused() async throws {
