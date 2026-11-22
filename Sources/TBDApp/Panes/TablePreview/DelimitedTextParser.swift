@@ -168,8 +168,11 @@ private struct DelimitedByteScan {
 
         let stoppedAtLimit: Bool
         if stoppedAtRowLimit {
-            // Every kept row ended at a line break, so none is partial.
-            stoppedAtLimit = cutAtByteLimit || remainderHasContent()
+            // Every kept row ended at a line break, so none is partial. Any
+            // byte after the last kept row's line break starts a row the
+            // table does not hold, even a lone line break, which is a row
+            // with one empty field.
+            stoppedAtLimit = cutAtByteLimit || index < count
         } else {
             if cutAtByteLimit {
                 // The last row may be cut short: drop the unfinished row, or,
@@ -288,16 +291,5 @@ private struct DelimitedByteScan {
         lastFinishedRowWasOverColumnLimit = rowIsOverColumnLimit
         if rowIsOverColumnLimit { finishedRowsOverColumnLimit += 1 }
         rowIsOverColumnLimit = false
-    }
-
-    /// Whether any byte other than a line break follows `index`.
-    private func remainderHasContent() -> Bool {
-        var position = index
-        while position < bytes.count {
-            let byte = bytes[position]
-            if byte != Self.lineFeed && byte != Self.carriageReturn { return true }
-            position += 1
-        }
-        return false
     }
 }

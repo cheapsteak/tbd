@@ -140,6 +140,18 @@ struct DelimitedTextParserTests {
         #expect(t.stoppedAtLimit == true)
     }
 
+    /// Without a limit the empty line is a row, so with a limit of one row
+    /// the table does not hold it.
+    @Test("an empty line past the row limit stops the table")
+    func trailingEmptyRowPastLimitIsStopped() throws {
+        let whole = try table(parse("h\n1\n\n"))
+        #expect(whole.rows == [["1"], [""]])
+
+        let t = try table(parse("h\n1\n\n", rowLimit: 1))
+        #expect(t.rows == [["1"]])
+        #expect(t.stoppedAtLimit == true)
+    }
+
     @Test("exactly the row limit plus a final line break is not stopped")
     func exactlyRowLimitIsNotStopped() throws {
         let t = try table(parse("h\n1\n2\n3\n", rowLimit: 3))
