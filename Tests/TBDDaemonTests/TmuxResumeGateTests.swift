@@ -611,6 +611,10 @@ struct TmuxResumeGateTests {
     /// While it may run, the row is left active with its whole record for an
     /// explicit retry and nothing is launched; once it is gone, the restore
     /// relaunches the tab on the holder and clears the record.
+    ///
+    /// The checkout is a real one, made by a full create: recovery deletes a
+    /// `.creating` row whose checkout is missing before it reaches the
+    /// restore, and asks the gate only for a row that has one.
     @Test(arguments: [LeftoverTmuxServerState.running, .absent])
     func recoveryOfAnArchivedRestoreAsksTheResumeGateFirst(
         serverState: LeftoverTmuxServerState
@@ -622,7 +626,8 @@ struct TmuxResumeGateTests {
         let probe = RecordingLeftoverTmuxProbe { _ in serverState }
         let lifecycle = makeLifecycle(db: db, holder: holder, leftoverTmuxProbe: probe.probe)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-        let worktree = try await lifecycle.beginCreateWorktree(repoID: repo.id)
+        let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+        #expect(FileManager.default.fileExists(atPath: worktree.localPath))
         try await db.worktrees.updateStatus(id: worktree.id, status: .creating)
         // The tab the revive opened before the daemon died: a primary, so
         // recovery reads the restore as one with no hook to wait for.
@@ -636,6 +641,8 @@ struct TmuxResumeGateTests {
         try await db.worktrees.setArchivedAgentTabs(id: worktree.id, tabs: tabs)
         #expect(try await db.terminalHistory.liveOnTmuxServers(sessionIDs: [sessionID]).isEmpty)
         #expect(try await db.terminals.liveTmuxServers(sessionIDs: [sessionID]).isEmpty)
+        let launchesBefore = holder.launches.count
+        #expect(probe.servers.isEmpty)
 
         for task in await lifecycle.recoverCreatingWorktrees() { await task.value }
 
@@ -648,7 +655,7 @@ struct TmuxResumeGateTests {
         case .running:
             #expect(row.archivedAgentTabs == tabs)
             #expect(relaunched.isEmpty)
-            #expect(holder.launches.isEmpty)
+            #expect(holder.launches.count == launchesBefore)
         case .absent:
             #expect(row.archivedAgentTabs == nil)
             let tab = try #require(relaunched.first)
