@@ -162,14 +162,29 @@ under `phone/protocol/` gain the new request, its reply and a layout that carrie
 
 - `AppState` reads the setting from each `Repo` in its repo list, not from `UserDefaults`. A click on
   the header button or the menu item flips the repo in the app's list at once and calls
-  `repo.setRegistryRemoteHidden`. A failed call puts the old value back.
-- A change made on the phone reaches the Mac at its next repo refresh.
+  `repo.setRegistryRemoteHidden`. A failed call puts back what the daemon holds and shows an error
+  alert naming the repo and the daemon's reason. A call that fails because the daemon cannot be
+  reached puts the value back with no alert, since the app's connection state already shows that.
+- A change made on the phone reaches the Mac at its next repo refresh. Repo refreshes overlap – the
+  poll, adding or relocating a repo, the initial load – so each fetch is numbered when sent, and a
+  result that lands after a later fetch's result has been applied is dropped: it read the daemon
+  earlier and could flip a toggle back.
 - **The one-time copy.** After the first successful repo refresh, the app reads the old
-  `sidebarRegistryRemoteHiddenRepoIDs` key. For each listed repo that is still in the repo list and
-  whose `registryRemoteHidden` is nil, it calls the RPC with `hidden: true`. A repo with a value
-  already, such as one the phone turned off, keeps it. A listed ID with no repo is dropped. When
-  every call succeeds, the app removes the key. When any call fails, the key stays and the copy runs
-  again at the next refresh; setting a value twice is harmless.
+  `sidebarRegistryRemoteHiddenRepoIDs` key and copies it in a task of its own, so neither that
+  refresh nor the worktree and notification loads after it wait for the copy's calls. Each listed
+  repo that is still in the repo list is decided just before its call. A repo with a click in
+  flight waits for that click's call to return. Then a repo with a value of its own keeps it, such
+  as one the phone turned off or one the click set, and a repo whose `registryRemoteHidden` is nil
+  gets the RPC with `hidden: true`. A click on a repo whose copy call is in flight is sent after that
+  call returns. A listed ID with no repo is dropped. When every call succeeds, the app removes the
+  key. When any call fails, such as against a daemon too old to know the RPC, the key stays, the
+  run's failures make one log line, and the copy runs again only after the next state subscription
+  starts – after a reconnect, or when a new daemon replaces the old one under the running app – not
+  on every refresh. Setting a value twice is harmless.
+- **The saved choice shows before the copy lands.** Until the copy has succeeded, a repo the key
+  lists whose `registryRemoteHidden` is nil shows the filter on: from the first refresh after the
+  upgrade, and for as long as the copy keeps failing. Once a repo fetch sent after the copy
+  succeeded has been applied, the daemon's values alone decide.
 - The Mac spec's storage section is rewritten to state this design.
 
 ## Rollout
@@ -226,6 +241,13 @@ that row.
   - the protocol fixtures round-trip
 - **Mac:**
   - the filter reads from the repo list
-  - a toggle calls the RPC, and a failure restores the old value
+  - a toggle calls the RPC; a failure restores the old value and shows an alert, except for a lost
+    connection and for a click a later one overtook
+  - a fetch result that lands after a later one was applied is dropped
   - the one-time copy sets only nil repos, drops unknown IDs, removes the key after full success,
     and keeps it after a failure
+  - after a failure, refreshes do not run the copy again until a state subscription starts
+  - the refresh does not wait for the copy, and the saved choice shows until a fetch sent after the
+    copy succeeded is applied
+  - a click during the copy's call is sent after it; a repo clicked before the copy reaches it keeps
+    the click's value, or is copied when the click failed

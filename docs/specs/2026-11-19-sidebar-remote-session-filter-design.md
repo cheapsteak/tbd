@@ -186,10 +186,13 @@ gives the column, the RPC, the phone's chip and the one-time copy of choices
 saved by app builds that kept them in the `UserDefaults` key
 `sidebarRegistryRemoteHiddenRepoIDs`.
 
-`AppState` derives the set of filtered repos from its repo list. A click flips
-the repo in that list at once and calls the RPC; a failed call puts the old
-value back. Views read the set through `AppState`, never through
-`@AppStorage`.
+`AppState` derives the set of filtered repos from its repo list. Until the
+one-time copy has succeeded, a repo the old key lists that has no value of its
+own counts as filtered too, so a choice saved before the setting moved shows
+from the first refresh. A click flips the repo in that list at once and calls
+the RPC; a failed call puts the old value back and shows an error alert, unless
+the daemon could not be reached. Views read the set through `AppState`, never
+through `@AppStorage`.
 
 ### The rule in one place
 
@@ -251,7 +254,8 @@ repo row, deleted with that row.
 - **Wording:** one registry provider names it; two or more fall back to the
   generic text.
 - **Storage:** the filter reads from the repo list, and a toggle calls the
-  RPC and restores the old value when the call fails.
+  RPC and, when the call fails, restores the old value and shows an alert.
+  The one-time copy's cases are listed in the phone spec.
 - **Layouts:** the filter applied with grouping on (an emptied Remote group
   does not render; its summary counts kept rows only) and with grouping off.
 - **Drop mapping:** a drop between two visible rows with hidden rows between

@@ -625,7 +625,9 @@ final class AppState {
     /// (everything but cloud). Observed: the outline rebuilds on it. A mirror
     /// of the repos whose `Repo.registryRemoteHidden` is `true`, set from the
     /// repo list after each fetch and by a toggle at once; the daemon's repo
-    /// row holds the setting. See `AppState+SidebarRegistryFilter.swift` and
+    /// row holds the setting. Until the one-time copy of the old
+    /// `UserDefaults` set settles, a repo that set lists with no value of its
+    /// own is in it too. See `AppState+SidebarRegistryFilter.swift` and
     /// docs/specs/2026-11-22-phone-remote-session-filter-design.md.
     var sidebarRegistryRemoteHiddenRepoIDs: Set<UUID> = [] {
         didSet {
@@ -643,8 +645,32 @@ final class AppState {
     @ObservationIgnored var nextRegistryFilterToggleToken: UInt64 = 0
     /// The number the next `refreshRepos()` fetch gets when it is sent.
     @ObservationIgnored var nextRepoFetchNumber: UInt64 = 0
+    /// The number of the newest `refreshRepos()` fetch whose result was
+    /// applied. A result numbered below it is dropped: the newer list read
+    /// the daemon later and already stands.
+    @ObservationIgnored var lastAppliedRepoFetchNumber: UInt64?
     /// Where the one-time copy of the old `UserDefaults` set stands.
     @ObservationIgnored var registryFilterLegacyCopy: RegistryFilterLegacyCopy = .pending
+    /// The task running the one-time copy, started by `refreshRepos()` and
+    /// kept so a test can await it.
+    @ObservationIgnored var registryFilterLegacyCopyTask: Task<Void, Never>?
+    /// The one-time copy's `repo.setRegistryRemoteHidden` call in flight, by
+    /// repo. A toggle of that repo sends after it returns, as it does after
+    /// an earlier toggle.
+    @ObservationIgnored var registryFilterCopySends: [UUID: Task<(any Error)?, Never>] = [:]
+    /// The repos the old `UserDefaults` key lists, read on first use. Until
+    /// the one-time copy has settled, a listed repo with no value of its own
+    /// shows the filter on; then it is emptied.
+    @ObservationIgnored lazy var registryFilterLegacySeed: Set<UUID> =
+        AppState.restoredSidebarRegistryRemoteHiddenRepoIDs(defaults: userDefaults)
+    /// The number the next repo fetch would get when the one-time copy
+    /// succeeded. Once a fetch numbered at or above it is applied, the
+    /// daemon's values cover every copied repo and the seed is emptied.
+    @ObservationIgnored var registryFilterLegacySeedFence: UInt64?
+    /// How many times `startSubscription()` has run. A failed one-time copy
+    /// runs again only once this has moved on, so a daemon that refuses the
+    /// call is asked once per subscription rather than on every refresh.
+    @ObservationIgnored var stateSubscriptionStarts: UInt64 = 0
     /// An explicit re-selection must reveal a manually collapsed group too.
     var sidebarSelectionGeneration: UInt64 = 0
     @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
@@ -3395,6 +3421,11 @@ final class AppState {
         // That verdict belongs to the old daemon, so it goes here as on a
         // connect.
         holderClaimSweepUnsupported = false
+        // The same holds for a failed one-time copy of the registry filter:
+        // the next applied repo refresh runs it again. The launch's connect
+        // starts a subscription, and the poll starts one once a dropped
+        // subscription has ended, so this also covers a reconnect.
+        stateSubscriptionStarts &+= 1
         // Same reason for program status: the daemon's `ProgramStatusStore` is
         // memory-only and counts revisions from zero after a restart. Re-seed
         // from the list; deltas from the new subscription keep it current.
@@ -4496,15 +4527,27 @@ final class AppState {
 
     /// Refresh the repo list. Only updates if data changed.
     ///
+    /// Refreshes overlap: the poll, adding or relocating a repo and the
+    /// initial load each send one. Each fetch is numbered when sent, and a
+    /// result that lands after a later fetch's result has been applied is
+    /// dropped whole, since the later list read the daemon after it did.
+    ///
     /// The registry filter's toggles still in flight, or committed after this
     /// fetch was sent, are laid over the fetched list, and the filter's
-    /// mirror is set from the result; then the old `UserDefaults` set is
-    /// copied to the daemon once (`AppState+SidebarRegistryFilter.swift`).
+    /// mirror is set from the result; then the one-time copy of the old
+    /// `UserDefaults` set is started in a task of its own, so this refresh
+    /// and the rest of `refreshAll()` do not wait for its calls
+    /// (`AppState+SidebarRegistryFilter.swift`).
     func refreshRepos() async {
         let fetchNumber = nextRepoFetchNumber
         nextRepoFetchNumber += 1
         do {
             let fetchedRepos = try await reposFetcher()
+            if let applied = lastAppliedRepoFetchNumber, fetchNumber < applied {
+                logger.debug("Dropping repo fetch \(fetchNumber, privacy: .public): fetch \(applied, privacy: .public) was sent later and is already applied")
+                return
+            }
+            lastAppliedRepoFetchNumber = fetchNumber
             let merged = mergingRegistryFilterToggles(into: fetchedRepos, fetchNumber: fetchNumber)
             if merged != repos {
                 repos = merged
@@ -4512,8 +4555,9 @@ final class AppState {
             }
             reposLoaded = true
             pruneExpandedSidebarGroups(repoIDs: Set(fetchedRepos.map(\.id)))
+            retireRegistryFilterLegacySeedIfSettled(appliedFetch: fetchNumber)
             syncSidebarRegistryRemoteHiddenRepoIDs()
-            await copyLegacySidebarRegistryFilterIfNeeded()
+            startLegacyRegistryFilterCopyIfNeeded()
         } catch {
             logger.error("Failed to list repos: \(error)")
             handleConnectionError(error)
