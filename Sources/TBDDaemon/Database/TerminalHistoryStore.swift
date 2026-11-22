@@ -138,18 +138,22 @@ public struct TerminalHistoryStore: Sendable {
 
     /// Close of a live tmux row, which TBD deletes without running tmux, so
     /// the session it carried may keep running in `server`. Writes the entry
-    /// as a capture-less `recordOnClose` does, marked with `server`, and marks
-    /// the terminal's existing entry when it already has one. The mark is what
-    /// every resume of the entry's session id asks about before it starts that
-    /// session on the pty holder (`TmuxResumeGate`).
+    /// as `recordOnClose` does, marked with `server`. Without a capture it
+    /// marks the terminal's existing entry when it already has one and keeps
+    /// that entry's screen and `closedAt`; with one, the screen a park in
+    /// flight saved, it writes the entry anew with that screen. The mark is
+    /// what every resume of the entry's session id asks about before it starts
+    /// that session on the pty holder (`TmuxResumeGate`).
     ///
     /// Throws when the entry cannot be written, unlike every other close
     /// here: once the row is deleted the mark is the only record that the
     /// session may still be running, so a caller that cannot write it keeps
     /// the row (`WorktreeLifecycle.closeLeftoverTmuxRow`).
-    public func recordLiveTmuxClose(terminal: Terminal, server: String) async throws {
+    public func recordLiveTmuxClose(
+        terminal: Terminal, server: String, capture: String? = nil
+    ) async throws {
         try await write(
-            terminal: terminal, text: nil, closedAt: Date(),
+            terminal: terminal, text: Self.nonBlank(capture), closedAt: Date(),
             keepingExistingEntryWithoutText: true, liveOnTmuxServer: server)
     }
 
@@ -393,13 +397,23 @@ public struct TerminalHistoryStore: Sendable {
         }
     }
 
-    /// Delete all history rows for a worktree AND its content directory.
-    /// Called from the worktree hard-delete paths (forget, scratch delete,
-    /// recovery cleanup) — archive deliberately keeps history.
+    /// Delete a worktree's history rows AND its content directory, except the
+    /// entries marked `liveOnTmuxServer`. Called from the worktree hard-delete
+    /// paths (forget, scratch delete, recovery cleanup) — archive deliberately
+    /// keeps history.
+    ///
+    /// A marked entry stays because it is the only record that its session
+    /// may still be running in a tmux server an earlier build started
+    /// (`recordLiveTmuxClose`), and every resume of that session id asks about
+    /// it (`TmuxResumeGate`) however it reaches the session: by id, or from
+    /// the same folder adopted again. No view lists it once its worktree row
+    /// is gone. Its screen goes with the directory, which a reader takes as
+    /// an empty capture.
     public func deleteForWorktree(worktreeID: UUID) async throws {
         _ = try await writer.write { db in
             try TerminalHistoryRecord
                 .filter(Column("worktreeID") == worktreeID.uuidString)
+                .filter(Column("liveOnTmuxServer") == nil)
                 .deleteAll(db)
         }
         let dir = worktreeDir(worktreeID: worktreeID)

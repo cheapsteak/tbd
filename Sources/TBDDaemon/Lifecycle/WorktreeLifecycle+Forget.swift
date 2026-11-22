@@ -15,12 +15,18 @@ extension WorktreeLifecycle {
     ///
     /// What `forget` does (mirrors the archive/reconcile cleanup, minus the disk
     /// removal and the archive hook):
-    /// 1. Inserts a `forgotten_worktree` tombstone for the path (see below).
-    /// 2. Ends the worktree's sessions: each holder and its job are reclaimed,
-    ///    and a row on tmux runs no tmux command.
-    /// 3. Deletes its terminals + tabs and clears their pending questions and
-    ///    per-session ClaudeHookOverlay files.
-    /// 4. Hard-deletes the worktree row (so it's gone from BOTH the active and
+    /// 1. Closes each row on tmux, running no tmux command: a live row's
+    ///    Closed Terminals entry is marked with the worktree's tmux server
+    ///    (`closeLeftoverTmuxRow`), and a mark that cannot be written refuses
+    ///    the forget before anything else is done.
+    /// 2. Inserts a `forgotten_worktree` tombstone for the path (see below).
+    /// 3. Ends the worktree's other sessions: each holder and its job are
+    ///    reclaimed.
+    /// 4. Deletes its terminals + tabs and clears their pending questions and
+    ///    per-session ClaudeHookOverlay files, and its Closed Terminals
+    ///    entries except the marked ones, which outlive the worktree so a
+    ///    resume of their sessions still asks about the server first.
+    /// 5. Hard-deletes the worktree row (so it's gone from BOTH the active and
     ///    archived lists — not merely flipped to `.archived`).
     ///
     /// What `forget` does NOT do:
@@ -45,6 +51,22 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.invalidOperation("Cannot forget the main branch worktree")
         }
 
+        let terminals = try await db.terminals.list(worktreeID: worktreeID)
+
+        // Every tmux row is closed first, before the tombstone and before any
+        // holder is disposed of, as an archive closes them before its status
+        // flip. Its close runs no tmux command, and a live row's Closed
+        // Terminals entry is marked with the worktree's server: the hard
+        // delete below keeps marked entries, so every resume of that session
+        // still asks about the server first, from wherever it is resumed. A
+        // mark that cannot be written refuses the forget here, with the
+        // worktree and every row as they were.
+        for terminal in terminals where terminal.transport == .tmux {
+            try await Self.closeLeftoverTmuxRow(
+                terminal, server: worktree.tmuxServer, history: db.terminalHistory,
+                during: .forgettingWorktree)
+        }
+
         // Tombstone the path so reconcile doesn't report it as unmanaged.
         // Inserted for any repo-backed worktree regardless of prefix: for paths
         // outside TBD-managed prefixes it's inert (reconcile never looks at
@@ -59,34 +81,26 @@ extension WorktreeLifecycle {
             )
         }
 
-        // Mirror the archive/reconcile cleanup: end each terminal's session,
+        // Mirror the archive/reconcile cleanup: end each holder session,
         // delete terminals + tabs, clear pending questions, and reclaim
         // per-session ClaudeHookOverlay files. Deliberately NO git worktree
         // remove and NO archive hook.
-        let terminals = try await db.terminals.list(worktreeID: worktreeID)
-        for terminal in terminals {
-            switch terminal.transport {
-            case .holder:
-                // Reclaimed, not refused: its row goes away below either way,
-                // and the holder and the job it forked would outlive the only
-                // record of their pids. Same branch, same reason, as
-                // `handleTerminalDelete` and `closeScratchTerminals`.
-                if let failure = await disposeHolder(for: terminal) {
-                    forgetLogger.warning(
-                        "forget left a holder running: \(failure, privacy: .public)")
-                }
-            case .tmux:
-                // No history: forget hard-deletes it right below. With no
-                // entry to mark, the close cannot fail.
-                try await Self.closeLeftoverTmuxRow(
-                    terminal, server: worktree.tmuxServer, history: nil)
+        for terminal in terminals where terminal.transport == .holder {
+            // Reclaimed, not refused: its row goes away below either way,
+            // and the holder and the job it forked would outlive the only
+            // record of their pids. Same branch, same reason, as
+            // `handleTerminalDelete` and `closeScratchTerminals`.
+            if let failure = await disposeHolder(for: terminal) {
+                forgetLogger.warning(
+                    "forget left a holder running: \(failure, privacy: .public)")
             }
         }
 
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
         await sessionTitles.forget(worktreeID: worktreeID)
         try await db.tabs.deleteForWorktree(worktreeID: worktreeID)
-        // Hard delete: closed-terminal history (rows + captured files) goes too.
+        // Hard delete: closed-terminal history (rows + captured files) goes
+        // too, all but the entries marked with a tmux server.
         try await db.terminalHistory.deleteForWorktree(worktreeID: worktreeID)
         for terminal in terminals {
             await pendingQuestions.clear(terminalID: terminal.id)

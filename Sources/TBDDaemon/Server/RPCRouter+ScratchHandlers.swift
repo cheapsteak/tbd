@@ -138,7 +138,11 @@ extension RPCRouter {
     ///
     /// `keepsHistory` is true for archive, which leaves the worktree's Closed
     /// Terminals history in place, and false for delete, which hard-deletes it
-    /// right afterwards — an entry written there would be wiped unread.
+    /// right afterwards — a holder row's entry written there would be wiped
+    /// unread. A tmux row's close writes its entry either way: a live row's is
+    /// marked with the scratch space's tmux server, and the hard delete keeps
+    /// marked entries (`TerminalHistoryStore.deleteForWorktree`), so a resume
+    /// of its session still asks about that server first.
     ///
     /// Returns the terminals sorted by whether their session has a process
     /// left (`WorktreeLifecycle.sessionHasEnded`), which archive hands to
@@ -156,12 +160,12 @@ extension RPCRouter {
         // with every session and row as it was and the open row keeps naming
         // its session to the resume gate. The entries written for the tmux
         // rows closed ahead of the failing one stay, listed in Closed
-        // Terminals beside their open tabs. Delete writes no entry, so it
-        // cannot fail here.
+        // Terminals beside their open tabs. Archive and delete alike: a
+        // delete that cannot mark a live row is refused the same way.
         for t in terminals where t.transport == .tmux {
             try await WorktreeLifecycle.closeLeftoverTmuxRow(
-                t, server: wt.tmuxServer,
-                history: keepsHistory ? db.terminalHistory : nil)
+                t, server: wt.tmuxServer, history: db.terminalHistory,
+                during: keepsHistory ? .archivingScratchSpace : .deletingScratchSpace)
         }
         var sessions = WorktreeLifecycle.SessionTeardownTally()
         for t in terminals {
@@ -262,7 +266,8 @@ extension RPCRouter {
         }
 
         // Hard delete: closed-terminal history (rows + captured files) goes
-        // too. Archive (below) deliberately keeps it.
+        // too, all but the entries marked with a tmux server. Archive (below)
+        // deliberately keeps it.
         try? await db.terminalHistory.deleteForWorktree(worktreeID: wt.id)
         try await db.worktrees.delete(id: wt.id)
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
