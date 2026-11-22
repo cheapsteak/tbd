@@ -414,8 +414,11 @@ extension AppState {
             // other terminal's composer state stays: a list answered before a
             // terminal was created can arrive after it, so absence from one
             // list does not prove the terminal ended, and forgetting would
-            // fail the session-start waiters of a terminal just created.
-            if closingTerminals[terminal.id] != nil {
+            // fail the session-start waiters of a terminal just created. That
+            // includes a terminal whose delete is still in flight: the list
+            // may predate the daemon's answer, and the answer settles it
+            // (`settleTerminalClose`).
+            if closingTerminals[terminal.id]?.awaitingList == true {
                 letGoOfDroppedTerminal(terminal.id)
             }
         }

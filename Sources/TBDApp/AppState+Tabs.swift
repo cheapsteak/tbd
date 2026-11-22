@@ -325,7 +325,7 @@ extension AppState {
         tabs[worktreeID] = arr
         Task {
             do {
-                try await daemonClient.setTabLabel(tabID: tabID, worktreeID: worktreeID, label: newValue)
+                try await tabLabelSetter(tabID, worktreeID, newValue)
             } catch {
                 logger.error("renameTab persist failed for \(tabID, privacy: .public): \(error, privacy: .public)")
                 handleConnectionError(error)
@@ -424,15 +424,8 @@ extension AppState {
         //
         // Any other terminal the tab names is not deleted: the one a
         // `.liveTranscript` tab — the composer's own home — shows, which is
-        // exactly the shape `allTerminalIDs()` does not enumerate. Its
-        // composer's unsent message, focus registrations and spawn
-        // bookkeeping go with the tab. Safe from eating a send in flight —
-        // the send path clears the draft itself on success, and a tab cannot
-        // close while its own send is mid-flight without the person closing
-        // it deliberately.
-        for terminalID in terminalIDs(in: tab).subtracting(terminalIDsInTab) {
-            forgetComposerState(for: terminalID)
-        }
+        // exactly the shape `allTerminalIDs()` does not enumerate.
+        let shownTerminalIDs = terminalIDs(in: tab).subtracting(terminalIDsInTab)
 
         // Read before the layout goes: `panel.syncTabs` lists the tab as it
         // was while any of its terminals is still closing.
@@ -441,7 +434,19 @@ extension AppState {
         arr.remove(at: index)
         tabs[worktreeID] = arr
         worktreeTabOrders[worktreeID] = arr.map(\.id)
-        prunePaneHistories()
+
+        // A terminal the closed tab only showed keeps its composer's unsent
+        // message, focus registrations and spawn bookkeeping while another
+        // tab still shows it — its own tab, as a rule, which is where the
+        // person goes on with it — and while a tab close holds it, which
+        // settles them itself. Otherwise they go with the tab. Safe from
+        // eating a send in flight — the send path clears the draft itself on
+        // success, and a tab cannot close while its own send is mid-flight
+        // without the person closing it deliberately.
+        for terminalID in shownTerminalIDs
+        where closingTerminals[terminalID] == nil && !isTerminalShownInAnyTab(terminalID) {
+            forgetComposerState(for: terminalID)
+        }
 
         if !terminalIDsInTab.isEmpty {
             closedTabsAwaitingDeletes[worktreeID, default: []].append(closedTabPayload)
@@ -462,6 +467,10 @@ extension AppState {
                 }
             }
         }
+        // After the closed tab is held: the slot histories of a tab whose
+        // terminals are still closing stay until the close lets go of it
+        // (`prunePaneHistories`).
+        prunePaneHistories()
 
         if closingActiveTab {
             if arr.isEmpty {
@@ -501,6 +510,12 @@ extension AppState {
     ///   next terminal list adopted for its worktree decides
     ///   (`ClosingTerminal.awaitingList`).
     ///
+    /// A refused or failed terminal that a terminal list dropped while its
+    /// delete was in flight is still held: the list predates the daemon's
+    /// answer, which a refusal says kept the terminal. It waits for the next
+    /// list, as a failed one does (`ClosingTerminal.awaitingList`), and a
+    /// refusal still shows its alert.
+    ///
     /// A refused or failed terminal that has left the app's state meanwhile —
     /// its worktree was archived while the delete was in flight — has no tab
     /// to come back as and shows no alert. The removal already let go of
@@ -514,7 +529,14 @@ extension AppState {
         if case .deleted = outcome { return }
         guard let worktreeTerminals = terminals[worktreeID],
               worktreeTerminals.contains(where: { $0.id == terminalID }) else {
-            letGoOfDroppedTerminal(terminalID)
+            if terminals[worktreeID] != nil, closingTerminals[terminalID] != nil {
+                closingTerminals[terminalID]?.awaitingList = true
+                if case .refused(let message) = outcome {
+                    showTabCloseRefusal(message, refusals: refusals)
+                }
+            } else {
+                letGoOfDroppedTerminal(terminalID)
+            }
             return
         }
         if case .refused(let message) = outcome {
@@ -528,8 +550,11 @@ extension AppState {
     /// Reconciles a worktree's tabs once the closed terminals named here,
     /// which the daemon kept, stop being held: `reconcileTabs` gives each a
     /// tab of its own at the end of the strip, and each that the closed tab
-    /// was rooted at takes that tab's label. With no terminals named it is a
-    /// plain reconcile.
+    /// was rooted at takes that tab's label, persisted under the new tab's
+    /// ID — a split's tab had an ID of its own, so the label stored under it
+    /// would not reach the new tab after a restart. A composer send each
+    /// one's close held is answered now (`releaseLatchedSessionStartWaiters`).
+    /// With no terminals named it is a plain reconcile.
     func bringBackClosedTerminals(
         _ terminalIDs: [UUID], worktreeID: UUID, terminals worktreeTerminals: [TBDShared.Terminal]
     ) {
@@ -539,19 +564,51 @@ extension AppState {
                 labels[terminalID] = label
             }
             finishClosingTerminal(terminalID)
+            releaseLatchedSessionStartWaiters(terminalID: terminalID)
         }
         let tabIDsBefore = Set((tabs[worktreeID] ?? []).map(\.id))
         reconcileTabs(worktreeID: worktreeID, terminals: worktreeTerminals)
         guard !labels.isEmpty, var arr = tabs[worktreeID] else { return }
-        var relabelled = false
+        var relabelled: [(tabID: UUID, label: String)] = []
         for index in arr.indices where !tabIDsBefore.contains(arr[index].id) {
             guard case .terminal(let terminalID) = arr[index].content,
                   let label = labels[terminalID], arr[index].label != label else { continue }
             arr[index].label = label
-            relabelled = true
+            relabelled.append((tabID: arr[index].id, label: label))
         }
-        if relabelled {
-            tabs[worktreeID] = arr
+        guard !relabelled.isEmpty else { return }
+        tabs[worktreeID] = arr
+        for (tabID, label) in relabelled {
+            Task {
+                do {
+                    try await tabLabelSetter(tabID, worktreeID, label)
+                } catch {
+                    logger.error("label persist for a returning tab \(tabID, privacy: .public) failed: \(error, privacy: .public)")
+                    handleConnectionError(error)
+                }
+            }
+        }
+    }
+
+    /// Lets go of each closed tab's terminal whose delete got no answer, in a
+    /// worktree a full worktree list no longer holds. No terminal list for
+    /// that worktree is coming to decide it (`ClosingTerminal.awaitingList`),
+    /// so the close's hold, the closed tab `panel.syncTabs` keeps listing and
+    /// the composer state kept for it would otherwise stay for the app's
+    /// life. A terminal whose delete is still in flight is left to its
+    /// delete's answer.
+    func letGoOfUnansweredCloses(outside listedWorktreeIDs: Set<UUID>) {
+        for (terminalID, closing) in closingTerminals
+        where closing.awaitingList && !listedWorktreeIDs.contains(closing.worktreeID) {
+            letGoOfDroppedTerminal(terminalID)
+        }
+    }
+
+    /// Whether an open tab, in any worktree, shows the terminal
+    /// (`terminalIDs(in:)`).
+    func isTerminalShownInAnyTab(_ terminalID: UUID) -> Bool {
+        tabs.values.contains { worktreeTabs in
+            worktreeTabs.contains { terminalIDs(in: $0).contains(terminalID) }
         }
     }
 

@@ -34,8 +34,13 @@ extension AppState {
     /// The cancellation handling is not defensive bookkeeping: the coordinator's
     /// task group awaits all of its children on exit, so a continuation nobody
     /// resumes would hang the send forever rather than time out.
+    ///
+    /// A terminal a tab close holds (`closingTerminals`) does not answer from
+    /// the latch: the waiter registers, and the close's outcome answers it
+    /// (see `noteSessionStart`).
     func awaitSessionStart(terminalID: UUID, incarnationID: UUID) async -> Bool {
-        if lastStartedIncarnation[terminalID] == incarnationID {
+        if closingTerminals[terminalID] == nil,
+           lastStartedIncarnation[terminalID] == incarnationID {
             return true
         }
         let token = UUID()
@@ -74,13 +79,29 @@ extension AppState {
     /// lost — nothing was there to release. Recording it here lets the waiter,
     /// once it does register (or checks in `awaitSessionStart` before
     /// registering), find it retroactively.
+    ///
+    /// **A terminal a tab close holds releases nobody yet** (`closingTerminals`).
+    /// The person closed its tab, so a send held on it must not report
+    /// delivered into a terminal its delete is about to end. The start is
+    /// latched, and the close answers the waiters: a terminal the daemon
+    /// deleted fails them with the rest of its composer state
+    /// (`forgetComposerState`), and one it kept releases the waiters the
+    /// latch matches as it comes back (`bringBackClosedTerminals`).
     func noteSessionStart(terminalID: UUID, incarnationID: UUID?) {
         guard let incarnationID else { return }
         lastStartedIncarnation[terminalID] = incarnationID
-        guard let waiters = sessionStartWaiters[terminalID] else { return }
-        let matched = waiters.filter { $0.incarnationID == incarnationID }
+        guard closingTerminals[terminalID] == nil else { return }
+        releaseLatchedSessionStartWaiters(terminalID: terminalID)
+    }
+
+    /// Release this terminal's waiters for the incarnation its latch holds
+    /// (`lastStartedIncarnation`), leaving every other waiter waiting.
+    func releaseLatchedSessionStartWaiters(terminalID: UUID) {
+        guard let started = lastStartedIncarnation[terminalID],
+              let waiters = sessionStartWaiters[terminalID] else { return }
+        let matched = waiters.filter { $0.incarnationID == started }
         guard !matched.isEmpty else { return }
-        let remaining = waiters.filter { $0.incarnationID != incarnationID }
+        let remaining = waiters.filter { $0.incarnationID != started }
         sessionStartWaiters[terminalID] = remaining.isEmpty ? nil : remaining
         for waiter in matched { waiter.resume(true) }
     }

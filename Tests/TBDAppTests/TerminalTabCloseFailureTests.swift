@@ -8,10 +8,11 @@ import TestSupport
 // through the injected `terminalDeleter`, which can hold each delete until
 // the test releases it (`PanelCallGate`), so the tab strip is read after
 // every answer, and the terminal list the app reads back after an error goes
-// through `worktreeTerminalsFetcher`. The worktree is marked hydrated so no
-// `tab.list` is sent, and the composer-draft report is stubbed. The close's
-// `tab.setOrder` has no seam; it fails against the fenced socket as in the
-// other tab-close suites.
+// through `worktreeTerminalsFetcher`. A returning tab's label is persisted
+// through `tabLabelSetter`, which the test daemon records. The worktree is
+// marked hydrated so no `tab.list` is sent, and the composer-draft report is
+// stubbed. The close's `tab.setOrder` has no seam; it fails against the
+// fenced socket as in the other tab-close suites.
 
 /// A tab close removes the tab at once and deletes its terminals on the
 /// daemon, all at the same time, and settles each terminal as its own delete
@@ -37,6 +38,9 @@ struct TerminalTabCloseFailureTests {
         let daemon = TerminalCloseDaemon()
         state.terminalDeleter = { @MainActor terminalID in try await daemon.delete(terminalID) }
         state.worktreeTerminalsFetcher = { @MainActor worktreeID in daemon.list(worktreeID: worktreeID) }
+        state.tabLabelSetter = { @MainActor tabID, worktreeID, label in
+            daemon.setLabel(tabID: tabID, worktreeID: worktreeID, label: label)
+        }
         state.composerDraftsSetter = { @MainActor _ in }
         state.tabStatesFetcher = { @MainActor _ in
             Issue.record("unexpected tab.list")
@@ -560,6 +564,273 @@ struct TerminalTabCloseFailureTests {
             #expect(await waiter.value == false)
         }
     }
+
+    /// Registers a session-start waiter for `incarnationID` and returns once
+    /// `count` waiters are registered on the terminal.
+    private static func registerWaiter(
+        _ state: AppState, terminalID: UUID, incarnationID: UUID, count: Int
+    ) async throws -> Task<Bool, Never> {
+        let waiter = Task { @MainActor in
+            await state.awaitSessionStart(terminalID: terminalID, incarnationID: incarnationID)
+        }
+        var registered = false
+        for _ in 0..<1000 where !registered {
+            registered = state.sessionStartWaiters[terminalID]?.count == count
+            if !registered { await Task.yield() }
+        }
+        try #require(registered, "the session-start waiter never registered")
+        return waiter
+    }
+
+    @Test("a list that lands while a refused delete is in flight lets go of nothing the refusal brings back")
+    func listLandingWhileARefusedDeleteIsInFlight() async throws {
+        try await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build],
+                tabs: [Self.tab(claude), Self.tab(build, label: "build server")])
+            state.composerDraft(for: build).text = "half a sentence"
+            daemon.hold([build])
+            daemon.failures[build] = DaemonClientError.rpcError(Self.refusal, code: nil)
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            // A list the daemon answered before it decided the delete: it can
+            // lack the row the daemon goes on to keep.
+            let answeredMidDelete = daemon.list(worktreeID: worktreeID).filter { $0.id != build }
+            state.adoptTerminalSnapshot(answeredMidDelete, worktreeID: worktreeID)
+
+            #expect(state.closingTerminals[build] != nil, "the delete in flight still holds the terminal")
+            #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence")
+            let held: [UUID] = [build]
+            #expect(state.closedTabsAwaitingDeletes[worktreeID]?.map(\.tabID) == held,
+                    "panel.syncTabs keeps listing the closed tab, so its surface stays")
+
+            daemon.release(build)
+            await PanelTabsFixture.drainMainActor()
+            #expect(state.alertMessage == "Couldn't close terminal: \(Self.refusal)")
+            #expect(state.closingTerminals[build]?.awaitingList == true,
+                    "the refusal waits for a list that holds the terminal")
+            #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence")
+
+            Self.poll(state, daemon, worktreeID)
+            let back: [UUID] = [claude, build]
+            #expect(Self.tabIDs(state, worktreeID) == back)
+            let returned = try #require(state.tabs[worktreeID]?.last)
+            #expect(returned.label == "build server")
+            #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence")
+            #expect(state.closingTerminals.isEmpty)
+        }
+    }
+
+    @Test("a refused split pane takes the closed tab's label under its own tab ID, persisted")
+    func refusedSplitPanePersistsItsLabel() async throws {
+        try await Self.withState { state, daemon in
+            let (left, right, agent) = (UUID(), UUID(), UUID())
+            var split = Self.splitTab(state, [left, right])
+            split.label = "build pair"
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [left, right, agent], tabs: [split, Self.tab(agent)])
+            daemon.failures[left] = DaemonClientError.rpcError(Self.refusal, code: nil)
+
+            state.closeTab(worktreeID: worktreeID, index: 0)
+            await PanelTabsFixture.drainMainActor()
+            await PanelTabsFixture.drainMainActor()
+
+            let returned = try #require(state.tabs[worktreeID]?.last)
+            #expect(returned.id == left, "the split's own tab ID does not come back")
+            #expect(returned.label == "build pair")
+            let persisted = [TabLabelWrite(tabID: left, worktreeID: worktreeID, label: "build pair")]
+            #expect(daemon.labelWrites == persisted,
+                    "the label is stored under the returning tab's ID, so it survives a restart")
+        }
+    }
+
+    @Test("a session start during a close answers no send until the delete does, and the delete fails it")
+    func sessionStartDuringADeletedClose() async throws {
+        try await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build], tabs: [Self.tab(claude), Self.tab(build)])
+            let incarnation = UUID()
+            let waiter = try await Self.registerWaiter(
+                state, terminalID: build, incarnationID: incarnation, count: 1)
+            daemon.hold([build])
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            state.noteSessionStart(terminalID: build, incarnationID: incarnation)
+
+            #expect(state.sessionStartWaiters[build]?.count == 1,
+                    "a send is not reported delivered into a terminal whose tab just closed")
+
+            daemon.release(build)
+            await PanelTabsFixture.drainMainActor()
+            #expect(await waiter.value == false, "the delete ended the terminal the send was held on")
+            #expect(state.sessionStartWaiters[build] == nil)
+        }
+    }
+
+    @Test("a session start during a close the daemon refuses answers the send as the terminal comes back")
+    func sessionStartDuringARefusedClose() async throws {
+        try await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build], tabs: [Self.tab(claude), Self.tab(build)])
+            let incarnation = UUID()
+            let early = try await Self.registerWaiter(
+                state, terminalID: build, incarnationID: incarnation, count: 1)
+            daemon.hold([build])
+            daemon.failures[build] = DaemonClientError.rpcError(Self.refusal, code: nil)
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            state.noteSessionStart(terminalID: build, incarnationID: incarnation)
+            // A waiter that finds the start already latched waits too while
+            // the close holds the terminal.
+            let late = try await Self.registerWaiter(
+                state, terminalID: build, incarnationID: incarnation, count: 2)
+            #expect(state.lastStartedIncarnation[build] == incarnation)
+
+            daemon.release(build)
+            await PanelTabsFixture.drainMainActor()
+            #expect(Self.tabIDs(state, worktreeID).last == build)
+            #expect(await early.value == true, "the kept terminal runs the session the send started")
+            #expect(await late.value == true)
+            #expect(state.sessionStartWaiters[build] == nil)
+        }
+    }
+
+    @Test("a close whose delete got no answer is let go when a full worktree list drops its worktree")
+    func unansweredCloseInADroppedWorktreeIsLetGo() async {
+        await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build], tabs: [Self.tab(claude), Self.tab(build)])
+            state.composerDraft(for: build).text = "half a sentence"
+            daemon.failures[build] = DaemonClientError.connectionFailed("connection refused")
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            #expect(state.closingTerminals[build]?.awaitingList == true)
+            state.worktreesFetcher = { @MainActor _ in [] }
+            state.terminalsListFetcher = { @MainActor in [] }
+
+            await state.refreshWorktrees(repoID: UUID())
+            #expect(state.closingTerminals[build]?.awaitingList == true,
+                    "one repo's list does not name every worktree")
+
+            await state.refreshWorktrees()
+            #expect(state.closingTerminals.isEmpty)
+            #expect(state.closedTabsAwaitingDeletes[worktreeID] == nil)
+            #expect(state.composerDrafts[.terminal(build)] == nil)
+        }
+    }
+
+    @Test("a full worktree list that still holds the worktree leaves an unanswered close waiting")
+    func unansweredCloseInAListedWorktreeWaits() async {
+        await Self.withState { state, daemon in
+            let (claude, build) = (UUID(), UUID())
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [claude, build], tabs: [Self.tab(claude), Self.tab(build)])
+            state.composerDraft(for: build).text = "half a sentence"
+            daemon.failures[build] = DaemonClientError.connectionFailed("connection refused")
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+            let listed = TBDShared.Worktree(
+                id: worktreeID, repoID: UUID(), name: "acme", displayName: "acme",
+                branch: "main", path: "/acme/worktrees/acme", tmuxServer: "tbd-acme")
+            state.worktreesFetcher = { @MainActor _ in [listed] }
+            // The terminal list fails, so only the worktree list is read.
+            state.terminalsListFetcher = { @MainActor in throw DaemonClientError.daemonNotRunning }
+
+            await state.refreshWorktrees()
+
+            #expect(state.closingTerminals[build]?.awaitingList == true)
+            #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence")
+        }
+    }
+
+    @Test("a closed tab's slot histories last while its delete is in flight, and ride the sync that lists it")
+    func closedTabKeepsItsSlotHistoriesWhileHeld() async throws {
+        try await Self.withState { state, daemon in
+            let (build, agent, slot) = (UUID(), UUID(), UUID())
+            let viewer = PaneContent.codeViewer(id: slot, path: "/acme/b.md")
+            state.layouts[build] = .split(
+                id: UUID(), direction: .horizontal,
+                children: [.pane(.terminal(terminalID: build)), .pane(viewer)],
+                ratios: [0.5, 0.5])
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [build, agent], tabs: [Self.tab(build), Self.tab(agent)])
+            state.recordPaneReplacement(.init(
+                paneID: slot, outgoing: .codeViewer(id: slot, path: "/acme/a.md"), incoming: viewer))
+            let history = try #require(state.paneHistories[slot])
+            let syncs = PanelTabsFixture.collectSyncs(state)
+            state.markPanelSyncReady(worktreeIDs: [worktreeID])
+            await PanelTabsFixture.drainMainActor()
+            syncs.reset()
+            daemon.hold([build])
+
+            state.closeTab(worktreeID: worktreeID, index: 0)
+            await PanelTabsFixture.drainMainActor()
+            state.prunePaneHistories()
+
+            #expect(state.paneHistories[slot] == history, "a refusal may yet bring the tab's surface back")
+            let whileClosing = try #require(syncs.sent.last)
+            #expect(whileClosing.tabs.map(\.tabID).contains(build))
+            #expect(whileClosing.paneHistories[slot] == history)
+
+            daemon.release(build)
+            await PanelTabsFixture.drainMainActor()
+            state.prunePaneHistories()
+            #expect(state.paneHistories[slot] == nil, "once the delete succeeds, no tab holds the slot")
+        }
+    }
+
+    @Test("closing a transcript tab keeps the composer of a terminal another tab still shows")
+    func closingATranscriptTabKeepsAShownTerminalsComposer() async {
+        await Self.withState { state, daemon in
+            let (build, transcriptID) = (UUID(), UUID())
+            let transcript = TBDShared.Tab(
+                id: transcriptID, content: .liveTranscript(id: transcriptID, terminalID: build), label: nil)
+            let worktreeID = Self.seed(
+                state, daemon, terminalIDs: [build], tabs: [Self.tab(build), transcript])
+            state.composerDraft(for: build).text = "half a sentence"
+            state.lastStartedIncarnation[build] = UUID()
+
+            state.closeTab(worktreeID: worktreeID, index: 1)
+            await PanelTabsFixture.drainMainActor()
+
+            #expect(daemon.asked.isEmpty, "a transcript tab deletes no terminal")
+            #expect(state.composerDrafts[.terminal(build)]?.text == "half a sentence")
+            #expect(state.lastStartedIncarnation[build] != nil)
+        }
+    }
+
+    @Test("closing the only tab that shows a terminal's transcript forgets that terminal's composer")
+    func closingTheLastTranscriptTabForgetsTheComposer() async {
+        await Self.withState { state, daemon in
+            let (build, transcriptID) = (UUID(), UUID())
+            let transcript = TBDShared.Tab(
+                id: transcriptID, content: .liveTranscript(id: transcriptID, terminalID: build), label: nil)
+            let worktreeID = Self.seed(state, daemon, terminalIDs: [build], tabs: [transcript])
+            state.composerDraft(for: build).text = "half a sentence"
+            state.lastStartedIncarnation[build] = UUID()
+
+            state.closeTab(worktreeID: worktreeID, index: 0)
+            await PanelTabsFixture.drainMainActor()
+
+            #expect(daemon.asked.isEmpty)
+            #expect(state.composerDrafts[.terminal(build)] == nil)
+            #expect(state.lastStartedIncarnation[build] == nil)
+        }
+    }
+}
+
+/// One `tab.setLabel` the app sent.
+struct TabLabelWrite: Equatable {
+    let tabID: UUID
+    let worktreeID: UUID
+    let label: String?
 }
 
 /// The daemon's end of `terminal.delete` for a tab close: records each
@@ -567,13 +838,19 @@ struct TerminalTabCloseFailureTests {
 /// fails those named in `failures`; every other delete succeeds. `rows` is
 /// what its terminal list answers with: a delete that succeeds removes the
 /// row, and a failing one keeps it unless `rowGoneBeforeFailure` names it.
+/// Every tab label the app persists is recorded in `labelWrites`.
 @MainActor
 final class TerminalCloseDaemon {
     var failures: [UUID: any Error] = [:]
     var rowGoneBeforeFailure: Set<UUID> = []
     var rows: [TBDShared.Terminal] = []
     private(set) var asked: [UUID] = []
+    private(set) var labelWrites: [TabLabelWrite] = []
     private var gates: [UUID: PanelCallGate] = [:]
+
+    func setLabel(tabID: UUID, worktreeID: UUID, label: String?) {
+        labelWrites.append(TabLabelWrite(tabID: tabID, worktreeID: worktreeID, label: label))
+    }
 
     func hold(_ terminalIDs: [UUID]) {
         for terminalID in terminalIDs { gates[terminalID] = PanelCallGate() }
