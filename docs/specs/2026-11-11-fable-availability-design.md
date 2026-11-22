@@ -1,7 +1,9 @@
 # Fable availability
 
 TBD knows, per profile, whether the account can run a Fable model right now,
-and balancing never places a Fable spawn on an account known to be out.
+and balancing never places a Fable spawn on a profile whose fresh reading is
+`out`. A profile not read in time counts as eligible, so a spawn can still land
+on an account that is out but not yet read (see Balancing).
 
 ## Why
 
@@ -71,8 +73,9 @@ time it is needed).
 | `unknown` | 10 minutes |
 
 **Nothing probes on a timer.** A probe runs only when something asks for a
-reading that is missing or past its TTL: a Fable spawn that balances,
-`tbd profile fable-check`, or `tbd profile list --refresh-fable`. Limits: one
+reading that is missing or past its TTL: a Fable spawn that TBD places (a
+balanced pick or the global default), `tbd profile fable-check`, or
+`tbd profile list --refresh-fable`. Limits: one
 probe at a time per profile (a second ask joins the one in flight), at most two
 at once across profiles, 60 seconds each, then SIGTERM and SIGKILL. The probe
 runs in the environment `tbd profile exec` builds
@@ -94,17 +97,30 @@ directory.
 A spawn asks for Fable when its per-spawn model (an alias such as `fable`, or
 an id containing `fable`) says so. For a balanced pick:
 
-1. Pool profiles whose reading is missing or stale are probed first, waiting at
-   most 45 seconds. **A profile still unchecked after that is eligible but
-   unverified**: it is not refused, and the spawn is not delayed further.
+1. Pool profiles whose reading is missing or stale are probed first, and the
+   spawn waits at most 45 seconds for them. A probe can run for up to 60
+   seconds and at most two run at once, so the wait can end with profiles
+   still unchecked, most often when more than two need a probe or one is
+   slow. **A profile still unchecked when the wait ends counts as eligible**:
+   it is not refused, and the spawn does not wait for it any longer. Its probe
+   keeps running and records the result for later spawns.
 2. `ProfilePoolPicker` gives a profile whose reading is `out` and fresh the
    verdict `.fableOut`, before any usage-reading rule. It is never chosen and
    never reaches the fallback tiers (`aboveCeiling`, `staleReading`, `full`),
    which only name profiles turned away for their usage reading.
 3. If nothing is eligible and nothing is a fallback but some profile was
    `.fableOut`, the spawn fails with `FableUnavailableError` naming those
-   profiles. It does not run another model and does not land on an out
-   account. The same check guards the global-default step.
+   profiles. It does not run another model. The same check guards the
+   global-default step, after a wait of up to 45 seconds for that profile's
+   own probe.
+
+So the guarantee is narrow: a Fable spawn that TBD places itself, by a
+balanced pick or at the global default, never lands on a profile whose fresh
+reading is `out`. It can land on an account that is out of credits but not yet
+read. That session fails on its first turn, and the
+profile reads `out` once its probe finishes or the session's StopFailure hook
+reports the credits error, so later Fable spawns avoid it. The design accepts
+that gap rather than hold a spawn until every probe ends.
 
 A non-Fable request is unaffected. An **explicit pin** (the picker's chosen
 profile, a repo or scratch override) is the person's choice and is not
