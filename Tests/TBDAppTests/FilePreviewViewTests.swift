@@ -63,18 +63,21 @@ private final class PreviewFixtures {
 }
 
 /// One file in a viewer that fills the pane, with its own playback
-/// coordinator so no test registers with the app-wide one.
+/// coordinator so no test registers with the app-wide one. A rich view and
+/// source mode are off unless the test asks for them.
 private struct PreviewRoot: View {
     let path: String
     let worktreePath: String
     let coordinator: MediaPlaybackCoordinator
+    var rendersRichView: Bool = false
+    var showSourceCode: Bool = false
 
     var body: some View {
         FilePreviewView(
             filePath: path,
             worktreePath: worktreePath,
-            showSourceCode: false,
-            rendersMarkdown: false,
+            showSourceCode: showSourceCode,
+            rendersRichView: rendersRichView,
             onOpenFile: { _ in },
             fillsViewport: true
         )
@@ -107,10 +110,11 @@ private struct ViewportSwitchRoot: View {
 
 /// `FilePreviewView` mounted offscreen: a playable audio file gets one paused
 /// player framed to its control bar, an audio file that does not load falls
-/// back to the "Cannot preview" screen, and a player stays the same view when
-/// the selection goes from one file to several. A source file whose extension
-/// looks up as a playable type is covered by `FilePreviewTextTests`, which
-/// reads the accessibility tree.
+/// back to the "Cannot preview" screen, a player stays the same view when the
+/// selection goes from one file to several, and a CSV file shows the table.
+/// A source file whose extension looks up as a playable type, and a CSV file
+/// in source mode, are covered by `FilePreviewTextTests`, which reads the
+/// accessibility tree.
 @MainActor
 @Suite("FilePreviewView", .fastPassBounded)
 struct FilePreviewViewTests {
@@ -146,7 +150,7 @@ struct FilePreviewViewTests {
         let fixtures = try PreviewFixtures()
         defer { fixtures.remove() }
         let url = try fixtures.garbageWAV()
-        let kind = await FilePreviewClassifier.shared.kind(forPath: url.path, rendersMarkdown: false)
+        let kind = await FilePreviewClassifier.shared.kind(forPath: url.path, rendersRichView: false)
         try #require(kind == .audio, "the fixture must reach the player, but it classified as \(kind)")
         let host = OffscreenHost(
             root: PreviewRoot(
@@ -173,6 +177,36 @@ struct FilePreviewViewTests {
         }
         let remaining = host.descendants(MediaPlayerHostView.self).count
         try #require(fellBack, "the player was still mounted after the load failed: \(remaining) player view(s)")
+    }
+
+    /// A single CSV file, when the pane asks for a rich view, shows the AppKit
+    /// table, and the table's columns are the file's header row. The table
+    /// arrives after two reads off the main actor, the text sniff and the
+    /// table load, so the wait is bounded in time, not in pumps.
+    @Test func aCsvFileMountsATable() async throws {
+        let fixtures = try PreviewFixtures()
+        defer { fixtures.remove() }
+        let url = try fixtures.text("name,age\nAda,36\n", named: "data.csv")
+        let host = OffscreenHost(
+            root: PreviewRoot(
+                path: url.path, worktreePath: fixtures.directory.path,
+                coordinator: MediaPlaybackCoordinator(), rendersRichView: true),
+            size: Self.paneSize)
+        defer { host.tearDown() }
+
+        let mounted = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+        ) { @Sendable in
+            await host.pump()
+            return await MainActor.run { host.descendants(TableHostView.self).count == 1 }
+        }
+        let found = host.descendants(TableHostView.self).count
+        try #require(
+            mounted == .satisfied,
+            Comment(rawValue: "expected one table (\(mounted)); found \(found)"))
+        let tableHost = try #require(host.descendants(TableHostView.self).first)
+        let titles = tableHost.tableView.tableColumns.map(\.title)
+        #expect(titles == ["name", "age"])
     }
 
     /// Selecting a second file while one plays flips `fillsViewport` from
@@ -231,7 +265,8 @@ struct FilePreviewViewTests {
 
 extension AccessibilityBridgeSerialized {
     /// A source file whose extension looks up as a playable type shows its
-    /// text and no player. The evidence that the text rendered is the file's
+    /// text and no player, and a CSV file in source mode shows its text and
+    /// no table. The evidence that the text rendered is the file's
     /// own words in the accessibility tree, which needs the process-global
     /// bridge switch, so this suite is nested here to run serialized with the
     /// others that flip it.
@@ -247,7 +282,7 @@ extension AccessibilityBridgeSerialized {
                 let fixtures = try PreviewFixtures()
                 defer { fixtures.remove() }
                 let url = try fixtures.text("export const x = 1\n", named: "index.ts")
-                let kind = await FilePreviewClassifier.shared.kind(forPath: url.path, rendersMarkdown: false)
+                let kind = await FilePreviewClassifier.shared.kind(forPath: url.path, rendersRichView: false)
                 #expect(kind == .text)
                 let host = OffscreenHost(
                     root: PreviewRoot(
@@ -276,6 +311,38 @@ extension AccessibilityBridgeSerialized {
                 let mediaHosts = host.descendants(MediaPlayerHostView.self).count
                 #expect(avPlayers == 0, "a TypeScript file mounted \(avPlayers) AVPlayerView(s)")
                 #expect(mediaHosts == 0)
+            }
+        }
+
+        /// In source mode a CSV file shows its text and no table, even when
+        /// the pane asks for a rich view.
+        @Test func aCsvFileInSourceModeIsText() async throws {
+            try await withAccessibilityBridge {
+                let fixtures = try PreviewFixtures()
+                defer { fixtures.remove() }
+                let url = try fixtures.text("name,age\nAda,36\n", named: "data.csv")
+                let host = OffscreenHost(
+                    root: PreviewRoot(
+                        path: url.path, worktreePath: fixtures.directory.path,
+                        coordinator: MediaPlaybackCoordinator(),
+                        rendersRichView: true, showSourceCode: true),
+                    size: Self.paneSize)
+                defer { host.tearDown() }
+
+                // The 1 pt placeholder shown until classification lands holds
+                // no table either, so wait for the file's own text first.
+                let rendered = await pollUntilTrue(
+                    timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+                ) { @Sendable in
+                    await host.pump()
+                    return await accessibilityTree(of: host, contains: "name,age")
+                }
+                let tree = host.accessibilityTreeDescription()
+                try #require(
+                    rendered == .satisfied,
+                    Comment(rawValue: "the file's text never rendered (\(rendered)); accessibility tree:\n\(tree)"))
+
+                #expect(host.descendants(TableHostView.self).isEmpty)
             }
         }
     }
