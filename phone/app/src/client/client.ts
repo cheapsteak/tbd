@@ -70,9 +70,11 @@ import type { Envelope } from '../protocol/wire.ts';
 import type { AppEvent, ErrorCode, Method, ParamsOf, ResultOf, SessionsSubscribeResult } from '../protocol/types.ts';
 
 /**
- * The methods that act on a session or create something. The daemon keeps their replies in its
- * request memory (`PhoneAppService.remembersReplies(of:)`), so a resend of one gets the first
- * run's reply and acts no more, but only while the daemon still remembers it.
+ * The methods that act on a session, create something, or change a setting on the laptop. The
+ * daemon keeps their replies in its request memory (`PhoneAppService.remembersReplies(of:)`), so
+ * a resend of one gets the first run's reply and acts no more, but only while the daemon still
+ * remembers it. Acting requests also go out in the order they were made, across a drop, so two
+ * quick taps on a repo's filter chip reach the laptop in order.
  *
  * **Never retry a failed action automatically under a new ID.** Several failures can mean the
  * action happened all the same: `not_confirmed`, `bad_reply`, `internal`, and a `too_large`
@@ -88,6 +90,7 @@ export const ACTING_METHODS: ReadonlySet<Method> = new Set<Method>([
   'session.setModel',
   'worktree.create',
   'remote.create',
+  'repo.setRemoteFilter',
 ]);
 
 /**

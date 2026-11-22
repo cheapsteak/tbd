@@ -1,5 +1,6 @@
-// Tests what App (src/App.tsx) renders again when the state changes, and what the session
-// screen (src/screens/SessionScreen.tsx) shows while its session's row has not arrived. esbuild
+// Tests what App (src/App.tsx) renders again when the state changes, what the session screen
+// (src/screens/SessionScreen.tsx) shows while its session's row has not arrived, and a tap on a
+// repo header's filter chip in the sessions list (src/sessions/SessionsList.tsx). esbuild
 // bundles both for Node with the components they draw with swapped for probes that count their
 // renders and draw nothing, and React DOM's development build runs them under `act`. React
 // draws into a stand-in for the element it mounts into: its document makes elements that keep
@@ -43,6 +44,8 @@ export { act, createElement } from 'react';
 export { createRoot } from 'react-dom/client';
 export { App } from './src/App.tsx';
 export { SessionScreen } from './src/screens/SessionScreen.tsx';
+export { SessionsList } from './src/sessions/SessionsList.tsx';
+export { AppError } from './src/client/client.ts';
 export { createActions } from './src/actions/index.ts';
 export { AppContext } from './src/state/context.tsx';
 export { createStore, SESSIONS_ROUTE } from './src/state/store.ts';
@@ -337,6 +340,71 @@ test('a session whose row has not arrived yet shows the back button, which asks 
   await act(async () => { actions.onRoute(null); });
   assert.equal(store.get().ui.route, SESSIONS_ROUTE);
   assert.equal(findByAttribute(dom, 'data-state', 'session-waiting'), null);
+
+  await act(async () => { react.unmount(); });
+  assert.deepEqual(errors, []);
+});
+
+test("a tap on a repo's filter chip flips it at once, and a refusal flips it back with the laptop's reason", async (t) => {
+  Object.assign(globalThis, { window: {}, IS_REACT_ACT_ENVIRONMENT: true });
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => { errors.push(args.join(' ')); });
+  const { act, createElement, createRoot, SessionsList, AppContext, AppError, createActions, createStore } = await loadApp();
+
+  const store = createStore();
+  /** @type {Array<{ method: string, params: unknown, reject: (error: unknown) => void }>} */
+  const sent = [];
+  const client = {
+    stream: null, lastSeq: null,
+    request: (/** @type {string} */ method, /** @type {unknown} */ params) => new Promise((_resolve, reject) => { sent.push({ method, params, reject }); }),
+  };
+  const actions = createActions({ store, client, link: { openLink: () => {} }, entries: { push() {}, replace() {}, back() {} }, now: () => 0 });
+
+  // Repo acme has a local row and an acme-box row. Its group is folded, which leaves the chip on
+  // its header, and keeps every row's text out of this stand-in DOM.
+  const repoID = '16E7737E-5C20-548E-81FC-5DD3F9A51D36';
+  const groupID = `repo:${repoID}`;
+  const box = {
+    ...row('BOX', 'unused'), remote: true,
+    sessions: [{ ...row('BOX', 'unused').sessions[0], ref: { kind: 'remote', provider: 'acme-box', sessionID: 'run-1' }, agent: 'remote' }],
+  };
+  const layout = [{ id: groupID, kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'BOX', depth: 0 }] }];
+  store.update((s) => ({
+    ...s,
+    conn: { up: true, subscribed: true, error: null },
+    sessions: { layout, rows: { W1: row('W1', 'T1'), BOX: box } },
+    ui: { ...s.ui, collapsed: { [groupID]: true } },
+  }));
+
+  const dom = container();
+  const react = createRoot(dom);
+  await act(async () => {
+    react.render(createElement(AppContext.Provider, { value: { store, actions } }, createElement(SessionsList)));
+  });
+  const chip = /** @type {FakeElement} */ (findByAttribute(dom, 'class', 'rf'));
+  assert.equal(chip?.nodeName, 'BUTTON');
+  const text = () => /** @type {any} */ (findByAttribute(chip, 'class', 'rf-t'))?.textContent;
+  const fill = () => /** @type {FakeElement} */ (findByAttribute(chip, 'd', 'M3 5h18l-7 8.2V19l-4 2v-7.8L3 5Z')).attributes.get('fill');
+  assert.equal(chip.attributes.get('aria-pressed'), 'false');
+  assert.equal(chip.attributes.get('aria-label'), 'Hide acme-box sessions');
+  assert.equal(text(), 'Hide acme-box');
+  assert.equal(fill(), undefined);
+  assert.equal(findByAttribute(dom, 'class', 'repo-row filt')?.nodeName, 'DIV');
+
+  await act(async () => { click(dom, chip); });
+  assert.deepEqual(sent.map((r) => [r.method, r.params]), [['repo.setRemoteFilter', { repoID, hidden: true }]]);
+  assert.equal(chip.attributes.get('aria-pressed'), 'true');
+  assert.equal(chip.attributes.get('aria-label'), '1 acme-box session hidden. Tap to show it.');
+  assert.equal(text(), '1 hidden');
+  assert.equal(fill(), 'currentColor');
+
+  await act(async () => {
+    sent[0]?.reject(new AppError('not_found', 'That repo is no longer on this laptop.'));
+    await flush();
+  });
+  assert.equal(chip.attributes.get('aria-pressed'), 'false');
+  assert.equal(text(), 'Hide acme-box');
+  assert.equal(store.get().ui.toast?.text, 'That repo is no longer on this laptop.');
 
   await act(async () => { react.unmount(); });
   assert.deepEqual(errors, []);

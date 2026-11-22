@@ -4,12 +4,12 @@
  */
 
 import type { JSX } from 'react';
-import { GLYPHS, reactAttrs, type GlyphName } from './glyphs.ts';
+import { glyph, reactAttrs, type IconName } from './glyphs.ts';
 
-export function Icon(p: { name: GlyphName; cls?: string }): JSX.Element {
+export function Icon(p: { name: IconName; cls?: string }): JSX.Element {
   return (
     <svg className={p.cls ? `i ${p.cls}` : 'i'} viewBox="0 0 24 24" aria-hidden="true">
-      {GLYPHS[p.name].map(([tag, attrs], i) => {
+      {glyph(p.name).map(([tag, attrs], i) => {
         const Tag = tag as 'path' | 'circle' | 'rect';
         return <Tag key={i} {...reactAttrs(attrs)} />;
       })}

@@ -309,3 +309,12 @@ button.tool:active{background:var(--box)}
 .tool code.path .base{flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* the New sheet's Account row: the account a new worktree starts on sits at the row's right, as a value, and a long name is cut with an ellipsis */
 .mi .val{flex:0 1 auto;display:block;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+/* a repo header's filter chip: beside it the name gives up the row's width and shrinks first, cut with an ellipsis, so the chip and the "+" never move. The chip's tap area is the row's full height around a 22px pill, and a long provider name in it is cut too. On, the pill takes the accent's tint, which is --work-bg's blue. */
+.repo .rn{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.repo-row.filt .repo{flex:0 1 auto;padding-right:4px}
+.rf{flex:none;display:flex;align-items:center;height:30px;margin-right:auto;padding:0 4px}
+.rf-pill{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 8px;border-radius:11px;border:1px solid var(--sep);color:var(--muted);font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.rf-pill svg.i{width:11px;height:11px}
+.rf-t{max-width:120px;overflow:hidden;text-overflow:ellipsis}
+.rf[aria-pressed="true"] .rf-pill{background:var(--work-bg);border-color:transparent;color:var(--accent)}
+.rf:active .rf-pill{background:var(--sel)}

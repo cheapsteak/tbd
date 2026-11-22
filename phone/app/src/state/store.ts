@@ -12,6 +12,7 @@ import type { HostEnv } from '../env.ts';
 import type { PhoneGroupLayout, PhoneRow, PhoneSessionRef } from '../protocol/types.ts';
 import { emptyPrompts } from './prompts.ts';
 import type { PromptsState } from './prompts.ts';
+import type { RemoteFilterPending } from './remoteFilter.ts';
 import { emptySheets } from './sheets.ts';
 import type { SheetsState } from './sheets.ts';
 import { emptyTranscript } from './transcript.ts';
@@ -74,6 +75,11 @@ export interface UIState {
   refusal: Readonly<Record<string, string>>;
   /** Unsent composer text, by `refKey` of the session. */
   drafts: Readonly<Record<string, string>>;
+  /**
+   * The phone's own value of a repo's filter for registry-provider sessions, by repo ID, while a
+   * tap on its chip waits for the laptop's list to agree (`state/remoteFilter.ts`).
+   */
+  remoteFilterPending: Readonly<Record<string, RemoteFilterPending>>;
 }
 
 /**
@@ -145,6 +151,7 @@ export function initialState(): AppState {
       nav: 0,
       refusal: emptyRecord(),
       drafts: emptyRecord(),
+      remoteFilterPending: emptyRecord(),
     },
     transcript: emptyTranscript(),
     prompts: emptyPrompts(),

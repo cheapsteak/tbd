@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { GLYPHS, reactAttrs } from './glyphs.ts';
+import { APP_GLYPHS, glyph, GLYPHS, reactAttrs } from './glyphs.ts';
 
 // Outside phone/: the classifier's `docs/design/phone-control/*` route
 // (scripts/ci/phone-parts-needed.sh) runs this test when the mock changes.
@@ -39,4 +39,27 @@ test('hyphenated attributes reach React in its own names', () => {
   );
   for (const kids of Object.values(GLYPHS))
     for (const [, attrs] of kids) assert.equal(Object.keys(attrs).length, Object.keys(reactAttrs(attrs)).length);
+});
+
+test("the app's own glyphs repeat no sprite symbol's name, and each reaches React whole", () => {
+  const sprite = parse();
+  for (const [name, kids] of Object.entries(APP_GLYPHS)) {
+    assert.equal(sprite.has(name), false, name);
+    assert.equal(Object.hasOwn(GLYPHS, name), false, name);
+    assert.ok(kids.length > 0, name);
+    for (const [tag, attrs] of kids) {
+      assert.ok(['path', 'circle', 'rect'].includes(tag), `${name}: ${tag}`);
+      assert.equal(Object.keys(reactAttrs(attrs)).length, Object.keys(attrs).length, name);
+    }
+  }
+  // The filter chip's two: the same funnel, outlined and filled.
+  assert.deepEqual(APP_GLYPHS['filter-on'].map(([tag, a]) => [tag, a['d']]), APP_GLYPHS.filter.map(([tag, a]) => [tag, a['d']]));
+  assert.equal(APP_GLYPHS['filter-on'][0]?.[1]['fill'], 'currentColor');
+  assert.equal(APP_GLYPHS.filter[0]?.[1]['fill'], undefined);
+});
+
+test('glyph finds a sprite glyph and an app glyph', () => {
+  assert.equal(glyph('plus'), GLYPHS.plus);
+  assert.equal(glyph('filter'), APP_GLYPHS.filter);
+  assert.equal(glyph('filter-on'), APP_GLYPHS['filter-on']);
 });

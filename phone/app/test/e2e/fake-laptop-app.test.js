@@ -344,6 +344,22 @@ test("worktree.create starts the session under the profileID sent, else the repo
   assertDecodes(t.sent, t.methods);
 });
 
+test("repo.setRemoteFilter sets the repo group's flag, announces a changed layout, and refuses a repo it does not hold", () => {
+  const t = makeLaptop();
+  t.subscribe();
+  const layouts = () => t.events().filter((body) => body.data.layout !== undefined).map((body) => body.data.layout[0].remoteFilterOn);
+  assert.deepEqual(t.replyTo(t.ask('repo.setRemoteFilter', { repoID: REPO_ID, hidden: true })).result, {});
+  assert.equal(t.laptop.state.layout[0].remoteFilterOn, true);
+  // The same value again changes nothing, so no layout goes out.
+  t.ask('repo.setRemoteFilter', { repoID: REPO_ID, hidden: true });
+  t.ask('repo.setRemoteFilter', { repoID: REPO_ID, hidden: false });
+  assert.equal('remoteFilterOn' in t.laptop.state.layout[0], false);
+  assert.deepEqual(layouts(), [true, undefined]);
+  const refused = t.ask('repo.setRemoteFilter', { repoID: 'no-such-repo', hidden: true });
+  assert.deepEqual(t.replyTo(refused).error, { code: 'not_found', message: TEXT.noSuchRepo });
+  assertDecodes(t.sent, t.methods);
+});
+
 test('setReply replaces a handler, and null brings it back', () => {
   const t = makeLaptop();
   t.subscribe();
