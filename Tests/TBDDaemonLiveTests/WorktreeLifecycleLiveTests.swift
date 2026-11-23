@@ -21,26 +21,39 @@ import Testing
 ///   directory of its own. `stopListening()` closes it and leaves the file on
 ///   disk, as a tmux server that exits leaves its socket, so a connect to it is
 ///   refused.
-/// - **Its process.** `/bin/sleep`, executed through a link named `tmux`, with
-///   an argv that names the server with `-L`. The kernel takes a process's
-///   command name from the path it was executed through, so the process table
-///   reads it as `tmux`. It is started suspended: `sleep` would refuse that
-///   argv and exit, and a suspended process never runs, while its table entry
-///   and its `KERN_PROCARGS2` buffer are already in place. `endProcess()` kills
-///   and reaps it.
+/// - **Its process.** `/bin/bash`, executed through a link named `tmux`, with
+///   an argv that names the server with `-L` (see `arguments`). The kernel
+///   keeps the argv exactly as given, `argv[0]` included, but takes the
+///   command name (`p_comm`) and `proc_pidpath` from the file the link
+///   resolves to, so the process table reads the process as `bash`, not
+///   `tmux`. The probe still counts it as tmux because the names it is given
+///   come from a saved tmux path naming the link (`tmuxExecutableNames`),
+///   which adds the resolved name `bash` to `tmux`. `endProcess()` kills and
+///   reaps it.
 ///
 /// Nothing exists until `start()`. `tearDown()` undoes whatever is standing and
 /// removes the scratch root, and the test registers it in a `defer` before
 /// calling `start()`, so a half-finished start, a thrown error or a failed
-/// `#require` still leaves nothing behind.
+/// `#require` still leaves nothing behind. When the test process dies before
+/// any `defer` runs, the process ends by itself (see `lifetimeSeconds`).
 private final class StandInTmuxServer {
     /// The probe's fallback root: the directory `tmux-<uid>` sits in.
     let fallbackRoot: String
     let socketPath: String
     /// The link named `tmux` that the process is executed through.
     let executablePath: String
-    /// The process's argv, `argv[0]` included, as an earlier build's
-    /// `tmux -L <server> new-session` left it.
+    /// The process's argv, `argv[0]` included.
+    ///
+    /// To bash it is `bash -c '<command>' <arg0> <args…>`: `-c` is a flag, its
+    /// first operand is the command, and every argument after that is a
+    /// positional parameter, so bash runs the command and ignores the rest. To
+    /// the probe's parser, which reads `-c` as tmux's `-c <shell-command>`, it
+    /// is `tmux -c <value> -u -L <server> new-session -d -s main`, an earlier
+    /// build's `new-session` naming its server with `-L`.
+    ///
+    /// The `; :` after `sleep` keeps bash from replacing itself with `sleep`,
+    /// which it does for a command string of one simple command: the process
+    /// would then carry `sleep`'s argv and name no server.
     let arguments: [String]
     private let scratchRoot: String
     private var listener: Int32?
@@ -51,6 +64,16 @@ private final class StandInTmuxServer {
     /// refuse the next connect and read as a server that is gone.
     private static let backlog: Int32 = 8
 
+    /// How long the process lives if nothing ends it, so a test process that
+    /// dies before its `defer` runs leaves nothing behind for long: the
+    /// process, now launchd's, exits when its `sleep` does. That bound is the
+    /// reclaim, since no sweep can find it — it holds no descriptor and no
+    /// row. The test needs the process for a few seconds at most; 120 leaves
+    /// a wide margin for a loaded runner, while bounding an orphan to two
+    /// minutes. When `endProcess()` kills bash, its `sleep` child ends by
+    /// itself within the same bound, and names no server.
+    private static let lifetimeSeconds = 120
+
     init(server: String) {
         // Short and fenced: under `TBD_TEST_SCRATCH_ROOT`, so a killed run's
         // root is still reclaimed, and well inside darwin's 104-byte
@@ -59,7 +82,10 @@ private final class StandInTmuxServer {
         fallbackRoot = "\(scratchRoot)/fallback"
         socketPath = "\(fallbackRoot)/tmux-\(getuid())/\(server)"
         executablePath = "\(scratchRoot)/tmux"
-        arguments = ["tmux", "-u", "-L", server, "new-session", "-d", "-s", "main"]
+        arguments = [
+            "tmux", "-c", "/bin/sleep \(StandInTmuxServer.lifetimeSeconds); :",
+            "-u", "-L", server, "new-session", "-d", "-s", "main",
+        ]
     }
 
     /// The process's pid, while it is running.
@@ -71,9 +97,9 @@ private final class StandInTmuxServer {
             atPath: (socketPath as NSString).deletingLastPathComponent,
             withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(
-            atPath: executablePath, withDestinationPath: "/bin/sleep")
+            atPath: executablePath, withDestinationPath: "/bin/bash")
         listener = try Self.listeningSocket(at: socketPath)
-        process = try ExactArgvChild(path: executablePath, argv: arguments, startSuspended: true)
+        process = try ExactArgvChild(path: executablePath, argv: arguments)
     }
 
     /// Closes the socket and leaves its file where it was.
@@ -159,8 +185,9 @@ private struct StandInFailed: Error, CustomStringConvertible {
 /// other tmux on the machine can decide the answer: a developer box may run
 /// servers of its own, and one whose argv the kernel will not give reads as
 /// running whatever server is asked about. The tmux names are the ones a
-/// saved tmux path naming the stand-in's link gives (`tmuxExecutableNames`),
-/// `tmux` and whatever the link resolves to.
+/// saved tmux path naming the stand-in's link gives (`tmuxExecutableNames`):
+/// `tmux`, and `bash`, the name the link resolves to and the one the kernel
+/// reports for the stand-in.
 @Test func testReconcileRebootParksClaudeAndDeletesShell() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }

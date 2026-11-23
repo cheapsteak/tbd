@@ -22,14 +22,6 @@ import Darwin
 /// another suite's lock or pipe, held open until the child is ended. Start
 /// only a program that needs no stdio and touches no TBD store; `/bin/sleep`
 /// is the one the suites use.
-///
-/// `startSuspended` starts the child stopped before its first instruction
-/// (`POSIX_SPAWN_START_SUSPENDED`). The kernel has already executed it, so its
-/// process-table entry, its command name and its `KERN_PROCARGS2` buffer are
-/// all in place, but it never runs. That lets a test give a program an argv
-/// it would refuse: a suspended `/bin/sleep` keeps whatever argv it was given
-/// for as long as the test needs, where a running one would exit on it at
-/// once. `end()` kills and reaps a suspended child the same way.
 public struct ExactArgvChild: Sendable {
     /// A call that starts the child failed. Thrown, so its text is the
     /// failing test's primary line; there is no child to end.
@@ -42,11 +34,8 @@ public struct ExactArgvChild: Sendable {
 
     public let pid: pid_t
 
-    /// Starts `path` with `argv` and `environment`, each entry `KEY=value`,
-    /// suspended when `startSuspended` is true.
-    public init(
-        path: String, argv: [String], environment: [String] = [], startSuspended: Bool = false
-    ) throws {
+    /// Starts `path` with `argv` and `environment`, each entry `KEY=value`.
+    public init(path: String, argv: [String], environment: [String] = []) throws {
         var pid: pid_t = 0
         // `posix_spawn` copies both lists before it returns, so they need to
         // live only until then.
@@ -65,9 +54,7 @@ public struct ExactArgvChild: Sendable {
             throw SpawnFailed(call: "posix_spawnattr_init", path: path, code: initialized)
         }
         defer { posix_spawnattr_destroy(&attributes) }
-        var flags = POSIX_SPAWN_CLOEXEC_DEFAULT
-        if startSuspended { flags |= POSIX_SPAWN_START_SUSPENDED }
-        let flagged = posix_spawnattr_setflags(&attributes, Int16(flags))
+        let flagged = posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
         guard flagged == 0 else {
             throw SpawnFailed(call: "posix_spawnattr_setflags", path: path, code: flagged)
         }

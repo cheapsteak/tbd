@@ -20,7 +20,8 @@ session such a server may still run; the data the two read
 write and the probe reads for the tmux binary's name. No test and no CI step
 starts tmux, and none installs it: the probe's live test
 (`Tests/TBDDaemonLiveTests/WorktreeLifecycleLiveTests.swift`) stands in for a
-server with a listening socket and a suspended process whose argv names it.
+server with a listening socket and a bash process, started through a link named
+`tmux`, whose argv names it and which exits by itself within two minutes.
 Every citation below is from the readings this document names.*
 
 *Re-read against the tree on 2026-10-25 in the entries for the key-name
