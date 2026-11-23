@@ -16,14 +16,12 @@
 # `/bin/bash scripts/test.test.sh`, not `bash scripts/test.test.sh`.
 #
 # ZERO BUILDS, ZERO CPU LOAD, AND IT NEVER TOUCHES THE REAL ~/tbd, ~/.claude,
-# ~/.codex, ~/Library/Logs/TBD, ~/Library/Preferences OR THE REAL TMUX SOCKET
-# DIRECTORY. Every case
-# here drives the wrapper against a synthetic home under a throwaway fixture
-# directory, with a stub
-# standing in for `swift`, so the whole file runs in seconds on a shared box
-# while other agents are working.
+# ~/.codex, ~/Library/Logs/TBD OR ~/Library/Preferences. Every case here drives
+# the wrapper against a synthetic home under a throwaway fixture directory,
+# with a stub standing in for `swift`, so the whole file runs in seconds on a
+# shared box while other agents are working.
 #
-# FOUR SEAMS MAKE THAT POSSIBLE, AND EVERY ONE IS A PRODUCTION MECHANISM RATHER
+# THREE SEAMS MAKE THAT POSSIBLE, AND EVERY ONE IS A PRODUCTION MECHANISM RATHER
 # THAN A TEST-ONLY HOOK — nothing here asks the scripts under test to behave
 # differently because they are under test:
 #
@@ -34,16 +32,10 @@
 #   TMPDIR            the fake home is `$TMPDIR/tbd-test-fakehome.<uid>`, so a
 #                     fixture TMPDIR gives each case its own fake home and its
 #                     own decoys.
-#   TMUX_TMPDIR       the wrapper OVERWRITES it for the run but the fingerprint
-#                     reads the caller's value, so a fixture value stands in for
-#                     "the developer's real /tmp/tmux-<uid>" on both sides. Every
-#                     run through `run_script` gets one, so no case can observe —
-#                     or litter — the real socket directory.
 #   TBD_SWIFT_BIN     `scripts/swift-safe` execs this instead of `swift`. The
 #                     stub records the environment and argv it was handed, and
-#                     can be told to misbehave — chmod a decoy back, write into
-#                     the fixture's real home as a leak would, or leave tmux
-#                     sockets behind in the fenced directory as a real run does.
+#                     can be told to misbehave — chmod a decoy back, or write
+#                     into the fixture's real home as a leak would.
 #
 # Using TBD_SWIFT_BIN rather than stubbing out `swift-safe` itself is
 # deliberate: the admission-lock cases below then exercise the REAL lock
@@ -83,15 +75,6 @@ assert_nonzero()  { if [[ "$2" != "0" ]]; then echo "ok   - $1"; else echo "FAIL
 mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/testsh-test.XXXXXX"; }
 mode_of()         { stat -f '%Lp' "$1" 2>/dev/null; }
 
-# The unix-socket path cap. `sun_path` is 104 bytes on darwin INCLUDING the
-# terminating NUL, so 103 is the longest path a socket may have. tmux reports
-# an overflow only as `error connecting to <path> (File name too long)`, which
-# is why the budget is asserted here rather than left to be rediscovered.
-SUN_PATH_BUDGET=103
-# The longest tmux socket name this suite may mint. Today's longest is 31 bytes
-# (`tbd-test-send-mismatch-` plus 8 hex characters); 50 is budgeted headroom, so
-# a new suite naming its server generously does not have to re-derive this.
-LONGEST_SOCKET_NAME_BYTES=50
 # The fake home's decoys are mode 000, which defeats a plain `rm -rf` — chmod
 # them back first or every run leaves a fixture behind.
 rmfix()           { chmod -R u+rwx "$1" 2>/dev/null; rm -rf "$1"; }
@@ -142,8 +125,6 @@ fake_swift_invocation="$(wc -l < "$FAKE_SWIFT_DUMP.count" | tr -d ' ')"
   echo "TBD_CLAUDE_HOST_HOME=${TBD_CLAUDE_HOST_HOME:-<unset>}"
   echo "TBD_TEST_CODEX_HOME=${TBD_TEST_CODEX_HOME:-<unset>}"
   echo "DEV_SERVERS_DIR=${DEV_SERVERS_DIR:-<unset>}"
-  echo "TMUX_TMPDIR=${TMUX_TMPDIR:-<unset>}"
-  echo "tmux-tmpdir-mode=$(stat -f '%Lp' "${TMUX_TMPDIR:-/nonexistent}" 2>/dev/null)"
   echo "TBD_SWIFT_LOCK_PATH=${TBD_SWIFT_LOCK_PATH:-<unset>}"
   echo "TBD_SWIFT_QUEUE_YIELD_SECONDS=${TBD_SWIFT_QUEUE_YIELD_SECONDS:-<unset>}"
   for decoy in tbd .claude .codex; do
@@ -161,15 +142,6 @@ if [ -n "${FAKE_SWIFT_LEAK_FILE:-}" ]; then
     mkdir -p "$(dirname "$leaked_file")"
     : > "$leaked_file"
   done
-fi
-# Leave sockets where the run's tmux servers would leave them. tmux creates
-# `$TMUX_TMPDIR/tmux-<uid>` itself and never unlinks a socket on server exit,
-# so this is what the directory looks like when the suite finishes — dead
-# files, possibly with live servers still behind some of them.
-if [ -n "${FAKE_SWIFT_TMUX_SOCKETS:-}" ]; then
-  socket_dir="${TMUX_TMPDIR:-/nonexistent}/tmux-$(id -u)"
-  mkdir -p "$socket_dir"
-  for socket_name in $FAKE_SWIFT_TMUX_SOCKETS; do : > "$socket_dir/$socket_name"; done
 fi
 # Leave a LIVE holder behind, the way a leaked fixture holder does: a process
 # that owns the rendezvous socket plus a job it supervises, in the parent/child
@@ -252,15 +224,6 @@ STUB
 # heartbeat or orphan hatch decides how the admission-lock cases wait.
 # TBD_SWIFT_BIN is the deliberate exception: this harness sets it itself, below.
 #
-# `TMUX_TMPDIR` is pinned rather than unset, and it stands in for the
-# DEVELOPER'S REAL socket directory: the wrapper overwrites it for the run, so
-# what the fixture value actually controls is which directory the fingerprint
-# observes on both sides. Leaving it unset would point that at the real
-# `/tmp/tmux-<uid>`, where a live daemon on a developer box creates and removes
-# sockets throughout — the fingerprint cases would flake, and they would be
-# reporting the machine rather than the wrapper. It doubles as the bogus
-# inherited value the overwrite case asserts against.
-#
 # `RUN_CWD` names the directory to run from, and it is a seam of the same kind:
 # `scripts/test.sh` resolves `scripts/swift-safe`, `scripts/remote-verify.sh`
 # and the fingerprint script relative to `git rev-parse --show-toplevel`, so a
@@ -276,9 +239,9 @@ STUB
 # file, and `tee` never fails, so `RUN_RC` is still the wrapper's own status.
 # Empty means `/dev/null`, which is every other case.
 #
-# `TBD_KEEP_DSYM=1` is the default for the same reason `TMUX_TMPDIR` is pinned:
-# the wrapper's EXIT trap deletes the `.dSYM` bundles under the repository it
-# ran in, and most cases run in the REAL checkout. It sits before `RUN_ENV`, so
+# `TBD_KEEP_DSYM=1` is the default because the wrapper's EXIT trap deletes the
+# `.dSYM` bundles under the repository it ran in, and most cases run in the
+# REAL checkout. It sits before `RUN_ENV`, so
 # a case that wants the prune passes `TBD_KEEP_DSYM=`.
 RUN_CWD=""
 RUN_TEE=""
@@ -293,7 +256,7 @@ run_script() {
                  -u FAKE_LATE_WRITE_CONTAINER -u FAKE_LATE_WRITE_LOG -u FAKE_LATE_WRITES \
                  -u FAKE_LATE_WRITE_SHAPE -u FAKE_SLEEP_LOG -u FAKE_RM_FAIL_ON \
                  -u FAKE_LATE_WRITE_AT_POLLS \
-                 -u FAKE_SWIFT_TMUX_SOCKETS -u FAKE_SWIFT_TEST_COUNT \
+                 -u FAKE_SWIFT_TEST_COUNT \
                  -u FAKE_SWIFT_HOLDERS -u FAKE_SWIFT_DEAD_HOLDER_SOCKETS \
                  -u FAKE_HOLDER_START -u FAKE_SWIFT_COPY_RUN_CLAIM \
                  -u TBD_REMOTE_VERIFY -u TBD_REMOTE_VERIFY_YIELD_SECONDS \
@@ -304,7 +267,6 @@ run_script() {
                  ${RUN_ENV[@]+"${RUN_ENV[@]}"} \
                  HOME="$fix/home" \
                  TMPDIR="$fix/tmp" \
-                 TMUX_TMPDIR="$(caller_tmux_tmpdir "$fix")" \
                  TBD_SWIFT_BIN="$fix/bin/fake-swift" \
                  FAKE_SWIFT_DUMP="$fix/swift-invocation" \
                  bash "$script" "$@" 2>&1 | tee "${RUN_TEE:-/dev/null}")"
@@ -353,34 +315,11 @@ swift_invocations() {
   if [ -f "$counted" ]; then wc -l < "$counted" | tr -d ' '; else echo 0; fi
 }
 
-# The fixture's stand-in for the developer's real `/tmp/tmux-<uid>` parent —
-# what the CALLER has in `TMUX_TMPDIR`, and therefore what the fingerprint
-# watches. Deliberately not created: an absent directory is a valid starting
-# state and the arm has an `<absent>` marker for it.
-caller_tmux_tmpdir()      { echo "$1/real-tmux"; }
-caller_tmux_socket_dir()  { echo "$(caller_tmux_tmpdir "$1")/tmux-$(id -u)"; }
-# What the wrapper handed the run, read back out of the stub's dump.
-fenced_tmux_tmpdir()      { dump_of "$1" | sed -n 's/^TMUX_TMPDIR=//p'; }
 # The per-run scratch root the wrapper's EXIT trap deletes, as the run saw it.
 # Fixtures that must bind a socket under a short root of their own mint it here
 # rather than in `/tmp`, so a killed run still has them reclaimed.
 fenced_scratch_root()     { dump_of "$1" | sed -n 's/^TBD_TEST_SCRATCH_ROOT=//p'; }
 fenced_tbd_home()         { dump_of "$1" | sed -n 's/^TBD_HOME=//p'; }
-tmux_log_of()             { cat "$1/tmux-invocations" 2>/dev/null; }
-
-# A stub `tmux` on PATH, recording every argv it is handed. The wrapper's
-# cleanup sweep resolves tmux with `command -v`, so a PATH prefix is all it
-# takes to observe the sweep without a real tmux server anywhere.
-mk_stub_tmux() {
-  local fix="$1"
-  mkdir -p "$fix/tmuxbin"
-  cat > "$fix/tmuxbin/tmux" <<'STUB'
-#!/usr/bin/env bash
-echo "$*" >> "${FAKE_TMUX_LOG:-/dev/null}"
-exit 0
-STUB
-  chmod +x "$fix/tmuxbin/tmux"
-}
 
 # Stub `rm` and `sleep` on PATH, for the preferences settle.
 #
@@ -450,25 +389,6 @@ STUB
 
 # Lines in a stub's log, 0 when it was never written.
 log_lines() { if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
-
-# The longest socket path the fence can produce: its directory, the `tmux-<uid>`
-# subdirectory tmux appends, and a socket name at the budgeted maximum.
-worst_case_socket_path() {
-  local dir="$1" name=""
-  while [ "${#name}" -lt "$LONGEST_SOCKET_NAME_BYTES" ]; do name="${name}x"; done
-  echo "$dir/tmux-$(id -u)/$name"
-}
-
-# "within" / "over (N > cap)" — a verdict rather than a boolean, so a failing
-# assertion prints the length that blew the budget.
-sun_path_verdict() {
-  local path="$1"
-  if [ "${#path}" -le "$SUN_PATH_BUDGET" ]; then
-    echo "within"
-  else
-    echo "over (${#path} > $SUN_PATH_BUDGET)"
-  fi
-}
 
 # A stand-in for a leaked `TBDHolder`, and for the job it supervises.
 #
@@ -747,7 +667,7 @@ test_decoy_replaced_by_a_symlink_during_the_run_fails_the_run() {
 # names — were dropped. Every case that asserts the banner goes through this.
 LEAK_BANNER="$(printf '%s\n%s' \
   "  THE TEST RUN WROTE INTO A REAL STORE: ~/tbd, ~/.claude, ~/.codex," \
-  "  ~/Library/Logs/TBD, ~/Library/Preferences OR /tmp/tmux-<uid>")"
+  "  ~/Library/Logs/TBD OR ~/Library/Preferences")"
 
 # Each arm leaks one entry into the fixture's real home — the shape a leak that
 # got past the fence would take — and must be named in the diff.
@@ -787,7 +707,7 @@ test_fingerprint_detects_a_new_codex_entry() {
   _assert_leak_is_detected "a new ~/.codex entry" ".codex/leaked" "~/.codex/leaked"
 }
 
-# The fifth root, and the only one a sweep DELETES from: `OrphanGC`'s
+# The fourth root, and the only one a sweep DELETES from: `OrphanGC`'s
 # hang-stack phase reclaims files under `~/Library/Logs/TBD/hang-stacks`, and
 # `HangStackWriter` creates them. `FAKE_SWIFT_LEAK` stands in for the create
 # direction; the arm sees a delete by the same mechanism, since either edits the
@@ -798,7 +718,7 @@ test_fingerprint_detects_a_new_hang_stack() {
     "~/Library/Logs/TBD/hang-stacks/hang-leaked.txt"
 }
 
-# THE SIXTH ROOT, `~/Library/Preferences`: the only one no fence variable
+# THE FIFTH ROOT, `~/Library/Preferences`: the only one no fence variable
 # reaches, and the only one with a reclaimer instead of a fence. `cfprefsd`
 # resolves `UserDefaults(suiteName:)` over XPC, and a suite's backing file
 # reappears after the test process exits, so the suite helper makes the files
@@ -1250,15 +1170,12 @@ test_fingerprint_comparison_is_load_bearing() {
 # cannot give, since a single over-broad arm would satisfy all of them.
 # ---------------------------------------------------------------------------
 
-# `TMUX_TMPDIR` is derived from the fixture home for the same reason the
-# wrapper cases pin it: unset would point the tmux arm at the developer's real
-# `/tmp/tmux-<uid>`, which exists and churns on any box with a live daemon.
-fingerprint_with_home() { HOME="$1" TMUX_TMPDIR="$1/tmux-tmpdir" bash "$2"; }
+fingerprint_with_home() { HOME="$1" bash "$2"; }
 
 # ARMS, NOT ROOTS — the two counts differ and the smaller one is the tempting
-# mistake. There are six roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
-# socket dir, `~/Library/Logs/TBD/hang-stacks`, `~/Library/Preferences`) but
-# EIGHT arms, because `~/.claude` and `~/.codex` are each read twice: a
+# mistake. There are five roots (`~/tbd`, `~/.claude`, `~/.codex`,
+# `~/Library/Logs/TBD/hang-stacks`, `~/Library/Preferences`) but SEVEN arms,
+# because `~/.claude` and `~/.codex` are each read twice: a
 # `-maxdepth 1` pass over the store itself, then a second pass at a nested
 # directory the depth limit puts out of the first one's reach. An arm
 # with no assertion here can be deleted wholesale and this file stays green —
@@ -1272,7 +1189,6 @@ test_fingerprint_script_covers_every_arm() {
   assert_contains "absent ~/.claude/projects is a marker" "$out" "~/.claude/projects <absent>"
   assert_contains "absent ~/.codex is a marker" "$out" "~/.codex <absent>"
   assert_contains "absent ~/.codex/plugins/cache is a marker" "$out" "~/.codex/plugins/cache <absent>"
-  assert_contains "absent socket dir is a marker" "$out" "<tmux-sockets> <absent>"
   assert_contains "absent hang-stacks is a marker" "$out" \
     "~/Library/Logs/TBD/hang-stacks <absent>"
   # THE PREFERENCES ARM COUNTS INSTEAD OF MARKING, and absent reads `count=0`:
@@ -1609,164 +1525,8 @@ test_inherited_lock_path_is_honoured() {
 }
 
 # ---------------------------------------------------------------------------
-# 6. The tmux socket fence
-#
-# tmux resolves every `-L <name>` under `$TMUX_TMPDIR/tmux-<uid>/`, and it NEVER
-# unlinks a socket file when its server exits — it unlinks a stale one lazily at
-# bind time, when a new server claims that exact path. Every test mints a fresh
-# UUID-suffixed name, so nothing ever reclaims one and the files accumulate
-# forever: ~7,100 dead sockets in nine days on one box. No teardown can fix
-# that; only a fenced directory that gets deleted wholesale can.
-# ---------------------------------------------------------------------------
-
-test_tmux_tmpdir_is_fenced_under_the_scratch_root() {
-  local fix; fix="$(mkfix)"
-  run_wrapper "$fix"
-  assert_ok "a clean run exits 0" "$RUN_RC"
-  local dump; dump="$(dump_of "$fix")"
-  assert_contains "TMUX_TMPDIR is a scratch dir" "$dump" "TMUX_TMPDIR=/tmp/tbd-test-home."
-  assert_contains "and it is the run's own tmux dir" "$dump" "/tmux"
-  assert_missing "the caller's socket dir is discarded" "$dump" \
-    "TMUX_TMPDIR=$(caller_tmux_tmpdir "$fix")"
-  rmfix "$fix"
-}
-
-# MUTATION. Drop the pin from the env prefix and the run inherits the caller's
-# socket directory — every server it starts lands in the real one, forever.
-test_tmux_tmpdir_pin_is_load_bearing() {
-  local fix mutant; fix="$(mkfix)"
-  mutant="$(mutant_of "$SCRIPT" '/^ +TMUX_TMPDIR="\$tmux_tmpdir" \\$/d')"
-  run_script "$mutant" "$fix"
-  local dump; dump="$(dump_of "$fix")"
-  assert_contains "without the pin the caller's value survives" "$dump" \
-    "TMUX_TMPDIR=$(caller_tmux_tmpdir "$fix")"
-  assert_missing "and nothing points at the scratch dir" "$dump" \
-    "TMUX_TMPDIR=/tmp/tbd-test-home."
-  rmfix "$fix"
-}
-
-test_fenced_tmux_dir_exists_and_is_mode_700_during_the_run() {
-  local fix; fix="$(mkfix)"
-  run_wrapper "$fix"
-  assert_contains "the fenced tmux dir is 700 while the suite runs" \
-    "$(dump_of "$fix")" "tmux-tmpdir-mode=700"
-  rmfix "$fix"
-}
-
-# MUTATION. Without the chmod the directory takes the umask — group- and
-# world-readable on a default box, which is a socket anyone can connect to.
-#
-# THE UMASK IS PINNED, and that is what makes this case an assertion rather
-# than a reading of the developer's shell. `mkdir -p` creates 0777 masked by
-# the umask, so the mutant's mode is a function of ambient state: at 022 it is
-# 755 (the case is meaningful), but at 077 it is *already* 700 and the case
-# would red on a hardened box while nothing was wrong. Pinning 022 also lets
-# this assert the exact composed mode instead of "not 700", which is the
-# whitelist shape the rest of this file uses.
-test_fenced_tmux_dir_chmod_is_load_bearing() {
-  local fix mutant prior_umask; fix="$(mkfix)"
-  mutant="$(mutant_of "$SCRIPT" '/^chmod 700 "\$tmux_tmpdir"$/d')"
-  prior_umask="$(umask)"
-  umask 022
-  run_script "$mutant" "$fix"
-  umask "$prior_umask"
-  local dump; dump="$(dump_of "$fix")"
-  assert_contains "without the chmod the dir takes the umask, not 700" \
-    "$dump" "tmux-tmpdir-mode=755"
-  rmfix "$fix"
-}
-
-# THE BUDGET CASE. This is what stops a future refactor from nesting the fenced
-# directory deeper and reintroducing `error connecting to <path> (File name too
-# long)` across every live tmux test at once.
-test_fenced_tmux_socket_path_fits_sun_path() {
-  local fix; fix="$(mkfix)"
-  run_wrapper "$fix"
-  local path; path="$(worst_case_socket_path "$(fenced_tmux_tmpdir "$fix")")"
-  assert_eq "the worst-case socket path fits sun_path" "within" "$(sun_path_verdict "$path")"
-
-  # MUTATION: the same budget against a fence dir nested a few components
-  # deeper — the exact refactor this case exists to refuse.
-  local mutant deep
-  mutant="$(mutant_of "$SCRIPT" \
-    's|^tmux_tmpdir="\$scratch_home/tmux"$|tmux_tmpdir="$scratch_home/sanctioned/tbd/runtime/tmux-sockets"|')"
-  run_script "$mutant" "$fix"
-  deep="$(worst_case_socket_path "$(fenced_tmux_tmpdir "$fix")")"
-  assert_contains "the mutant really nested it deeper" "$deep" "/sanctioned/tbd/runtime/tmux-sockets/"
-  assert_contains "a deeper fence dir blows the budget" "$(sun_path_verdict "$deep")" "over ("
-  rmfix "$fix"
-}
-
-# The sweep is about PROCESSES, not files: `rm -rf` would unlink the socket and
-# leave a live server running forever with nothing able to reach it.
-test_cleanup_sweeps_the_runs_tmux_servers() {
-  local fix; fix="$(mkfix)"; mk_stub_tmux "$fix"
-  RUN_ENV=(PATH="$fix/tmuxbin:$PATH" FAKE_TMUX_LOG="$fix/tmux-invocations"
-           FAKE_SWIFT_TMUX_SOCKETS="tbd-sweep-a tbd-sweep-b")
-  run_wrapper "$fix"
-  RUN_ENV=()
-  assert_ok "a run that left sockets behind still exits 0" "$RUN_RC"
-  local log; log="$(tmux_log_of "$fix")"
-  assert_contains "the first server is killed" "$log" "/tmux-$(id -u)/tbd-sweep-a kill-server"
-  assert_contains "the second server is killed" "$log" "/tmux-$(id -u)/tbd-sweep-b kill-server"
-  assert_contains "by socket path, not by name" "$log" "-S /tmp/tbd-test-home."
-  rmfix "$fix"
-}
-
-# MUTATION. Drop the sweep and the scratch dir still disappears — which is
-# exactly the silent failure: the files are gone and the servers are not.
-test_cleanup_sweep_is_load_bearing() {
-  local fix mutant; fix="$(mkfix)"; mk_stub_tmux "$fix"
-  mutant="$(mutant_of "$SCRIPT" '/^  sweep_tmux_servers "\$scratch_home"$/d')"
-  RUN_ENV=(PATH="$fix/tmuxbin:$PATH" FAKE_TMUX_LOG="$fix/tmux-invocations"
-           FAKE_SWIFT_TMUX_SOCKETS="tbd-sweep-a tbd-sweep-b")
-  run_script "$mutant" "$fix"
-  RUN_ENV=()
-  assert_ok "the mutant run is green (a sweep is not a correctness gate)" "$RUN_RC"
-  assert_eq "without the sweep no server is killed" "" "$(tmux_log_of "$fix")"
-  rmfix "$fix"
-}
-
-# The detector's fourth ROOT — its sixth arm, since `~/.claude` and `~/.codex`
-# are each read twice — directly: a socket appearing in the CALLER's socket
-# directory between two snapshots must change the fingerprint.
-test_fingerprint_script_sees_a_new_tmux_socket() {
-  local fix; fix="$(mkfix)"
-  # MUTATION: point the arm's existence test at a path that never exists, so it
-  # always takes the `<absent>` branch and reports nothing.
-  local no_arm; no_arm="$(mutant_of "$FINGERPRINT" 's|-d "\$real_tmux"|-d "/no/such/path"|')"
-  mkdir -p "$fix/home/tmux-tmpdir/tmux-$(id -u)"
-  local before mutant_before
-  before="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
-  mutant_before="$(fingerprint_with_home "$fix/home" "$no_arm")"
-  : > "$fix/home/tmux-tmpdir/tmux-$(id -u)/tbd-leaked-socket"
-  local after mutant_after
-  after="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
-  mutant_after="$(fingerprint_with_home "$fix/home" "$no_arm")"
-  assert_missing "socket absent before" "$before" "<tmux-sockets>/tbd-leaked-socket"
-  assert_contains "socket present after" "$after" "<tmux-sockets>/tbd-leaked-socket"
-  assert_eq "without the arm the snapshots are identical" "$mutant_before" "$mutant_after"
-  rmfix "$fix"
-}
-
-# End to end through the wrapper, which is also what proves the arm reads the
-# CALLER's TMUX_TMPDIR: the run itself was fenced elsewhere, yet a write to the
-# caller's socket directory still reddens the diff.
-test_fingerprint_detects_a_leaked_tmux_socket() {
-  local fix; fix="$(mkfix)"
-  RUN_ENV=(FAKE_SWIFT_LEAK="$(caller_tmux_socket_dir "$fix")/tbd-leaked-socket")
-  run_wrapper "$fix" --fingerprint
-  RUN_ENV=()
-  assert_nonzero "a leaked tmux socket fails the run" "$RUN_RC"
-  assert_contains "it is reported" "$RUN_OUT" "$LEAK_BANNER"
-  assert_contains "the entry is named" "$RUN_OUT" "+  <tmux-sockets>/tbd-leaked-socket"
-  assert_contains "and the fix is named" "$RUN_OUT" "the fix is TMUX_TMPDIR"
-  rmfix "$fix"
-}
-
-# ---------------------------------------------------------------------------
-# 6b. The holder sweep, and the reconciler for the run that never reached its
-#     own trap
+# 6. The holder sweep, and the reconciler for the run that never reached its
+#    own trap
 #
 # A `TBDHolder` is built to OUTLIVE its spawner: it calls `setsid()` and ignores
 # `SIGHUP` (`Sources/TBDHolder/Holder.swift`) so it can survive the daemon's
@@ -1973,8 +1733,8 @@ test_the_holder_lookup_ands_its_selectors() {
 # THE SECOND HALF OF THE DISCRIMINATOR. Age says nobody is coming back; the
 # claim file says whether anybody is still there. They are not redundant, and
 # the case that separates them is the expensive one: a run that WEDGES stops
-# writing, so its root ages exactly like an abandoned one while its holder, its
-# tmux servers and its `TBD_HOME` are all still in use. Reclaiming that would
+# writing, so its root ages exactly like an abandoned one while its holder and
+# its `TBD_HOME` are still in use. Reclaiming that would
 # `SIGKILL` a live run and delete its state.
 test_an_aged_root_whose_owner_is_alive_is_left_alone() {
   local roots old owner; roots="$(mk_roots_dir)"
@@ -2564,7 +2324,6 @@ test_a_refused_precondition_falls_back_to_a_local_run() {
   assert_contains "the fallback is still fenced (TBD_HOME)" "$dump" "TBD_HOME=/tmp/tbd-test-home."
   assert_contains "the fallback is still fenced (host claude)" "$dump" "/sanctioned/tbd/claude-host"
   assert_contains "the fallback is still fenced (codex)" "$dump" "/sanctioned/tbd/codex-host"
-  assert_contains "the fallback is still fenced (tmux)" "$dump" "TMUX_TMPDIR=/tmp/tbd-test-home."
   assert_contains "and still pinned to the shared lock" "$dump" \
     "TBD_SWIFT_LOCK_PATH=$fix/home/tbd/runtime/swift-build.lock"
   rmfix "$fix"

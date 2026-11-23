@@ -25,9 +25,6 @@ Three components communicate over a Unix socket using a JSON RPC protocol:
 
 - macOS 15+
 - Swift 6.0+ / Xcode 16+
-- [tmux](https://github.com/tmux/tmux) (`brew install tmux`), only to run the
-  whole test suite: `TBDDaemonLiveTests` starts a real tmux server for the
-  leftover-tmux probe to find. TBD itself runs no tmux.
 - [SwiftLint](https://github.com/realm/SwiftLint) installed (`brew install swiftlint`) — required for the pre-push git hook
 
 ## Build & Run

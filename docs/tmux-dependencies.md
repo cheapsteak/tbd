@@ -17,10 +17,12 @@ session such a server may still run; the data the two read
 (`worktree.tmuxServer`, a terminal's `transport`, `tmuxWindowID` and
 `tmuxPaneID`, `terminal_history.liveOnTmuxServer`); the saved
 `tmux-executable-path`, which `scripts/restart.sh` and `scripts/update.sh`
-write and the probe reads for the tmux binary's name; and the test fence
-(`TMUX_TMPDIR`, and the sweep of tmux servers in `scripts/test.sh`), kept for
-the live tests that start a real tmux server to exercise the probe. Every
-citation below is from the readings this document names.*
+write and the probe reads for the tmux binary's name. No test and no CI step
+starts tmux, and none installs it: the probe's live test
+(`Tests/TBDDaemonLiveTests/WorktreeLifecycleLiveTests.swift`) stands in for a
+server with a listening socket and a bash process, started through a link named
+`tmux`, whose argv names it and which exits by itself within two minutes.
+Every citation below is from the readings this document names.*
 
 *Re-read against the tree on 2026-10-25 in the entries for the key-name
 `send-keys`, `capture-pane -p -e -J`, `windowExists`, `pane_current_command`

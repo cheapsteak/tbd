@@ -510,8 +510,8 @@ macos_scripts_listed() {
   return "$missing"
 }
 test_a_step_with_run_as_its_first_key_is_read() {
-  check "a step whose first key is run: is linted too" lint_clean '      - name: Install tmux' \
-    $'      - run: |\n          declare -A seen=()\n      - name: Install tmux'
+  check "a step whose first key is run: is linted too" lint_clean '      - name: Select Xcode' \
+    $'      - run: |\n          declare -A seen=()\n      - name: Select Xcode'
 }
 
 test_every_script_a_macos_step_runs_is_checked() {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# The test suite, with the developer's real `~/tbd`, `~/.claude`, `~/.codex`
-# and tmux socket directory fenced off.
+# The test suite, with the developer's real `~/tbd`, `~/.claude` and `~/.codex`
+# fenced off.
 #
 # SwiftPM is invoked through `scripts/swift-safe`, never directly: that wrapper
 # holds a machine-global admission lock and bounds compiler jobs so concurrent
@@ -25,10 +25,10 @@
 # Four layers. All but the third are always on; the third is CI-only.
 #
 #   1. CONTAINMENT — always on. `TBD_HOME`, `TBD_SOCKET_PATH`,
-#      `TBD_CLAUDE_HOST_HOME` and `TMUX_TMPDIR` point at a fresh scratch dir
-#      for the whole run, so any code path that resolves a TBD-owned path — or
-#      the host Claude store a profile dir mirrors, or a tmux socket — lands
-#      there instead of in the real one. This catches leaks nobody has
+#      `TBD_CLAUDE_HOST_HOME` and `TBD_TEST_CODEX_HOME` point at a fresh
+#      scratch dir for the whole run, so any code path that resolves a
+#      TBD-owned path — or the host Claude store a profile dir mirrors, or the
+#      Codex store — lands there instead of in the real one. This catches leaks nobody has
 #      diagnosed yet, including ones in code that has no injection seam at all.
 #      `DEV_SERVERS_DIR` points the shared dev-server running-file directory
 #      (`~/.local/state/dev-servers`, docs/dev-servers.md) at the same scratch,
@@ -45,10 +45,10 @@
 #      the error. See "READING A PERMISSION-DENIED FAILURE" below.
 #   3. DETECTION — on in CI (`$CI` set), off elsewhere; `--fingerprint` opts in
 #      locally and `--no-fingerprint` forces it off anywhere. The real `~/tbd`,
-#      `~/.claude`, `~/.codex`, `~/Library/Logs/TBD/hang-stacks`, the tmux
-#      socket directory and `~/Library/Preferences` are fingerprinted before
-#      and after, and a changed fingerprint fails the run even when every test
-#      passed. For the first five this is a backstop rather than the primary
+#      `~/.claude`, `~/.codex`, `~/Library/Logs/TBD/hang-stacks` and
+#      `~/Library/Preferences` are fingerprinted before and after, and a
+#      changed fingerprint fails the run even when every test passed. For the
+#      first four this is a backstop rather than the primary
 #      guard; see "WHY THE TRIPWIRE SUPERSEDES THE FINGERPRINT". For
 #      `~/Library/Preferences` it counts only inside the test container, so
 #      what it watches is layer 4 having done its job; a suite minted outside
@@ -63,17 +63,16 @@
 #      exited. See "THE PREFERENCES CONTAINER" below.
 #
 # WHAT THE FENCE CANNOT DO ON ITS OWN: KILL A PROCESS. Containment is about
-# paths, and two of the things a run leaves behind are not files. A tmux server
-# outlives the socket that named it, and a `TBDHolder` outlives the test process
-# that spawned it BY DESIGN — it calls `setsid()` and ignores `SIGHUP` so it can
-# survive the daemon's death (`Sources/TBDHolder/Holder.swift`), which means it
-# survives a killed test process just as well, re-parents to launchd, and keeps
-# its job running. Deleting the scratch root does not touch either one. So
-# `cleanup` sweeps both by resource — a `kill-server` per socket file, and a
-# `kill -9` for whoever `lsof` says holds each holder rendezvous socket — before
-# the `rm -rf`, and never by name pattern: this machine runs live production
-# holders and other people's agents, and a `pkill -f` on the holder's name would
-# end them.
+# paths, and one of the things a run leaves behind is not a file. A `TBDHolder`
+# outlives the test process that spawned it BY DESIGN — it calls `setsid()` and
+# ignores `SIGHUP` so it can survive the daemon's death
+# (`Sources/TBDHolder/Holder.swift`), which means it survives a killed test
+# process just as well, re-parents to launchd, and keeps its job running.
+# Deleting the scratch root does not touch it. So `cleanup` sweeps holders by
+# resource — a `kill -9` for whoever `lsof` says holds each holder rendezvous
+# socket — before the `rm -rf`, and never by name pattern: this machine runs
+# live production holders and other people's agents, and a `pkill -f` on the
+# holder's name would end them.
 #
 # AND THE RUN THAT NEVER REACHES ITS OWN TRAP. `trap cleanup EXIT` fires on a
 # fatal signal as well as a normal exit, but nothing in-process runs after a
@@ -84,7 +83,7 @@
 # with no row anywhere. `reclaim_abandoned_run_roots` is the named reconciler
 # for that case (docs/specs/2026-08-15-named-reconciler-doctrine-design.md): at
 # START-UP, every sibling run root that is both older than a day AND has no live
-# owner gets the same two sweeps and then `rm -rf`. Every run is a sweep, so the
+# owner gets the same holder sweep and then `rm -rf`. Every run is a sweep, so the
 # machine heals as soon as anybody tests again. The liveness half is not
 # redundant with the age half: a WEDGED run stops writing, so it ages exactly
 # like an abandoned one, and only the pid it claimed its root with can tell them
@@ -113,7 +112,7 @@
 #   - `CFFIXED_USER_HOME` DOES fence Foundation, verified for a plain unsigned
 #     SPM binary: every one of the above returned the scratch path. CF does not
 #     cache it, so a runtime `setenv` takes effect on the next call.
-#   - So `HOME` fences *subprocesses* — `git`, `tmux`, shells; they do not link
+#   - So `HOME` fences *subprocesses* — `git`, shells; they do not link
 #     CoreFoundation — and `CFFIXED_USER_HOME` fences *in-process Foundation*.
 #     Both are needed.
 #
@@ -181,9 +180,9 @@
 # run wait for more things. Nothing about the fence weakens if it is respected.
 #
 # They are applied as a prefix on the `swift test` invocation rather than
-# exported, so this script's own `$HOME` and `$TMUX_TMPDIR` stay real and
-# `scripts/tbd-home-fingerprint.sh` — which deliberately reads both — needs
-# no special-casing on either side of the run. The shared-lock computation below
+# exported, so this script's own `$HOME` stays real and
+# `scripts/tbd-home-fingerprint.sh` — which deliberately reads it — needs no
+# special-casing on either side of the run. The shared-lock computation below
 # depends on the same property: it reads the real `$HOME` / `$TBD_HOME`, which
 # only works because nothing here has exported the fenced values.
 #
@@ -372,32 +371,6 @@ RUN_OWNER_FILE=".run-owner"
 # daemon and no bookkeeping file. A run still in flight is hours away from it.
 ABANDONED_RUN_ROOT_MINUTES=1440
 
-# THE SWEEP KILLS SERVERS; THE `rm -rf` ONLY REMOVES FILES. Those are not the
-# same leak, and the expensive one is the process: unlinking a socket out from
-# under a live tmux server leaves it running forever with nothing able to reach
-# it. So every socket the run created is issued a `kill-server` BEFORE the
-# scratch dir goes away. Most will already be dead — a dead server's file is
-# still there, because tmux never unlinks one — so errors are ignored throughout.
-#
-# It takes the run root as an argument rather than reading the global, because
-# `reclaim_abandoned_run_roots` runs it against somebody else's abandoned root.
-sweep_tmux_servers() {
-  local root="${1:-}" tmux_bin socket_dir socket
-  tmux_bin="$(command -v tmux || true)"
-  # No tmux on PATH means no server this run could have started.
-  [ -n "$tmux_bin" ] || return 0
-  [ -n "$root" ] || return 0
-  socket_dir="$root/tmux/tmux-$(id -u)"
-  [ -d "$socket_dir" ] || return 0
-  for socket in "$socket_dir"/*; do
-    # `-e` rather than `-S`: it skips the unmatched-glob case, and tmux owns
-    # this directory exclusively, so anything in it is one of its sockets.
-    [ -e "$socket" ] || continue
-    "$tmux_bin" -S "$socket" kill-server >/dev/null 2>&1 || true
-  done
-  return 0
-}
-
 # Every rendezvous socket a holder fixture may have bound under `$1`.
 #
 # Two depths, and both are real. A holder fixture mints its own short root
@@ -456,6 +429,9 @@ holder_sockets_under() {
 # is still there. The alternative — matching the holder's argv or its name —
 # is what must never be done: this machine runs live production holders and
 # other people's agents, and no pattern can tell them from ours.
+#
+# It takes the run root as an argument rather than reading the global, because
+# `reclaim_abandoned_run_roots` runs it against somebody else's abandoned root.
 sweep_holders() {
   local root="${1:-}" lsof_bin socket owners pid children child
   lsof_bin="$(command -v lsof || true)"
@@ -515,8 +491,8 @@ claim_run_root() {
 # roots are all far under it — but not a developer who starts a run by hand and
 # walks away from one that WEDGES. `Tests/CLAUDE.md` documents several real hang
 # classes, and a wedged run is exactly the case age cannot see: it stops writing,
-# so its root ages like an abandoned one while its holder, its tmux servers and
-# its `TBD_HOME` are all still in use. Without this check the reclaim would go
+# so its root ages like an abandoned one while its holder and its `TBD_HOME`
+# are still in use. Without this check the reclaim would go
 # from "silently leak" to "SIGKILL somebody's live run and delete its state",
 # which is the wrong direction to be wrong in.
 #
@@ -567,8 +543,8 @@ run_root_is_live() {
 # before anything is signalled.
 #
 # ORDER MATTERS: the processes go first and the files second, for the same
-# reason the tmux sweep runs before its `rm -rf`. Removing a socket out from
-# under a live holder leaves the holder running with nothing able to reach it.
+# reason `cleanup` sweeps before its `rm -rf`. Removing a socket out from under
+# a live holder leaves the holder running with nothing able to reach it.
 #
 # `-user` and `-type d` keep it to directories this uid owns — `/tmp` is mode
 # 1777, so anybody can create a name that matches — and a symlink is `-type l`,
@@ -588,7 +564,6 @@ reclaim_abandoned_run_roots() {
     # Age says nobody is coming back for it; the claim file can still say
     # somebody is. A wedged run looks exactly like an abandoned one to `find`.
     run_root_is_live "$root" && continue
-    sweep_tmux_servers "$root"
     sweep_holders "$root"
     rm -rf "$root" 2>/dev/null || true
   done < <(find -H "$dir" -maxdepth 1 -type d -name "$RUN_ROOT_PREFIX*" \
@@ -1065,39 +1040,10 @@ reclaim_abandoned_run_roots "$RUN_ROOT_DIR"
 # there. It was previously left to individual tests to remember, which is
 # exactly the shape the run-wide fence exists to replace.
 #
-# DEV_SERVERS_DIR is the sixth leg, and the store is not TBD's at all: any tool
+# DEV_SERVERS_DIR is the fifth leg, and the store is not TBD's at all: any tool
 # on the machine reads the shared running-file directory, so a test that wrote
 # there would put fake servers in front of other tools, and a GC test could
 # delete a real server's stale file.
-#
-# TMUX_TMPDIR is the fifth, and the store it fences is not a TBD one at all:
-# `/tmp/tmux-<uid>`, shared by every tmux server this user runs. Nothing in
-# `Sources/` or `Tests/` ever passes an absolute `-S <path>`; every call site
-# uses `-L <name>`, which tmux resolves under `$TMUX_TMPDIR/tmux-<uid>/`, so
-# this one variable redirects all of them.
-#
-# WHY IT MATTERS MORE THAN IT LOOKS: **tmux never unlinks its socket file on
-# server exit** — measured against tmux 3.6a, and true for a killed server, a
-# cleanly `kill-server`ed one and one that self-exits when its last session
-# ends alike. It unlinks a stale socket lazily instead, at bind time, when a
-# NEW server is started on that exact path. Every test here mints a fresh
-# UUID-suffixed socket name, so that lazy unlink never fires and every file
-# survives forever: ~7,100 dead socket files accumulated in one developer's
-# real `/tmp/tmux-<uid>` over nine days, behind 7 live servers. No teardown
-# can fix that — a test that dutifully kills its server still leaves the file
-# — which is why the fix is a fenced directory that gets deleted wholesale,
-# not a missing `kill-server` somewhere.
-#
-# IT MUST STAY DIRECTLY UNDER THE SHORT `/tmp` SCRATCH ROOT. tmux connects
-# over a unix socket, so `$TMUX_TMPDIR/tmux-<uid>/<name>` is bound by the same
-# ~104-byte `sun_path` cap as TBD's own socket, and tmux reports an overflow
-# only as `error connecting to <path> (File name too long)`. The budget:
-# `/tmp/tbd-test-home.XXXXXXXX/tmux/tmux-<uid>/` is ~42 bytes, and the suite's
-# longest socket name is ~31 bytes today (`tbd-test-send-mismatch-` plus 8 hex
-# characters) with 50 budgeted as headroom — ~92 bytes against ~104. Nesting
-# this directory any deeper spends that headroom and every live tmux test
-# starts failing at once. `scripts/test.test.sh` asserts the budget so a
-# refactor that moves it cannot land quietly.
 scratch_home="$(mktemp -d "$RUN_ROOT_DIR/${RUN_ROOT_PREFIX}XXXXXXXX")"
 # Claimed IMMEDIATELY, before anything slow happens: everything after this line
 # — the build, the suite, a wait in the admission queue — is time during which
@@ -1105,15 +1051,14 @@ scratch_home="$(mktemp -d "$RUN_ROOT_DIR/${RUN_ROOT_PREFIX}XXXXXXXX")"
 # it looks abandoned. The claim is what stops the reconciler above from ever
 # reclaiming a run that is merely stuck rather than gone.
 claim_run_root "$scratch_home"
-tmux_tmpdir="$scratch_home/tmux"
 
 # CLEANUP IS PROCESSES FIRST, FILES SECOND. `rm -rf` unlinks; it does not kill,
-# and both leaks this run can leave behind are processes. A tmux server whose
-# socket is deleted keeps running with nothing able to reach it; a holder
-# `setsid`s away from its spawner on purpose and outlives the whole test process
-# regardless. So both sweeps run BEFORE the scratch dir goes away, and both take
-# it as an argument so `reclaim_abandoned_run_roots` can run the same two passes
-# over a root some earlier run never got to.
+# and the leak this run can leave behind is a process: a holder `setsid`s away
+# from its spawner on purpose and outlives the whole test process regardless,
+# and one whose socket is deleted keeps running with nothing able to reach it.
+# So the holder sweep runs BEFORE the scratch dir goes away, and takes it as an
+# argument so `reclaim_abandoned_run_roots` can run the same pass over a root
+# some earlier run never got to.
 #
 # THE .dSYM PRUNE RIDES ALONG, AND IT MUST NEVER DECIDE THE EXIT STATUS. Linking
 # the test bundle writes a 646 MB `TBDPackageTests.dSYM` (plus one per product)
@@ -1123,7 +1068,6 @@ tmux_tmpdir="$scratch_home/tmux"
 # inside the trap would replace it; hence the `|| true`. Skipped under CI and
 # with TBD_KEEP_DSYM=1, and held off while another build here is running.
 cleanup() {
-  sweep_tmux_servers "$scratch_home"
   sweep_holders "$scratch_home"
   rm -rf "$scratch_home"
   prune_debug_dsyms "$repo_toplevel" >&2 || true
@@ -1173,14 +1117,6 @@ sanctioned_home="$scratch_home/sanctioned/tbd"
 fake_home="${TMPDIR:-/tmp}"
 fake_home="${fake_home%/}/tbd-test-fakehome.$(id -u)"
 mkdir -p "$sanctioned_home"
-
-# tmux creates `$TMUX_TMPDIR/tmux-<uid>` itself, but refuses if the parent is
-# missing — so the parent is ours to make. Mode 700 for the same reason tmux
-# insists on 700 for the directory it creates inside: a socket anyone can
-# connect to is a shell anyone can type into. The scratch root is already
-# ours alone; this is belt and braces on a `/tmp` path.
-mkdir -p "$tmux_tmpdir"
-chmod 700 "$tmux_tmpdir"
 
 require_owned_dir "$fake_home" "the fake home"
 mkdir -p "$fake_home"
@@ -1243,7 +1179,6 @@ run_fenced_suite() {
     TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
     TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
     DEV_SERVERS_DIR="$sanctioned_home/dev-servers" \
-    TMUX_TMPDIR="$tmux_tmpdir" \
     TBD_SWIFT_LOCK_PATH="$swift_lock_path" \
     HOME="$fake_home" \
     CFFIXED_USER_HOME="$fake_home" \
@@ -1429,14 +1364,13 @@ if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo >&2
   echo "=======================================================================" >&2
   echo "  THE TEST RUN WROTE INTO A REAL STORE: ~/tbd, ~/.claude, ~/.codex," >&2
-  echo "  ~/Library/Logs/TBD, ~/Library/Preferences OR /tmp/tmux-<uid>" >&2
+  echo "  ~/Library/Logs/TBD OR ~/Library/Preferences" >&2
   echo "=======================================================================" >&2
   echo >&2
   echo "CLAUDE.md: \"Tests must not touch ~/tbd\". Something resolved a real" >&2
   echo "config path despite TBD_HOME=$sanctioned_home," >&2
   echo "TBD_CLAUDE_HOST_HOME=$sanctioned_home/claude-host," >&2
-  echo "TBD_TEST_CODEX_HOME=$sanctioned_home/codex-host," >&2
-  echo "TMUX_TMPDIR=$tmux_tmpdir and" >&2
+  echo "TBD_TEST_CODEX_HOME=$sanctioned_home/codex-host and" >&2
   echo "HOME=CFFIXED_USER_HOME=$fake_home." >&2
   echo >&2
   echo "Entries added (+) or removed (-):" >&2
@@ -1447,14 +1381,6 @@ if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo "injected seam, or a path hand-built from \$HOME instead of going" >&2
   echo "through TBDConstants. Fix the leak — do not delete the entries and" >&2
   echo "move on; ~/tbd holds real state (see \"NEVER delete ~/tbd/state.db\")." >&2
-  echo >&2
-  echo "If the entry is a tmux socket, the fix is TMUX_TMPDIR — never a" >&2
-  echo "relaxed guard and never a teardown. tmux does NOT unlink its socket" >&2
-  echo "file when a server exits, so killing the server leaves the file" >&2
-  echo "behind; the only thing that removes it is deleting the directory it" >&2
-  echo "lives in, which this wrapper can do only for a directory it owns." >&2
-  echo "Something spawned tmux with an environment that dropped TMUX_TMPDIR:" >&2
-  echo "look for a Process whose \`environment\` is built from scratch." >&2
   echo >&2
   echo "If the entry is <preferences>/$PREFERENCES_CONTAINER_NAME, test suites were" >&2
   echo "minted through the helper and this wrapper failed to reclaim them," >&2

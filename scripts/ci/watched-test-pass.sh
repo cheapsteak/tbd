@@ -59,8 +59,8 @@
 #
 # On expiry the whole machine's process listing is written first and
 # unconditionally. The runner is single-tenant, so that listing is both the
-# record of the fixture's holder, tmux and job processes and the way we learn
-# what anything is really called.
+# record of the fixture's holder and job processes and the way we learn what
+# anything is really called.
 #
 # The processes to sample are then found structurally, by descending the
 # pipeline subshell's own tree with `pgrep -P`, and never by name: a CI probe of
@@ -125,7 +125,7 @@
 # inert at best and reaches whatever reused the number at worst.
 #
 # The remaining processes get a graceful pass, because `scripts/test.sh` has an
-# EXIT trap that sweeps tmux servers and checks its filesystem fence, and that
+# EXIT trap that sweeps leftover holders and removes its scratch root, and that
 # cleanup is worth running. `tee` is a direct child of the subshell and owns the
 # far end of the log pipe, so anything still writing when `tee` dies writes to a
 # closed pipe — and the EXIT trap's cleanup output is exactly what the log
@@ -142,7 +142,7 @@
 # on, because an ordering nobody can observe is an ordering nobody can check.
 #
 # WHY 30 SECONDS OF GRACE. That is what `scripts/test.sh`'s EXIT trap gets to
-# run its tmux `kill-server` sweep and fence checks — generous against the few
+# run its holder sweep and remove its scratch root — generous against the few
 # seconds those take, and still inside the margin the budget leaves. SIGTERM
 # goes first for the same reason; SIGKILL follows only if the subshell is still
 # alive after the grace, to a rebuilt order and then to the subshell itself.

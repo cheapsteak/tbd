@@ -63,18 +63,17 @@ invalidates any measurement they are midway through.
 Every invocation in this file, in `test.yml` and in the pre-push hook goes
 through `scripts/test.sh`, which forwards its arguments to `swift test` behind a
 scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME` /
-`TBD_TEST_CODEX_HOME` / `TMUX_TMPDIR`, plus a `TBD_TEST_SCRATCH_ROOT` naming
-that scratch dir itself — the one the EXIT trap deletes — for the few fixtures
-that must mint a short socket-bearing root of their own and need it reclaimed
-even on a killed run. Bare `swift test` writes into the
-developer's real `~/tbd`, `~/.claude`, `~/.codex` and `/tmp/tmux-<uid>` — 18k
-orphan profile dirs, ~2.9k fake worktrees and ~7,100 dead tmux sockets
-accumulated that way before anyone noticed. Read `swift test …` below
+`TBD_TEST_CODEX_HOME`, plus a `TBD_TEST_SCRATCH_ROOT` naming that scratch dir
+itself — the one the EXIT trap deletes — for the few fixtures that must mint a
+short socket-bearing root of their own and need it reclaimed even on a killed
+run. Bare `swift test` writes into the developer's real `~/tbd`, `~/.claude`
+and `~/.codex` — 18k orphan profile dirs and ~2.9k fake worktrees accumulated
+that way before anyone noticed. Read `swift test …` below
 as `scripts/test.sh …`.
 
-**Two of the things a run leaves behind are processes, and no amount of path
-fencing touches either.** A tmux server outlives the socket that named it, and a
-`TBDHolder` outlives the test process that spawned it *by design* — it calls
+**One of the things a run leaves behind is a process, and no amount of path
+fencing touches it.** A `TBDHolder` outlives the test process that spawned it
+*by design* — it calls
 `setsid()` and ignores `SIGHUP` so it can survive the daemon's death
 (`Sources/TBDHolder/Holder.swift`), which means it survives a dead test process
 just as well, re-parents to launchd, and keeps its job running. Nothing in the
@@ -100,7 +99,7 @@ one can be left behind, and each covers exactly one:
 - **A wrapper that is SIGKILLed**, where not even the EXIT trap runs, is
   reclaimed by the *next* run: `reclaim_abandoned_run_roots` gives every sibling
   `/tmp/tbd-test-home.*` that is both older than a day and has no live owner the
-  same two sweeps, then removes it. Every run being a sweep is what makes the
+  same holder sweep, then removes it. Every run being a sweep is what makes the
   machine heal as soon as anybody tests again, with no timer and no daemon. It
   is the named reconciler for fixture holders in the sense
   `docs/specs/2026-08-15-named-reconciler-doctrine-design.md` means it.
@@ -108,7 +107,7 @@ one can be left behind, and each covers exactly one:
   **Age is not the whole discriminator, and the missing half is the dangerous
   one.** No run lasts a day, so age says nobody is coming back — but a run that
   WEDGES stops writing, so its root ages exactly like an abandoned one while its
-  holder, its tmux servers and its `TBD_HOME` are all still in use. So every run
+  holder and its `TBD_HOME` are still in use. So every run
   claims its own root on the way in, writing its pid and that pid's kernel start
   time into `<root>/.run-owner`, and the reconciler skips any root whose claim
   still checks out. Same identity check as everywhere else here: a pid alone
@@ -116,19 +115,7 @@ one can be left behind, and each covers exactly one:
   predates the mechanism and is reclaimed on age — the one arm that is
   deliberately not keep-biased, because immortal roots are the leak.
 
-The tmux leg is the one with no teardown remedy: **tmux never unlinks its
-socket file when a server exits.** It unlinks a stale socket lazily instead, at
-bind time, when a new server claims that exact path — and every test mints a
-fresh UUID-suffixed name, so nothing ever reclaims one. Killing your server in
-a `defer` is still worth doing (it stops the orphan *process*, which the
-wrapper also sweeps on exit) but it cannot remove the file. If you spawn tmux
-through a `Process` whose `environment` you build from scratch, propagate
-`TMUX_TMPDIR` into it or every socket that run creates lands outside the fence,
-permanently; `TestSupport.shell(_:at:)` already does.
-
-Four of those first five variables only fence code that *asks* where home is, and
-`TMUX_TMPDIR` is the odd one out — it fences a store that has nothing to do
-with `$HOME`, and tmux consults it without anyone in this tree asking. The
+Those variables only fence code that *asks* where home is. The
 wrapper also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home
 whose `tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
 the code that assembles a path out of the home directory instead of asking: it
@@ -202,7 +189,7 @@ before trusting it: the home value has to be visible near the append, so a path
 built from a `home` that arrived as a parameter matches nothing. It narrows the
 shape rather than closing it.
 
-The wrapper's detection layer, a before/after fingerprint of six real roots,
+The wrapper's detection layer, a before/after fingerprint of five real roots,
 is on when `$CI` is set and off otherwise; `--fingerprint` opts in
 locally and `--no-fingerprint` forces it off. The default follows the argument
 rather than contradicting it: a live daemon and sibling worktrees write to
@@ -212,7 +199,7 @@ agent session starting in a new directory mints a fresh
 not the primary guard: it compares directory *listings*, so a leak that writes
 to a fixed path — or one that cleans up after itself in a `defer` — is invisible
 to it, while the tripwire fails on the permission check every run regardless.
-The sixth root, `~/Library/Preferences`, has no fence half. What guards it is
+The fifth root, `~/Library/Preferences`, has no fence half. What guards it is
 the SwiftLint rule `no_raw_userdefaults_suite`, which keeps every suite on the
 helper, and the helper's own test asserting that the backing file lands at the
 exact path inside `TBDTests.suites`; the fingerprint's count of plists in that
@@ -222,12 +209,10 @@ wrapper's header.
 
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
-fake home, the post-run mode-000 recheck, the fingerprint's eight arms (six
+fake home, the post-run mode-000 recheck, the fingerprint's seven arms (five
 roots, two of which are read twice), the preferences reclaim, its three
-refusals and its post-run settle, the tmux socket fence (its `sun_path`
-budget and its kill-server sweep), the holder sweep and the abandoned-run-root
-reconciler, and the
-shared-lock pin against fixture directories with a stub `swift`, so it takes
+refusals and its post-run settle, the holder sweep and the abandoned-run-root
+reconciler, and the shared-lock pin against fixture directories with a stub `swift`, so it takes
 ~11 s, builds nothing, and touches no real store. **Every case there is
 mutation-checked** — the assertion is shown going red against a deliberately
 weakened copy of the script. If you change a guard, change its case; if you add
@@ -237,15 +222,15 @@ is not a regression test.
 ## Test tiers
 
 Three tiers, defined by what a test may touch: tier 1 (deterministic,
-in-process state only — no real sleeps, subprocesses, tmux, network, or
-`~/tbd`), tier 2 (in-process integration — real concurrency, real filesystem,
-real git subprocesses, deadlines only via bounded waits), tier 3
-(live-external — real tmux server, real `ps`, spawned processes, the replay
-firehose). Full taxonomy: `docs/specs/2026-07-24-test-hardening-design.md` §3.
+in-process state only — no real sleeps, subprocesses, network, or `~/tbd`),
+tier 2 (in-process integration — real concurrency, real filesystem, real git
+subprocesses, deadlines only via bounded waits), tier 3 (live-external — real
+`TBDHolder` processes, real `ps`, spawned processes, the kernel's process
+table, the replay firehose). Full taxonomy: `docs/specs/2026-07-24-test-hardening-design.md` §3.
 
 Tier 3 suites live in `Tests/TBDDaemonLiveTests/`. A suite belongs there if
 and only if its runtime depends on an external process it does not fully
-control — it spawns a real tmux server, shells out to `ps`, spawns a child
+control — it spawns a real holder, shells out to `ps`, spawns a child
 racing a deadline, or drives the replay firehose — or it checks the quiet
 pass's own process. CI runs that target serially on an otherwise-idle
 machine, in a separate step from the fast parallel pass.

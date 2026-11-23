@@ -17,17 +17,6 @@ import Foundation
 /// test` still yields the real home, which is one more reason the wrapper is
 /// not optional.
 ///
-/// `TMUX_TMPDIR` is forwarded when the parent has it, and omitted when it does
-/// not. Assigning `process.environment` wholesale REPLACES the inherited
-/// environment, so a command in here that starts tmux would otherwise resolve
-/// `-L <name>` under the shared `/tmp/tmux-<uid>` — outside the fence
-/// `scripts/test.sh` set up, and permanently: tmux never unlinks a socket file
-/// when its server exits, it only unlinks a stale one lazily when a new server
-/// claims that same path, and every test mints a fresh name. So one dropped
-/// variable is one file that stays forever. Copying the value rather than
-/// hardcoding a path keeps bare `swift test` behaving exactly as before —
-/// unset in, unset out — which is the same rule `HOME` follows above.
-///
 /// The wait goes through ``collectOutput(of:)``, so no cooperative-pool thread
 /// is parked on the child. Hundreds of tests reach this helper, directly or
 /// through the repo fixtures in `GitRepoHelpers.swift`, and a blocking
@@ -47,7 +36,7 @@ public func shell(_ command: String, at dir: URL) async throws {
     process.executableURL = URL(fileURLWithPath: "/bin/bash")
     process.arguments = ["-c", command]
     process.currentDirectoryURL = dir
-    var environment = [
+    process.environment = [
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
         "HOME": NSHomeDirectory(),
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -57,10 +46,6 @@ public func shell(_ command: String, at dir: URL) async throws {
         "GIT_COMMITTER_NAME": "Test",
         "GIT_COMMITTER_EMAIL": "test@test.com",
     ]
-    if let tmuxTmpdir = ProcessInfo.processInfo.environment["TMUX_TMPDIR"] {
-        environment["TMUX_TMPDIR"] = tmuxTmpdir
-    }
-    process.environment = environment
     let result = try await collectOutput(of: process)
     guard result.status == 0 else {
         let output = String(data: result.stdout + result.stderr, encoding: .utf8) ?? ""
