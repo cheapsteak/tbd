@@ -548,6 +548,43 @@ struct HolderReconcileInventoryTests {
 
     // MARK: - The budget the production pass arms
 
+    /// The first sleep the phase budget's timer asked of `clock`.
+    ///
+    /// Waited for, not sampled: the timer is its own unstructured task, so it
+    /// reaches the clock a scheduling hop after the pass that armed it, which
+    /// may already have returned — and under the fast parallel pass one hop
+    /// can take tens of seconds. Nil when the wait ended without a sleep:
+    /// after recording `NoBudgetSleep` on a timeout, and silently on
+    /// cancellation, which belongs to whatever cancelled the test.
+    private func firstBudgetSleep(
+        on clock: SleepRecordingClock, missing: String
+    ) async -> Duration? {
+        let started = ContinuousClock.now
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            !clock.requestedSleeps.isEmpty
+        }
+        switch outcome {
+        case .satisfied:
+            return clock.requestedSleeps.first
+        case .cancelled:
+            return nil
+        case .timedOut:
+            Issue.record(NoBudgetSleep(
+                finding: missing, elapsed: ContinuousClock.now - started,
+                sleeps: clock.requestedSleeps.count))
+            return nil
+        }
+    }
+
+    private struct NoBudgetSleep: Error, CustomStringConvertible {
+        let finding: String
+        let elapsed: Duration
+        let sleeps: Int
+        var description: String {
+            "\(finding) — \(sleeps) sleep(s) requested of the clock after \(elapsed)"
+        }
+    }
+
     /// **The bracket in `reconcileTerminals` is the untested line, not the
     /// budget actor.** A test that calls `begin` itself stays green with both
     /// the `begin` and the `end` deleted from production, while the whole
@@ -584,13 +621,13 @@ struct HolderReconcileInventoryTests {
 
         // The budget's timer is its own task, so it can reach the clock a hop
         // or two after the pass that armed it has already cancelled it.
-        let sleeps = await clock.settledSleeps()
-        let requested = try #require(
-            sleeps.first,
-            """
-            the reconcile pass never asked the lifecycle's clock for a budget: the whole \
-            pre-bind bound on this serial arm is gone
-            """)
+        guard let requested = await firstBudgetSleep(
+            on: clock,
+            missing: """
+                the reconcile pass never asked the lifecycle's clock for a budget: the whole \
+                pre-bind bound on this serial arm is gone
+                """)
+        else { return }
         #expect(
             requested <= WorktreeLifecycle.holderPhaseBudget
                 && requested > WorktreeLifecycle.holderPhaseBudget - .milliseconds(500),
@@ -623,9 +660,8 @@ struct HolderReconcileInventoryTests {
             actuationLog: makeTestActuationLog())
 
         #expect(try await db.terminals.get(id: shell.id) == nil)
-        #expect(
-            !(await clock.settledSleeps().isEmpty),
-            "the reconcile pass armed no phase budget on an untouched config")
+        _ = await firstBudgetSleep(
+            on: clock, missing: "the reconcile pass armed no phase budget on an untouched config")
     }
 
     // MARK: - Overlapping passes share one budget
@@ -913,9 +949,9 @@ struct HolderReconcileInventoryTests {
             kind: .shell, transport: .holder, holderPID: 4242, childPID: 4243)
 
         #expect(await handBack(shell, to: lifecycle) == .sessionOver(.exitedStatusUnknown))
-        #expect(
-            !(await clock.settledSleeps().isEmpty),
-            "the hand-back probed a rendezvous with no phase budget armed")
+        guard await firstBudgetSleep(
+            on: clock, missing: "the hand-back probed a rendezvous with no phase budget armed") != nil
+        else { return }
 
         // A pass begun now starts a clock of its own only if the hand-back
         // ended the one it began.
@@ -1015,16 +1051,6 @@ private final class SleepRecordingClock: Clock, @unchecked Sendable {
 
     var requestedSleeps: [Duration] {
         lock.withLock { recorded }
-    }
-
-    /// The recorded sleeps once the budget timer has had a chance to reach this
-    /// clock, bounded so a missing bracket fails rather than hangs.
-    func settledSleeps() async -> [Duration] {
-        for _ in 0..<500 {
-            if !requestedSleeps.isEmpty { break }
-            await Task.yield()
-        }
-        return requestedSleeps
     }
 
     func sleep(until deadline: Instant, tolerance: Duration?) async throws {
