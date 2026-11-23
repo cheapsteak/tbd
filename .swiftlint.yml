@@ -551,7 +551,7 @@ custom_rules:
       - "Sources/TBDDaemon/Holder/HolderRegistry\\.swift"                     # defines spawn and abandon; its calls reach the spawner, the fabricator and itself
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\.swift"               # defines disposeHolder, the row-shaped teardown every close and archive calls; covered by its callers' rows
       # The doors: each writes its own row before it acts.
-      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers, each writing its row before it acts: create, revive, delete, the profile swap's park and fork, migrateTransport; defines closeTerminalTab, shared with server.start / server.stop under their row; the send courier and its delivery-verification re-send, recorded against the send's row
+      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers, each writing its row before it acts: create, revive, delete, the profile swap's park, fork and in-place wake, migrateTransport; defines closeTerminalTab, shared with server.start / server.stop under their row; the send courier and its delivery-verification re-send, recorded against the send's row
       - "Sources/TBDDaemon/Server/RPCRouter\\+ScratchHandlers\\.swift"        # scratch.delete / scratch.archive; one worktree-named row, then the per-terminal disposal
       - "Sources/TBDDaemon/Server/RPCRouter\\+ManualSuspendHandlers\\.swift"  # terminal.suspend / terminal.resume, one row each; worktree.suspend / worktree.resume, one row per session at that session's park or wake
       - "Sources/TBDDaemon/Server/RPCRouter\\+HibernationHandlers\\.swift"    # terminal.hibernate / terminal.wake, one row each before the park or wake
@@ -584,8 +584,9 @@ custom_rules:
     # a primitive: `spawnTerminal` and `spawnPreSessionTerminal` (every spawn
     # path), `closeTerminalTab` (terminal.delete's teardown, shared with
     # server.stop), the parks and wakes `manualHibernate`, `parkForProfileSwap`,
-    # `performHolderHibernate` and `HibernationCoordinator.wake(terminalID:`,
-    # the transport moves `TerminalTransportMigrator.migrate(terminalID:`,
+    # `performHolderHibernate`, `HibernationCoordinator.wake(terminalID:` and
+    # `wakeHolderAfterInPlaceChange` (the in-place profile swap's wake), the
+    # transport moves `TerminalTransportMigrator.migrate(terminalID:`,
     # `moveRunningShellToHolder` and `parkLeftoverTmuxRow`, and
     # `redeliverVerifiedPayload`, the delivery verifier's re-send. A wrapper
     # that writes its own row — `hibernateForMerge`, the idle sweep, the
@@ -626,7 +627,7 @@ custom_rules:
     # forced step is `HolderRegistry.killJob` inside `abandon`, which is matched
     # at the `abandon` call. The orphan sweeps reach `killJob` too (the rowless
     # holder collector), but a session with no row is reclaimed, not actuated.
-    regex: '(?<!func )\b(?:(?:spawn|abandon|deliver|wake|migrate)\s*\((?=\s*terminalID:)|abandon\s*\((?=\s*terminal:)|(?:abandonVerifiedJob|disposeHolder|setHibernated|spawnTerminal|spawnPreSessionTerminal|closeTerminalTab|manualHibernate|parkForProfileSwap|performHolderHibernate|moveRunningShellToHolder|parkLeftoverTmuxRow|redeliverVerifiedPayload)\s*\()'
+    regex: '(?<!func )\b(?:(?:spawn|abandon|deliver|wake|migrate)\s*\((?=\s*terminalID:)|abandon\s*\((?=\s*terminal:)|(?:abandonVerifiedJob|disposeHolder|setHibernated|spawnTerminal|spawnPreSessionTerminal|closeTerminalTab|manualHibernate|parkForProfileSwap|performHolderHibernate|moveRunningShellToHolder|parkLeftoverTmuxRow|redeliverVerifiedPayload|wakeHolderAfterInPlaceChange)\s*\()'
     # Code only. Several doc comments name these primitives while explaining the
     # boundary, and firing on the prose that documents the rule is how a rule
     # gets disabled.

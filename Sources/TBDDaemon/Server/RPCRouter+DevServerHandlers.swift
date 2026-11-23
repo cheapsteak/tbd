@@ -73,8 +73,8 @@ extension RPCRouter {
         guard !names.isEmpty else {
             return try RPCResponse(result: DevServerActionResult(outcomes: []))
         }
-        // One row per call naming the worktree, written before any spawn,
-        // respawn or tab close.
+        // One row per call naming the worktree, written before any spawn or
+        // tab close.
         let actuationID = try await beginActuation(
             .serverStart, actor: actor,
             target: .local(worktree: params.worktreeID, terminal: nil),

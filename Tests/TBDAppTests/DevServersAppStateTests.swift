@@ -15,7 +15,7 @@ struct DevServersAppStateTests {
     }
 
     /// `fromStatus` marks a state the server's `status` command decided, as
-    /// the daemon does. `ended` is the server's ended tab run, which the
+    /// the daemon does. `ended` is the server's ended tab, which the
     /// daemon reports whatever decided the state.
     private func info(_ name: String, _ state: DevServerStateKind, url: String? = nil,
                       fromStatus: Bool = false, terminalID: UUID? = nil,
@@ -144,7 +144,7 @@ struct DevServersAppStateTests {
     /// remembered, with the ended tab the server had then: a server running
     /// by its TBD tab or a running file is read live.
     @Test func onlyStatesTheStatusCommandDecidedAreRemembered() {
-        let ended = DevServerExitedTab(terminalID: UUID(), pid: 700)
+        let ended = DevServerExitedTab(terminalID: UUID())
         var tabbed = info("tab", .running, terminalID: UUID())
         tabbed.pid = 42
         let filed = info("file", .running, url: "http://localhost:1")
@@ -160,53 +160,26 @@ struct DevServersAppStateTests {
     }
 
     /// The remembered answer covers a stopped server, and an exited one whose
-    /// ended tab run is the one the `status` run saw (a detached command's
-    /// finished tab). A newer exited tab, a respawn of the same tab, a tab
-    /// that was still running when the answer came, and every other state
-    /// are live and win.
+    /// ended tab is the one the `status` run saw (a detached command's
+    /// finished tab). A later start's exited tab, a tab that was still running
+    /// when the answer came, and every other state are live and win.
     @Test func theLastKnownStatusCoversAStoppedServerAndTheSameExitedTab() {
-        let seen = DevServerExitedTab(terminalID: UUID(), pid: 700)
-        let saved = DevServerExitedTab(terminalID: UUID(), pid: nil)
+        let seen = DevServerExitedTab(terminalID: UUID())
+        let saved = DevServerExitedTab(terminalID: UUID())
         let l = list([info("same", .exited, ended: seen),
-                      info("newer", .exited, ended: DevServerExitedTab(terminalID: UUID(), pid: 700)),
-                      info("respawned", .exited, ended: DevServerExitedTab(terminalID: seen.terminalID, pid: 701)),
+                      info("newer", .exited, ended: DevServerExitedTab(terminalID: UUID())),
                       info("web", .stopped), info("saved", .exited, ended: saved),
                       info("wasRunning", .exited, ended: seen),
                       info("live", .unknown, terminalID: seen.terminalID)])
         let known = DevServerRememberedStatus(state: .running, exitedTab: seen)
         let merged = AppState.withLastKnownStatus(l, lastKnown: [
-            "same": known, "newer": known, "respawned": known,
+            "same": known, "newer": known,
             "web": DevServerRememberedStatus(state: .running, exitedTab: nil),
             "saved": DevServerRememberedStatus(state: .running, exitedTab: saved),
             "wasRunning": DevServerRememberedStatus(state: .running, exitedTab: nil),
             "live": known,
         ])
-        #expect(merged.servers.map(\.state) == [.running, .exited, .exited, .running, .running, .exited, .unknown])
-    }
-
-    /// tmux respawns an exited server tab in place, keeping its terminal id.
-    /// The app remembers Running over a detached command's ended tab; a CLI
-    /// start then respawns that tab and the new run exits 1. That exit is a
-    /// new fact and must show, not the remembered Running.
-    @Test func aRespawnOfTheSameTabThatExitsIsShown() async {
-        await withState { state in
-            let id = UUID(), tab = UUID()
-            let firstRun = DevServerExitedTab(terminalID: tab, pid: 700)
-            let probed = self.list([self.info("db", .running, fromStatus: true, ended: firstRun)], id: id)
-            state.devServerListFetcher = { _, _ in probed }
-            await state.refreshDevServerStatus(worktreeID: id)
-            let quiet = self.list([self.info("db", .exited, ended: firstRun)], id: id)
-            state.devServerListFetcher = { _, _ in quiet }
-            await state.refreshDevServers(worktreeID: id, trigger: .change)
-            #expect(state.devServerLists[id]?.servers.map(\.state) == [.running])
-            var failed = self.info("db", .exited, ended: DevServerExitedTab(terminalID: tab, pid: 701))
-            failed.exitCode = 1
-            let respawned = self.list([failed], id: id)
-            state.devServerListFetcher = { _, _ in respawned }
-            await state.refreshDevServers(worktreeID: id, trigger: .change)
-            #expect(state.devServerLists[id]?.servers.map(\.state) == [.exited])
-            #expect(state.devServerLists[id]?.servers.first?.exitCode == 1)
-        }
+        #expect(merged.servers.map(\.state) == [.running, .exited, .running, .running, .exited, .unknown])
     }
 
     /// `docker compose up -d db` with `status = "docker compose ps db"`: the
@@ -216,7 +189,7 @@ struct DevServersAppStateTests {
     @Test func aDetachedServerStaysRunningAfterItsTabExits() async {
         await withState { state in
             let id = UUID(), tab = UUID()
-            let ended = DevServerExitedTab(terminalID: tab, pid: 700)
+            let ended = DevServerExitedTab(terminalID: tab)
             let probed = self.list([self.info("db", .running, fromStatus: true, ended: ended)], id: id)
             let quiet = self.list([self.info("db", .exited, ended: ended)], id: id)
             state.devServerListFetcher = { _, run in run ? probed : quiet }
@@ -230,7 +203,7 @@ struct DevServersAppStateTests {
             #expect(state.devServerLists[id]?.servers.map(\.state) == [.running])
             // A newer start's tab that exited is a new fact and wins.
             let restarted = self.list(
-                [self.info("db", .exited, ended: DevServerExitedTab(terminalID: UUID(), pid: 800))], id: id)
+                [self.info("db", .exited, ended: DevServerExitedTab(terminalID: UUID()))], id: id)
             state.devServerListFetcher = { _, _ in restarted }
             await state.refreshDevServers(worktreeID: id, trigger: .change)
             #expect(state.devServerLists[id]?.servers.map(\.state) == [.exited])

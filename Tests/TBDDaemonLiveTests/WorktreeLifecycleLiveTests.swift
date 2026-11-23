@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import DaemonTestSupport
+import Synchronization
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -176,7 +177,7 @@ private struct StandInFailed: Error, CustomStringConvertible {
 /// runs — its socket answering, or, with the socket refused, a tmux process
 /// still naming it. Once both are gone (a reboot, or `tmux kill-server`), the
 /// rows are PARKED (resumable Claude) or deleted (plain shell) — never
-/// recreated, and the dead server stays dead (#284).
+/// recreated: a parked session waits for a person's wake (#284).
 ///
 /// The probe is the production one with two seams set: the fallback root is
 /// the stand-in's scratch directory, never the real `/private/tmp/tmux-<uid>`,
@@ -213,10 +214,16 @@ private struct StandInFailed: Error, CustomStringConvertible {
             executablePath: { ProcessLiveness.executablePath(pid: $0) },
             procArgs: { ProcessEnvironmentReader.procArgs(pid: $0) })
     }
+    // The probe reads the process table only once every socket is refused, so
+    // counting its reads tells which signal decided each pass below.
+    let tableReads = ProcessTableReads()
     let probe = LeftoverTmuxServerProbe.production(
         environment: [:],
         fallbackRoot: standIn.fallbackRoot,
-        tmuxProcesses: standInProcesses)
+        tmuxProcesses: { uid in
+            tableReads.record()
+            return standInProcesses(uid)
+        })
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(), hooks: HookResolver(),
         leftoverTmuxProbe: probe
@@ -258,7 +265,10 @@ private struct StandInFailed: Error, CustomStringConvertible {
         tmuxWindowID: shellWindow.windowID, tmuxPaneID: shellWindow.paneID
     )
 
-    // The server is running: both rows stay live and untouched.
+    // The server is running: both rows stay live and untouched. The socket
+    // decides it — its answer settles the probe before the process table is
+    // read, so a probe that ignored the socket and fell through to the
+    // process, which also names the server, would read the table here.
     try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
     let claudeWhileRunning = try await db.terminals.get(id: claudeTerminal.id)
     let shellWhileRunning = try await db.terminals.get(id: shellTerminal.id)
@@ -266,9 +276,12 @@ private struct StandInFailed: Error, CustomStringConvertible {
             "a session whose tmux server is running must not be parked")
     #expect(shellWhileRunning != nil,
             "a shell whose tmux server is running must not be deleted")
+    #expect(tableReads.count == 0,
+            "an answering socket must settle the probe without a read of the process table")
 
     // Its socket stops answering, as when the server listens somewhere this
-    // daemon does not look, but its process still names it: still running.
+    // daemon does not look, but its process still names it: still running,
+    // and this time the process table decides it.
     standIn.stopListening()
     let socketAfterClose = await LeftoverTmuxServerProbe.state(ofSocketAt: standIn.socketPath)
     try #require(socketAfterClose == .absent,
@@ -280,6 +293,8 @@ private struct StandInFailed: Error, CustomStringConvertible {
             "a session whose tmux server's process still runs must not be parked")
     #expect(shellWhileNamed != nil,
             "a shell whose tmux server's process still runs must not be deleted")
+    #expect(tableReads.count > 0,
+            "a refused socket must leave the probe to read the process table")
 
     // Simulate the reboot: the whole server is gone. Its socket file stays
     // behind, as tmux leaves it, so the probe reads a refused connect, not a
@@ -292,8 +307,7 @@ private struct StandInFailed: Error, CustomStringConvertible {
 
     let claudeAfter = try await db.terminals.get(id: claudeTerminal.id)
     let shellAfter = try await db.terminals.get(id: shellTerminal.id)
-    // Did reconcile bring the dead server back to recreate windows? (The bug.)
-    let serverAfter = await probe.state(serverName)
+    let rowsAfter = try await db.terminals.list(worktreeID: wt.id)
 
     // Resumable Claude session: parked, not recreated, not deleted.
     #expect(claudeAfter != nil, "claude terminal must NOT be deleted on reboot")
@@ -306,8 +320,25 @@ private struct StandInFailed: Error, CustomStringConvertible {
     // Plain shell: nothing resumable, deleted.
     #expect(shellAfter == nil, "shell terminal with no session must be deleted on reboot")
 
-    // CRUCIAL #284 invariant: reconcile must not have bootstrapped the dead
-    // server to recreate windows. No mass `claude --resume` storm on reboot.
-    #expect(serverAfter == .absent,
-            "reconcile must leave the dead server dead — no eager mass-recreate (#284)")
+    // CRUCIAL #284 invariant: reconcile must not start the sessions a dead
+    // server ran on its own — no mass `claude --resume` storm on reboot. The
+    // parked session waits for a person's wake: the worktree holds that one
+    // row, still on tmux, with no tab opened beside it and no holder spawned
+    // for it.
+    #expect(rowsAfter.map(\.id) == [claudeTerminal.id],
+            "reconcile must not open a tab to resume the session (#284)")
+    #expect(claudeAfter?.transport == .tmux,
+            "reconcile must not move the parked session to a holder (#284)")
+    #expect(claudeAfter?.holderPID == nil,
+            "reconcile must not spawn a holder for the parked session (#284)")
+}
+
+/// How many times the probe has read the process table. A class around a
+/// `Mutex`, so the probe's `@Sendable` lister can count into it.
+private final class ProcessTableReads: Sendable {
+    private let reads = Mutex(0)
+
+    func record() { reads.withLock { $0 += 1 } }
+
+    var count: Int { reads.withLock { $0 } }
 }
