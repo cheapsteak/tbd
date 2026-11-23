@@ -3,9 +3,11 @@ import TBDShared
 
 enum DevServerTabStatus: Sendable, Equatable {
     /// The command is still the tab's live process. `expectedStart` anchors
-    /// the pid against reuse: a holder job always carries the start time its
-    /// row recorded. nil means no recorded start time anchors it, so a stop
-    /// re-reads the tab and takes the start time at the kill.
+    /// the pid against reuse; the production inspector always reports the
+    /// start time the holder row recorded, and verifies the pid against it
+    /// first. nil is a pid read with nothing recorded to hold it to, which a
+    /// stop anchors with the start time it reads at the kill
+    /// (`DevServerKillTarget.firstHand`).
     case running(pid: Int32, expectedStart: Date?)
     /// The tab's process is alive but no recorded start time ties the pid
     /// to it: a holder job whose row recorded none for that pid, adopted by
@@ -13,10 +15,9 @@ enum DevServerTabStatus: Sendable, Equatable {
     /// Reads as running; a stop — gesture or archive — refuses to signal it
     /// and reports so, and closing the tab ends the job.
     case runningUnverifiable(pid: Int32)
-    /// The command ended; `code` is nil when the transport could not say.
-    /// `pid` is the process that ended, when the transport still reports it;
-    /// it tells a respawned tab's runs apart.
-    case exited(code: Int32?, pid: Int32? = nil)
+    /// The command ended; `code` is nil when the transport could not say. A
+    /// start never reuses a tab, so the tab names this one run.
+    case exited(code: Int32?)
     /// The tab's window or session no longer exists.
     case gone
     /// The transport could not be asked — a process that could not be read,

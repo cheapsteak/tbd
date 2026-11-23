@@ -178,10 +178,9 @@ extension AppState {
     /// and one whose command detached (`docker compose up -d`) reads exited
     /// by its finished TBD tab. Show the state the last `status` run found
     /// instead — over a stopped server, or over an exited one whose ended
-    /// tab run is the one that run saw (same tab, same process). A tab that
-    /// ended after the answer, or was started again and ended again, is new
-    /// and wins, as does every other state (a running file, a running or
-    /// unreadable TBD tab).
+    /// tab is the one that run saw. A tab that ended after the answer, or a
+    /// later start's tab that has ended, is new and wins, as does every other
+    /// state (a running file, a running or unreadable TBD tab).
     nonisolated static func withLastKnownStatus(
         _ list: DevServerListResult, lastKnown: [String: DevServerRememberedStatus]
     ) -> DevServerListResult {
@@ -235,9 +234,9 @@ extension AppState {
     }
 
     /// "Show last output" for an exited server: the saved entry in Session
-    /// History's Closed Terminals viewer when the daemon saved one, else the
-    /// server's own tab (on a tab still recorded as tmux, the leftover-session
-    /// notice).
+    /// History's Closed Terminals viewer when the daemon saved one, else —
+    /// when the exit left no saved entry — the server's own tab. A tab still
+    /// on tmux never reads exited, so the menu never offers this for one.
     func showDevServerLastOutput(worktreeID: UUID, server: DevServerInfo) async {
         if let entryID = server.lastOutputID {
             await devServerLastOutputOpener(worktreeID, entryID)

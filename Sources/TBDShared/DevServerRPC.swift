@@ -84,20 +84,21 @@ public struct DevServerInfo: Codable, Sendable, Equatable, Identifiable {
     public var isDeclared: Bool { source != nil }
 }
 
-/// One run of a server's TBD tab that has ended. Starting the server again
-/// in a tmux tab respawns that tab in place, keeping its terminal id, so the
-/// process id is what tells one run of the tab from the next.
+/// One run of a server's TBD tab that has ended. A start never reuses a tab —
+/// a later run of the server opens a tab of its own — so the terminal id alone
+/// names the run.
 public struct DevServerExitedTab: Codable, Sendable, Equatable {
     /// The tab's terminal id. Once an ended tab's row is gone, its saved
     /// last output carries the same id.
     public var terminalID: UUID
-    /// The process the tab ran, when the transport still reports it after
-    /// the exit (a tmux pane kept by `remain-on-exit`); nil otherwise. A
-    /// holder tab is never respawned in place, so its terminal id alone is
-    /// one run.
+    /// The process the tab ran. This daemon never sets it. An older daemon,
+    /// which starts servers in tmux tabs and respawns an ended one in place
+    /// under the same terminal id, sends it to tell those runs apart, so the
+    /// field stays, optional, for the app to compare when such a daemon
+    /// answers.
     public var pid: Int32?
 
-    public init(terminalID: UUID, pid: Int32?) {
+    public init(terminalID: UUID, pid: Int32? = nil) {
         self.terminalID = terminalID; self.pid = pid
     }
 }

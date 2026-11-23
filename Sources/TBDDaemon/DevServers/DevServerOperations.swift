@@ -145,13 +145,13 @@ struct DevServerOperations: Sendable {
     /// Kill targets are the server's running TBD tab and, when
     /// `signalRunningFiles` is true, the pid of every live running file for
     /// it. The tab is read again here rather than trusted from the snapshot,
-    /// which can be a `status` timeout old: a first-hand pid (a live tmux
-    /// pane) is then anchored by the start time the kill reads at once, a
-    /// holder job by the start time its row recorded, and a tab whose pid
-    /// cannot be tied to it — or whose state cannot be read at all — is
-    /// reported, never signalled. Running files are anchored by the start
-    /// time they recorded; one whose process could not be read is a target
-    /// too, which the kill refuses unless a fresh read now succeeds.
+    /// which can be a `status` timeout old: a holder job is then anchored by
+    /// the start time its row recorded, a pid the inspector read with no
+    /// recorded start time by the start time the kill reads at once, and a
+    /// tab whose pid cannot be tied to it — or whose state cannot be read at
+    /// all — is reported, never signalled. Running files are anchored by the
+    /// start time they recorded; one whose process could not be read is a
+    /// target too, which the kill refuses unless a fresh read now succeeds.
     ///
     /// Archive passes `signalRunningFiles: false`: anything can write a
     /// running file, so only a user gesture may signal the pid one names.

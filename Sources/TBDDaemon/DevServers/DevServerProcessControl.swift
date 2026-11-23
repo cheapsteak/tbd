@@ -81,9 +81,9 @@ struct DevServerKillTarget: Sendable, Equatable {
         /// A start time recorded when the process was first seen (a running
         /// file, a holder row); the kernel's must lie within `tolerance`.
         case recorded(Date, tolerance: TimeInterval)
-        /// The pid was read first-hand moments before the kill (a live tmux
-        /// pane): the kill reads the start time itself, at once, and every
-        /// later check holds the process to it.
+        /// The pid was read first-hand moments before the kill, with no start
+        /// time recorded for it: the kill reads the start time itself, at
+        /// once, and every later check holds the process to it.
         case readAtKill
     }
 
