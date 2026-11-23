@@ -102,8 +102,8 @@ if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
 fi
 
 # Two passes, mirroring test.yml's fast/quiet split — NOT one `--parallel` run
-# over everything. The tier-3 suites in TBDDaemonLiveTests spawn real tmux
-# servers and children racing deadlines, and several pin
+# over everything. The tier-3 suites in TBDDaemonLiveTests spawn real holders
+# and children racing deadlines, and several pin
 # `.timeLimit(.minutes(1))` as a REGRESSION DETECTOR sized for the quiet pass
 # (SubprocessTimeoutStarvationTests waits out a `sleep 90` child). Run them in
 # the parallel pass and that limit is measuring machine load instead of the
