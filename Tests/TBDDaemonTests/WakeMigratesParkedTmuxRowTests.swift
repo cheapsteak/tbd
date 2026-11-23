@@ -266,12 +266,20 @@ struct WakeMigratesParkedTmuxRowTests {
         var declarations: [String] = []
         var forwarders: [String] = []
         var defaulted: [String] = []
+        var misread: [String] = []
         for file in files {
             guard let source = try? String(contentsOf: file, encoding: .utf8) else { continue }
             scanned += 1
             guard entryPoints.contains(where: { source.contains($0) }) else { continue }
             let text = Self.codeOnly(source)
             let fileName = file.lastPathComponent
+            // Code's braces balance, so blanked text whose braces do not was
+            // misread: a string or comment the blanking never closed has
+            // swallowed code, and the scan would pass over whatever was in it.
+            let opened = text.filter { $0 == "{" }.count, closed = text.filter { $0 == "}" }.count
+            if opened != closed {
+                misread.append("\(fileName) (\(opened) `{`, \(closed) `}`)")
+            }
             for entryPoint in entryPoints {
                 for parameters in Self.declaredParameters(of: entryPoint, in: text) {
                     declarations.append("\(fileName): \(entryPoint)")
@@ -300,6 +308,8 @@ struct WakeMigratesParkedTmuxRowTests {
         }
 
         #expect(scanned > 100, "the source scan found almost nothing to read — it is passing vacuously")
+        #expect(misread.isEmpty,
+                "the blanking misread these files, whose code's braces do not balance: \(misread.joined(separator: "; "))")
         #expect(calls.count >= 11, "the scan missed calls it should find: \(calls)")
         #expect(offenders.isEmpty,
                 "these wake or resume without naming a rail, the client's actor or the phone's: \(offenders.joined(separator: "; "))")
@@ -390,6 +400,39 @@ struct WakeMigratesParkedTmuxRowTests {
                 "a local `let actor` passed for a function that takes none")
     }
 
+    /// The scan's reading of a `"""` that does not open a multi-line string:
+    /// `#""""#` and `#"""#` are one-line raw strings, closed on their own
+    /// line, so the code after each is still code. A `#"""` with nothing
+    /// after it on its line opens a multi-line raw string, which is blanked.
+    /// Each one-line string sits before a function of its own, so misreading
+    /// either as a multi-line opening blanks that function.
+    @Test("the source scan reads a one-line raw string that starts with three quotes")
+    func theSourceScanReadsOneLineRawStrings() {
+        let written = ##"""
+            let empty = #""""#
+            func handleTerminalWake(_ paramsData: Data, actor: ActuationActor?) async {
+                await holdWakeIfDenied(id, actor: actor)
+            }
+            let quote = #"""#
+            func outerWake(actor: ActuationActor?) async {
+                await holdWakeIfDenied(id, actor: actor)
+            }
+            let block = #"""
+                func decoy(actor: ActuationActor) {
+                """#
+            """##
+        let source = Self.codeOnly(written)
+        #expect(written.contains("decoy"))
+        #expect(!source.contains("decoy"), "a multi-line raw string survived the blanking: \(source)")
+        #expect(source.filter { $0 == "\n" }.count == written.filter { $0 == "\n" }.count)
+        #expect(source.filter { $0 == "{" }.count == source.filter { $0 == "}" }.count,
+                "the blanking left unbalanced braces: \(source)")
+        let holds = Self.calls(of: "holdWakeIfDenied", in: source)
+        #expect(holds.map { Self.actorBinding(at: $0.start, in: source)?.name } == [
+            "handleTerminalWake", "outerWake",
+        ], "a one-line raw string was read as opening a multi-line one: \(source)")
+    }
+
     /// The actor each daemon file may pass to a wake or resume entry point.
     private static func isAllowedWakeActor(_ actor: String?, file: String) -> Bool {
         guard let actor else { return false }
@@ -411,10 +454,13 @@ struct WakeMigratesParkedTmuxRowTests {
     /// comment, or a parenthesis or brace inside a string, cannot pass for a
     /// declaration or upset the balancing the helpers below rely on. It reads
     /// line comments, nested block comments, single-line, multi-line and raw
-    /// strings, and interpolations with strings nested inside them. It works
-    /// on UTF-8 bytes: every delimiter is ASCII, and no byte of a multi-byte
-    /// character is ASCII, so a character is blanked whole or not at all.
-    /// Every helper below reads text this has passed over.
+    /// strings, and interpolations with strings nested inside them. A `"""`,
+    /// after any `#`s, opens a multi-line string only when nothing but
+    /// whitespace follows it on its line, as Swift reads it: `#""""#` is a
+    /// one-line raw string holding `""`, and the code after it is still code.
+    /// It works on UTF-8 bytes: every delimiter is ASCII, and no byte of a
+    /// multi-byte character is ASCII, so a character is blanked whole or not
+    /// at all. Every helper below reads text this has passed over.
     private static func codeOnly(_ text: String) -> String {
         enum Context {
             /// Code; with `parens`, the code of an interpolation inside a
@@ -426,6 +472,7 @@ struct WakeMigratesParkedTmuxRowTests {
         let newline = UInt8(ascii: "\n"), slash = UInt8(ascii: "/"), star = UInt8(ascii: "*")
         let quote = UInt8(ascii: "\""), hash = UInt8(ascii: "#"), backslash = UInt8(ascii: "\\")
         let open = UInt8(ascii: "("), close = UInt8(ascii: ")")
+        let whitespace: Set<UInt8> = [UInt8(ascii: " "), UInt8(ascii: "\t"), UInt8(ascii: "\r")]
         let bytes = Array(text.utf8)
         let count = bytes.count
         var output = bytes
@@ -434,6 +481,14 @@ struct WakeMigratesParkedTmuxRowTests {
         }
         func run(of byte: UInt8, at start: Int, length: Int) -> Bool {
             start + length <= count && bytes[start..<(start + length)].allSatisfy { $0 == byte }
+        }
+        func onlyWhitespaceToLineEnd(from start: Int) -> Bool {
+            var cursor = start
+            while cursor < count, bytes[cursor] != newline {
+                guard whitespace.contains(bytes[cursor]) else { return false }
+                cursor += 1
+            }
+            return true
         }
         var stack: [Context] = [.code(parens: nil)]
         var index = 0
@@ -460,6 +515,7 @@ struct WakeMigratesParkedTmuxRowTests {
                     while opening < count, bytes[opening] == hash { opening += 1 }
                     if opening < count, bytes[opening] == quote {
                         let multiline = run(of: quote, at: opening, length: 3)
+                            && onlyWhitespaceToLineEnd(from: opening + 3)
                         let contentStart = opening + (multiline ? 3 : 1)
                         blank(index..<contentStart)
                         stack.append(.string(hashes: opening - index, multiline: multiline))
