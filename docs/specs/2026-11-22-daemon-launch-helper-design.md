@@ -322,8 +322,9 @@ direct launch.
     they are inert and vanish at logout, and `OrphanGC` removes only the directories.
 - **Helper version directories.** `OrphanGC`, under `gcEnabled`, removes one only when no running
   process executes from it and its `last-used` stamp is 30 days old. A directory with no stamp is
-  dated by its own modification time. A process listing that fails, or a process whose
-  executable path cannot be read, counts as in use. The 30 days spare the grants of a version
+  dated by its own modification time. A process listing that fails, or a TBD Server process
+  whose executable path cannot be read, counts as in use. Only TBD Server executes from a
+  version directory, so other processes do not count. The 30 days spare the grants of a version
   that a worktree launches now and then. An install killed partway leaves its `.install-*`
   directory, which is reclaimed under the same rule as a version directory no process uses.
 - **`--serve` processes.** No reconciler covers them, because an orphan cannot arise: a `--serve`
@@ -442,7 +443,8 @@ Every branch the flag gates is tested in both states, as `CLAUDE.md` requires.
   finds it taken by `--serve` waits for the result instead of failing at the first deadline.
 - **`--serve` lifetime,** with an injected coalition lister and clock: it stays while another
   member remains, exits when alone, and stays when the listing fails.
-- **`OrphanGC`:**
+- **`OrphanGC`,** with an injected `launchctl` runner, so no test registers or boots out a real
+  job:
   - job registrations and launch directories: a young one kept, a running one kept, a stale one
     removed;
   - version directories: one in use kept, one with a recent stamp kept, one with unreadable
