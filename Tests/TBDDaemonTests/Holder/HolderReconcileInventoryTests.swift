@@ -699,6 +699,36 @@ struct HolderReconcileInventoryTests {
         await budget.end()
     }
 
+    /// A timer's sleep can return a moment before the last pass's `end`
+    /// cancels it: too late for the cancel to stop it, but before its expiry
+    /// reaches the budget. By the time that expiry lands, a new pass may have
+    /// begun on a clock of its own, and the stale expiry must not spend it —
+    /// that pass would keep every row it reaches without probing one.
+    ///
+    /// The held clock stands in for that moment: its sleep ignores the cancel
+    /// and returns only when the test releases it, after the new pass began.
+    /// Joining the old timer then proves its expiry has run before the flag
+    /// is read, so the negative needs no window.
+    @Test("an expiry from an ended pass's clock does not spend a later pass", .clockDriven)
+    func aStaleExpiryDoesNotSpendALaterPass() async throws {
+        let budget = HolderProbeBudget()
+        let held = HeldSleepClock()
+        await budget.begin(.seconds(5), clock: held)
+        let staleTimer = try #require(await budget.timerForTesting)
+        await budget.end()
+
+        // The later pass's own clock, which nothing advances: only the stale
+        // expiry could spend this pass.
+        await budget.begin(.seconds(5), clock: EventDrivenTestClock())
+        held.release()
+        await staleTimer.value
+
+        #expect(
+            await budget.isSpent == false,
+            "the expiry of a clock whose pass had ended spent the pass begun after it")
+        await budget.end()
+    }
+
     // MARK: - The reaper's hand-back
 
     /// The incident's shape: a Claude row whose holder (4242) and job (4243)
@@ -1057,5 +1087,43 @@ private final class SleepRecordingClock: Clock, @unchecked Sendable {
         let requested = base.now.duration(to: deadline)
         lock.withLock { recorded.append(requested) }
         try await base.sleep(until: deadline, tolerance: tolerance)
+    }
+}
+
+/// A clock whose every sleep returns normally once `release()` is called, and
+/// not before — cancelled or not.
+///
+/// It models a sleep that had already returned when its task was cancelled:
+/// the cancel arrives, and the sleeper goes on as if it had not.
+private final class HeldSleepClock: Clock, @unchecked Sendable {
+    typealias Instant = ContinuousClock.Instant
+
+    private let base = ContinuousClock()
+    private let lock = NSLock()
+    private var released = false
+    private var sleepers: [CheckedContinuation<Void, Never>] = []
+
+    var now: Instant { base.now }
+    var minimumResolution: Duration { base.minimumResolution }
+
+    /// Ends every sleep, those already waiting and any that start later.
+    func release() {
+        let waiting = lock.withLock {
+            released = true
+            defer { sleepers = [] }
+            return sleepers
+        }
+        for sleeper in waiting { sleeper.resume() }
+    }
+
+    func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        await withCheckedContinuation { (sleeper: CheckedContinuation<Void, Never>) in
+            let alreadyReleased = lock.withLock {
+                if released { return true }
+                sleepers.append(sleeper)
+                return false
+            }
+            if alreadyReleased { sleeper.resume() }
+        }
     }
 }

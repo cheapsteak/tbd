@@ -43,11 +43,19 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 /// another is running joins its clock, and the clock stops only when the last
 /// pass on it ends, so a pass that finishes first cannot take the bound off
 /// one that is still probing.
+///
+/// **Each clock spends only its own passes.** Cancelling a timer cannot stop
+/// one whose sleep has already returned, so its expiry can reach the actor
+/// after the last pass on its clock has ended and a new pass has started
+/// another. Every clock carries a generation, and an expiry from any but the
+/// running one is ignored.
 actor HolderProbeBudget {
     private var spent = false
     private var timer: Task<Void, Never>?
     /// How many passes are between `begin` and `end` right now.
     private var passes = 0
+    /// The running clock's generation, bumped each time `begin` starts one.
+    private var generation = 0
 
     /// Starts the clock for one pass. A call while a pass is running starts no
     /// new clock: the pass shares the running one's budget rather than
@@ -56,6 +64,8 @@ actor HolderProbeBudget {
         passes += 1
         guard timer == nil else { return }
         spent = false
+        generation += 1
+        let clockGeneration = generation
         timer = Task { [weak self] in
             do {
                 try await clock.sleep(for: budget)
@@ -63,7 +73,7 @@ actor HolderProbeBudget {
                 // Cancelled because the pass finished inside its budget.
                 return
             }
-            await self?.expire()
+            await self?.expire(clockGeneration)
         }
     }
 
@@ -80,7 +90,17 @@ actor HolderProbeBudget {
     /// Whether the current pass has already spent its budget.
     var isSpent: Bool { spent }
 
-    private func expire() { spent = true }
+    /// The running clock's timer, so a test can join it and know its expiry
+    /// has run. Nil when no clock is running.
+    var timerForTesting: Task<Void, Never>? { timer }
+
+    /// Spends the budget, unless `clockGeneration` names a clock that has
+    /// already stopped: its passes are over, and the passes running now are
+    /// another clock's to spend.
+    private func expire(_ clockGeneration: Int) {
+        guard clockGeneration == generation else { return }
+        spent = true
+    }
 }
 
 enum HolderRowVerdict: Sendable, Equatable {
