@@ -480,7 +480,7 @@ struct DevServersAppStateTests {
         }
     }
 
-    /// tmux: no saved entry, so the dead pane in the server's tab is the output.
+    /// The exit left no saved entry, so the server's tab is all there is to show.
     @Test func showLastOutputFocusesTheTabWithoutASavedEntry() async {
         await withState { state in
             let worktreeID = UUID(), terminalID = UUID()

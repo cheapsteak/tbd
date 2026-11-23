@@ -229,31 +229,27 @@ declared servers, started side by side) do the same thing per server:
   /bin/sh -c '<command>'` in `cwd` with `env` applied. The `exec` makes the
   command the tab's own process, so it leads the tab's process group, a group
   signal reaches every child, and the command's exit status is the tab's.
-- The exit status is read from the terminal transport, never from a wrapper
-  around the command: tmux's `#{pane_dead_status}`, or the holder's report of
-  its child's exit.
-- On the tmux transport TBD sets `remain-on-exit` on the server's window in
-  the same tmux invocation that creates it (`new-window … ; set-option -w
-  remain-on-exit on`), so the pane outlives the command — however fast it
-  dies — and keeps its final screen and its exit status. tmux runs one
-  invocation's commands back to back, before its event loop can reap the
-  pane; a respawned exited tab keeps the option it was created with.
-- On the holder transport the tab does not keep a dead screen, so TBD saves
-  the server's final output instead (see "Exited servers keep their last
+- The tab opens on a pty holder, as every new session does. A daemon that
+  cannot start a holder fails that server's start with the reason before it
+  changes anything, so the server's old tab and its saved last output stay as
+  they were.
+- The exit status is the holder's report of its child's exit, never a wrapper
+  around the command.
+- A holder tab does not keep its screen once its command has exited, so TBD
+  saves the server's final output (see "Exited servers keep their last
   output").
 - The terminal row records the server's name in a new nullable `server_name`
   column on `terminal`, linking tab to server. That is a migration plus the GRDB
   record plus `Terminal` in `TBDShared/Models.swift`, in one commit.
 - Starting a server that is already running does nothing and says so. A
   server that reads *Unknown* is not started, since its command may still be
-  running: one whose tab's state cannot be read — a tmux query that timed out
-  or failed without saying the pane is gone — fails and says to try again,
-  and one whose `status` command timed out fails with "state unknown (status
-  command timed out); try again or stop it first". Neither opens a second
-  tab. A server
-  whose tmux tab exited is started again in that same tab, so tabs do not pile
-  up; a holder session cannot be respawned, so its exited tab is closed and a
-  new one opened.
+  running. One whose tab's process could not be read fails and says to try
+  again; one whose tab is still on the tmux transport fails with the remedy in
+  "A server tab still on tmux"; one whose `status` command timed out fails
+  with "state unknown (status command timed out); try again or stop it
+  first". None opens a second tab. A server whose tab exited is started in a
+  new tab, and TBD closes the exited one first, so tabs do not pile up. A
+  session is never restarted in place.
 
 ### State
 
@@ -265,16 +261,15 @@ Each server's state is derived, in this order:
 3. **Exited (code N)** – the command TBD last started for it ended: its tab
    still shows the ended command, or its saved last output records the exit.
    The code is omitted when the transport could not observe it.
-4. **Unknown** – TBD's tab for it could not be read (a tmux query that timed
-   out or failed without tmux saying the pane is gone), or the `status`
-   command timed out, and nothing above applies. Only tmux's own answer that
-   the pane or its server is absent makes a tab gone. A running file whose
-   process cannot be read (liveness above) likewise reads *Unknown*. When the
-   worktree's tab rows cannot be read from the database at all, every server not shown
-   running by a live file or its `status` command reads *Unknown* — not
-   *Stopped*, and not an *Exited* taken from a saved output, since TBD cannot
-   tell whether a tab still runs it — and a start or stop fails with "try
-   again" as for an unreadable tab.
+4. **Unknown** – TBD's tab for it could not be read (the kernel read of its
+   process failed, or the tab is still on the tmux transport, which TBD does
+   not read), or the `status` command timed out, and nothing above applies. A
+   running file whose process cannot be read (liveness above) likewise reads
+   *Unknown*. When the worktree's tab rows cannot be read from the database at
+   all, every server not shown running by a live file or its `status` command
+   reads *Unknown* — not *Stopped*, and not an *Exited* taken from a saved
+   output, since TBD cannot tell whether a tab still runs it — and a start or
+   stop fails with "try again" as for an unreadable tab.
 5. **Stopped** – none of the above.
 
 `status` commands run with a 5-second timeout, and only on a user's explicit
@@ -292,10 +287,10 @@ In each server it lists, the daemon marks whether the `status` command decided
 the state — it exited 0 (running) or timed out (unknown) and nothing ranked
 above it — and whether the declaration has a `status` command at all. It also
 reports the server's TBD tab whenever that tab has ended, whatever decided the
-state: the tab's id (or, once the tab's row is gone, the id its saved last
-output carries) and, on tmux, the process the dead pane ran. Starting a server
-whose tmux tab has exited respawns that tab in place under the same id, so the
-process id is what tells one run of the tab from the next. The app remembers
+state: the tab's id, or, once the tab's row is gone, the id its saved last
+output carries. That id names one run, because a start never reuses a tab: a
+later run of the server has a tab of its own. The record's optional process id
+is never set for a holder tab. The app remembers
 each answer the `status` command decided, together with the server's ended tab
 at that moment, if it had one, and lays it over a list fetched without
 `status` commands in two cases:
@@ -303,12 +298,11 @@ at that moment, if it had one, and lays it over a list fetched without
 - **Stopped** – the server is known only through its `status` command, which
   that list did not run.
 - **Exited, same run** – the server's TBD tab has ended, and its ended run is
-  the one the remembered answer saw: the same tab and, on tmux, the same
-  process. This is a command that detaches: `docker compose up -d db` exits at
-  once and its tab reads exited, while `docker compose ps db` keeps answering
-  running. A tab that was still running when the answer came and has ended
-  since, an exited tab from a later start, and a respawn of the same tab that
-  exited again are new facts and win.
+  the one the remembered answer saw: the same tab. This is a command that
+  detaches: `docker compose up -d db` exits at once and its tab reads exited,
+  while `docker compose ps db` keeps answering running. A tab that was still
+  running when the answer came and has ended since, and an exited tab from a
+  later start, are new facts and win.
 
 Every other state comes from a running file or a running or unreadable TBD tab,
 which are read on every refresh and always win. Each run replaces what the app
@@ -334,18 +328,15 @@ of the sidebar dot. The re-check timer takes an injected clock.
 ### Exited servers keep their last output
 
 A crashed server's last screen is usually the only explanation of the crash,
-so an exited server's output stays readable:
-
-- **tmux** – the dead pane is the record. Its screen and `#{pane_dead_status}`
-  remain until the tab is closed or the server is started again.
-- **holder** – when a server tab's child exits, the daemon saves the session's
-  final screen and scrollback into Closed Terminals history (the store archive
-  and tab close already write) before the holder registry releases the
-  session's emulator, and records the exit code and server name on that
-  history entry. The holder transport's release behavior is unchanged: the
-  save happens in the step before the release, which always follows. Because
-  the entry lives in the database, the exit code survives a daemon restart —
-  including the reconcile that removes the ended holder tab.
+so an exited server's output stays readable. A holder tab does not keep its
+screen once its command has exited, so when a server tab's child exits, the
+daemon saves the session's final screen and scrollback into Closed Terminals
+history (the store archive and tab close already write) before the holder
+registry releases the session's emulator, and records the exit code and server
+name on that history entry. The save is a step before the release and never
+delays or skips it. Because the entry lives in the database, the exit code
+survives a daemon restart — including the reconcile that removes the ended
+holder tab.
 
 The server's state reads *Exited* from the newest saved entry for its name
 until it is started again or stopped; either detaches the entry from the
@@ -354,10 +345,27 @@ caused by a stop is never recorded as the server's last output: the save
 applies only while the server's tab still exists, and a stop closes the tab
 before it clears the server's entries.
 
-The Servers menu offers **Show last output** for an exited server. On the
-holder transport it opens the saved entry in Session History's Closed
-Terminals viewer; on tmux it focuses the server's tab, where the dead pane
-shows the output.
+The Servers menu offers **Show last output** for an exited server. It opens
+the saved entry in Session History's Closed Terminals viewer, or, when the exit
+left no saved entry, focuses the server's tab.
+
+### A server tab still on tmux
+
+A server tab opened before every session started on the pty holder may still
+be recorded on the tmux transport. TBD runs no tmux command, so it never reads
+such a tab: the tab reads *Unknown*, since its command may still be running in
+the repo's tmux server, and so does its server unless a live running file or
+its `status` command says it runs. It never reads *Exited*, so the menu offers
+no **Show last output** for it; a final screen stays in the tmux window, where
+TBD cannot show it.
+
+A retry would read the tab no better, so a start or a stop of its server does
+not say "try again". It fails with the command that ends the repo's tmux
+server, `tmux -L <server> kill-server`, which also ends the repo's other tmux
+tabs, and says to close the tab after it; the next start opens a new tab on a
+holder. Closing the tab first would leave the command running in tmux beside
+the new one, because closing a tmux tab runs no tmux command. Archive does not
+signal such a tab either (see "On archive").
 
 ### Stopping
 
@@ -371,11 +379,10 @@ shows the output.
   to the end even when the request that started the stop is cancelled, and a
   group whose only remaining members are zombies counts as gone. Before
   signalling, re-verify the pid's identity: a running file's pid against the
-  start time it recorded; a tab's pid is read from the tab again at stop time.
-  A tmux pane's start time is taken from the kernel at that moment. A holder
-  tab's job is verified against the start time its terminal row recorded for
-  that pid; a job with none recorded — whether or not the daemon has adopted
-  the session — cannot be told apart from a reused pid, so it is reported as a
+  start time it recorded; a tab's pid is read from the tab again at stop time
+  and verified against the start time its terminal row recorded for that pid.
+  A job with none recorded — whether or not the daemon has adopted the
+  session — cannot be told apart from a reused pid, so it is reported as a
   failed stop and not signalled, and closing the tab ends it.
 - The whole process group is signalled only when the pid leads it
   (`getpgid(pid) == pid`). Otherwise only the pid itself is signalled, and the
@@ -397,8 +404,9 @@ shows the output.
 
 Stop on an exited server closes its tab and clears its *Exited* state; it
 neither signals anything nor runs a declared `stop`, since nothing is running
-to stop. Stop on a server whose tab's state cannot be read fails and says to
-try again, without signalling, running `stop` or closing the tab.
+to stop. Stop on a server whose tab's state cannot be read fails without
+signalling, running `stop` or closing the tab: it says to try again, or, for a
+tab still on tmux, gives the remedy in "A server tab still on tmux".
 
 A start, and a stop of named servers, run only those servers' `status`
 commands.
@@ -419,8 +427,8 @@ running file names it. Two facts decide this:
   change, so running it there would run a branch's code without anyone
   clicking anything.
 - **Anything can write a running file.** Any process running as the user can
-  write one naming any pid — the repo's tmux server, another worktree's
-  shell. The start-time check stops a reused pid from being hit, but not a
+  write one naming any pid — a pty holder, another worktree's shell. The
+  start-time check stops a reused pid from being hit, but not a
   file that names the wrong live process on purpose or by mistake. A stop
   someone asks for accepts that risk; an unattended archive does not.
 
@@ -430,7 +438,10 @@ So archive does this, per server that reads running or *Unknown*:
   its process group gets SIGTERM, then SIGKILL after 5 seconds, under the
   group-kill rules in "Stopping". A tab pid that cannot be verified — a holder
   job with no recorded start time — or a tab whose state cannot be read is not
-  signalled; the tab teardown that follows ends it.
+  signalled; the tab teardown that follows ends it. A tab still on tmux is the
+  exception: the teardown deletes its row and logs the command that ends the
+  repo's tmux server, and its command keeps running there until someone runs
+  that command.
 - **A server with both a TBD tab and a running file** is stopped through its
   tab only. The pid the running file names is not signalled, even when it is
   not the tab's job; if it is in the tab's process group, the group kill ends
@@ -443,8 +454,9 @@ So archive does this, per server that reads running or *Unknown*:
 
 That holds whether or not the server declares `stop`. Signalling a tab's group
 is safe where signalling a running file's pid is not: TBD spawned that
-process itself, it leads its own group, and its pid comes from tmux or from
-the holder's recorded start time rather than from a file anyone could write.
+process itself, it leads its own group, and its pid and start time come from
+the terminal row TBD recorded when the holder started it, rather than from a
+file anyone could write.
 
 Archive does this in its first phase, right after the worktree's status flips
 to archived — so a concurrent `server start` is refused — and before its tabs
@@ -514,8 +526,8 @@ output`.
 - **Sidebar dot** – a green dot on a worktree's row when any of its servers is
   running according to a live running file or a live TBD server tab. The dot
   never runs `status` commands. Stopped and exited servers show nothing.
-- Exited servers are visible only in the menu, in their tab, and — on the
-  holder transport — in Closed Terminals.
+- Exited servers are visible only in the menu, in Closed Terminals, and in
+  their tab until it is closed.
 
 ## No feature flag
 
@@ -544,7 +556,7 @@ something this feature adds.
 
 - **Server processes TBD started** are tab processes, so tab teardown and the
   existing terminal reconcilers cover them, and stop and archive kill the tab
-  process's whole group, which it leads, rather than the pane pid alone. A
+  process's whole group, which it leads, rather than that process alone. A
   process that leaves its group (`setsid`, a daemonizing server) escapes the
   group kill; a server like that should write a running file for its real pid
   or declare a `stop` command, and the repo's archive hook should stop it,
@@ -573,7 +585,8 @@ something this feature adds.
 - **A tab pid that cannot be verified as the tab's** fails the stop; nothing is
   signalled.
 - **A tab whose state cannot be read** fails a start or a stop with "try
-  again"; nothing is spawned, signalled or closed.
+  again"; nothing is spawned, signalled or closed. A tab still on tmux fails
+  them with the command that ends the repo's tmux server instead.
 - **A status-only server with no `stop`** fails the stop with "nothing to
   stop".
 - **A server archive does not stop** — one known only through a running file
@@ -603,8 +616,12 @@ something this feature adds.
   release, with the established status; a server tab's exit saves its screen
   and code, an ordinary tab's exit saves nothing, and an exit whose tab is
   already gone records no server state; start and stop detach the saved entry;
-  "Show last output" opens the entry on the holder transport and focuses the
-  tab on tmux.
+  "Show last output" opens the saved entry, and focuses the server's tab when
+  there is none.
+- A tab still on tmux reads *Unknown* without a tmux command, and a start or a
+  stop of its server fails with the command that ends the repo's tmux server
+  and no "try again"; a holder tab whose process cannot be read still says to
+  try again and names no tmux command.
 - Archive, and reconcile's archive, kill the process group of a TBD tab still
   running its command and run no `status` or `stop` command — a tab server
   that declares `stop` is signalled, while a gesture Stop of the same server
@@ -619,10 +636,10 @@ something this feature adds.
 - The tab inspector reads a holder job the daemon adopted but whose row
   recorded no start time as unverifiable, so no stop signals it.
 - The daemon marks a state the `status` command decided, and whether a server
-  declares a `status` command, and reports an ended tab with its process id.
-  The app keeps a remembered answer over a stopped server and over an exited
-  one whose ended run is the one the answer saw, not over a newer exited tab,
-  a respawn of the same tab, or a tab that ended after the answer; drops it
+  declares a `status` command, and reports an ended tab by its id. The app
+  keeps a remembered answer over a stopped server and over an exited one whose
+  ended run is the one the answer saw, not over a newer exited tab or a tab
+  that ended after the answer; drops it
   when the server or its `status` command is gone and when the worktree
   leaves the app, with no refresh in flight writing it back; and keeps an
   older run's answers when a newer run fails.

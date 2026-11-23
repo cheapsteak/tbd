@@ -47,11 +47,12 @@ the session resumable, but it never rewrites a transport.
 A person's wake of a parked session is such a choice. Waking it starts its
 program, at a moment its owner picked: selecting it in the app, a click in its
 parked pane, a message sent to it from the composer or the phone,
-`tbd terminal wake`, `tbd terminal resume` or `tbd worktree resume`. Selecting
-is the app's wake on focus, the same wake that resumes any parked, resumable
-session a person selects: selecting a worktree wakes the session it shows, or
-its first parked, resumable session when the one it shows is not one, and
-activating a tab wakes the parked, resumable sessions in that tab. Resumable
+`tbd terminal wake`, or a `terminal.resume` or `worktree.resume` request on
+the daemon's socket. Selecting is the app's wake on focus, the same wake that
+resumes any parked, resumable session a person selects: selecting a worktree
+wakes the session it shows, or its first parked, resumable session when the one
+it shows is not one, and activating a tab wakes the parked, resumable sessions
+in that tab. Resumable
 there means a Claude session with a session id, so the focus wake passes over a
 parked shell or Codex tab, which wakes only when asked for directly. As it does
 for a holder session, it also passes over a session parked by hand or stamped as
@@ -623,9 +624,10 @@ TBD starts programs only on the pty holder. A person's wake of a parked row
 still recorded as `tmux` moves the row first ("Why a gesture rather than a
 behaviour"). Every other wake of one — a rail's, or a call to
 `HibernationCoordinator.wake` that no move preceded — refuses with a reason
-naming the gestures that move it and the row's own id (`tbd terminal wake <id>`,
-`tbd terminal migrate <id>`), and that refusal comes before every other check a
-wake makes — a missing session id, a Codex wake asked to deliver a prompt — so
+naming the gestures that move it and the row's own id
+(`tbd terminal wake --terminal <id>`, `tbd terminal migrate <id>`), and that
+refusal comes before every other check a wake makes — a missing session id, a
+Codex wake asked to deliver a prompt — so
 whoever reads it is always told the one thing that unblocks the row. The row
 stays parked with its session id, so a wake after the move resumes it on the
 holder. Switching a tmux session's account in place would start a program too,

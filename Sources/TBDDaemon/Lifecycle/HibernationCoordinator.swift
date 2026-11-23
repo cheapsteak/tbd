@@ -410,7 +410,7 @@ public actor HibernationCoordinator {
     static func tmuxWakeUnavailableReason(terminalID: UUID) -> String {
         "This session is parked on the tmux transport, which TBD no longer runs sessions on. "
         + "TBD moves it to the pty holder when a person wakes it (click it, or run "
-        + "`tbd terminal wake \(terminalID.uuidString)`) or with "
+        + "`tbd terminal wake --terminal \(terminalID.uuidString)`) or with "
         + "`tbd terminal migrate \(terminalID.uuidString)`."
     }
 

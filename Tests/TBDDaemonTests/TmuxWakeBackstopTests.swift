@@ -127,8 +127,8 @@ struct TmuxWakeBackstopTests {
         // send whoever reads the refusal looking for which session it meant.
         #expect(reason.contains("tbd terminal migrate \(row.id.uuidString)"),
                 "the refusal does not name the session to migrate: \(reason)")
-        #expect(reason.contains("tbd terminal wake \(row.id.uuidString)"),
-                "the refusal does not name the session to wake: \(reason)")
+        #expect(reason.contains("tbd terminal wake --terminal \(row.id.uuidString)"),
+                "the refusal does not name the session to wake as the CLI takes it: \(reason)")
         let after = try #require(try await f.db.terminals.get(id: row.id))
         #expect(after.isParked, "the refusal must leave the row parked")
         #expect(after.claudeSessionID == session)

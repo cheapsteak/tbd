@@ -288,7 +288,7 @@ Should I also update the test fixtures to use the new token format?
 ---
 ```
 
-Includes terminal UUID (so conductor can immediately `tbd terminal send <id>`), branch name, terminal label, time waiting, and time running since last input. Last assistant message from the Claude session JSONL.
+Includes terminal UUID (so conductor can immediately `tbd terminal send --terminal <id>`), branch name, terminal label, time waiting, and time running since last input. Last assistant message from the Claude session JSONL.
 
 This is sent to the conductor terminal via `TmuxManager.sendKeys()` (same mechanism as `tbd terminal send`).
 
@@ -426,7 +426,7 @@ poll terminals to check on them. When asked to check status, or periodically:
 | `tbd terminal conversation <id>` | Read last assistant message from Claude session |
 | `tbd terminal conversation <id> --messages N` | Read last N assistant messages |
 | `tbd terminal output <id> --lines 50` | Debug: raw terminal viewport (last 50 lines) |
-| `tbd terminal send <id> "message"` | Send message to a terminal |
+| `tbd terminal send --terminal <id> --text "message"` | Send message to a terminal |
 | `tbd conductor list --json` | List all conductors |
 | `tbd conductor status {NAME} --json` | Your own scope and config |
 | `tbd notify --type attention_needed "message"` | Escalate to user via macOS notification |
@@ -530,7 +530,7 @@ Conductor (Claude) decides to check on terminals
 
 ```
 Conductor (Claude) reads terminal conversation, decides to auto-respond
-  → Runs: tbd terminal send <terminal-id> "Yes, proceed with updating the tests"
+  → Runs: tbd terminal send --terminal <terminal-id> --text "Yes, proceed with updating the tests"
   → Daemon receives terminal.send RPC
   → Message sent to terminal via TmuxManager.sendKeys()
   → Terminal's Claude processes the message (transitions to running)

@@ -619,11 +619,19 @@ extension AppState {
     /// read after its delete was refused, when a list that landed while the
     /// delete was in flight dropped it. That list was answered before the
     /// daemon decided the delete, so it says nothing about the terminal;
-    /// this one was answered after. Without it the close would wait for the
-    /// next list (`ClosingTerminal.awaitingList`), and the next list to land
-    /// can be another one answered before the refusal, which also lacks the
-    /// terminal and so lets go of it, its tab's label and its composer's
-    /// draft with it.
+    /// this one was answered after. The close's settle then brings the
+    /// terminal back as a tab at once, with its label and draft, and saves
+    /// the label under the tab's ID. Otherwise the close would wait for the
+    /// next list (`ClosingTerminal.awaitingList`), and when that list is
+    /// another one answered before the refusal, it lacks the terminal and
+    /// lets go of the close's hold and the composer's draft with it.
+    ///
+    /// It does not keep such a list from dropping the terminal after the
+    /// settle. That list treats it as it treats any terminal no close holds:
+    /// it takes the tab away, and the label shown on it, until a list that
+    /// holds the terminal gives it a new tab, without that label. The
+    /// composer's draft survives, and the saved label comes back the next
+    /// time the app loads the worktree's tabs from the daemon, on relaunch.
     ///
     /// Only while the close still holds the terminal and its worktree is
     /// still in the app's state, and never for a terminal the app recorded

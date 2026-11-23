@@ -551,11 +551,16 @@ custom_rules:
       - "Sources/TBDDaemon/Holder/HolderRegistry\\.swift"                     # defines spawn and abandon; its calls reach the spawner, the fabricator and itself
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\.swift"               # defines disposeHolder, the row-shaped teardown every close and archive calls; covered by its callers' rows
       # The doors: each writes its own row before it acts.
-      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers, each writing its row before it acts; closeTerminalTab, shared with server.start / server.stop under their row; the send courier and its delivery-verification re-send, recorded against the send's row
+      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers, each writing its row before it acts: create, revive, delete, the profile swap's park and fork, migrateTransport; defines closeTerminalTab, shared with server.start / server.stop under their row; the send courier and its delivery-verification re-send, recorded against the send's row
       - "Sources/TBDDaemon/Server/RPCRouter\\+ScratchHandlers\\.swift"        # scratch.delete / scratch.archive; one worktree-named row, then the per-terminal disposal
+      - "Sources/TBDDaemon/Server/RPCRouter\\+ManualSuspendHandlers\\.swift"  # terminal.suspend / terminal.resume, one row each; worktree.suspend / worktree.resume, one row per session at that session's park or wake
+      - "Sources/TBDDaemon/Server/RPCRouter\\+HibernationHandlers\\.swift"    # terminal.hibernate / terminal.wake, one row each before the park or wake
+      - "Sources/TBDDaemon/Server/RPCRouter\\+WakeMigration\\.swift"          # moves a row parked on tmux to the holder before a person's wake, under that wake's row (it takes the wake's actuation ID)
+      - "Sources/TBDDaemon/Server/RPCRouter\\+ContinueInCodexHandlers\\.swift" # terminal.continueInCodex; spawns the Codex tab under its row
+      - "Sources/TBDDaemon/Server/RPCRouter\\+DevServerHandlers\\.swift"      # server.start / server.stop; spawns and closes server tabs under their row, which covers every server in the call
       - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"          # park/wake engine: RPC rows plus the auto-hibernate rails' entry points; the running-shell move of terminal.migrateTransport
       - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\+Holder\\.swift"  # the holder legs of park, wake and profile swap; covered by the same rows as HibernationCoordinator
-      - "Sources/TBDDaemon/Daemon\\.swift"                                    # composition root: hands the limit-resume rail its courier-backed send; LimitResumeActuator writes the rail's row
+      - "Sources/TBDDaemon/Daemon\\.swift"                                    # composition root: hands the limit-resume rail its courier-backed send, which LimitResumeActuator records under the rail's row; hands the delivery verifier its re-send, recorded against the send's row
       # The shared lifecycle internals and phases. They stay deliberately
       # silent — `worktree.archive` and the reconcile sweep both reach them, and
       # a row down here would double-count every teardown — so their acts are
@@ -565,13 +570,40 @@ custom_rules:
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"  # hook-terminal close; covered by worktree.rerunPreSession / worktree.create
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+SpawnTerminal\\.swift" # the one spawn-and-record step every spawn path calls, and its rollback; covered by the caller's row: terminal.create / terminal.continueInCodex / worktree.create / scratch.create / revive / server.start
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Reconcile\\.swift"   # the reconcile rail; one row per act at its own entry point
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Create\\.swift"      # worktree creation's primary, setup and pre-session spawns; covered by worktree.create / scratch.create / worktree.revive / worktree.reviveConversationFresh / worktree.rerunPreSession
+      - "Sources/TBDDaemon/Lifecycle/TerminalTransportMigrator\\.swift"     # the migrator's production park, wake and running-shell move; covered by the row of the terminal.migrateTransport or wake that runs the migration
     # The primitives are the holder transport's acts on a session: spawning a
     # holder (`HolderRegistry.spawn`), letting one go or killing its job
     # (`HolderRegistry.abandon`, `abandonVerifiedJob`), tearing one down with
     # its row (`disposeHolder`), and writing input into one
     # (`HolderInjectionCourier.deliver`) — plus `setHibernated`, the park's
-    # record. A caller that spawns through `spawnTerminal` reaches the spawn
-    # inside an allowlisted file, as every spawn path does.
+    # record.
+    #
+    # With them, the wrappers that act on ONE session and leave the row to
+    # their caller, so a new caller of one is as unrecorded as a new caller of
+    # a primitive: `spawnTerminal` and `spawnPreSessionTerminal` (every spawn
+    # path), `closeTerminalTab` (terminal.delete's teardown, shared with
+    # server.stop), the parks and wakes `manualHibernate`, `parkForProfileSwap`,
+    # `performHolderHibernate` and `HibernationCoordinator.wake(terminalID:`,
+    # the transport moves `TerminalTransportMigrator.migrate(terminalID:`,
+    # `moveRunningShellToHolder` and `parkLeftoverTmuxRow`, and
+    # `redeliverVerifiedPayload`, the delivery verifier's re-send. A wrapper
+    # that writes its own row — `hibernateForMerge`, the idle sweep, the
+    # reconcile rail — is left out: its callers record nothing, so there is
+    # nothing for them to forget.
+    #
+    # What it cannot catch, stated as plainly as the granularity above:
+    #   - An unapplied reference. The regex needs the call's parenthesis, so
+    #     `let send = courier.deliver` and every later `send(...)` go unseen.
+    #   - The raw write under the courier. `HolderReader.write(_:)` is the
+    #     courier's fallback writer, wired in Daemon.swift; `write(` is far too
+    #     common a name to match, so a new caller of it elsewhere is invisible.
+    #   - Worktree-scale operations: `beginArchiveWorktree`,
+    #     `completeArchiveWorktree`, `forgetWorktree`, `spawnPrimaryTerminals`,
+    #     the create and revive entry points. They reach every session through
+    #     the acts above inside allowlisted lifecycle files, and their doors
+    #     are the worktree.*, repo.remove and scratch.* handlers and the
+    #     auto-archive rail; a new caller of one is not caught.
     #
     # Call sites only, which decides the odd-looking pieces of this regex.
     # `(?<!func )` skips DECLARATIONS: TerminalStore's `setHibernated` and the
@@ -579,11 +611,12 @@ custom_rules:
     # acts being performed — and skipping them keeps TerminalStore.swift (a DB
     # layer that must never actuate) fully covered instead of allowlisted for a
     # declaration. The lookaheads on argument labels exist because `spawn`,
-    # `abandon` and `deliver` are common names: a cloud spawner's
-    # `spawn(request)`, a `.spawn(path:` and an `.abandon(.notFound` enum case
-    # are not holder acts, and a rule that fired on them would be one people
-    # disable. The lookahead keeps the label out of the match, so the matched
-    # text is the identifier and its parenthesis alone.
+    # `abandon`, `deliver`, `wake` and `migrate` are common names: a cloud
+    # spawner's `spawn(request)`, a `.spawn(path:`, an `.abandon(.notFound`
+    # enum case and the resume scheduler's `wake()` are not holder acts, and a
+    # rule that fired on them would be one people disable. The lookahead keeps
+    # the label out of the match, so the matched text is the identifier and its
+    # parenthesis alone.
     #
     # Raw `kill(` is deliberately NOT in this list: no regex can separate a
     # signal sent to a session's process from ordinary subprocess reaping, and a
@@ -593,7 +626,7 @@ custom_rules:
     # forced step is `HolderRegistry.killJob` inside `abandon`, which is matched
     # at the `abandon` call. The orphan sweeps reach `killJob` too (the rowless
     # holder collector), but a session with no row is reclaimed, not actuated.
-    regex: '(?<!func )\b(?:(?:spawn|abandon|deliver)\s*\((?=\s*terminalID:)|abandon\s*\((?=\s*terminal:)|(?:abandonVerifiedJob|disposeHolder|setHibernated)\s*\()'
+    regex: '(?<!func )\b(?:(?:spawn|abandon|deliver|wake|migrate)\s*\((?=\s*terminalID:)|abandon\s*\((?=\s*terminal:)|(?:abandonVerifiedJob|disposeHolder|setHibernated|spawnTerminal|spawnPreSessionTerminal|closeTerminalTab|manualHibernate|parkForProfileSwap|performHolderHibernate|moveRunningShellToHolder|parkLeftoverTmuxRow|redeliverVerifiedPayload)\s*\()'
     # Code only. Several doc comments name these primitives while explaining the
     # boundary, and firing on the prose that documents the rule is how a rule
     # gets disabled.
