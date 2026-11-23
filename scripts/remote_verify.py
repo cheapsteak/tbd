@@ -47,7 +47,7 @@ A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds jobs the
 test job does not wait on — lint, the committed-plans guard, the review-script
 tests among them; it waits only on the Swift suite gate, which on a dispatched
 run always lets it run — plus cache bookkeeping steps that can fail without
-stopping the tests, and ten fallible setup and build steps before the first
+stopping the tests, and nine fallible setup and build steps before the first
 `scripts/test.sh`; and
 `scripts/test.sh` runs none of that locally. So a red run only becomes a red
 suite if its results say so: `verdict_from_results` decides that, on the red
@@ -897,15 +897,14 @@ def verdict_from_results(results: Report | None) -> int:
       one that failed. Only `actions/upload-artifact`'s `if-no-files-found: warn`
       keeps the second shape off the wire today, by publishing no artifact when
       nothing matches; that is a third party's behavior, not a guard of ours.
-      `test.yml`'s test job runs ten fallible steps before it reaches the
+      `test.yml`'s test job runs nine fallible steps before it reaches the
       first `scripts/test.sh` — checkout, the cache-save decision, mtime
-      restore, `brew install tmux`, `xcode-select`, toolchain capture, cache
-      restore, workspace repair, force rebuild, the build — and any one of
-      them failing means zero tests ran, no xUnit file was written and no
-      artifact was uploaded. `brew install` flaking on a hosted runner is
-      ordinary weather, and reporting that as a red suite tells a caller its
-      tests failed when they never started, with no local fallback to correct
-      it. Every case that lands here is answered correctly by 78: setup failed
+      restore, `xcode-select`, toolchain capture, cache restore, workspace
+      repair, force rebuild, the build — and any one of them failing means
+      zero tests ran, no xUnit file was written and no artifact was uploaded.
+      A setup step failing on a hosted runner is ordinary weather, and
+      reporting that as a red suite tells a caller its tests failed when they
+      never started, with no local fallback to correct it. Every case that lands here is answered correctly by 78: setup failed
       (nothing ran); the compile failed (the local re-run reproduces the error
       properly); the tests really did fail but the upload broke (the local
       re-run finds the real failures); cancelled (already 78, via

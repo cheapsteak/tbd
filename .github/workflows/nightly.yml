@@ -70,11 +70,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tmux
-        # macos runners don't ship tmux, and the stress loop reruns test.yml's
-        # passes, which run with it installed.
-        run: brew install tmux
-
       - name: Select Xcode 26.6 (Swift 6.3.3)
         run: sudo xcode-select -s /Applications/Xcode_26.6.app
 
