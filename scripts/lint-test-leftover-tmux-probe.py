@@ -32,7 +32,9 @@ without a build. Under `Tests/`:
   `LeftoverTmuxServerProbe` that defaults to `.absent` instead.
 - `production()` is used only in the files in `PRODUCTION_ALLOWED`: the
   probe's own suite, whose calls inject the environment and the process
-  lister, and the tier-3 test that runs it against a real tmux server. A use
+  lister, and the tier-3 test that runs it against a stand-in for a leftover
+  server — a bash process whose argv names the server, and a socket the test
+  binds — with the fallback root and the process lister injected. A use
   is `LeftoverTmuxServerProbe.production`, called or named as a function, and
   any implicit-member `.production(` or `.production {` whose argument labels
   are all the probe's own (`environment`, `fallbackRoot`, `uid`,

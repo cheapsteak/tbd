@@ -20,8 +20,8 @@ import Darwin
 /// descriptors at all, stdio included (`POSIX_SPAWN_CLOEXEC_DEFAULT`): every
 /// suite shares this test process, so an inherited descriptor could be
 /// another suite's lock or pipe, held open until the child is ended. Start
-/// only a program that needs no stdio and touches no TBD store; `/bin/sleep`
-/// is the one the suites use.
+/// only a program that needs no stdio and touches no TBD store: the suites
+/// start `/bin/sleep`, and `/bin/bash` running a bounded `sleep`.
 public struct ExactArgvChild: Sendable {
     /// A call that starts the child failed. Thrown, so its text is the
     /// failing test's primary line; there is no child to end.
