@@ -1453,11 +1453,11 @@ jobs:
       # fails with EACCES at its own call site) and, as a backstop, fingerprints
       # the real `~/tbd`, `~/.claude`, `~/.codex`,
       # `~/Library/Logs/TBD/hang-stacks` and test-suite plists in
-      # `~/Library/Preferences` on either side and fails the step if
-      # anything appeared or vanished.
-      # `CLAUDE.md` has said "Tests must not touch ~/tbd" all along, and the
-      # suite quietly violated it anyway: 18k orphan profile dirs and ~2.9k
-      # fake worktrees accumulated on a developer box before anyone noticed. No per-test assertion could have caught it —
+      # `~/Library/Preferences` on either side and fails the step if anything
+      # appeared or vanished. `CLAUDE.md` has said "Tests must not touch
+      # ~/tbd" all along, and the suite quietly violated it anyway: 18k orphan
+      # profile dirs and ~2.9k fake worktrees accumulated on a developer box
+      # before anyone noticed. No per-test assertion could have caught it —
       # the invariant belongs to the whole run.
       #
       # THIS JOB IS THE ONLY PLACE THE FINGERPRINT RUNS, and every step below

@@ -28,8 +28,9 @@
 #      `TBD_CLAUDE_HOST_HOME` and `TBD_TEST_CODEX_HOME` point at a fresh
 #      scratch dir for the whole run, so any code path that resolves a
 #      TBD-owned path — or the host Claude store a profile dir mirrors, or the
-#      Codex store — lands there instead of in the real one. This catches leaks nobody has
-#      diagnosed yet, including ones in code that has no injection seam at all.
+#      Codex store — lands there instead of in the real one. This catches
+#      leaks nobody has diagnosed yet, including ones in code that has no
+#      injection seam at all.
 #      `DEV_SERVERS_DIR` points the shared dev-server running-file directory
 #      (`~/.local/state/dev-servers`, docs/dev-servers.md) at the same scratch,
 #      so no test reads or writes running files a real server published.

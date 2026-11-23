@@ -63,25 +63,26 @@ invalidates any measurement they are midway through.
 Every invocation in this file, in `test.yml` and in the pre-push hook goes
 through `scripts/test.sh`, which forwards its arguments to `swift test` behind a
 scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME` /
-`TBD_TEST_CODEX_HOME`, plus a `TBD_TEST_SCRATCH_ROOT` naming that scratch dir
-itself — the one the EXIT trap deletes — for the few fixtures that must mint a
-short socket-bearing root of their own and need it reclaimed even on a killed
-run. Bare `swift test` writes into the developer's real `~/tbd`, `~/.claude`
-and `~/.codex` — 18k orphan profile dirs and ~2.9k fake worktrees accumulated
-that way before anyone noticed. Read `swift test …` below
-as `scripts/test.sh …`.
+`TBD_TEST_CODEX_HOME` / `DEV_SERVERS_DIR`, plus a `TBD_TEST_SCRATCH_ROOT`
+naming that scratch dir itself — the one the EXIT trap deletes — for the few
+fixtures that must mint a short socket-bearing root of their own and need it
+reclaimed even on a killed run. Bare `swift test` writes into the developer's
+real `~/tbd`, `~/.claude` and `~/.codex` — 18k orphan profile dirs and ~2.9k
+fake worktrees accumulated that way before anyone noticed. `DEV_SERVERS_DIR`
+keeps tests out of the shared dev-server running-file directory, which other
+tools on the machine read. Read `swift test …` below as `scripts/test.sh …`.
 
 **One of the things a run leaves behind is a process, and no amount of path
 fencing touches it.** A `TBDHolder` outlives the test process that spawned it
-*by design* — it calls
-`setsid()` and ignores `SIGHUP` so it can survive the daemon's death
-(`Sources/TBDHolder/Holder.swift`), which means it survives a dead test process
-just as well, re-parents to launchd, and keeps its job running. Nothing in the
-product reclaims a fixture's holder: `OrphanGC`'s rowless-holder collector
-enumerates the real `~/tbd/holders`, and `AgentReaper`'s holder leg works from
-`terminal` rows an in-memory fixture database never had. One measured instance
-ran for 24 hours with its job still looping. Three layers cover the three ways
-one can be left behind, and each covers exactly one:
+*by design* — it calls `setsid()` and ignores `SIGHUP` so it can survive the
+daemon's death (`Sources/TBDHolder/Holder.swift`), which means it survives a
+dead test process just as well, re-parents to launchd, and keeps its job
+running. Nothing in the product reclaims a fixture's holder: `OrphanGC`'s
+rowless-holder collector enumerates the real `~/tbd/holders`, and
+`AgentReaper`'s holder leg works from `terminal` rows an in-memory fixture
+database never had. One measured instance ran for 24 hours with its job still
+looping. Three layers cover the three ways one can be left behind, and each
+covers exactly one:
 
 - **A teardown that runs** kills what its rows name, then sweeps the pids it
   remembers — refusing any whose kernel start time no longer matches the one
@@ -107,20 +108,20 @@ one can be left behind, and each covers exactly one:
   **Age is not the whole discriminator, and the missing half is the dangerous
   one.** No run lasts a day, so age says nobody is coming back — but a run that
   WEDGES stops writing, so its root ages exactly like an abandoned one while its
-  holder and its `TBD_HOME` are still in use. So every run
-  claims its own root on the way in, writing its pid and that pid's kernel start
-  time into `<root>/.run-owner`, and the reconciler skips any root whose claim
-  still checks out. Same identity check as everywhere else here: a pid alone
+  holder and its `TBD_HOME` are still in use. So every run claims its own root
+  on the way in, writing its pid and that pid's kernel start time into
+  `<root>/.run-owner`, and the reconciler skips any root whose claim still
+  checks out. Same identity check as everywhere else here: a pid alone
   would be a number the kernel is free to reissue. A root with no claim in it
   predates the mechanism and is reclaimed on age — the one arm that is
   deliberately not keep-biased, because immortal roots are the leak.
 
-Those variables only fence code that *asks* where home is. The
-wrapper also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home
-whose `tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
+Those variables only fence code that *asks* where its store is. The wrapper
+also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home whose
+`tbd`, `.claude` and `.codex` entries are pre-created mode `000`. That covers
 the code that assembles a path out of the home directory instead of asking: it
-gets `EACCES` at the call site, inside the failing test, with the offending path
-in the error.
+gets `EACCES` at the call site, inside the failing test, with the offending
+path in the error.
 
 **So if a test fails with "You don't have permission to save the file …" on a
 path ending in `/tbd/…`, `/.claude/…` or `/.codex/…`, read it as: this code
@@ -190,15 +191,15 @@ built from a `home` that arrived as a parameter matches nothing. It narrows the
 shape rather than closing it.
 
 The wrapper's detection layer, a before/after fingerprint of five real roots,
-is on when `$CI` is set and off otherwise; `--fingerprint` opts in
-locally and `--no-fingerprint` forces it off. The default follows the argument
-rather than contradicting it: a live daemon and sibling worktrees write to
-`~/tbd` legitimately for the whole duration of a local run, and any concurrent
-agent session starting in a new directory mints a fresh
-`~/.claude/projects/<cwd-hash>`. It is a backstop,
-not the primary guard: it compares directory *listings*, so a leak that writes
-to a fixed path — or one that cleans up after itself in a `defer` — is invisible
-to it, while the tripwire fails on the permission check every run regardless.
+is on when `$CI` is set and off otherwise; `--fingerprint` opts in locally and
+`--no-fingerprint` forces it off. The default follows the argument rather than
+contradicting it: a live daemon and sibling worktrees write to `~/tbd`
+legitimately for the whole duration of a local run, and any concurrent agent
+session starting in a new directory mints a fresh
+`~/.claude/projects/<cwd-hash>`. It is a backstop, not the primary guard: it
+compares directory *listings*, so a leak that writes to a fixed path — or one
+that cleans up after itself in a `defer` — is invisible to it, while the
+tripwire fails on the permission check every run regardless.
 The fifth root, `~/Library/Preferences`, has no fence half. What guards it is
 the SwiftLint rule `no_raw_userdefaults_suite`, which keeps every suite on the
 helper, and the helper's own test asserting that the backing file lands at the
@@ -212,12 +213,12 @@ runs in the `lint` CI job: it drives the symlink and ownership refusals on the
 fake home, the post-run mode-000 recheck, the fingerprint's seven arms (five
 roots, two of which are read twice), the preferences reclaim, its three
 refusals and its post-run settle, the holder sweep and the abandoned-run-root
-reconciler, and the shared-lock pin against fixture directories with a stub `swift`, so it takes
-~11 s, builds nothing, and touches no real store. **Every case there is
-mutation-checked** — the assertion is shown going red against a deliberately
-weakened copy of the script. If you change a guard, change its case; if you add
-one, add a case. The guards were proven once by hand when they landed, and that
-is not a regression test.
+reconciler, and the shared-lock pin against fixture directories with a stub
+`swift`, so it takes ~11 s, builds nothing, and touches no real store. **Every
+case there is mutation-checked** — the assertion is shown going red against a
+deliberately weakened copy of the script. If you change a guard, change its
+case; if you add one, add a case. The guards were proven once by hand when
+they landed, and that is not a regression test.
 
 ## Test tiers
 
@@ -226,7 +227,8 @@ in-process state only — no real sleeps, subprocesses, network, or `~/tbd`),
 tier 2 (in-process integration — real concurrency, real filesystem, real git
 subprocesses, deadlines only via bounded waits), tier 3 (live-external — real
 `TBDHolder` processes, real `ps`, spawned processes, the kernel's process
-table, the replay firehose). Full taxonomy: `docs/specs/2026-07-24-test-hardening-design.md` §3.
+table, the replay firehose). Full taxonomy:
+`docs/specs/2026-07-24-test-hardening-design.md` §3.
 
 Tier 3 suites live in `Tests/TBDDaemonLiveTests/`. A suite belongs there if
 and only if its runtime depends on an external process it does not fully
