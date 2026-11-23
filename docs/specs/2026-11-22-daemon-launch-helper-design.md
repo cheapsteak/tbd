@@ -145,14 +145,16 @@ The helper has three modes:
 
 1. The launcher runs `TBD Server --launch` with the daemon's path, the log path and its own
    environment, which includes `TBD_HANDOVER_FROM_PID` during a handover.
-2. `--launch` creates `$TBD_HOME/helper/launches/<uuid>/` and writes `job.plist` into it:
+2. `--launch` creates `$TBD_HOME/helper/launches/<uuid>/` with mode `0700` and writes
+   `job.plist` into it. The plist carries the launcher's environment, which can hold tokens, so
+   it and every other file `--launch` and `--serve` write in that directory are mode `0600`:
    - `Label` `com.github.cheapsteak.tbd.daemon.<uuid>`;
    - `ProgramArguments`: the helper executable, `--job`, the launch directory, the daemon path
      and the log path;
    - `RunAtLoad` true, `KeepAlive` false, `AbandonProcessGroup` true, `ProcessType`
      `Interactive`;
-   - `EnvironmentVariables`: the launcher's whole environment, plus `TBD_LAUNCH_MODE=helper`
-     and `TBD_HELPER_VERSION`;
+   - `EnvironmentVariables`: the launcher's whole environment, minus any inherited
+     `TBD_LAUNCH_FALLBACK_REASON`, plus `TBD_LAUNCH_MODE=helper` and `TBD_HELPER_VERSION`;
    - `WorkingDirectory`, `Umask` and the soft and hard `NumberOfFiles` limits: the launcher's
      own.
 3. `--launch` runs `launchctl bootstrap gui/<uid> <job.plist>`. launchd starts `--job` in a new
@@ -166,12 +168,24 @@ The helper has three modes:
    - **Why `--serve` disclaims:** without it, `--serve` inherits `--job` as its responsible
      process, and `--job` is about to exit. Disclaimed, `--serve` is its own responsible process
      for as long as it lives, and it stays in the job's coalition.
-5. `--serve` opens the log path for writing, spawns the daemon with that file as stdout and
-   stderr, and writes the daemon's pid to the launch directory's `pid` file (written to a
-   temporary name, then renamed). If the spawn fails, it writes `error: <reason>` there instead
-   and exits.
-6. `--launch` polls for the `pid` file until a 5-second deadline on an injected clock. launchd
-   starts a job in tens of milliseconds, and missing the deadline costs only a fallback.
+5. `--serve` first claims the launch: it creates the launch directory's `claim` file with
+   `O_CREAT | O_EXCL`. If the file already exists, or the launch directory is gone, `--launch`
+   has given up on this launch, and `--serve` exits without spawning anything. Having claimed it, `--serve` opens the log path for
+   writing, spawns the daemon with that file as stdout and stderr, and writes the daemon's pid to
+   the `pid` file (written to a temporary name, then renamed). If the spawn fails, it writes
+   `error: <reason>` there instead and exits.
+6. `--launch` checks for the `pid` file every 20 ms until a 5-second deadline on an injected
+   clock. launchd starts a job in tens of milliseconds, and missing the deadline costs only a
+   fallback. At the deadline `--launch` tries to create `claim` itself, the same way:
+   - **It creates it:** no daemon can start from this launch, so it fails and the launcher falls
+     back.
+   - **`--serve` holds it already:** the spawn is under way. `--launch` waits up to a further 5
+     seconds for the `pid` or `error:` result. Past that it fails anyway, and the daemon's
+     pid-file gate is the backstop against a second daemon.
+
+   The claim is what keeps a late helper launch and a direct fallback from both starting a
+   daemon. The pid-file gate alone cannot: during a handover both carry `TBD_HANDOVER_FROM_PID`,
+   which is the way past that gate.
 7. On success `--launch` boots out the finished job, removes the launch directory and prints the
    pid. The launcher waits on that pid exactly as it waits on `$!` today.
 
@@ -205,15 +219,24 @@ takes effect at the next daemon launch and never moves a running daemon.
 
 **Reading the flag before a daemon runs.** A launch happens when no daemon runs (app auto-start)
 or when one is about to be replaced (handover), so a launcher cannot ask over RPC.
-`TBDDaemon --launch-mode` reads the flag and exits:
+`TBDDaemon --launch-mode --home <path>` reads the flag and exits. `<path>` is the real TBD home,
+from which it derives the database and the helper path.
 
-- It opens `state.db` read-only, at the path `TBDConstants` derives from `TBD_HOME`, and reads
-  only `daemon_launch_helper_enabled`. The launching binary is newer than the database it reads,
-  so a database the column has not reached yet reads as NULL. So does a missing database.
+Launchers run this probe fenced, the way `scripts/test.sh` fences a test run. `TBD_HOME`,
+`TBD_SOCKET_PATH`, `HOME` and `CFFIXED_USER_HOME` point into an empty temporary directory, and
+`TBD_HANDOVER_FROM_PID` is removed. A probe still running after 5 seconds is killed. The fence is
+for a daemon binary from before `--launch-mode`, which ignores the arguments and starts serving.
+Fenced, it claims no real pid file or socket, writes nothing in a real place, and retires no
+predecessor, and the time limit ends it. Launchers and binaries normally come from one build, so
+this guards only mixed states, such as a script newer than the binary beside it.
+
+- It opens the database read-only and reads only `daemon_launch_helper_enabled`. The launching
+  binary is newer than the database it reads, so a database the column has not reached yet reads
+  as NULL. So does a missing database.
 - It resolves NULL through `Config.daemonLaunchHelperDefault`, the same constant
   `ConfigRecord.toModel()` uses. A test holds the two readers to the same answer for NULL, 0 and 1.
 - It prints `direct`, or `helper` followed by the path of the helper executable for the
-  `HelperVersion` it was built with.
+  `HelperVersion` it was built with, under `<path>`.
 
 **Launchers.** Three places start a daemon, and each branches on `--launch-mode`:
 
@@ -222,10 +245,14 @@ or when one is about to be replaced (handover), so a launcher cannot ask over RP
 - the handover launch in `scripts/update.sh`, both interactive and `--auto`;
 - `DaemonClient.launchDaemon` in `Sources/TBDApp/DaemonClient.swift`, the app's auto-start.
 
-In `direct` mode each launches exactly as it does today. In `helper` mode each runs
-`TBD Server --launch` and takes the daemon's pid from its output. Handover waits, readiness
-checks and stop-on-failure keep working on that pid unchanged. A failing `--launch-mode` reads as
-`direct`.
+In `direct` mode each launches as it does today, except that it removes `TBD_LAUNCH_MODE`,
+`TBD_HELPER_VERSION` and `TBD_LAUNCH_FALLBACK_REASON` from the daemon's environment. A daemon
+passes its environment on to what it starts, so without that, an update a helper-launched daemon
+started would label its direct launch `helper`. In `helper` mode each runs `TBD Server --launch`
+and takes the daemon's pid from its output. Handover waits, readiness checks and stop-on-failure
+keep working on that pid unchanged. A failing `--launch-mode` reads as `direct`.
+
+The app's auto-start keeps no daemon log today, and passes `/dev/null` as the log path.
 
 Tests, `scripts/test.sh`, mock-mode daemons and CI never go through a launcher and are
 unaffected.
@@ -238,11 +265,12 @@ A launcher falls back when no helper is installed at the path `--launch-mode` pr
 - `launchctl bootstrap` fails, as it does over SSH with no GUI session;
 - the disclaim symbol is missing;
 - `--serve` reports a spawn error;
-- the pid deadline passes.
+- the pid deadline passes and `--launch` takes the claim, or the further wait after `--serve`
+  took it passes.
 
 `--launch` boots out the job and removes the launch directory before it exits. The launcher logs the
-reason and launches the daemon directly, setting `TBD_LAUNCH_FALLBACK_REASON` in the daemon's
-environment. A failed helper launch therefore costs exactly today's exposure, and never leaves
+reason and launches the daemon directly, removing the inherited labels as any direct launch does
+and setting `TBD_LAUNCH_FALLBACK_REASON` in the daemon's environment. A failed helper launch therefore costs exactly today's exposure, and never leaves
 the user without a daemon.
 
 ### Handover and existing sessions
@@ -263,9 +291,10 @@ the user without a daemon.
 update.sh and restart.sh install the helper when `$TBD_HOME/helper/<HelperVersion>/` is missing,
 and only then:
 
-1. Build the `TBDServer` product with the rest of the build.
+1. Build the `TBDServer` product with the rest of the build. A release download carries it with
+   the other products. The install learns the version from `TBD Server --helper-version`.
 2. Assemble `TBD Server.app` from the binary and `Sources/TBDServer/Info.plist`, in a temporary
-   directory beside the version directory.
+   `.install-*` directory beside the version directory.
 3. Sign it ad hoc and verify the signature.
 4. Rename it into place, then register it with Launch Services (`lsregister -f`), so that the
    Local Network prompt and System Settings show it by name.
@@ -284,14 +313,19 @@ direct launch.
 - **launchd job registrations and launch directories.** `--launch` removes its own on success
   and on failure. A `--launch` killed partway leaves both behind. `OrphanGC`, under `gcEnabled`,
   boots out any job labelled `com.github.cheapsteak.tbd.daemon.` that is not running and whose
-  launch directory is older than `gcGraceSeconds`, then removes the directory.
+  launch directory is older than `gcGraceSeconds`, then removes the directory. Each half is
+  judged on its own: a registration with no launch directory is booted out when it is not
+  running, and a launch directory with no registration is removed once it is older than
+  `gcGraceSeconds`.
   - Booting out a finished job must leave `--serve` and the daemon running, and a live test
     proves it before this ships. If the test shows otherwise, nothing boots out finished jobs:
     they are inert and vanish at logout, and `OrphanGC` removes only the directories.
 - **Helper version directories.** `OrphanGC`, under `gcEnabled`, removes one only when no running
-  process executes from it and its `last-used` stamp is 30 days old. Process information it
-  cannot read counts as in use. The 30 days spare the grants of a version that a worktree
-  launches now and then.
+  process executes from it and its `last-used` stamp is 30 days old. A directory with no stamp is
+  dated by its own modification time. A process listing that fails, or a process whose
+  executable path cannot be read, counts as in use. The 30 days spare the grants of a version
+  that a worktree launches now and then. An install killed partway leaves its `.install-*`
+  directory, which is reclaimed under the same rule as a version directory no process uses.
 - **`--serve` processes.** No reconciler covers them, because an orphan cannot arise: a `--serve`
   lives only while some other process in its coalition lives, and that process depends on it.
 
@@ -303,17 +337,22 @@ direct launch.
 - **`tbd doctor sessions`** is a new check. The existing `tbd doctor` keeps checking the CLI
   install. It reports:
   - how the daemon was launched, and why it fell back if it did;
-  - the daemon's coalition, each live holder's, and any GUI app that shares a holder's
-    coalition. A holder outside the daemon's coalition, or in an app's, is exposed, and doctor
-    suggests parking and waking it;
+  - the daemon's coalition, the coalition of each live holder TBD has a row for, and any GUI
+    app that shares a holder's coalition. A GUI app is a process whose executable sits in an
+    `.app` bundle's `Contents/MacOS`, other than TBD Server. A holder is protected when a
+    `--serve` of any helper version is in its coalition and no GUI app is. After a handover,
+    older holders stay under the previous `--serve`, and they are protected too. Any other holder
+    is exposed, and doctor suggests parking and waking it;
   - doctor's own responsible process, read through the private
     `responsibility_get_pid_responsible_for_pid` when it resolves, or "unknown";
   - whether it can list `~/Documents` and `~/Desktop`;
-  - whether a TCP connect to the default gateway is allowed: refused or connected means allowed,
-    `EHOSTUNREACH` means denied, a timeout means unknown.
+  - whether a TCP connect to the default gateway on port 80 is allowed, with a 2-second
+    timeout: refused or connected means allowed, `EHOSTUNREACH` means denied, a timeout means
+    unknown.
 
-  Run inside a TBD tab, doctor descends from `--serve` and shares the sessions' privacy identity,
-  so its privacy answers are the sessions' real ones. Run anywhere else, it says that its answers
+  Doctor knows it runs inside a TBD session when a `--serve` shares its coalition. There it has
+  `--serve` as its responsible process and shares the sessions' privacy identity, so its privacy
+  answers are the sessions' real ones. Run anywhere else, it says that its answers
   describe its own context, not the sessions'. The first run inside a TBD tab may raise the macOS
   prompts that name TBD Server, which is how the user grants them.
 
@@ -370,6 +409,13 @@ direct launch.
   terminated with its subordinates (agterm#985).
 - **One long-lived `--serve` that spawns each successor daemon on request.** It adds a protocol
   and helper-daemon version skew, and buys nothing over a `--serve` per launch.
+- **Leaving the fallback race to the daemon's pid-file gate.** During a handover both a late
+  helper daemon and the direct fallback carry `TBD_HANDOVER_FROM_PID`, the way past that gate, so
+  it cannot pick one. Having `--serve` kill a daemon it spawned after the deadline was rejected
+  too: a daemon that starts and is killed can disturb a handover in progress.
+- **A marker file beside the binaries saying they understand `--launch-mode`.** It is one more
+  artifact to keep in step with the binary, where the fenced probe makes an old binary harmless
+  whatever it does.
 - **Forwarding SIGTERM from `--serve` to the daemon.** It gives anything that signals `--serve` a
   path to stop the daemon. Launchers already stop the daemon by its pid.
 - **A self-signed certificate, or an Apple Development identity, for the helper.** Either could
@@ -386,10 +432,14 @@ Every branch the flag gates is tested in both states, as `CLAUDE.md` requires.
 - **Flag states:** a pre-migration row reads NULL. An explicit `false` survives a change to the
   default constant, and NULL follows it. `--launch-mode` prints `direct` for no database, a
   database without the column, NULL and `0`, and `helper` for `1`.
-- **Job plist builder:** every key in step 2 of the launch sequence, with a unique label.
-- **`--launch` failures,** with an injected `launchctl` runner and clock: helper missing,
-  bootstrap refused, disclaim symbol missing, spawn error, deadline passed. Each boots out the job,
+- **Job plist builder:** every key in step 2 of the launch sequence, with a unique label, an
+  inherited fallback reason dropped, and modes `0700` and `0600`.
+- **`--launch` failures,** with an injected `launchctl` runner and clock: bootstrap refused,
+  disclaim symbol missing, spawn error, deadline passed with the claim taken by `--launch`, and
+  deadline passed with the claim taken by `--serve` but no result. Each boots out the job,
   removes the directory and exits non-zero with its reason.
+- **The claim:** `--serve` that finds `claim` already created spawns nothing. `--launch` that
+  finds it taken by `--serve` waits for the result instead of failing at the first deadline.
 - **`--serve` lifetime,** with an injected coalition lister and clock: it stays while another
   member remains, exits when alone, and stays when the listing fails.
 - **`OrphanGC`:**
@@ -404,12 +454,14 @@ Every branch the flag gates is tested in both states, as `CLAUDE.md` requires.
 
 **Script harnesses** (`scripts/restart-bundle-lib.test.sh`, `scripts/update.test.sh`)
 
-- `direct` launches with the unchanged line.
+- `direct` launches with the unchanged line, less any inherited `TBD_LAUNCH_*` labels.
 - `helper` invokes the helper with the environment and the log path, and waits on the pid it
   prints.
-- A failed helper launch falls back to a direct launch, logs the reason and sets
-  `TBD_LAUNCH_FALLBACK_REASON`.
+- A missing helper, or a failed helper launch, falls back to a direct launch, logs the reason and
+  sets `TBD_LAUNCH_FALLBACK_REASON`.
 - A failing `--launch-mode` launches directly.
+- The probe runs fenced: a stand-in daemon that ignores `--launch-mode` and starts serving sees
+  only the temporary home, no `TBD_HANDOVER_FROM_PID`, and is killed at the time limit.
 - An install runs only when the version directory is missing.
 
 **App**
