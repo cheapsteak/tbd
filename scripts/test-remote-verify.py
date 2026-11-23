@@ -740,11 +740,10 @@ class ResultsVerdictTests(unittest.TestCase):
         )
 
     def test_no_results_at_all_is_no_verdict_rather_than_a_failing_suite(self):
-        # 78, NOT 1. The test job runs nine fallible steps before the first
-        # `scripts/test.sh` — checkout, the cache-save decision, mtime restore,
-        # `xcode-select`, toolchain capture, cache restore, workspace repair,
-        # force rebuild, the build — so a failed cache restore means zero tests
-        # ran, no xUnit file exists and no artifact was uploaded.
+        # 78, NOT 1. The test job runs its setup and build steps before the
+        # first `scripts/test.sh`, checkout and the build among them, so a
+        # failed checkout or build means zero tests ran, no xUnit file exists
+        # and no artifact was uploaded.
         # Adopting 1 there tells a caller its suite is red when nothing ever
         # compiled, and `scripts/test.sh` has no local fallback for a 1. Every
         # case that reaches here is answered by 78: setup died, the compile
@@ -1176,7 +1175,7 @@ class DriverTests(unittest.TestCase):
 
     def test_a_failing_run_with_no_artifact_falls_back_to_the_local_queue(self):
         # A RED RUN THAT PUBLISHED NOTHING IS NOT A RED SUITE. This is the shape a
-        # setup failure takes — the cache restore failing before the first
+        # setup failure takes — the checkout or the build failing before the first
         # `scripts/test.sh`, so zero tests ran and no xUnit file exists — and it is
         # indistinguishable here from a red run whose upload broke. 78 fits both:
         # the local re-run either compiles nothing new or finds the real failures,
