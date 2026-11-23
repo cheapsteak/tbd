@@ -645,9 +645,22 @@ extension WorktreeLifecycle {
     /// renamed — is left as it is and logged, and the next pass, or the
     /// reaper's next hand-back, judges it afresh.
     ///
+    /// **A committed write is announced as every other park and close is:**
+    /// `.terminalHibernationChanged` for a park, `.terminalRemoved` for a
+    /// delete. The app applies both to its cached row in place, so without
+    /// them a connected app keeps showing the row live until something else
+    /// makes it refetch. The reaper's hand-back runs with an app connected,
+    /// and so can every sweep after startup — `repo.add`, `cleanup`, the
+    /// hourly scratch pass; at startup no app is connected yet, and the
+    /// announcement reaches nobody. A write that failed or was refused
+    /// changed nothing, and announces nothing.
+    ///
     /// `finding` is what the caller established, in the words the log line
     /// carries, so the two callers' lines can be told apart.
-    private func disposeOfEndedHolderRow(
+    ///
+    /// Internal rather than private only so a test can hand it a row that
+    /// changed after it was read, which neither caller lets a test arrange.
+    func disposeOfEndedHolderRow(
         _ terminal: Terminal, finding: String, actuationLog: ActuationLog
     ) async {
         let expectedState = LiveHolderRowSnapshot(terminal: terminal)
@@ -686,6 +699,7 @@ extension WorktreeLifecycle {
             }
             await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
             logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — \(finding, privacy: .public), session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
+            await announceRecoveryPark(of: terminal)
         } else {
             let deleted: Bool
             do {
@@ -701,10 +715,47 @@ extension WorktreeLifecycle {
             }
             await sessionTitles.forget(terminalID: terminal.id)
             logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(finding, privacy: .public), no session to preserve")
+            subscriptions?.broadcast(delta: .terminalRemoved(TerminalIDDelta(terminalID: terminal.id)))
         }
         await pendingQuestions.clear(terminalID: terminal.id)
         await subscriptions?.broadcastPendingPrompts(
             terminalID: terminal.id, from: pendingQuestions)
+    }
+
+    /// Announce the recovery park `disposeOfEndedHolderRow` just committed on
+    /// `terminal`'s row, with the delta `HibernationCoordinator.broadcastHibernation`
+    /// sends for every other park.
+    ///
+    /// Read back after the commit, as that one is: the park minted a session
+    /// incarnation and wrote the activity columns, and nothing else announces
+    /// either. A row read back unparked was woken since, and one read back
+    /// gone was closed; that wake or close announces the row as it now is, and
+    /// a park delta landing after it would put the app's cached row back to
+    /// parked, so neither is announced. A row that cannot be read back is
+    /// still announced as parked, with the fields this pass read before it.
+    private func announceRecoveryPark(of terminal: Terminal) async {
+        guard let subscriptions else { return }
+        let committed: Terminal?
+        do {
+            guard let row = try await db.terminals.get(id: terminal.id), row.isParked else {
+                logger.debug("reconcile: not announcing the park of terminal \(terminal.id, privacy: .public) — it was woken or closed after the park")
+                return
+            }
+            committed = row
+        } catch {
+            logger.warning("reconcile: parked terminal \(terminal.id, privacy: .public) but could not read it back; announcing the park without its new incarnation: \(error.localizedDescription, privacy: .public)")
+            committed = nil
+        }
+        subscriptions.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            hibernated: true,
+            keepWarm: committed?.keepWarm ?? terminal.keepWarm,
+            suspendedSnapshot: committed?.suspendedSnapshot ?? terminal.suspendedSnapshot,
+            hibernateReason: committed?.hibernateReason ?? .recovery,
+            sessionIncarnationID: committed?.sessionIncarnationID,
+            activity: committed.map(TerminalActivityDelta.init(columnsOf:))
+        )))
     }
 
     /// Judge one holder row again once `AgentReaper` has found its holder and

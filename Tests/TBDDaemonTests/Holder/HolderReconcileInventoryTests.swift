@@ -65,10 +65,12 @@ struct HolderReconcileInventoryTests {
 
     private func makeLifecycle(
         db: TBDDatabase, signaller: ProcessSignaller, registry: HolderRegistry?,
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        subscriptions: StateSubscriptionManager? = nil
     ) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), hooks: HookResolver(),
+            subscriptions: subscriptions,
             processSignaller: signaller,
             // Every tmux server reads as gone — the answer a holder row's worktree
             // gets from a real socket, since a server that was never started has
@@ -1009,6 +1011,135 @@ struct HolderReconcileInventoryTests {
         }
     }
 
+    // MARK: - What a disposal announces
+
+    /// A connected app applies a park to its cached row in place, from the
+    /// delta every park sends; without it the row reads live until the app
+    /// next refetches. The hand-back is the disposal that runs with an app
+    /// connected, so it is the one that has to say so.
+    @Test("a handed-back row that is parked is announced as parked")
+    func aHandedBackParkIsAnnounced() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let deltas = BroadcastDeltas()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243]), registry: registry,
+            subscriptions: deltas.manager)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        await registry.recordStatusForTesting(
+            .exitedStatusUnknown, for: claude.id, fromAbsentRendezvous: true)
+
+        #expect(await handBack(claude, to: lifecycle) == .sessionOver(.exitedStatusUnknown))
+
+        let parked = try #require(try await db.terminals.get(id: claude.id))
+        #expect(deltas.removals(of: claude.id) == 0)
+        let announced = deltas.hibernationChanges(of: claude.id)
+        #expect(announced.count == 1, "the park was announced \(announced.count) times")
+        let park = try #require(announced.first, "the park was never announced to the app")
+        #expect(park.worktreeID == main.id)
+        #expect(park.hibernated)
+        #expect(park.hibernateReason == .recovery)
+        #expect(park.keepWarm == parked.keepWarm)
+        // The park minted these, and nothing else announces them: a cached
+        // row that kept the old incarnation would forward the next session's
+        // reports under one the daemon no longer runs.
+        #expect(park.sessionIncarnationID == parked.sessionIncarnationID)
+        #expect(park.activity?.activityState == .idle)
+    }
+
+    /// The other fork: a row deleted with its tab is announced as removed, so
+    /// the app drops the tab instead of showing a session that is gone.
+    @Test("a handed-back row that is deleted is announced as removed")
+    func aHandedBackDeleteIsAnnounced() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let deltas = BroadcastDeltas()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243]),
+            registry: registry(environment: vanishedHolderEnvironment()),
+            subscriptions: deltas.manager)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4242, childPID: 4243)
+
+        #expect(await handBack(shell, to: lifecycle) == .sessionOver(.exitedStatusUnknown))
+
+        #expect(try await db.terminals.get(id: shell.id) == nil)
+        #expect(deltas.removals(of: shell.id) == 1)
+        #expect(deltas.hibernationChanges(of: shell.id).isEmpty)
+    }
+
+    /// The sweep disposes through the same code, so it announces the same
+    /// way. It matters after startup — `repo.add`, `cleanup` and the hourly
+    /// scratch pass run with an app connected — and costs nothing at startup,
+    /// when nobody is subscribed yet.
+    @Test("the sweep announces each row it parks or deletes")
+    func theSweepAnnouncesItsDisposals() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let deltas = BroadcastDeltas()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243, 4245]),
+            registry: registry(environment: vanishedHolderEnvironment()),
+            subscriptions: deltas.manager)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
+
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+
+        #expect(try await db.terminals.get(id: claude.id)?.isParked == true)
+        #expect(deltas.hibernationChanges(of: claude.id).map(\.hibernateReason) == [.recovery])
+        #expect(try await db.terminals.get(id: shell.id) == nil)
+        #expect(deltas.removals(of: shell.id) == 1)
+    }
+
+    /// A write the row refused changed nothing, so it tells the app nothing:
+    /// a park or removal announced over a row that was woken onto a new
+    /// holder in between would hide a running session. Driven directly,
+    /// because neither caller lets a test change the row between its read
+    /// and its write.
+    @Test("a disposal the row refused announces nothing")
+    func aRefusedDisposalAnnouncesNothing() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let deltas = BroadcastDeltas()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243, 4245]),
+            registry: registry(environment: vanishedHolderEnvironment()),
+            subscriptions: deltas.manager)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let created = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
+        let shell = try #require(try await db.terminals.get(id: created.id))
+
+        // Both woken onto new holders after the disposal's caller read them.
+        try await db.terminals.setHolderProcess(
+            id: claude.id, holderPID: 5252, childPID: 5253, startedAt: Date())
+        try await db.terminals.setHolderProcess(
+            id: shell.id, holderPID: 5254, childPID: 5255, startedAt: Date())
+
+        await lifecycle.disposeOfEndedHolderRow(
+            claude, finding: "a stale read", actuationLog: makeTestActuationLog())
+        await lifecycle.disposeOfEndedHolderRow(
+            shell, finding: "a stale read", actuationLog: makeTestActuationLog())
+
+        #expect(try await db.terminals.get(id: claude.id)?.isParked == false)
+        #expect(try await db.terminals.get(id: shell.id) != nil)
+        #expect(deltas.all.isEmpty, "a refused disposal broadcast \(deltas.all.count) delta(s)")
+    }
+
     // MARK: - The disposal's compare-and-set
 
     /// The sweep and the hand-back read a row, probe, and only then write, so
@@ -1087,6 +1218,41 @@ private final class SleepRecordingClock: Clock, @unchecked Sendable {
         let requested = base.now.duration(to: deadline)
         lock.withLock { recorded.append(requested) }
         try await base.sleep(until: deadline, tolerance: tolerance)
+    }
+}
+
+/// Every delta a lifecycle broadcasts through `manager`, collected from
+/// whichever thread broadcast it.
+private final class BroadcastDeltas: @unchecked Sendable {
+    let manager = StateSubscriptionManager()
+    private let lock = NSLock()
+    private var deltas: [StateDelta] = []
+
+    init() {
+        manager.addSubscriber { [weak self] data in
+            guard let self else { return false }
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                lock.withLock { deltas.append(delta) }
+            }
+            return true
+        }
+    }
+
+    var all: [StateDelta] { lock.withLock { deltas } }
+
+    func hibernationChanges(of terminalID: UUID) -> [TerminalHibernationDelta] {
+        all.compactMap {
+            guard case .terminalHibernationChanged(let delta) = $0,
+                  delta.terminalID == terminalID else { return nil }
+            return delta
+        }
+    }
+
+    func removals(of terminalID: UUID) -> Int {
+        all.filter {
+            guard case .terminalRemoved(let delta) = $0 else { return false }
+            return delta.terminalID == terminalID
+        }.count
     }
 }
 
