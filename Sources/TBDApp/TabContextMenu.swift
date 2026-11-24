@@ -84,7 +84,9 @@ enum TabContextMenu {
                         app.displayName,
                         action: .openWith(path: file.path, app: app.url),
                         target: target)
-                    let icon = NSWorkspace.shared.icon(forFile: app.url.path)
+                    // Size a copy: the workspace may hand out a shared image.
+                    let shared = NSWorkspace.shared.icon(forFile: app.url.path)
+                    let icon = (shared.copy() as? NSImage) ?? shared
                     icon.size = NSSize(width: 16, height: 16)
                     appItem.image = icon
                     apps.append(appItem)
