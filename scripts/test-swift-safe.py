@@ -176,7 +176,10 @@ class RunnerFixture(unittest.TestCase):
         The shared module cache is turned OFF here, so that the cases below
         keep asserting SwiftPM's argv exactly and stay about the job
         governor.  `sharing_env` is the same environment with that opt-out
-        removed, which is what a real caller gets.
+        removed, which is what a real caller gets.  The link-step SDK is
+        turned off for the same reason: on a Mac the real `xcrun` would
+        answer, so every argv below would grow its flags.  `LinkSdkTests`
+        turns it back on against a stub `xcrun`.
         """
         env = {
             name: value
@@ -189,6 +192,7 @@ class RunnerFixture(unittest.TestCase):
                 "TBD_HOME": str(self.tbd_home),
                 "TBD_SWIFT_BIN": str(self.fake_swift),
                 "TBD_SWIFT_SHARED_MODULE_CACHE": "0",
+                "TBD_SWIFT_LINK_SDK": "0",
                 **extra_env,
             }
         )
@@ -924,6 +928,252 @@ class SharedModuleCacheTests(RunnerFixture):
                 swift_safe.pwd, "getpwuid", side_effect=KeyError("uid not found")
             ):
                 self.assertEqual(swift_safe._shared_module_cache_path(), target)
+
+
+class LinkSdkTests(RunnerFixture):
+    """The SDK handed to the link step as `-isysroot`, against a stub `xcrun`.
+
+    The stub stands first on PATH, so these cases mean the same thing on a Mac,
+    whose real `xcrun` would otherwise answer, and on the Linux runner, which
+    has none.  It answers only the exact question the wrapper must ask,
+    `--sdk macosx --show-sdk-path`, and exits 1 for any other, so a wrapper that
+    asked the bare `--show-sdk-path` (which echoes `SDKROOT` back unchecked)
+    would lose its flags here.  Like the module-cache cases, each condition is
+    asserted in both directions.
+    """
+
+    def setUp(self):
+        super().setUp()
+        root = Path(self.temp.name)
+        self.sdk = root / "SDKs" / "MacOSX.sdk"
+        self.sdk.mkdir(parents=True)
+        self.other_sdk = root / "SDKs" / "MacOSX99.sdk"
+        self.other_sdk.mkdir()
+        self.stub_bin = root / "stub-bin"
+        self.stub_bin.mkdir()
+        self.xcrun_log = root / "xcrun.log"
+        self.answer_with(f"printf '%s\\n' {shlex.quote(str(self.sdk))}")
+
+    def answer_with(self, reply: str) -> None:
+        """Install a stub `xcrun` that runs the shell line `reply` to answer."""
+        stub = self.stub_bin / "xcrun"
+        stub.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> {shlex.quote(str(self.xcrun_log))}\n"
+            '[ "$*" = "--sdk macosx --show-sdk-path" ] || exit 1\n'
+            f"{reply}\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+
+    def flags_for(self, path) -> str:
+        """The flags as the fake `swift` prints them: argv joined by spaces."""
+        return (
+            "-Xswiftc -Xclang-linker -Xswiftc -isysroot "
+            f"-Xswiftc -Xclang-linker -Xswiftc {path}"
+        )
+
+    def xcrun_questions(self) -> list[str]:
+        try:
+            return self.xcrun_log.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return []
+
+    def stubbed_env(self, **extra_env) -> dict[str, str]:
+        """`runner_env` with the SDK flags left on, the stub first on PATH,
+        and no `SDKROOT` from the developer's own shell unless a case sets one."""
+        env = self.runner_env(**extra_env)
+        if "TBD_SWIFT_LINK_SDK" not in extra_env:
+            env.pop("TBD_SWIFT_LINK_SDK", None)
+        if "SDKROOT" not in extra_env:
+            env.pop("SDKROOT", None)
+        env["PATH"] = f"{self.stub_bin}{os.pathsep}{env.get('PATH', '')}"
+        return env
+
+    def run_stubbed(self, *arguments, **extra_env):
+        return self._run(self.stubbed_env(**extra_env), arguments)
+
+    @contextlib.contextmanager
+    def stubbed_in_process(self):
+        """The same environment for helpers called in-process."""
+        path = f"{self.stub_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+        with self.in_process_environment(PATH=path):
+            os.environ.pop("SDKROOT", None)
+            yield
+
+    def assert_unflagged(self, result, expected: str) -> None:
+        """No SDK flags, and not a word about it: a skip is silent."""
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), expected)
+        self.assertEqual(result.stderr, "")
+
+    # ---- the subcommands that link ----------------------------------------
+
+    def test_every_linking_subcommand_gets_the_sdk(self):
+        for subcommand in ("build", "test"):
+            with self.subTest(subcommand=subcommand):
+                result = self.run_stubbed(subcommand)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.strip(),
+                    f"{subcommand} --jobs 2 {self.flags_for(self.sdk)}",
+                )
+                self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            self.xcrun_questions(), ["--sdk macosx --show-sdk-path"] * 2
+        )
+
+    def test_run_places_the_sdk_before_the_executable(self):
+        """Past the executable name SwiftPM stops reading its own arguments."""
+        result = self.run_stubbed("run", "TBDApp", "--jobs", "99")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            f"run --jobs 2 {self.flags_for(self.sdk)} TBDApp --jobs 99",
+        )
+
+    def test_an_sdk_flag_meant_for_the_program_does_not_disarm_a_run(self):
+        """Mutation guard: `run` scans only SwiftPM's own prefix."""
+        result = self.run_stubbed("run", "TBDApp", "--sdk", str(self.other_sdk))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.flags_for(self.sdk), result.stdout)
+
+    def test_a_non_linking_subcommand_never_asks_xcrun(self):
+        """`package resolve` links nothing, so it has no SDK to stamp."""
+        with self.stubbed_in_process():
+            self.assertEqual(swift_safe._link_sdk_arguments("package", ["resolve"]), [])
+            self.assertEqual(self.xcrun_questions(), [])
+            self.assertEqual(
+                " ".join(swift_safe._link_sdk_arguments("build", [])),
+                self.flags_for(self.sdk),
+            )
+
+        # End to end, the wrapper refuses the subcommand before asking anyone.
+        self.xcrun_log.unlink()
+        result = self.run_stubbed("package", "resolve")
+        self.assertEqual(result.returncode, 64)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.xcrun_questions(), [])
+
+    # ---- an xcrun that cannot answer ---------------------------------------
+
+    def test_an_xcrun_without_a_usable_answer_is_skipped_silently(self):
+        """Every bad answer costs the stamp, never the build."""
+        answer = f"printf '%s\\n' {shlex.quote(str(self.sdk))}"
+        replies = {
+            "fails": "exit 1",
+            "answers then fails": f"{answer}; exit 1",
+            "answers nothing": ":",
+            "names a missing directory": "printf '/no/such/MacOSX.sdk\\n'",
+            "names a relative path": "printf 'SDKs/MacOSX.sdk\\n'",
+        }
+        for label, reply in replies.items():
+            with self.subTest(xcrun=label):
+                self.answer_with(reply)
+                self.assert_unflagged(self.run_stubbed("build"), "build --jobs 2")
+
+    def test_a_missing_xcrun_is_skipped_silently(self):
+        """Linux, or a Mac without developer tools: nothing to ask."""
+        with self.stubbed_in_process():
+            with mock.patch.object(swift_safe.shutil, "which", return_value=None):
+                self.assertIsNone(swift_safe._link_sdk_path())
+                self.assertEqual(swift_safe._link_sdk_arguments("build", []), [])
+        self.assertEqual(self.xcrun_questions(), [])
+
+    def test_a_wedged_xcrun_is_abandoned_rather_than_waited_for(self):
+        self.answer_with("exec sleep 5")
+        with self.stubbed_in_process():
+            with mock.patch.object(swift_safe, "XCRUN_TIMEOUT_SECONDS", 0.2):
+                started = time.monotonic()
+                self.assertEqual(swift_safe._link_sdk_arguments("build", []), [])
+                self.assertLess(time.monotonic() - started, 4)
+
+    # ---- the opt-out ---------------------------------------------------------
+
+    def test_the_opt_out_adds_nothing_and_asks_nothing(self):
+        off = self.run_stubbed("build", TBD_SWIFT_LINK_SDK="0")
+        self.assert_unflagged(off, "build --jobs 2")
+        self.assertEqual(self.xcrun_questions(), [])
+
+        for value in ("1", ""):
+            with self.subTest(value=value):
+                on = self.run_stubbed("build", TBD_SWIFT_LINK_SDK=value)
+                self.assertEqual(on.returncode, 0, on.stderr)
+                self.assertIn(self.flags_for(self.sdk), on.stdout)
+
+    def test_ci_gets_the_sdk_too(self):
+        """Unlike the module cache: a binary built on a runner needs the stamp."""
+        result = self.run_stubbed("build", CI="true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.flags_for(self.sdk), result.stdout)
+
+    # ---- a caller that already chose ---------------------------------------
+
+    def test_only_the_swift_build_backend_is_flagged(self):
+        """The native backend stamps the SDK itself and honors `SDKROOT`."""
+        for arguments in (
+            ("--build-system", "native"),
+            ("--build-system=native",),
+            ("--build-system", "xcode"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assert_unflagged(
+                    self.run_stubbed("build", *arguments),
+                    "build " + " ".join(arguments) + " --jobs 2",
+                )
+        for arguments in (
+            ("--build-system", "swiftbuild"),
+            ("--build-system=swiftbuild",),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.run_stubbed("build", *arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(self.flags_for(self.sdk), result.stdout)
+
+    def test_a_caller_that_names_its_own_sdk_or_target_is_left_alone(self):
+        """A macOS SDK added to a cross-compile would break its link."""
+        spellings = (
+            ("--sdk", str(self.other_sdk)),
+            (f"--sdk={self.other_sdk}",),
+            ("--swift-sdk", "x86_64-swift-linux-musl"),
+            ("--triple", "x86_64-unknown-linux-gnu"),
+            tuple(self.flags_for(self.other_sdk).split()),
+            # On Darwin `-isysroot` outranks `--sysroot`, so adding ours would
+            # override a caller's own `--sysroot`, in either spelling.
+            (
+                "-Xswiftc", "-Xclang-linker", "-Xswiftc", "--sysroot",
+                "-Xswiftc", "-Xclang-linker", "-Xswiftc", str(self.other_sdk),
+            ),
+            ("-Xswiftc", "-Xclang-linker", "-Xswiftc", f"--sysroot={self.other_sdk}"),
+            # The driver's own single-dash `-sdk`, not SwiftPM's `--sdk`.
+            ("-Xswiftc", "-sdk", "-Xswiftc", str(self.other_sdk)),
+        )
+        for arguments in spellings:
+            with self.subTest(arguments=arguments):
+                self.assert_unflagged(
+                    self.run_stubbed("build", *arguments),
+                    "build " + " ".join(arguments) + " --jobs 2",
+                )
+        # The other direction: the same command without that choice is flagged.
+        result = self.run_stubbed("build")
+        self.assertIn(self.flags_for(self.sdk), result.stdout)
+
+    def test_an_sdkroot_naming_xcruns_sdk_keeps_the_flags(self):
+        alias = Path(self.temp.name) / "alias.sdk"
+        alias.symlink_to(self.sdk)
+        for value in (str(self.sdk), str(alias), ""):
+            with self.subTest(SDKROOT=value):
+                result = self.run_stubbed("build", SDKROOT=value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(self.flags_for(self.sdk), result.stdout)
+
+    def test_an_sdkroot_naming_another_sdk_is_never_contradicted(self):
+        """A deliberate `SDKROOT` is never overruled with a different SDK."""
+        for value in (str(self.other_sdk), "/nix/store/acme-apple-sdk"):
+            with self.subTest(SDKROOT=value):
+                self.assert_unflagged(
+                    self.run_stubbed("build", SDKROOT=value), "build --jobs 2"
+                )
 
 
 class WaitReportingTests(unittest.TestCase):

@@ -34,6 +34,14 @@ it on every test run.  ``TBD_SWIFT_MODULE_CACHE_PATH`` moves it,
 caller that passes its own ``-module-cache-path`` is left alone, and ``CI`` is
 left alone too — runners are ephemeral, so a shared cache saves nothing there.
 
+Compile commands also give the link step the macOS SDK as ``-isysroot``, from
+``xcrun --sdk macosx --show-sdk-path``.  Without it the Swift Build backend
+stamps every product's ``LC_BUILD_VERSION`` with the deployment target as the
+SDK version, and AppKit then draws the app with the pre-macOS-26 appearance.
+`_link_sdk_arguments` holds the reasons, the cases where it adds nothing, and
+when to delete it; ``TBD_SWIFT_LINK_SDK=0`` turns it off.  A missing or failing
+xcrun adds nothing and never fails a build.
+
 Waiting is reported on stderr, never stdout, so a caller parsing SwiftPM's
 output sees nothing from this wrapper.  Every line this wrapper writes is
 prefixed ``swift-safe:``, which is what lets a caller that buffers compiler
@@ -177,6 +185,23 @@ SHARED_MODULE_CACHE_SUBPATH = "Library/Caches/tbd/swift-module-cache"
 # A caller that already spelled one of these has chosen; see
 # `_shares_the_module_cache`.
 MODULE_CACHE_OPTIONS = {"-module-cache-path", "-fmodules-cache-path"}
+# A caller that names its own sysroot, SDK or target has chosen what the link
+# step links against, and a macOS SDK from xcrun could contradict it; see
+# `_link_sdk_arguments`.  Every spelling counts: clang's `-isysroot` and
+# `--sysroot` (on Darwin `-isysroot` outranks `--sysroot`, so adding ours would
+# override theirs), the driver's `-sdk` passed through `-Xswiftc`, and
+# SwiftPM's own `--sdk`.
+LINK_SDK_CHOICE_OPTIONS = {
+    "-isysroot",
+    "--sysroot",
+    "-sdk",
+    "--sdk",
+    "--swift-sdk",
+    "--triple",
+}
+# `xcrun` answers from a cache in milliseconds. The bound only exists so a
+# wedged one costs a build its stamp, never its start.
+XCRUN_TIMEOUT_SECONDS = 10.0
 SUPPORTED_SUBCOMMANDS = COMPILE_SUBCOMMANDS
 # Every status this wrapper produces itself, and what it means.  SwiftPM's own
 # status is deliberately absent and cannot be added: by then this process has
@@ -449,6 +474,123 @@ def _module_cache_arguments(subcommand: str, swiftpm_arguments: list[str]) -> li
     ]
 
 
+def _option_value(arguments: list[str], option: str) -> str | None:
+    """The last value given for `option`, spelled `option v` or `option=v`."""
+    value = None
+    for index, argument in enumerate(arguments):
+        if argument == option and index + 1 < len(arguments):
+            value = arguments[index + 1]
+        elif argument.startswith(f"{option}="):
+            value = argument.split("=", 1)[1]
+    return value
+
+
+def _link_sdk_path() -> str | None:
+    """The macOS SDK the Swift Build backend compiles and links against.
+
+    That is `xcrun --sdk macosx --show-sdk-path`, measured: Swift Build hands
+    its link step `-sdk <that path>` and ignores both an exported `SDKROOT` and
+    SwiftPM's `--sdk`. Asking xcrun by name rather than with a bare
+    `--show-sdk-path` matters, because a bare one echoes any `SDKROOT` back
+    with status 0, even a path that does not exist.
+
+    `None` whenever the answer is not a usable directory: no xcrun (Linux), a
+    failing or wedged one, or output that is not an absolute path to an
+    existing directory. The caller then adds nothing.
+    """
+    xcrun = shutil.which("xcrun")
+    if not xcrun:
+        return None
+    try:
+        completed = subprocess.run(
+            [xcrun, "--sdk", "macosx", "--show-sdk-path"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=XCRUN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    path = completed.stdout.strip()
+    if completed.returncode != 0 or not os.path.isabs(path):
+        return None
+    if not os.path.isdir(path):
+        return None
+    return path
+
+
+def _link_sdk_arguments(subcommand: str, swiftpm_arguments: list[str]) -> list[str]:
+    """Hand the clang that links each product the SDK as `-isysroot`, or nothing.
+
+    The Swift Build backend links with `swiftc -sdk <sdk>`, and the Swift
+    driver passes that SDK on to clang as `--sysroot`, which carries no SDK
+    version. ld then stamps the product's LC_BUILD_VERSION with the deployment
+    target (`sdk 15.0`) instead of the SDK's own version, and AppKit gives a
+    binary stamped older than macOS 26 the pre-26 appearance: the grey window
+    background, the darker sidebar, no Liquid Glass. `-isysroot` is the
+    spelling from which clang reads the SDK version. Reported upstream as
+    swiftlang/swift-build#1887; the driver fix is swiftlang/swift-driver PR
+    #2158, which passes `-isysroot` itself. Delete this function and its call
+    once the toolchain TBD builds with includes that fix. To check a new
+    toolchain, build with `TBD_SWIFT_LINK_SDK=0` and read the product's
+    `sdk` with `otool -l`.
+
+    It travels as `-Xswiftc -Xclang-linker`, the one route that reaches Swift
+    Build's link step: `-Xlinker` reaches ld but not clang, and Swift Build does
+    not pass an exported `SDKROOT` to the link task at all. The compile jobs
+    also receive the pair, and the driver ignores linker flags there without a
+    warning.
+
+    Each way it declines adds nothing and says nothing. That is the build as it
+    was before this existed, so a skip costs the stamp and never the build:
+
+    * a subcommand that links nothing;
+    * `TBD_SWIFT_LINK_SDK=0`, the opt-out;
+    * an explicit `--build-system` other than `swiftbuild`. The native backend
+      stamps the SDK correctly and honors `SDKROOT`, so the xcrun path could
+      contradict the SDK it links against;
+    * a caller that names its own sysroot, SDK or target. A macOS SDK added to
+      a cross-compile would break its link;
+    * an `SDKROOT` naming a different SDK from xcrun's, so the injection never
+      contradicts a deliberate choice. Swift Build ignores that variable
+      either way, so the build links against xcrun's SDK and keeps the old
+      stamp;
+    * no usable answer from xcrun (see `_link_sdk_path`).
+
+    Unlike the module cache, this applies under `CI` too, because a binary
+    built there should carry the right stamp as well.
+    """
+    if subcommand not in COMPILE_SUBCOMMANDS:
+        return []
+    if os.environ.get("TBD_SWIFT_LINK_SDK") == "0":
+        return []
+    build_system = _option_value(swiftpm_arguments, "--build-system")
+    if build_system is not None and build_system != "swiftbuild":
+        return []
+    if any(
+        argument.split("=", 1)[0] in LINK_SDK_CHOICE_OPTIONS
+        for argument in swiftpm_arguments
+    ):
+        return []
+    path = _link_sdk_path()
+    if path is None:
+        return []
+    sdkroot = os.environ.get("SDKROOT")
+    if sdkroot and os.path.realpath(sdkroot) != os.path.realpath(path):
+        return []
+    return [
+        "-Xswiftc",
+        "-Xclang-linker",
+        "-Xswiftc",
+        "-isysroot",
+        "-Xswiftc",
+        "-Xclang-linker",
+        "-Xswiftc",
+        path,
+    ]
+
+
 def _run_swiftpm_arguments(arguments: list[str]) -> list[str]:
     """Return only `swift run` options before the executable and app args."""
     prefix: list[str] = []
@@ -499,6 +641,7 @@ def _bounded_arguments(subcommand: str, arguments: list[str]) -> list[str]:
         added = []
 
     added += _module_cache_arguments(subcommand, swiftpm_arguments)
+    added += _link_sdk_arguments(subcommand, swiftpm_arguments)
     if not added:
         return result
     if subcommand == "run":
