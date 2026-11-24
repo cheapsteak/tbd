@@ -54,4 +54,24 @@ struct TabRightClickMenuLayerTests {
             #expect(hit == nil, "\(label)")
         }
     }
+
+    /// While the tab is renamed the layer is disabled, so a right-click or a
+    /// Control-click reaches the rename field's own menu.
+    @Test func disabledLayerTakesNoEvent() throws {
+        let view = makeView()
+        let events = try [
+            mouseEvent(.rightMouseDown),
+            mouseEvent(.leftMouseDown, modifierFlags: .control),
+        ]
+        view.isEnabled = false
+        for event in events {
+            let hit = view.hitTest(point, event: event)
+            #expect(hit == nil, "\(event.type)")
+        }
+        view.isEnabled = true
+        for event in events {
+            let hit = view.hitTest(point, event: event)
+            #expect(hit === view, "\(event.type)")
+        }
+    }
 }

@@ -9,23 +9,30 @@ import SwiftUI
 /// passes through to the tab below, so dragging, double-click rename, hover,
 /// the close button and the hover card work as before.
 struct TabRightClickMenuLayer: NSViewRepresentable {
+    /// False while the tab is being renamed, so every click, a right-click
+    /// included, reaches the rename field.
+    let isEnabled: Bool
     /// Builds the menu at the click, so it shows the tab as it is then. nil
     /// shows no menu.
     let makeMenu: @MainActor () -> NSMenu?
 
     func makeNSView(context: Context) -> TabRightClickMenuView {
         let view = TabRightClickMenuView(frame: .zero)
+        view.isEnabled = isEnabled
         view.makeMenu = makeMenu
         return view
     }
 
     func updateNSView(_ view: TabRightClickMenuView, context: Context) {
+        view.isEnabled = isEnabled
         view.makeMenu = makeMenu
     }
 }
 
 /// The view behind `TabRightClickMenuLayer`.
 final class TabRightClickMenuView: NSView {
+    /// When false, the view takes no event at all.
+    var isEnabled = true
     var makeMenu: @MainActor () -> NSMenu? = { nil }
 
     /// Whether `event` opens the menu: a right mouse down, or a left mouse
@@ -43,9 +50,10 @@ final class TabRightClickMenuView: NSView {
     }
 
     /// The hit test for `event`: this view for an event that opens the menu,
-    /// nil for any other, so it reaches the tab below.
+    /// nil for any other, or for every event while disabled, so it reaches
+    /// the tab below.
     func hitTest(_ point: NSPoint, event: NSEvent?) -> NSView? {
-        guard Self.opensMenu(for: event) else { return nil }
+        guard isEnabled, Self.opensMenu(for: event) else { return nil }
         return super.hitTest(point)
     }
 

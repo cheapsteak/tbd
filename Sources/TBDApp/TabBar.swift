@@ -1121,7 +1121,7 @@ private struct TabBarItem: View {
         .animation(.easeInOut(duration: 0.1), value: isHovering)
         // nil = no card (non-Claude tabs).
         .hoverCard(accountHoverCard)
-        .overlay { TabRightClickMenuLayer(makeMenu: { makeContextMenu() }) }
+        .overlay { TabRightClickMenuLayer(isEnabled: !isEditing, makeMenu: { makeContextMenu() }) }
         .onAppear { fileMenuApps.show(path: fileMenuTarget?.path) }
         .onChange(of: fileMenuTarget?.path) { _, path in
             fileMenuApps.show(path: path)
