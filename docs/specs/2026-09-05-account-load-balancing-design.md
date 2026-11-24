@@ -417,8 +417,10 @@ carries the count: the app already holds every terminal.
 
 ### 8.2 Account picker and swap menu
 
-`AccountPickerSheet` rows and `SwapProfileMenu.menuLabel` append the live
-count to the usage summary. The picker's sort order becomes the picker
+`AccountPickerSheet` rows append the live count to the usage summary. The
+swap menu's account rows draw usage bars and no live count
+([usage bars in the account menus](2026-11-23-usage-bars-in-account-menus-design.md)).
+The picker's sort order becomes the picker
 function's order when balancing is on (the row it would choose is first and
 carries a "balanced pick" caption); when off, the existing display-only
 `sortedForPicker` order is unchanged. Nothing is auto-selected in the sheet
