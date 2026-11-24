@@ -441,6 +441,8 @@ private struct AddTabButton: View {
     /// `stat`s on the main thread. The two real refresh paths below cover the
     /// value: `.task` on appear, and a synchronous re-detect in `showMenu()`.
     @State private var availability = AgentExecutableAvailability.allAvailable
+    @AppStorage(AppState.usageResetTimeStyleKey)
+    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
 
     var body: some View {
         Button {
@@ -475,6 +477,7 @@ private struct AddTabButton: View {
         let menu = AddTabMenu.build(
             profiles: profiles,
             availability: detected,
+            resetStyle: usageResetTimeStyle,
             coordinator: coordinator
         )
 
@@ -584,10 +587,12 @@ enum AddTabMenu {
     /// Builds the new-tab menu. Profile items are inserted, indented, directly
     /// below the "Claude" item — clicking one starts a Claude session pinned to
     /// that profile. With an empty `profiles` list, no profile items appear and
-    /// the menu is identical to the pre-feature menu.
+    /// the menu is identical to the pre-feature menu. `resetStyle` words the
+    /// reset times in each account row's tooltip.
     static func build(
         profiles: [ModelProfileWithUsage],
         availability: AgentExecutableAvailability = .allAvailable,
+        resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
         coordinator: MenuCoordinator
     ) -> NSMenu {
         let menu = NSMenu()
@@ -608,37 +613,35 @@ enum AddTabMenu {
             claudeItem.target = coordinator
             menu.addItem(claudeItem)
 
-            // One item per profile. The primary line is the profile's display
-            // name plus a short login-identity suffix (" — email" / " — needs
-            // /login" for oauth profiles); when the daemon has a usage snapshot,
-            // a smaller, indented secondary line underneath spells out the
-            // usage ("5h 0% · resets 23:10 · wk 76%"). Each gets a
-            // transparent placeholder icon the same size as the Claude asterisk
-            // so its title lines up in the same title column as "Claude" — the
-            // empty icon slot is the visual nesting cue. The profile id rides
-            // along in `representedObject` for MenuCoordinator.addClaudeProfile.
-            for entry in profiles {
-                let line = ProfileUsagePresentation.menuLine(for: entry)
+            // One item per profile: the profile's name with its login suffix
+            // (" — email" / " — needs /login" for oauth profiles), then its
+            // usage bars or note in a column every row shares
+            // (`AccountMenuRow`). Each gets a transparent placeholder icon the
+            // same size as the Claude asterisk so its title lines up in the
+            // same title column as "Claude" — the empty icon slot is the
+            // visual nesting cue. The profile id rides along in
+            // `representedObject` for MenuCoordinator.addClaudeProfile.
+            let rows: [(name: String, usage: ProfileUsagePresentation.MenuUsage)] = profiles.map {
+                (name: ProfileLoginPresentation.menuItemTitle(for: $0),
+                 usage: ProfileUsagePresentation.menuUsage(for: $0, style: resetStyle))
+            }
+            let nameColumnWidth = AccountMenuRow.nameColumnWidth(rows)
+            for (entry, row) in zip(profiles, rows) {
                 let item = NSMenuItem(
-                    title: line.primary,
+                    title: row.name,
                     action: #selector(MenuCoordinator.addClaudeProfile(_:)),
                     keyEquivalent: ""
                 )
-                if let attributed = twoLineAttributedTitle(line) {
-                    item.attributedTitle = attributed
-                    // Setting attributedTitle syncs `title` to its flattened
-                    // string; restore the identity-only plain title (used by
-                    // accessibility and any title-based lookups).
-                    item.title = line.primary
-                }
+                AccountMenuRow.apply(
+                    to: item, name: row.name, usage: row.usage, nameColumnWidth: nameColumnWidth)
                 item.image = blankIcon(size: claudeIcon.size)
                 item.representedObject = entry.profile.id
                 item.target = coordinator
                 menu.addItem(item)
             }
 
-            // Full account picker dialog — richer data (bars, reset times,
-            // staleness) than the compact suffixes above can carry.
+            // Full account picker dialog — reset times and more detail than
+            // the rows above can carry.
             let chooseItem = NSMenuItem(
                 title: "Choose account…",
                 action: #selector(MenuCoordinator.chooseAccount),
@@ -684,36 +687,6 @@ enum AddTabMenu {
         image.lockFocus()   // empty draw pass — produces a transparent representation
         image.unlockFocus()
         return image
-    }
-
-    /// An attributed two-line NSMenuItem title — identity at menu size, the
-    /// usage line smaller, secondary-colored, and indented underneath. nil when
-    /// there is no secondary line, so snapshotless profiles keep the plain
-    /// single-line title set at item creation.
-    static func twoLineAttributedTitle(
-        _ line: ProfileUsagePresentation.MenuLineModel
-    ) -> NSAttributedString? {
-    guard let secondary = line.secondary, !secondary.isEmpty else { return nil }
-    let title = NSMutableAttributedString(
-        string: line.primary,
-        attributes: [
-            .font: NSFont.menuFont(ofSize: 13),
-            .foregroundColor: NSColor.labelColor,
-        ]
-    )
-    let secondaryStyle = NSMutableParagraphStyle()
-    secondaryStyle.firstLineHeadIndent = 10
-    secondaryStyle.headIndent = 10
-    secondaryStyle.paragraphSpacingBefore = 1
-    title.append(NSAttributedString(
-        string: "\n\(secondary)",
-        attributes: [
-            .font: NSFont.menuFont(ofSize: 11),
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .paragraphStyle: secondaryStyle,
-        ]
-    ))
-        return title
     }
 }
 

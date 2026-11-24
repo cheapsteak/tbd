@@ -255,10 +255,10 @@ enum ProfileUsagePresentation {
     /// and an optional `secondary` usage line drawn smaller and indented
     /// underneath. `secondary` is nil for profiles with no snapshot (never
     /// logged in / poller hasn't fetched yet), which keeps their single-line
-    /// identity treatment. All surfaces (the "+" NSMenu, the switch-account
-    /// SwiftUI submenu) compose from `menuLine` so the two-line rules live in
-    /// one place; `menuItemTitle`/`usageSuffix` remain for anything still
-    /// single-line.
+    /// identity treatment. The worktree picker's rows compose from `menuLine`
+    /// so the two-line rules live in one place; the account menus draw bars
+    /// instead (`menuUsage`). `menuItemTitle`/`usageSuffix` remain for
+    /// anything still single-line.
     struct MenuLineModel: Equatable {
         let primary: String
         let secondary: String?
