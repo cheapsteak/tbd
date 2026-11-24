@@ -70,9 +70,16 @@ final class TabRightClickMenuView: NSView {
 
     /// The hit test for `event`: this view for an event that opens the menu,
     /// nil for any other, or for every event while disabled, so it reaches
-    /// the tab below.
+    /// the tab below. It claims only the point the event is at, in this
+    /// view's window: after a menu closes, the right-click stays the current
+    /// event while AppKit hit-tests other points for cursor and tooltip
+    /// updates.
     func hitTest(_ point: NSPoint, event: NSEvent?) -> NSView? {
-        guard isEnabled, Self.opensMenu(for: event) else { return nil }
+        guard isEnabled, let event, Self.opensMenu(for: event),
+              let window, event.window === window,
+              let location = superview?.convert(event.locationInWindow, from: nil),
+              abs(location.x - point.x) <= 1, abs(location.y - point.y) <= 1
+        else { return nil }
         return super.hitTest(point)
     }
 
