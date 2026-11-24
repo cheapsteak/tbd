@@ -1,7 +1,10 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import TBDApp
+import TBDShared
+import TestSupport
 
 /// The clear layer over a workspace tab takes only the clicks that open the
 /// tab's menu. Every other event must reach the tab below it, or dragging,
@@ -103,5 +106,56 @@ struct TabMenuAnchorTests {
         }
         #expect(released == nil)
         #expect(anchor.view == nil)
+    }
+}
+
+/// Pass-through also depends on the view SwiftUI wraps the layer in: its hit
+/// test must not take the click either. With no mouse event in progress,
+/// `NSApp.currentEvent` is not a right-click, so the layer returns nil and
+/// the hit shows what the host does.
+@MainActor
+@Suite("TabRightClickMenuLayer — hosted in a tab bar")
+struct TabRightClickMenuLayerHostedTests {
+    @Test func plainClickPassesThroughTheLayerAndItsHost() async throws {
+        try await withTestDefaults("TabRightClickMenuLayer.Hosted") { defaults in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let tab = TBDShared.Tab(id: tabID, content: .terminal(terminalID: tabID), label: "A")
+            let appState = AppState(userDefaults: defaults)
+            let host = OffscreenHost(
+                root: TabBar(
+                    tabs: [tab],
+                    worktreeID: worktreeID,
+                    activeTabIndex: .constant(0),
+                    onCloseTab: { _ in }
+                )
+                .environment(appState),
+                size: NSSize(width: 480, height: 52))
+            defer { host.tearDown() }
+
+            let laidOut = await host.settle {
+                let width = host.firstDescendant(TabRightClickMenuView.self)?.bounds.width ?? 0
+                return width > 0
+            }
+            try #require(laidOut, "The tab's right-click layer was never laid out")
+            let found = host.firstDescendant(TabRightClickMenuView.self)
+            let layer = try #require(found)
+            let wrapper = layer.superview
+
+            let middle = NSPoint(x: layer.bounds.midX, y: layer.bounds.midY)
+            let point = layer.convert(middle, to: host.contentView.superview)
+            let hit = host.contentView.hitTest(point)
+            let hitName = String(describing: hit.map { type(of: $0) })
+
+            #expect(hit !== layer, "The layer took a plain click")
+            // A layer placed straight in the hosting view has no wrapper of
+            // its own; the hosting view taking the click is then SwiftUI's
+            // own dispatch.
+            if let wrapper, wrapper !== host.hostingView {
+                #expect(hit !== wrapper, "SwiftUI's host for the layer took a plain click: \(hitName)")
+            }
+            let reachesTabBar = hit?.isDescendant(of: host.hostingView) ?? false
+            #expect(reachesTabBar, "The click reached \(hitName), outside the tab bar")
+        }
     }
 }
