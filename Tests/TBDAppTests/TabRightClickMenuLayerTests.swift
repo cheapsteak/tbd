@@ -75,3 +75,33 @@ struct TabRightClickMenuLayerTests {
         }
     }
 }
+
+/// VoiceOver's Show Menu opens the tab's menu through `TabMenuAnchor`.
+@MainActor
+@Suite("TabMenuAnchor")
+struct TabMenuAnchorTests {
+    /// Before the layer has set a view there is nowhere to open the menu.
+    @Test func showWithoutAViewDoesNothing() {
+        let anchor = TabMenuAnchor()
+        let menu = NSMenu(title: "")
+        menu.addItem(NSMenuItem(title: "Close Tab", action: nil, keyEquivalent: ""))
+        anchor.show(menu)
+        #expect(anchor.view == nil)
+    }
+
+    /// The anchor holds the layer's view weakly, so the view goes when the
+    /// tab does.
+    @Test func anchorDoesNotKeepItsViewAlive() {
+        let anchor = TabMenuAnchor()
+        weak var released: TabRightClickMenuView?
+        autoreleasepool {
+            let view = TabRightClickMenuView(frame: NSRect(x: 0, y: 0, width: 100, height: 30))
+            anchor.view = view
+            released = view
+            let held = anchor.view === view
+            #expect(held)
+        }
+        #expect(released == nil)
+        #expect(anchor.view == nil)
+    }
+}

@@ -9,6 +9,8 @@ import SwiftUI
 /// passes through to the tab below, so dragging, double-click rename, hover,
 /// the close button and the hover card work as before.
 struct TabRightClickMenuLayer: NSViewRepresentable {
+    /// Where VoiceOver's Show Menu opens the menu: this layer's view.
+    let anchor: TabMenuAnchor
     /// False while the tab is being renamed, so every click, a right-click
     /// included, reaches the rename field.
     let isEnabled: Bool
@@ -20,12 +22,29 @@ struct TabRightClickMenuLayer: NSViewRepresentable {
         let view = TabRightClickMenuView(frame: .zero)
         view.isEnabled = isEnabled
         view.makeMenu = makeMenu
+        anchor.view = view
         return view
     }
 
     func updateNSView(_ view: TabRightClickMenuView, context: Context) {
         view.isEnabled = isEnabled
         view.makeMenu = makeMenu
+        anchor.view = view
+    }
+}
+
+/// Opens the tab's menu at the tab rather than at the pointer, for
+/// VoiceOver's Show Menu action. The tab's right-click layer sets `view`.
+@MainActor
+final class TabMenuAnchor {
+    /// Weak, so the anchor never keeps the layer's view alive.
+    weak var view: NSView?
+
+    /// Pops `menu` at the bottom-left of `view`. Does nothing without a view.
+    func show(_ menu: NSMenu) {
+        guard let view else { return }
+        let origin = NSPoint(x: 0, y: view.isFlipped ? view.bounds.maxY : 0)
+        menu.popUp(positioning: nil, at: origin, in: view)
     }
 }
 

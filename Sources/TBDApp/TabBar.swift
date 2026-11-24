@@ -912,6 +912,8 @@ private struct TabBarItem: View {
     /// menu is built (`TabContextMenu`). One lookup at a time,
     /// and none outlives the item's file or the item (`OpenWithAppsLookup`).
     @StateObject private var fileMenuApps = OpenWithAppsLookup()
+    /// Where VoiceOver's Show Menu opens the tab's menu.
+    @State private var menuAnchor = TabMenuAnchor()
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @AppStorage(AppState.showClaudeTabUsageTooltipKey)
     private var showClaudeTabUsageTooltip: Bool = true
@@ -1121,7 +1123,14 @@ private struct TabBarItem: View {
         .animation(.easeInOut(duration: 0.1), value: isHovering)
         // nil = no card (non-Claude tabs).
         .hoverCard(accountHoverCard)
-        .overlay { TabRightClickMenuLayer(isEnabled: !isEditing, makeMenu: { makeContextMenu() }) }
+        .overlay {
+            TabRightClickMenuLayer(anchor: menuAnchor, isEnabled: !isEditing, makeMenu: { makeContextMenu() })
+        }
+        // VoiceOver's Show Menu, which `.contextMenu` gave the tab.
+        .accessibilityAction(.showMenu) {
+            guard !isEditing else { return }
+            menuAnchor.show(makeContextMenu())
+        }
         .onAppear { fileMenuApps.show(path: fileMenuTarget?.path) }
         .onChange(of: fileMenuTarget?.path) { _, path in
             fileMenuApps.show(path: path)
