@@ -94,6 +94,9 @@ The tab drops its `.contextMenu`. A thin AppKit layer covers the tab instead.
 - The layer takes a mouse event only for a right-click or a Control-click. Its `hitTest(_:)` returns
   nil for every other event, so dragging, double-click rename, hover, the close button and the hover
   card work as before.
+- It takes only the point the click is at, in its own window. After a menu closes, the right-click
+  stays the current event until the next one, and AppKit hit-tests other points over the tab
+  meanwhile for cursor and tooltip updates; those reach the tab.
 - On a right-click or Control-click, it asks the tab for a menu built at that moment and shows it as
   a context menu at the pointer.
 - `NSMenuItem` holds its target weakly, so the menu retains its target object as an associated
@@ -201,7 +204,8 @@ Unit tests, with no menu shown:
   accessibility description reads as specified.
 - **+ menu:** account rows are one line, the indent stays, and "Choose account…" follows them.
 - **Right-click layer:** `hitTest(_:)` returns the layer for a right-click and for a Control-click,
-  and nil for a plain left click.
+  and nil for a plain left click, for a right-click at another point, and for a right-click in
+  another window.
 
 On screen, before merge: build, restart, and right-click a Claude tab in light and dark mode. Check
 the alignment, the highlight, a row with no 5-hour bucket and the tooltip, then open the + menu. The
