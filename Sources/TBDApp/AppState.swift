@@ -5409,11 +5409,19 @@ final class AppState {
     /// UserDefaults key for the usage reset-time display preference
     /// (Settings → Claude → "Usage reset times"). Stores the raw value of
     /// `ProfileUsagePresentation.ResetTimeStyle`; defaults to `.timeOfReset`.
-    /// Read via `@AppStorage` in the view layer and injected into the
-    /// presentation helpers as a parameter — never read from
-    /// `UserDefaults.standard` inside them (tests construct with explicit
-    /// values).
+    /// Read in the view layer and injected into the presentation helpers as
+    /// a parameter — never read from `UserDefaults.standard` inside them
+    /// (tests construct with explicit values). Views below the detail
+    /// pagers, such as the tab bar, read it through `usageResetTimeStyle`.
     static let usageResetTimeStyleKey = "usageResetTimeStyle"
+
+    /// The usage reset-time style, read from `userDefaults`. Views below the
+    /// detail pagers read it here, because their `@AppStorage` reads
+    /// `.standard` (`Sources/TBDApp/CLAUDE.md`).
+    var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle {
+        userDefaults.string(forKey: Self.usageResetTimeStyleKey)
+            .flatMap(ProfileUsagePresentation.ResetTimeStyle.init(rawValue:)) ?? .timeOfReset
+    }
 
     /// Read of the live-transcript toggle for non-View callers (the View layer
     /// uses `@AppStorage` directly). Defaults to true when the user has never

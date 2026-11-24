@@ -441,8 +441,7 @@ private struct AddTabButton: View {
     /// `stat`s on the main thread. The two real refresh paths below cover the
     /// value: `.task` on appear, and a synchronous re-detect in `showMenu()`.
     @State private var availability = AgentExecutableAvailability.allAvailable
-    @AppStorage(AppState.usageResetTimeStyleKey)
-    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
+    @Environment(AppState.self) private var appState
 
     var body: some View {
         Button {
@@ -477,7 +476,7 @@ private struct AddTabButton: View {
         let menu = AddTabMenu.build(
             profiles: profiles,
             availability: detected,
-            resetStyle: usageResetTimeStyle,
+            resetStyle: appState.usageResetTimeStyle,
             coordinator: coordinator
         )
 
@@ -917,8 +916,6 @@ private struct TabBarItem: View {
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @AppStorage(AppState.showClaudeTabUsageTooltipKey)
     private var showClaudeTabUsageTooltip: Bool = true
-    @AppStorage(AppState.usageResetTimeStyleKey)
-    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
     @Environment(AppState.self) private var appState
 
     private var showClose: Bool {
@@ -979,7 +976,7 @@ private struct TabBarItem: View {
         return AccountHoverCards.claudeTabCard(
             terminal: terminal,
             profiles: appState.modelProfiles,
-            resetStyle: usageResetTimeStyle,
+            resetStyle: appState.usageResetTimeStyle,
             enabled: showClaudeTabUsageTooltip
         )
     }
@@ -1239,7 +1236,8 @@ private struct TabBarItem: View {
     /// What this tab's right-click menu shows, from the helpers that decide
     /// each item (`TabContextMenu`).
     private func contextMenuModel() -> TabContextMenu.Model {
-        TabContextMenu.Model(
+        let resetStyle = appState.usageResetTimeStyle
+        return TabContextMenu.Model(
             fileTarget: fileMenuTarget,
             openWithApps: fileMenuApps.apps,
             sessionID: CopyClaudeSessionIDMenu.sessionID(for: terminal),
@@ -1256,7 +1254,7 @@ private struct TabBarItem: View {
                 TabContextMenu.Account(
                     profileID: entry.profile.id,
                     name: entry.profile.name,
-                    usage: ProfileUsagePresentation.menuUsage(for: entry, style: usageResetTimeStyle))
+                    usage: ProfileUsagePresentation.menuUsage(for: entry, style: resetStyle))
             },
             // An in-place swap of a mid-run session interrupts the current
             // run, so Swap profile warns before the user picks an account.
