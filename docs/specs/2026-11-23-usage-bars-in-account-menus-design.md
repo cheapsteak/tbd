@@ -40,13 +40,14 @@ row of that menu.
   green when the account is on track to stay under 75%, orange when it is on track to reach 75–100%,
   red when it is on track to run out. A dark tick marks how far through the window the account is.
 - The row does not show reset times. The row's tooltip does, for example
-  "5-hour: 40% used · resets 8pm — Weekly: 16% used · resets Fri 7pm".
+  "5-hour: 40% used · resets at 8pm — Weekly: 16% used · resets at Fri 7pm".
 - **No 5-hour limit.** Some accounts, such as Ultra accounts, have a weekly limit only. Their 5h slot
   stays empty and keeps its width, so the weekly bar lines up with the weekly bars of the other rows.
 - **No usage data.** The row shows the name only, as it does today.
 - **Old or failing data.** Both menus follow the rule the + menu's second line follows today
   (`ProfileUsagePresentation.secondaryLine`). If the last fetch failed, the row shows the short note
-  in place of the bars, for example "rate-limited · 3h old". If the data is good but old, the row
+  in place of the bars, for example "usage unavailable — retrying · last data 3h ago". If the data
+  is good but old, the row
   shows the bars, then a small grey age note.
 - **Current account.** A standard macOS checkmark marks it, in place of the "●" prefix.
 - **Default (logged in).** The row shows no bars, as today. TBD keeps no usage data for the default
