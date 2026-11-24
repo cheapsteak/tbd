@@ -95,8 +95,8 @@ The tab drops its `.contextMenu`. A thin AppKit layer covers the tab instead.
   card work as before.
 - On a right-click or Control-click, it asks the tab for a menu built at that moment and shows it as
   a context menu at the pointer.
-- `NSMenuItem` holds its target weakly. The layer keeps the menu's target object alive while the menu
-  is open.
+- `NSMenuItem` holds its target weakly, so the menu retains its target object as an associated
+  object, as the + menu already does.
 
 ### The menu builder
 
