@@ -80,6 +80,12 @@ final class TabRightClickMenuView: NSView {
         hitTest(point, event: NSApplication.shared.currentEvent)
     }
 
+    /// A Control-click in an inactive window opens the menu at once, rather
+    /// than only bringing the window forward.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        Self.opensMenu(for: event)
+    }
+
     override func rightMouseDown(with event: NSEvent) {
         showMenu(with: event)
     }

@@ -58,6 +58,19 @@ struct TabRightClickMenuLayerTests {
         }
     }
 
+    /// A click that opens the menu does so in an inactive window too; any
+    /// other click only brings the window forward.
+    @Test func acceptsFirstMouseOnlyForMenuClicks() throws {
+        let view = makeView()
+        let rightClick = try mouseEvent(.rightMouseDown)
+        let controlClick = try mouseEvent(.leftMouseDown, modifierFlags: .control)
+        let plainClick = try mouseEvent(.leftMouseDown)
+        #expect(view.acceptsFirstMouse(for: rightClick))
+        #expect(view.acceptsFirstMouse(for: controlClick))
+        #expect(view.acceptsFirstMouse(for: plainClick) == false)
+        #expect(view.acceptsFirstMouse(for: nil) == false)
+    }
+
     /// While the tab is renamed the layer is disabled, so a right-click or a
     /// Control-click reaches the rename field's own menu.
     @Test func disabledLayerTakesNoEvent() throws {
