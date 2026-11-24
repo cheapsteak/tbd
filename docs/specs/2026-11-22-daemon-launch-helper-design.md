@@ -306,7 +306,11 @@ binary.
 The app never installs the helper. When it is missing, the app's auto-start falls back to a
 direct launch.
 
-`--launch` touches `$TBD_HOME/helper/<HelperVersion>/last-used` on every launch.
+Before anything else, `--launch` takes a shared `flock` on `$TBD_HOME/helper/versions.lock` and
+holds it until it exits. Under that lock it checks that its own version directory is still at
+`$TBD_HOME/helper/<HelperVersion>/`, then touches `last-used` there. A missing directory means
+`OrphanGC` reclaimed it after the launcher started the binary. `--launch` then fails, and the
+launcher falls back to a direct launch. The next shell launch installs the version again.
 
 ### Durable resources and their reconcilers
 
@@ -327,6 +331,16 @@ direct launch.
   version directory, so other processes do not count. The 30 days spare the grants of a version
   that a worktree launches now and then. An install killed partway leaves its `.install-*`
   directory, which is reclaimed under the same rule as a version directory no process uses.
+  - **A launch and the removal cannot overlap.** `OrphanGC` takes `versions.lock` exclusively,
+    without blocking, and skips the pass when a launch holds it. Under the lock it reads the
+    stamp and the process list again, and keeps the directory if either now says it is in use.
+    Otherwise it renames the directory to `$TBD_HOME/helper/.reclaim-<uuid>`, releases the lock
+    and removes the renamed directory. A launch that took the lock first has already touched
+    the stamp, and its `--serve` runs from the directory, so the re-check keeps it. A launch
+    whose binary started before the rename finds its directory gone once it holds the lock, and
+    falls back.
+    A `.reclaim-*` directory left by a killed pass is removed on the next one. `versions.lock` is
+    one file that is never removed, so no lock can be taken on a file that has been unlinked.
 - **`--serve` processes.** No reconciler covers them, because an orphan cannot arise: a `--serve`
   lives only while some other process in its coalition lives, and that process depends on it.
 
@@ -449,6 +463,10 @@ Every branch the flag gates is tested in both states, as `CLAUDE.md` requires.
     removed;
   - version directories: one in use kept, one with a recent stamp kept, one with unreadable
     process information kept, an old unused one removed;
+  - the lock: a pass skips while a launch holds `versions.lock`; a stamp touched between the
+    first check and the lock keeps the directory; a leftover `.reclaim-*` directory is removed;
+    and a `--launch` whose version directory is gone once it holds the lock fails with that
+    reason;
   - both legs off when `gcEnabled` is off.
 - **Helper-version guard:** changing `Sources/TBDServer` without bumping `HelperVersion` fails.
 - **Graduation tripwire:** a test pins `Config.daemonLaunchHelperDefault == false`. Its failure
@@ -485,7 +503,10 @@ are recorded in the implementing PR.
 ## Rollout
 
 **Soak.** Enable with `tbd config set daemon-launch-helper on`, then `scripts/restart.sh` or
-`tbd update`. Run these checks on macOS 27 and record each result in this spec:
+`tbd update`. Run these checks on macOS 27 and record each result in this spec. A session started
+before the restart stays in the old coalition, and a quit check can kill it. So run the quit
+checks only with sessions started since the restart, or parked and woken since. Before each quit,
+`tbd doctor sessions` must report every one of them protected.
 
 - Cmd-Q of TBD.app with live sessions: they survive.
 - Quitting the terminal app that ran the restart: they survive.
