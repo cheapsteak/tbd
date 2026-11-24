@@ -187,8 +187,18 @@ SHARED_MODULE_CACHE_SUBPATH = "Library/Caches/tbd/swift-module-cache"
 MODULE_CACHE_OPTIONS = {"-module-cache-path", "-fmodules-cache-path"}
 # A caller that names its own sysroot, SDK or target has chosen what the link
 # step links against, and a macOS SDK from xcrun could contradict it; see
-# `_link_sdk_arguments`.
-LINK_SDK_CHOICE_OPTIONS = {"-isysroot", "--sdk", "--swift-sdk", "--triple"}
+# `_link_sdk_arguments`.  Every spelling counts: clang's `-isysroot` and
+# `--sysroot` (on Darwin `-isysroot` outranks `--sysroot`, so adding ours would
+# override theirs), the driver's `-sdk` passed through `-Xswiftc`, and
+# SwiftPM's own `--sdk`.
+LINK_SDK_CHOICE_OPTIONS = {
+    "-isysroot",
+    "--sysroot",
+    "-sdk",
+    "--sdk",
+    "--swift-sdk",
+    "--triple",
+}
 # `xcrun` answers from a cache in milliseconds. The bound only exists so a
 # wedged one costs a build its stamp, never its start.
 XCRUN_TIMEOUT_SECONDS = 10.0

@@ -1138,6 +1138,15 @@ class LinkSdkTests(RunnerFixture):
             ("--swift-sdk", "x86_64-swift-linux-musl"),
             ("--triple", "x86_64-unknown-linux-gnu"),
             tuple(self.flags_for(self.other_sdk).split()),
+            # On Darwin `-isysroot` outranks `--sysroot`, so adding ours would
+            # override a caller's own `--sysroot`, in either spelling.
+            (
+                "-Xswiftc", "-Xclang-linker", "-Xswiftc", "--sysroot",
+                "-Xswiftc", "-Xclang-linker", "-Xswiftc", str(self.other_sdk),
+            ),
+            ("-Xswiftc", "-Xclang-linker", "-Xswiftc", f"--sysroot={self.other_sdk}"),
+            # The driver's own single-dash `-sdk`, not SwiftPM's `--sdk`.
+            ("-Xswiftc", "-sdk", "-Xswiftc", str(self.other_sdk)),
         )
         for arguments in spellings:
             with self.subTest(arguments=arguments):
