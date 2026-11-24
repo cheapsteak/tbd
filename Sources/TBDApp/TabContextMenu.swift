@@ -187,7 +187,11 @@ enum TabContextMenu {
         let defaultItem = item(defaultAccountTitle, action: action(nil), target: target)
         defaultItem.state = model.currentProfileID == nil ? .on : .off
         items.append(defaultItem)
-        items.append(.separator())
+        // Only between the default login and the profiles, so a menu with no
+        // profiles has no stray separator.
+        if !model.accounts.isEmpty {
+            items.append(.separator())
+        }
 
         let rows: [(name: String, usage: ProfileUsagePresentation.MenuUsage)] =
             model.accounts.map { (name: $0.name, usage: $0.usage) }

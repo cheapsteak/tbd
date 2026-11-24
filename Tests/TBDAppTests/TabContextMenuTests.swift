@@ -314,6 +314,20 @@ struct TabContextMenuTests {
         #expect(titles(fork) == ["Default (logged in)", "—", "Work", "Personal"])
     }
 
+    /// With no model profiles, the default login stands alone: no separator
+    /// after it, and only the one before the caption.
+    @Test func noAccountsLeavesNoStraySeparator() throws {
+        var model = liveClaudeModel()
+        model.accounts = []
+        model.busyCaption = SwapProfileMenu.interruptsRunCaption
+        let menu = build(model, ActionRecorder())
+        let swap = try submenu("Swap profile", in: menu)
+        let fork = try submenu("Fork Session", in: menu)
+
+        #expect(titles(fork) == ["Default (logged in)"])
+        #expect(titles(swap) == ["Default (logged in)", "—", SwapProfileMenu.interruptsRunCaption])
+    }
+
     /// Each account row goes through `AccountMenuRow`: the plain title stays
     /// the name, and a row with usage gets the drawn title.
     @Test func accountRowsKeepTheNameAsTheirPlainTitle() throws {
