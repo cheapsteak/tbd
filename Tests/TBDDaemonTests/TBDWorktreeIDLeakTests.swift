@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import DaemonTestSupport
 import TestSupport
+import TBDShared
 @testable import TBDDaemonLib
 @testable import TBDShared
 import TBDKernel
@@ -120,6 +121,13 @@ func testScrubInheritedTBDEnv() {
         #expect(
             ProcessInfo.processInfo.environment[name] == nil,
             "\(name) survived the startup scrub")
+    }
+
+    // The scrub also leaves this process naming the account it runs as, for
+    // every spawn that inherits plainly.
+    if let account = ClaudeCredentialAccount.current() {
+        #expect(ProcessInfo.processInfo.environment["USER"] == account)
+        #expect(ProcessInfo.processInfo.environment["LOGNAME"] == account)
     }
 }
 
