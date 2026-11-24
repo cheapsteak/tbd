@@ -114,10 +114,13 @@ struct HolderReconcileInventoryTests {
             registry: registry(environment: vanishedHolderEnvironment()))
         let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
 
+        // With a start time, as a spawned row has, so the park below has one
+        // to clear.
         let claude = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-holder",
-            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243)
+            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243,
+            holderChildStartedAt: Self.endedJobStartedAt)
         let shell = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
             kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
@@ -558,22 +561,28 @@ struct HolderReconcileInventoryTests {
     /// can take tens of seconds. Nil when the wait ended without a sleep:
     /// after recording `NoBudgetSleep` on a timeout, and silently on
     /// cancellation, which belongs to whatever cancelled the test.
+    ///
+    /// The diagnostic reports the sleeps the poll's final probe read, not a
+    /// fresh read after it: a timer that registers just after that probe
+    /// would otherwise report one sleep for a wait that saw none.
     private func firstBudgetSleep(
         on clock: SleepRecordingClock, missing: String
     ) async -> Duration? {
         let started = ContinuousClock.now
+        var observed: [Duration] = []
         let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            !clock.requestedSleeps.isEmpty
+            observed = clock.requestedSleeps
+            return !observed.isEmpty
         }
         switch outcome {
         case .satisfied:
-            return clock.requestedSleeps.first
+            return observed.first
         case .cancelled:
             return nil
         case .timedOut:
             Issue.record(NoBudgetSleep(
                 finding: missing, elapsed: ContinuousClock.now - started,
-                sleeps: clock.requestedSleeps.count))
+                sleeps: observed.count))
             return nil
         }
     }
@@ -737,15 +746,25 @@ struct HolderReconcileInventoryTests {
     /// are gone, which the startup pass kept because the job was mid-exit
     /// when it looked.
     ///
+    /// It carries the job's start time, as every spawned holder row does, so
+    /// a park that left it on the row would show. Nothing the hand-back or the
+    /// sweep decides reads it: the verdict asks only whether the pid is alive,
+    /// and the disposal's compare-and-set compares pids, not start times.
+    ///
     /// Read back after the insert, so a later comparison against the stored
     /// row compares like with like.
     private func seedEndedClaudeRow(db: TBDDatabase, worktreeID: UUID) async throws -> Terminal {
         let created = try await db.terminals.create(
             worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-holder",
-            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243)
+            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243,
+            holderChildStartedAt: Self.endedJobStartedAt)
         return try #require(try await db.terminals.get(id: created.id))
     }
+
+    /// When the ended rows' job started: a whole second, so it survives the
+    /// database's date encoding unchanged.
+    private static let endedJobStartedAt = Date(timeIntervalSince1970: 1_800_000_000)
 
     private func actuationRows(at path: String) throws -> [ActuationRow] {
         guard FileManager.default.fileExists(atPath: path) else { return [] }
@@ -776,6 +795,9 @@ struct HolderReconcileInventoryTests {
         let lifecycle = makeLifecycle(db: db, signaller: deadJobs([4243]), registry: registry)
         let (_, main) = try await seedRepo(db: db, at: repoDir.path)
         let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        // The nil start time asserted after the park proves a clear only if
+        // the row had one to clear.
+        try #require(claude.holderChildStartedAt != nil)
         await registry.recordStatusForTesting(
             .exitedStatusUnknown, for: claude.id, fromAbsentRendezvous: true)
         let logPath = tempDir.appendingPathComponent("handback.jsonl").path
@@ -989,14 +1011,19 @@ struct HolderReconcileInventoryTests {
         // ended the one it began.
         await lifecycle.holderProbeBudget.begin(.seconds(5), clock: clock)
         let started = ContinuousClock.now
+        var sleepsSeen = 0
         let rearmed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            clock.requestedSleeps.count >= 2
+            sleepsSeen = clock.requestedSleeps.count
+            return sleepsSeen >= 2
         }
+        // Taken before the cleanup: a second sleep that registers while
+        // `end()` is awaited, and the time `end()` takes, are not what the
+        // wait saw.
+        let waited = ContinuousClock.now - started
         await lifecycle.holderProbeBudget.end()
         if rearmed == .cancelled { return }
         if rearmed == .timedOut {
-            Issue.record(BudgetNeverEnded(
-                elapsed: ContinuousClock.now - started, sleeps: clock.requestedSleeps.count))
+            Issue.record(BudgetNeverEnded(elapsed: waited, sleeps: sleepsSeen))
         }
     }
 
