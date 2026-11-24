@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Shared color mapping for usage fill levels, consumed by both the
@@ -9,17 +10,21 @@ extension ProfileUsagePresentation.FillLevel {
     /// `.warning` intentionally share orange — the tracker's bars have no
     /// separate yellow tier.
     func barColor(_ colorScheme: ColorScheme) -> Color {
+        Color(nsColor: nsBarColor(isDark: colorScheme == .dark))
+    }
+
+    /// The AppKit form of `barColor`, and the one table both read. The account
+    /// menus' bars image takes it, choosing light or dark when it draws.
+    func nsBarColor(isDark: Bool) -> NSColor {
         switch self {
         case .normal:
-            return colorScheme == .dark
-                ? Color(red: 60 / 255, green: 199 / 255, blue: 95 / 255)
-                : Color(red: 27 / 255, green: 107 / 255, blue: 52 / 255)
-        case .caution:
-            return .orange
-        case .warning:
-            return .orange
+            return isDark
+                ? NSColor(srgbRed: 60 / 255, green: 199 / 255, blue: 95 / 255, alpha: 1)
+                : NSColor(srgbRed: 27 / 255, green: 107 / 255, blue: 52 / 255, alpha: 1)
+        case .caution, .warning:
+            return .systemOrange
         case .critical:
-            return .red
+            return .systemRed
         }
     }
 }

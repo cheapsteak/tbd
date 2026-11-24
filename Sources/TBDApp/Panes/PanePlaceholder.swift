@@ -639,14 +639,14 @@ private struct HeaderFileContextMenu: ViewModifier {
 }
 
 /// Reveal in Finder and the Open With submenu for the file at `path`: the
-/// file menu's items after its copy item, shared by the pane header's title
-/// (`headerFileContextMenu`) and a workspace tab's right-click menu
-/// (`TabBar`). It takes the applications Open With lists as `apps` rather
-/// than asking Launch Services (`openWithApps`) itself, because SwiftUI
-/// builds a context menu's content while it evaluates the body of the view
-/// the menu hangs on: each caller looks them up off the main actor at mount,
-/// on a change of `path` and on each hover-enter, and hands in the result.
-/// Open With is left out when `apps` is empty.
+/// file menu's items after its copy item, on the pane header's title
+/// (`headerFileContextMenu`). A workspace tab's right-click menu builds the
+/// same items in AppKit (`TabContextMenu`). It takes the applications Open
+/// With lists as `apps` rather than asking Launch Services (`openWithApps`)
+/// itself, because SwiftUI builds a context menu's content while it evaluates
+/// the body of the view the menu hangs on: the caller looks them up off the
+/// main actor at mount, on a change of `path` and on each hover-enter, and
+/// hands in the result. Open With is left out when `apps` is empty.
 struct RevealAndOpenWithMenuItems: View {
     let path: String
     let apps: [OpenWithApp]

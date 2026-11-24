@@ -255,10 +255,10 @@ enum ProfileUsagePresentation {
     /// and an optional `secondary` usage line drawn smaller and indented
     /// underneath. `secondary` is nil for profiles with no snapshot (never
     /// logged in / poller hasn't fetched yet), which keeps their single-line
-    /// identity treatment. All surfaces (the "+" NSMenu, the switch-account
-    /// SwiftUI submenu) compose from `menuLine` so the two-line rules live in
-    /// one place; `menuItemTitle`/`usageSuffix` remain for anything still
-    /// single-line.
+    /// identity treatment. The worktree picker's rows compose from `menuLine`
+    /// so the two-line rules live in one place; the account menus draw bars
+    /// instead (`menuUsage`). `menuItemTitle`/`usageSuffix` remain for
+    /// anything still single-line.
     struct MenuLineModel: Equatable {
         let primary: String
         let secondary: String?
@@ -653,6 +653,46 @@ enum ProfileUsagePresentation {
             resetPhrase: resetPhrase,
             elapsedFraction: elapsed
         )
+    }
+
+    // MARK: - Account menu rows
+
+    /// What an account row of the swap, fork and new-tab menus shows after the
+    /// name.
+    enum MenuUsage: Equatable {
+        /// The 5-hour and weekly bars; a missing bucket leaves its slot empty.
+        /// `ageNote` is set when the data is healthy but old.
+        case bars(session: BucketPresentation?, weekly: BucketPresentation?, ageNote: String?)
+        /// A short note in place of the bars, for a fetch that is failing.
+        case note(String)
+        /// The name alone.
+        case none
+    }
+
+    /// Picks a menu row's usage by the rule `secondaryLine` follows, so a
+    /// failing fetch shows its note and never its old numbers as current.
+    static func menuUsage(for entry: ModelProfileWithUsage,
+                          style: ResetTimeStyle = .timeOfReset,
+                          now: Date = Date(),
+                          timeZone: TimeZone = .current) -> MenuUsage {
+        let snapshot = entry.usageSnapshot
+        let kind = entry.profile.kind
+        if let snapshot, snapshot.isOK {
+            let session = sessionBucket(snapshot).map {
+                bucketPresentation($0, style: style, now: now, timeZone: timeZone)
+            }
+            let weekly = weeklyAllBucket(snapshot).map {
+                bucketPresentation($0, style: style, now: now, timeZone: timeZone)
+            }
+            if session != nil || weekly != nil {
+                return .bars(session: session, weekly: weekly,
+                             ageNote: stalenessNote(for: snapshot, kind: kind, now: now))
+            }
+        }
+        if let note = stalenessNote(for: snapshot, kind: kind, now: now) {
+            return .note(note)
+        }
+        return .none
     }
 
     /// Map a `FillLevel` to the corresponding `HoverCardTint`, preserving the

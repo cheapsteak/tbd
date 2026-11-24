@@ -253,8 +253,8 @@ struct TabBar: View {
             )
             // Outside the button, so its hover square stays 28 x 28.
             .padding(.leading, MainTabRowMetrics.pillToAddSpacing)
-            // On the button alone: the tabs' context menus must stay outside
-            // the style (`RowIconButtonStyle`).
+            // On the button alone: the style is for the row's icon buttons,
+            // and the tabs stay outside it (`RowIconButtonStyle`).
             .buttonStyle(RowIconButtonStyle())
         }
     }
@@ -441,6 +441,7 @@ private struct AddTabButton: View {
     /// `stat`s on the main thread. The two real refresh paths below cover the
     /// value: `.task` on appear, and a synchronous re-detect in `showMenu()`.
     @State private var availability = AgentExecutableAvailability.allAvailable
+    @Environment(AppState.self) private var appState
 
     var body: some View {
         Button {
@@ -475,6 +476,7 @@ private struct AddTabButton: View {
         let menu = AddTabMenu.build(
             profiles: profiles,
             availability: detected,
+            resetStyle: appState.usageResetTimeStyle,
             coordinator: coordinator
         )
 
@@ -584,10 +586,12 @@ enum AddTabMenu {
     /// Builds the new-tab menu. Profile items are inserted, indented, directly
     /// below the "Claude" item — clicking one starts a Claude session pinned to
     /// that profile. With an empty `profiles` list, no profile items appear and
-    /// the menu is identical to the pre-feature menu.
+    /// the menu is identical to the pre-feature menu. `resetStyle` words the
+    /// reset times in each account row's tooltip.
     static func build(
         profiles: [ModelProfileWithUsage],
         availability: AgentExecutableAvailability = .allAvailable,
+        resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
         coordinator: MenuCoordinator
     ) -> NSMenu {
         let menu = NSMenu()
@@ -608,37 +612,35 @@ enum AddTabMenu {
             claudeItem.target = coordinator
             menu.addItem(claudeItem)
 
-            // One item per profile. The primary line is the profile's display
-            // name plus a short login-identity suffix (" — email" / " — needs
-            // /login" for oauth profiles); when the daemon has a usage snapshot,
-            // a smaller, indented secondary line underneath spells out the
-            // usage ("5h 0% · resets 23:10 · wk 76%"). Each gets a
-            // transparent placeholder icon the same size as the Claude asterisk
-            // so its title lines up in the same title column as "Claude" — the
-            // empty icon slot is the visual nesting cue. The profile id rides
-            // along in `representedObject` for MenuCoordinator.addClaudeProfile.
-            for entry in profiles {
-                let line = ProfileUsagePresentation.menuLine(for: entry)
+            // One item per profile: the profile's name with its login suffix
+            // (" — email" / " — needs /login" for oauth profiles), then its
+            // usage bars or note in a column every row shares
+            // (`AccountMenuRow`). Each gets a transparent placeholder icon the
+            // same size as the Claude asterisk so its title lines up in the
+            // same title column as "Claude" — the empty icon slot is the
+            // visual nesting cue. The profile id rides along in
+            // `representedObject` for MenuCoordinator.addClaudeProfile.
+            let rows: [(name: String, usage: ProfileUsagePresentation.MenuUsage)] = profiles.map {
+                (name: ProfileLoginPresentation.menuItemTitle(for: $0),
+                 usage: ProfileUsagePresentation.menuUsage(for: $0, style: resetStyle))
+            }
+            let nameColumnWidth = AccountMenuRow.nameColumnWidth(rows)
+            for (entry, row) in zip(profiles, rows) {
                 let item = NSMenuItem(
-                    title: line.primary,
+                    title: row.name,
                     action: #selector(MenuCoordinator.addClaudeProfile(_:)),
                     keyEquivalent: ""
                 )
-                if let attributed = twoLineAttributedTitle(line) {
-                    item.attributedTitle = attributed
-                    // Setting attributedTitle syncs `title` to its flattened
-                    // string; restore the identity-only plain title (used by
-                    // accessibility and any title-based lookups).
-                    item.title = line.primary
-                }
+                AccountMenuRow.apply(
+                    to: item, name: row.name, usage: row.usage, nameColumnWidth: nameColumnWidth)
                 item.image = blankIcon(size: claudeIcon.size)
                 item.representedObject = entry.profile.id
                 item.target = coordinator
                 menu.addItem(item)
             }
 
-            // Full account picker dialog — richer data (bars, reset times,
-            // staleness) than the compact suffixes above can carry.
+            // Full account picker dialog — reset times and more detail than
+            // the rows above can carry.
             let chooseItem = NSMenuItem(
                 title: "Choose account…",
                 action: #selector(MenuCoordinator.chooseAccount),
@@ -685,43 +687,12 @@ enum AddTabMenu {
         image.unlockFocus()
         return image
     }
-
-    /// An attributed two-line NSMenuItem title — identity at menu size, the
-    /// usage line smaller, secondary-colored, and indented underneath. nil when
-    /// there is no secondary line, so snapshotless profiles keep the plain
-    /// single-line title set at item creation.
-    static func twoLineAttributedTitle(
-        _ line: ProfileUsagePresentation.MenuLineModel
-    ) -> NSAttributedString? {
-    guard let secondary = line.secondary, !secondary.isEmpty else { return nil }
-    let title = NSMutableAttributedString(
-        string: line.primary,
-        attributes: [
-            .font: NSFont.menuFont(ofSize: 13),
-            .foregroundColor: NSColor.labelColor,
-        ]
-    )
-    let secondaryStyle = NSMutableParagraphStyle()
-    secondaryStyle.firstLineHeadIndent = 10
-    secondaryStyle.headIndent = 10
-    secondaryStyle.paragraphSpacingBefore = 1
-    title.append(NSAttributedString(
-        string: "\n\(secondary)",
-        attributes: [
-            .font: NSFont.menuFont(ofSize: 11),
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .paragraphStyle: secondaryStyle,
-        ]
-    ))
-        return title
-    }
 }
 
 // MARK: - Swap-profile menu composition
 
-/// Testable composition for the tab's swap-profile submenus ("Swap profile" /
-/// "Fork Session"), following the `AddTabMenu` pattern: pure helpers here, the
-/// SwiftUI lowering in `TabBarItem.swapProfileMenuItems(mode:)`.
+/// Testable rules for the tab's swap-profile submenus ("Swap profile" /
+/// "Fork Session"): pure helpers here, the menu itself in `TabContextMenu`.
 enum SwapProfileMenu {
     /// Footer caption for the in-place "Swap profile" submenu when the session
     /// is mid-run: the swap resumes in place, so it interrupts the current run.
@@ -750,32 +721,6 @@ enum SwapProfileMenu {
     static func offersInPlaceSwitch(for terminal: TBDShared.Terminal?) -> Bool {
         guard let terminal else { return true }
         return terminal.transport == .holder || terminal.isParked
-    }
-
-    /// Formats a swap-profile menu item label with compact usage stats appended.
-    /// Examples: "Gmail", "Gmail — 5h 40% · wk 16%", "Gmail — no data".
-    /// Appends live session count when present (design 2026-09-05 §8.2).
-    /// The usage suffix is sourced from the same per-profile snapshots the
-    /// hover cards and account picker use.
-    static func menuLabel(
-        for profile: ModelProfile,
-        usage: ProfileUsageSnapshot?,
-        liveSessions: Int? = nil
-    ) -> String {
-        let baseName = profile.name
-        var parts: [String] = [baseName]
-
-        if let snapshot = usage, !snapshot.buckets.isEmpty,
-           let summary = ProfileUsagePresentation.usageSummary(for: snapshot) {
-            parts.append(summary)
-        }
-
-        if let liveSessions, liveSessions > 0 {
-            parts.append("\(liveSessions) live")
-        }
-
-        guard parts.count > 1 else { return baseName }
-        return parts.joined(separator: " — ")
     }
 }
 
@@ -963,14 +908,14 @@ private struct TabBarItem: View {
     /// up off the main actor when the item appears or that file changes, and
     /// again each time the pointer enters the item, so the right-click that
     /// almost always follows a hover finds the list fresh; never while the
-    /// menu is built (`RevealAndOpenWithMenuItems`). One lookup at a time,
+    /// menu is built (`TabContextMenu`). One lookup at a time,
     /// and none outlives the item's file or the item (`OpenWithAppsLookup`).
     @StateObject private var fileMenuApps = OpenWithAppsLookup()
+    /// Where VoiceOver's Show Menu opens the tab's menu.
+    @State private var menuAnchor = TabMenuAnchor()
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @AppStorage(AppState.showClaudeTabUsageTooltipKey)
     private var showClaudeTabUsageTooltip: Bool = true
-    @AppStorage(AppState.usageResetTimeStyleKey)
-    private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
     @Environment(AppState.self) private var appState
 
     private var showClose: Bool {
@@ -1031,7 +976,7 @@ private struct TabBarItem: View {
         return AccountHoverCards.claudeTabCard(
             terminal: terminal,
             profiles: appState.modelProfiles,
-            resetStyle: usageResetTimeStyle,
+            resetStyle: appState.usageResetTimeStyle,
             enabled: showClaudeTabUsageTooltip
         )
     }
@@ -1175,7 +1120,14 @@ private struct TabBarItem: View {
         .animation(.easeInOut(duration: 0.1), value: isHovering)
         // nil = no card (non-Claude tabs).
         .hoverCard(accountHoverCard)
-        .contextMenu { contextMenuContent }
+        .overlay {
+            TabRightClickMenuLayer(anchor: menuAnchor, isEnabled: !isEditing, makeMenu: { makeContextMenu() })
+        }
+        // VoiceOver's Show Menu, which `.contextMenu` gave the tab.
+        .accessibilityAction(.showMenu) {
+            guard !isEditing else { return }
+            menuAnchor.show(makeContextMenu())
+        }
         .onAppear { fileMenuApps.show(path: fileMenuTarget?.path) }
         .onChange(of: fileMenuTarget?.path) { _, path in
             fileMenuApps.show(path: path)
@@ -1264,42 +1216,6 @@ private struct TabBarItem: View {
         return "Profile: \(entry.profile.name)"
     }
 
-    private func formatProfileSubmenuLabel(_ entry: ModelProfileWithUsage) -> String {
-        SwapProfileMenu.menuLabel(for: entry.profile, usage: entry.usageSnapshot)
-    }
-
-    @ViewBuilder
-    private func swapProfileMenuItems(mode: TerminalSwapMode) -> some View {
-        Button {
-            guard let terminalID = terminal?.id else { return }
-            Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: nil, mode: mode) }
-        } label: {
-            let prefix = terminal?.profileID == nil ? "● " : "  "
-            Text("\(prefix)Default (logged in)")
-        }
-
-        Divider()
-
-        ForEach(appState.modelProfiles, id: \.profile.id) { entry in
-            Button {
-                guard let terminalID = terminal?.id else { return }
-                Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: entry.profile.id, mode: mode) }
-            } label: {
-                let prefix = terminal?.profileID == entry.profile.id ? "● " : "  "
-                Text("\(prefix)\(formatProfileSubmenuLabel(entry))")
-            }
-        }
-
-        // Busy-session safeguard: an in-place swap of a mid-run session
-        // interrupts the current run, so warn before the user picks a target.
-        if let caption = SwapProfileMenu.busyCaption(
-            mode: mode, activityState: terminal?.activityState
-        ) {
-            Divider()
-            Text(caption).font(.caption)
-        }
-    }
-
     /// The file this tab's Copy Path, Reveal in Finder and Open With act on,
     /// and the copy item's wording (`WorkspaceTabFileMenu`); nil for a tab
     /// with no file, which offers none of them. A transcript tab's file is
@@ -1317,131 +1233,96 @@ private struct TabBarItem: View {
         TabTerminalTarget.terminalID(for: tab.content)
     }
 
-    @ViewBuilder
-    private var contextMenuContent: some View {
-        if let fileTarget = fileMenuTarget {
-            Button(fileTarget.copyLabel) { copyToPasteboard(fileTarget.path) }
-            RevealAndOpenWithMenuItems(path: fileTarget.path, apps: fileMenuApps.apps)
+    /// What this tab's right-click menu shows, from the helpers that decide
+    /// each item (`TabContextMenu`).
+    private func contextMenuModel() -> TabContextMenu.Model {
+        let resetStyle = appState.usageResetTimeStyle
+        return TabContextMenu.Model(
+            fileTarget: fileMenuTarget,
+            openWithApps: fileMenuApps.apps,
+            sessionID: CopyClaudeSessionIDMenu.sessionID(for: terminal),
+            pinTitle: TabPinMenu.title(for: terminal),
+            isPinned: terminal?.pinnedAt != nil,
+            offersMoveToHolder: TransportMigrationMenu.isOffered(
+                for: terminal,
+                holderSupported: appState.daemonCapabilities?.ptyHolderSupported ?? false),
+            isClaude: isClaudeTerminal,
+            profileHeader: formatProfileHeader(terminal?.profileID),
+            offersInPlaceSwap: SwapProfileMenu.offersInPlaceSwitch(for: terminal),
+            currentProfileID: terminal?.profileID,
+            accounts: appState.modelProfiles.map { entry in
+                TabContextMenu.Account(
+                    profileID: entry.profile.id,
+                    name: entry.profile.name,
+                    usage: ProfileUsagePresentation.menuUsage(for: entry, style: resetStyle))
+            },
+            // An in-place swap of a mid-run session interrupts the current
+            // run, so Swap profile warns before the user picks an account.
+            busyCaption: SwapProfileMenu.busyCaption(mode: .inPlace, activityState: terminal?.activityState),
+            showsContinueInCodex: ContinueInCodexMenu.isVisible(for: terminal),
+            parkAction: TabParkMenuModel.action(for: terminal),
+            hasScheduledResume: terminal?.pendingResumeAt != nil,
+            isRenameable: isRenameable
+        )
+    }
+
+    /// Built on each right-click, so the menu shows the tab and its accounts'
+    /// usage as they are at the click.
+    private func makeContextMenu() -> NSMenu {
+        TabContextMenu.build(model: contextMenuModel()) { action in
+            perform(action)
         }
+    }
 
-        Button("Copy Link") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(
-                DeepLink.makeShareableOpenURL(worktreeID, terminalID: linkTerminalID).absoluteString,
-                forType: .string
-            )
-        }
-
-        if let sessionID = CopyClaudeSessionIDMenu.sessionID(for: terminal) {
-            Button(CopyClaudeSessionIDMenu.title) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(sessionID, forType: .string)
+    private func perform(_ action: TabContextMenu.Action) {
+        switch action {
+        case .copyPath(let path):
+            copyToPasteboard(path)
+        case .revealInFinder(let path):
+            revealInFinder(path: path)
+        case .openWith(let path, let app):
+            openFile(path: path, withApp: app)
+        case .copyLink:
+            copyToPasteboard(
+                DeepLink.makeShareableOpenURL(worktreeID, terminalID: linkTerminalID).absoluteString)
+        case .copySessionID(let sessionID):
+            copyToPasteboard(sessionID)
+        case .setPinned(let pinned):
+            guard let terminalID = terminal?.id else { return }
+            Task { await appState.setTerminalPin(id: terminalID, pinned: pinned) }
+        case .moveToHolder:
+            guard let terminalID = terminal?.id else { return }
+            Task { await appState.migrateTerminalToHolder(terminalID: terminalID) }
+        case .swapProfile(let profileID):
+            guard let terminalID = terminal?.id else { return }
+            Task {
+                await appState.swapTerminalProfile(
+                    terminalID: terminalID, newProfileID: profileID, mode: .inPlace)
             }
-        }
-
-        Divider()
-
-        if let terminal, let pinTitle = TabPinMenu.title(for: terminal) {
-            let pinned = terminal.pinnedAt != nil
-            Button {
-                Task { await appState.setTerminalPin(id: terminal.id, pinned: !pinned) }
-            } label: {
-                Label(pinTitle, systemImage: pinned ? "pin.slash" : "pin")
+        case .forkSession(let profileID):
+            guard let terminalID = terminal?.id else { return }
+            Task {
+                await appState.swapTerminalProfile(
+                    terminalID: terminalID, newProfileID: profileID, mode: .fork)
             }
-
-            Divider()
-        }
-
-        // Shells move too, so this sits outside the Claude-only block.
-        if TransportMigrationMenu.isOffered(
-            for: terminal,
-            holderSupported: appState.daemonCapabilities?.ptyHolderSupported ?? false) {
-            Button {
-                guard let terminalID = terminal?.id else { return }
-                Task { await appState.migrateTerminalToHolder(terminalID: terminalID) }
-            } label: {
-                Label(TransportMigrationVocabulary.menuTitle, systemImage: "arrow.right.square")
-            }
-
-            Divider()
-        }
-
-        if isClaudeTerminal {
-            Button(formatProfileHeader(terminal?.profileID)) {}
-                .disabled(true)
-
-            if SwapProfileMenu.offersInPlaceSwitch(for: terminal) {
-                Menu("Swap profile") {
-                    swapProfileMenuItems(mode: .inPlace)
-                }
-            }
-
-            Divider()
-
-            Menu {
-                swapProfileMenuItems(mode: .fork)
-            } label: {
-                Label("Fork Session", systemImage: "arrow.triangle.branch")
-            }
-
-            if ContinueInCodexMenu.isVisible(for: terminal) {
-                Button {
-                    guard let terminalID = terminal?.id else { return }
-                    Task {
-                        await appState.continueInCodex(
-                            sourceTerminalID: terminalID)
-                    }
-                } label: {
-                    Label("Continue in Codex", systemImage: "arrow.right.circle")
-                }
-            }
-
-            // Park (formerly the Suspend/Resume play/pause button) lives here
-            // as per-terminal Hibernate/Wake items — THIS tab's session only,
-            // unlike the worktree row's action which sweeps every session in
-            // the worktree. A scheduled auto-resume can still be pending on a
-            // live session that hit its limit, so keep the cancel affordance
-            // here too (#341).
-            switch TabParkMenuModel.action(for: terminal) {
-            case .hibernate:
-                Button {
-                    guard let terminalID = terminal?.id else { return }
-                    Task { await appState.hibernateTerminal(terminalID: terminalID, worktreeID: worktreeID) }
-                } label: {
-                    Label("Hibernate", systemImage: "moon")
-                }
-            case .wake:
-                Button {
-                    guard let terminalID = terminal?.id else { return }
-                    Task { await appState.wakeParkedTerminalUserInitiated(terminalID: terminalID, worktreeID: worktreeID) }
-                } label: {
-                    Label("Wake", systemImage: "sun.max")
-                }
-            case nil:
-                EmptyView()
-            }
-
-            if terminal?.pendingResumeAt != nil {
-                Button {
-                    guard let terminalID = terminal?.id else { return }
-                    Task { await appState.cancelScheduledResume(terminalID: terminalID) }
-                } label: {
-                    Label("Cancel Scheduled Resume", systemImage: "clock.badge.xmark")
-                }
-            }
-
-            Divider()
-        }
-
-        if isRenameable {
-            Button("Rename Tab") {
-                beginRename()
-            }
-            Divider()
-        }
-
-        Button(action: onClose) {
-            Label("Close Tab", systemImage: "xmark")
+        case .continueInCodex:
+            guard let terminalID = terminal?.id else { return }
+            Task { await appState.continueInCodex(sourceTerminalID: terminalID) }
+        // Hibernate and Wake act on THIS tab's session only, unlike the
+        // worktree row's action, which sweeps every session in the worktree.
+        case .hibernate:
+            guard let terminalID = terminal?.id else { return }
+            Task { await appState.hibernateTerminal(terminalID: terminalID, worktreeID: worktreeID) }
+        case .wake:
+            guard let terminalID = terminal?.id else { return }
+            Task { await appState.wakeParkedTerminalUserInitiated(terminalID: terminalID, worktreeID: worktreeID) }
+        case .cancelScheduledResume:
+            guard let terminalID = terminal?.id else { return }
+            Task { await appState.cancelScheduledResume(terminalID: terminalID) }
+        case .rename:
+            beginRename()
+        case .close:
+            onClose()
         }
     }
 

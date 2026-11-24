@@ -220,81 +220,68 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     #expect(item.action == #selector(MenuCoordinator.addClaudeProfile(_:)))
 }
 
-@MainActor
-@Test func addTabMenu_profileItemTitles_splitIdentityOverUsageOnTwoLines() {
-    // A profile with a usage snapshot renders two lines: identity as the plain
-    // `title` (primary), spelled-out usage in `attributedTitle` (secondary). A
-    // profile without a snapshot keeps a plain single-line title and no
-    // attributedTitle. (No resetsAt in the fixture so the expected string is
-    // timezone-independent.)
-    let snapshot = ProfileUsageSnapshot(
+/// A healthy, just-fetched snapshot with both windows. No reset times, so
+/// nothing depends on the time zone.
+private func healthySnapshot() -> ProfileUsageSnapshot {
+    ProfileUsageSnapshot(
         buckets: [
-            ClaudeUsageLimitBucket(kind: "session", percent: 0, severity: "normal"),
-            ClaudeUsageLimitBucket(kind: "weekly_all", percent: 76, severity: "warning"),
+            ClaudeUsageLimitBucket(kind: "session", percent: 40, severity: "normal"),
+            ClaudeUsageLimitBucket(kind: "weekly_all", percent: 16, severity: "normal"),
         ],
         fetchedAt: Date(), lastAttemptAt: Date(), status: "ok"
     )
-    let gmail = makeProfile(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: snapshot)
+}
+
+/// Every attachment in a title, in order. Each takes one character.
+private func attachments(_ title: NSAttributedString?) -> [NSTextAttachment] {
+    guard let title else { return [] }
+    var found: [NSTextAttachment] = []
+    for index in 0..<title.length {
+        if let attachment = title.attribute(.attachment, at: index, effectiveRange: nil) as? NSTextAttachment {
+            found.append(attachment)
+        }
+    }
+    return found
+}
+
+@MainActor
+@Test func profileRowsAreOneLineWithBars() {
+    // A profile with usage draws its bars after the name, on the same line.
+    // The plain title stays the name with its login suffix.
+    let gmail = makeProfile(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: healthySnapshot())
     let bare = makeProfile(name: "Work", loginIdentity: "a@b.co")
     let menu = AddTabMenu.build(profiles: [gmail, bare], coordinator: makeCoordinator())
 
     let idx = claudeIndex(menu)
     let gmailItem = menu.items[idx + 1]
-    // Primary line = identity only.
+    #expect(gmailItem.title == ProfileLoginPresentation.menuItemTitle(for: gmail))
     #expect(gmailItem.title == "Gmail — g@x.co")
-    // Two-line attributed title: identity, then the spelled-out usage line
-    // ("used" once, "week") on a second line.
-    let attributed = gmailItem.attributedTitle
-    #expect(attributed != nil)
-    let flattened = attributed?.string ?? ""
-    #expect(flattened == "Gmail — g@x.co\n5h 0% used · week 76%")
-    #expect(flattened.contains("\n"))
-    #expect(flattened.contains("used"))
+    let flattened = gmailItem.attributedTitle?.string ?? ""
+    #expect(flattened.hasPrefix("Gmail — g@x.co"))
+    #expect(flattened.contains("\n") == false)
+    let barsSizes = attachments(gmailItem.attributedTitle).compactMap { $0.image?.size }
+    #expect(barsSizes.contains(NSSize(width: 200, height: 13)))
 
-    // Snapshotless profile stays single-line: plain title, no attributedTitle.
+    // A profile with no usage keeps its plain title and no attributed one.
     let bareItem = menu.items[idx + 2]
     #expect(bareItem.title == "Work — a@b.co")
     #expect(bareItem.attributedTitle == nil)
 }
 
 @MainActor
-@Test func addTabMenu_twoLineAttributedTitle_labelsPercentAsUsedOnceAndIndentsSecondLine() {
-    let snapshot = ProfileUsageSnapshot(
-        buckets: [
-            ClaudeUsageLimitBucket(kind: "session", percent: 16, severity: "normal"),
-            ClaudeUsageLimitBucket(kind: "weekly_all", percent: 79, severity: "warning"),
-        ],
-        fetchedAt: Date(), lastAttemptAt: Date(), status: "ok"
-    )
-    let entry = makeProfile(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: snapshot)
-    let line = ProfileUsagePresentation.menuLine(for: entry)
-    let attributed = try! #require(AddTabMenu.twoLineAttributedTitle(line))
-
-    // "used" appears exactly once, on the first percentage segment.
-    let occurrences = attributed.string.components(separatedBy: "used").count - 1
-    #expect(occurrences == 1)
-    #expect(attributed.string == "Gmail — g@x.co\n5h 16% used · week 79%")
-
-    // The second line carries a head-indent paragraph style; the first does not.
-    let firstStyle = attributed.attribute(
-        .paragraphStyle, at: 0, effectiveRange: nil
-    ) as? NSParagraphStyle
-    let newlineIndex = attributed.string.distance(
-        from: attributed.string.startIndex,
-        to: attributed.string.firstIndex(of: "\n")!
-    )
-    let secondStyle = attributed.attribute(
-        .paragraphStyle, at: newlineIndex + 1, effectiveRange: nil
-    ) as? NSParagraphStyle
-    #expect((firstStyle?.headIndent ?? 0) == 0)
-    #expect((secondStyle?.headIndent ?? 0) > 0)
-}
-
-@MainActor
-@Test func addTabMenu_twoLineAttributedTitle_isNilWithoutUsageLine() {
+@Test func profileRowsKeepTheBlankIndentIcon() throws {
+    // The blank icon, the Claude asterisk's size, is what indents the account
+    // rows under "Claude", with usage or without.
+    let gmail = makeProfile(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: healthySnapshot())
     let bare = makeProfile(name: "Work", loginIdentity: "a@b.co")
-    let line = ProfileUsagePresentation.menuLine(for: bare)
-    #expect(AddTabMenu.twoLineAttributedTitle(line) == nil)
+    let menu = AddTabMenu.build(profiles: [gmail, bare], coordinator: makeCoordinator())
+
+    let idx = claudeIndex(menu)
+    let claudeIconSize = try #require(menu.items[idx].image?.size)
+    for item in menu.items[(idx + 1)...(idx + 2)] {
+        #expect(item.image?.size == claudeIconSize, "\(item.title)")
+    }
+    #expect(menu.items[idx + 3].title == "Choose account…")
 }
 
 @MainActor
