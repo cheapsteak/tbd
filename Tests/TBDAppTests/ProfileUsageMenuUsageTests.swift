@@ -94,6 +94,16 @@ struct ProfileUsageMenuUsageTests {
                                ageNote: note))
     }
 
+    /// With no fetch time, `stalenessNote` says "no usage data yet", which
+    /// the bars beside it would contradict, so the row shows no note.
+    @Test func okSnapshotWithoutFetchTimeShowsBarsWithoutNote() {
+        let snapshot = Fix.snapshot([Fix.session40], fetchedAt: nil)
+        let note = ProfileUsagePresentation.stalenessNote(for: snapshot, kind: .oauth, now: Fix.now)
+        #expect(note == "no usage data yet")
+        let usage = Fix.usage(Fix.entry(snapshot: snapshot))
+        #expect(usage == .bars(session: Fix.presentation(Fix.session40), weekly: nil, ageNote: nil))
+    }
+
     @Test func ageNoteFollowsTheProfileKind() {
         // Ten minutes is within a token profile's fifteen-minute threshold.
         let snapshot = Fix.snapshot([Fix.session40], fetchedAt: Fix.now.addingTimeInterval(-600))

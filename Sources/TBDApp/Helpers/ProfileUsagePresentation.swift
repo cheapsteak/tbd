@@ -685,8 +685,11 @@ enum ProfileUsagePresentation {
                 bucketPresentation($0, style: style, now: now, timeZone: timeZone)
             }
             if session != nil || weekly != nil {
-                return .bars(session: session, weekly: weekly,
-                             ageNote: stalenessNote(for: snapshot, kind: kind, now: now))
+                // With no fetch time the note would read "no usage data yet",
+                // which the bars beside it contradict.
+                let ageNote = snapshot.fetchedAt == nil
+                    ? nil : stalenessNote(for: snapshot, kind: kind, now: now)
+                return .bars(session: session, weekly: weekly, ageNote: ageNote)
             }
         }
         if let note = stalenessNote(for: snapshot, kind: kind, now: now) {
