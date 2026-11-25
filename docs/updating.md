@@ -82,17 +82,21 @@ these steps in order.
   the installed one, to a hidden `/Applications/.TBD-install-incoming`, and
   swaps the two with two renames back to back: the installed bundle to
   `/Applications/.TBD-install-outgoing`, the new one to `TBD.app`. The
-  replaced bundle is then removed. So `/Applications/TBD.app` holds a whole
+  replaced bundle is then renamed to `/Applications/.TBD-install-discard` and
+  deleted there, so a delete cut short never leaves part of a bundle under
+  the outgoing name. So `/Applications/TBD.app` holds a whole
   bundle throughout, save the moment between the two renames, which matters
   because the app can quit at any time (see the next step). A copy that fails
   leaves the installed bundle untouched, removes what it copied and ends the
   run, with the app still up. Each copy is an APFS clone where the volume
   allows, which costs almost no disk space. The running app does not notice
   the swap: it keeps running the program it started from. An install
-  interrupted part-way can leave either hidden directory behind, and the next
-  install removes both before it starts; if nothing is installed and a bundle
-  sits at `.TBD-install-outgoing`, the last run stopped between its two
-  renames, so that bundle is put back first rather than removed.
+  interrupted part-way can leave any of the three hidden directories behind,
+  and the next install removes them before it starts; if nothing is installed
+  and a whole bundle (with `Contents/Info.plist` and an executable
+  `Contents/MacOS/TBDApp`) sits at `.TBD-install-outgoing`, the last run
+  stopped between its two renames, so that bundle is put back first rather
+  than removed.
   `scripts/restart.sh` installs the same way.
 - **Stops the app**, unless you pass `--no-app`, and waits for it to exit:
   SIGTERM, five seconds, then SIGKILL, each outcome logged. It comes after the
@@ -370,10 +374,13 @@ the order you would reach for them.
   "Stops the app" above):
 
   ```bash
+  rm -rf /Applications/.TBD-install-incoming /Applications/.TBD-install-outgoing \
+    /Applications/.TBD-install-discard &&
   /bin/cp -cR ~/tbd/updates/previous/TBD.app /Applications/.TBD-install-incoming &&
   mv /Applications/TBD.app /Applications/.TBD-install-outgoing &&
   mv /Applications/.TBD-install-incoming /Applications/TBD.app &&
-  rm -rf /Applications/.TBD-install-outgoing
+  mv /Applications/.TBD-install-outgoing /Applications/.TBD-install-discard &&
+  rm -rf /Applications/.TBD-install-discard
   ```
 
   Then relaunch. That bundle's `Contents/SourceWorktreePath.txt` names the
@@ -446,7 +453,10 @@ because the new daemon may already be up. So it leaves the app as it is — not
 running if the run had stopped it, still running if the interruption came
 before the stop — and logs an error saying the run was interrupted while
 installing and handing over, with a line saying the app is not running when
-the run had stopped it.
+the run had stopped it. When the new build is installed but the run had not
+yet stopped the app or begun the handover, the run says so: TBD is still
+running the previous build in front of the newly installed bundle, nothing
+was handed over, and `tbd update` run again completes the move.
 
 To recover from either:
 

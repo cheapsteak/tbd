@@ -740,6 +740,7 @@ build_products() {
 # but it is not this run's to restore (see BUNDLE_STASHED).
 keep_installed_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
+    local keep_dir partial discard
     BUNDLE_STASHED=false
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
@@ -748,17 +749,36 @@ keep_installed_bundle() {
         fi
         return 0
     fi
-    if ! mkdir -p "$(dirname "$PREVIOUS_BUNDLE")"; then
-        log_error "could not make $(dirname "$PREVIOUS_BUNDLE") — installing nothing"
+    keep_dir="$(dirname "$PREVIOUS_BUNDLE")"
+    if ! mkdir -p "$keep_dir"; then
+        log_error "could not make $keep_dir — installing nothing"
         return 1
     fi
-    rm -rf "$PREVIOUS_BUNDLE"
-    # A leftover the rm could not remove would make cp copy into it.
-    if [ -e "$PREVIOUS_BUNDLE" ] || ! copy_app_bundle "$installed_bundle" "$PREVIOUS_BUNDLE"; then
-        rm -rf "$PREVIOUS_BUNDLE"
+    # A half-copied previous is worse than none: the recovery steps and
+    # docs/updating.md send the operator to it. So the copy goes to a sibling
+    # and is renamed into place only once whole, and the bundle it replaces
+    # is renamed away before it is deleted, so that a run cut short anywhere
+    # here leaves at $PREVIOUS_BUNDLE the earlier kept bundle, whole, or
+    # nothing. The next keep clears whatever either sibling still holds,
+    # which makes it their reclaimer.
+    partial="$keep_dir/.TBD.app.partial"
+    discard="$keep_dir/.TBD.app.discard"
+    rm -rf "$partial" "$discard"
+    # A leftover the rm could not remove would make cp copy into it, or mv
+    # move into it.
+    if [ -e "$partial" ] || [ -e "$discard" ] ||
+        ! copy_app_bundle "$installed_bundle" "$partial"; then
+        rm -rf "$partial"
         log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
         return 1
     fi
+    if { [ -e "$PREVIOUS_BUNDLE" ] && ! mv "$PREVIOUS_BUNDLE" "$discard"; } ||
+        ! mv "$partial" "$PREVIOUS_BUNDLE"; then
+        rm -rf "$partial"
+        log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
+        return 1
+    fi
+    rm -rf "$discard"
     BUNDLE_STASHED=true
     log "kept the previous app bundle at $PREVIOUS_BUNDLE"
 }
@@ -1312,12 +1332,25 @@ leave_app_stopped_for_recovery() {
 # mirror image of the mismatch the rollback exists to prevent. An app launched
 # into any of that reaches, or starts, whichever daemon it finds. So the run
 # says what happened and how to recover, and the operator chooses.
+#
+# One case the run can name outright: the new build is installed, but the run
+# ended before it stopped the app or began the handover. TBD is then still
+# running the previous build in front of the new bundle, which is accepted
+# rather than undone here: in a source build the update clone's .build/release
+# already holds the new binaries from the build step, so a daemon respawned
+# from it is the new build whether or not the bundle was swapped. Running
+# `tbd update` again completes the move, and the report says so.
 report_interrupted_install() {
-    local note
+    local note installed_commit
     log_error "the run was interrupted while installing and handing over; the installed app and the daemon may be different builds"
     note="$(put_back_outgoing_app_bundle "$INSTALLED_BUNDLE" 2>&1)" || true
     [ -z "$note" ] || log "$note"
     log "$(describe_installed_bundle)"
+    installed_commit="$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
+    if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_RELAUNCH_PENDING" != true ] &&
+        [ -n "$INSTALLING_COMMIT" ] && [ "$installed_commit" = "$INSTALLING_COMMIT" ]; then
+        log "nothing was handed over and the app was not stopped: TBD is still running the previous build, in front of the newly installed bundle — run 'tbd update' again, which completes the move"
+    fi
     leave_app_stopped_for_recovery
 }
 

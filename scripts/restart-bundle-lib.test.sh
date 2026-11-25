@@ -1026,12 +1026,14 @@ EOF
 }
 
 # A directory that looks enough like an assembled bundle for an install to
-# move it around, carrying <marker> in its SourceWorktreePath.txt. Echoes its
-# path.
+# move it around, carrying <marker> in its SourceWorktreePath.txt. It has an
+# Info.plist and an executable TBDApp, which is what put-back checks for.
+# Echoes its path.
 mkfakebundle() {
     local dir="$1" marker="$2"
     mkdir -p "$dir/Contents/MacOS"
     printf '%s' "$marker" > "$dir/Contents/SourceWorktreePath.txt"
+    printf '<plist version="1.0"><dict/></plist>\n' > "$dir/Contents/Info.plist"
     printf '#!/bin/sh\nexit 0\n' > "$dir/Contents/MacOS/TBDApp"
     chmod +x "$dir/Contents/MacOS/TBDApp"
     printf '%s\n' "$dir"
@@ -1177,6 +1179,110 @@ test_install_clears_what_an_interrupted_install_left() {
         "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
     assert_no_dir "the partial copy is gone (mid-swap)" "$apps/.TBD-install-incoming"
     assert_no_dir "nothing is left outgoing (mid-swap)" "$apps/.TBD-install-outgoing"
+}
+
+# A stand-in for `rm` at <bin>/rm that records each call in <log> and removes
+# nothing, failing as a delete cut short or refused would.
+#
+#   mkrefusingrm <bin> <log>
+mkrefusingrm() {
+    local bin="$1" log="$2"
+    mkdir -p "$bin"
+    cat > "$bin/rm" << EOF
+#!/bin/sh
+printf 'rm %s\n' "\$*" >> "$log"
+exit 1
+EOF
+    chmod +x "$bin/rm"
+}
+
+# A delete cut short leaves part of a tree behind. Deleted in place, the
+# outgoing sibling would keep its name, and the next install, finding nothing
+# installed, would put that part back as the bundle. So a sibling is renamed
+# to the discard sibling first and deleted there. With an `rm` that removes
+# nothing, the cleanup before an install, and the removal of the replaced
+# bundle after one, must each leave the outgoing name empty and the tree at
+# the discard name, and no rm may ever be aimed at the outgoing name. A stale
+# discard sibling is cleared like the other two.
+test_install_renames_a_sibling_away_before_deleting_it() {
+    local root apps log rc=0
+    root="$TEST_TMP/install-discard"
+    apps="$root/Applications"
+    log="$root/rm.log"
+    mkdir -p "$apps"
+    mkfakebundle "$apps/TBD.app" old >/dev/null
+    mkfakebundle "$apps/.TBD-install-outgoing" left-outgoing >/dev/null
+    mkrefusingrm "$root/bin" "$log"
+
+    # shellcheck disable=SC2016 # the script's own arguments, expanded by it
+    env PATH="$root/bin:$PATH" bash -c 'source "$1"; reclaim_app_bundle_siblings "$2"' \
+        _ "$HELPER" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+    assert_eq "a cleanup whose delete fails says so" "1" "$rc"
+    assert_no_dir "the outgoing name is empty even though nothing was deleted" \
+        "$apps/.TBD-install-outgoing"
+    assert_eq "the tree waits at the discard name" "left-outgoing" \
+        "$(cat "$apps/.TBD-install-discard/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_not_contains "no rm is aimed at the outgoing name" \
+        "$apps/.TBD-install-outgoing" "$(cat "$log" 2>/dev/null)"
+    assert_contains "the rm is aimed at the discard name" \
+        "rm -rf $apps/.TBD-install-discard" "$(cat "$log" 2>/dev/null)"
+
+    rm -rf "$apps/.TBD-install-discard" "$log"
+    mkfakebundle "$root/new/TBD.app" new >/dev/null
+    rc=0
+    # shellcheck disable=SC2016 # the script's own arguments, expanded by it
+    env PATH="$root/bin:$PATH" bash -c 'source "$1"; install_app_bundle "$2" "$3"' \
+        _ "$HELPER" "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+    assert_eq "an install whose delete of the replaced bundle fails still installs" "0" "$rc"
+    assert_eq "the new bundle is installed" "new" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_no_dir "the replaced bundle is not left under the outgoing name" \
+        "$apps/.TBD-install-outgoing"
+    assert_eq "it waits at the discard name" "old" \
+        "$(cat "$apps/.TBD-install-discard/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_not_contains "no rm is aimed at the outgoing name (install)" \
+        "$apps/.TBD-install-outgoing" "$(cat "$log" 2>/dev/null)"
+
+    rc=0
+    reclaim_app_bundle_siblings "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+    assert_eq "the next cleanup succeeds" "0" "$rc"
+    assert_no_dir "and clears the stale discard sibling" "$apps/.TBD-install-discard"
+}
+
+# Put-back trusts the outgoing sibling only when it looks whole: an
+# Info.plist, and an executable TBDApp. A tree missing either is no bundle to
+# put in front of a quitting app, so it is not put back, the line says why,
+# and the installed path stays empty until an install fills it; the cleanup
+# then removes the tree.
+test_put_back_refuses_an_outgoing_tree_that_is_not_whole() {
+    local root apps out rc which
+    for which in no-plist no-executable; do
+        root="$TEST_TMP/put-back-$which"
+        apps="$root/Applications"
+        mkdir -p "$apps"
+        mkfakebundle "$apps/.TBD-install-outgoing" "partial-$which" >/dev/null
+        if [ "$which" = no-plist ]; then
+            rm -f "$apps/.TBD-install-outgoing/Contents/Info.plist"
+        else
+            chmod -x "$apps/.TBD-install-outgoing/Contents/MacOS/TBDApp"
+        fi
+
+        rc=0
+        out="$(put_back_outgoing_app_bundle "$apps/TBD.app" 2>&1)" || rc=$?
+        assert_eq "put-back of a tree that is not whole is not an error ($which)" "0" "$rc"
+        assert_contains "it says why it put nothing back ($which)" \
+            "not putting back $apps/TBD.app from $apps/.TBD-install-outgoing: it lacks Contents/Info.plist or an executable Contents/MacOS/TBDApp" \
+            "$out"
+        assert_no_dir "nothing is installed ($which)" "$apps/TBD.app"
+        assert_eq "the tree stays where it was for the cleanup ($which)" "partial-$which" \
+            "$(cat "$apps/.TBD-install-outgoing/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+
+        rc=0
+        reclaim_app_bundle_siblings "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+        assert_eq "the cleanup succeeds ($which)" "0" "$rc"
+        assert_no_dir "the cleanup installs nothing ($which)" "$apps/TBD.app"
+        assert_no_dir "and removes the tree ($which)" "$apps/.TBD-install-outgoing"
+    done
 }
 
 # MARK: - App process control
@@ -2559,6 +2665,8 @@ test_install_siblings_sit_beside_the_installed_bundle
 test_install_keeps_a_whole_bundle_installed_while_it_copies
 test_install_whose_copy_fails_leaves_the_installed_bundle
 test_install_clears_what_an_interrupted_install_left
+test_install_renames_a_sibling_away_before_deleting_it
+test_put_back_refuses_an_outgoing_tree_that_is_not_whole
 test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
 test_stop_waits_for_the_app_and_escalates

@@ -595,18 +595,20 @@ copy_app_bundle() {
     "$TBD_BUNDLE_CP" -cR "${1-}" "${2-}"
 }
 
-# The path of one of the two siblings an install passes through:
+# The path of one of the three siblings an install passes through:
 #
-#   app_bundle_sibling <installed_bundle> incoming|outgoing
+#   app_bundle_sibling <installed_bundle> incoming|outgoing|discard
 #
 # The new bundle is copied to the incoming sibling while the installed bundle
 # stays where it is. Then the installed bundle is renamed to the outgoing
 # sibling and the incoming one renamed into its place (see
-# swap_in_staged_app_bundle). Both sit in the installed bundle's own
-# directory, so each move is a rename within one volume. Both are
-# dot-prefixed, so Finder hides them, and lack the `.app` extension, so
-# neither is named as an application. For /Applications/TBD.app they are
-# /Applications/.TBD-install-incoming and /Applications/.TBD-install-outgoing.
+# swap_in_staged_app_bundle). A sibling that is done with is renamed to the
+# discard sibling and deleted there (discard_app_bundle_sibling). All three
+# sit in the installed bundle's own directory, so each move is a rename
+# within one volume. All are dot-prefixed, so Finder hides them, and lack the
+# `.app` extension, so none is named as an application. For
+# /Applications/TBD.app they are /Applications/.TBD-install-incoming,
+# /Applications/.TBD-install-outgoing and /Applications/.TBD-install-discard.
 app_bundle_sibling() {
     local installed_bundle="${1-}"
     local role="${2-}"
@@ -621,8 +623,16 @@ app_bundle_sibling() {
 #
 #   put_back_outgoing_app_bundle <installed_bundle>
 #
-# Prints a line saying what it put back, and nothing when there was nothing
-# to put back. Non-zero, with an error on stderr, when the rename fails.
+# Only a tree that looks whole goes back: Contents/Info.plist present and
+# Contents/MacOS/TBDApp executable. Nothing deletes the outgoing sibling in
+# place (discard_app_bundle_sibling renames it away first), but a tree there
+# that fails the check is still no bundle to put in front of a quitting app,
+# so it is left for an install's cleanup (reclaim_app_bundle_siblings) and
+# the line printed says why.
+#
+# Prints a line saying what it put back or why it did not, and nothing when
+# there was nothing to put back. Non-zero, with an error on stderr, when the
+# rename fails.
 put_back_outgoing_app_bundle() {
     local installed_bundle="${1-}"
     local outgoing
@@ -630,6 +640,11 @@ put_back_outgoing_app_bundle() {
     [ -n "$installed_bundle" ] || return 1
     outgoing="$(app_bundle_sibling "$installed_bundle" outgoing)"
     if [ -e "$installed_bundle" ] || [ ! -d "$outgoing" ]; then
+        return 0
+    fi
+    if [ ! -f "$outgoing/Contents/Info.plist" ] || [ ! -x "$outgoing/Contents/MacOS/TBDApp" ]; then
+        printf 'not putting back %s from %s: it lacks Contents/Info.plist or an executable Contents/MacOS/TBDApp, so it is left for an install to clear\n' \
+            "$installed_bundle" "$outgoing"
         return 0
     fi
     if ! mv "$outgoing" "$installed_bundle"; then
@@ -640,28 +655,58 @@ put_back_outgoing_app_bundle() {
         "$installed_bundle" "$outgoing"
 }
 
-# Clear both siblings of <installed_bundle> before an install uses them.
+# Remove the incoming or outgoing sibling of <installed_bundle> by renaming
+# it to the discard sibling and deleting it there.
+#
+#   discard_app_bundle_sibling <installed_bundle> incoming|outgoing
+#
+# A delete cut short leaves part of a tree behind. Under the outgoing name the
+# next install would find it with nothing installed and take it for the
+# bundle to put back; under the discard name nothing reads it, and the next
+# install clears it (reclaim_app_bundle_siblings). Non-zero when the sibling
+# is still at its own name afterwards.
+discard_app_bundle_sibling() {
+    local installed_bundle="${1-}"
+    local role="${2-}"
+    local sibling discard
+
+    sibling="$(app_bundle_sibling "$installed_bundle" "$role")"
+    discard="$(app_bundle_sibling "$installed_bundle" discard)"
+    [ -e "$sibling" ] || return 0
+    rm -rf "$discard" 2>/dev/null || true
+    # A discard the rm could not remove would make mv move the sibling into it.
+    if [ -e "$discard" ] || ! mv "$sibling" "$discard"; then
+        return 1
+    fi
+    rm -rf "$discard" 2>/dev/null || true
+}
+
+# Clear the siblings of <installed_bundle> before an install uses them.
 #
 #   reclaim_app_bundle_siblings <installed_bundle>
 #
-# An interrupted install can leave either behind: a partial copy at the
-# incoming sibling, the bundle it replaced at the outgoing one. Nothing but an
-# install creates them, and every install starts here, so this create-time
-# cleanup is their reclaimer. An outgoing bundle with nothing installed in its
-# place is put back first (put_back_outgoing_app_bundle), since it is the last
-# whole bundle there is, and that line is printed. Non-zero, with an error on
-# stderr, when either sibling is still there afterwards.
+# An interrupted install can leave any of them behind: a partial copy at the
+# incoming sibling, the bundle it replaced at the outgoing one, part of a
+# deleted tree at the discard one. Nothing but an install creates them, and
+# every install starts here, so this create-time cleanup is their reclaimer.
+# An outgoing bundle with nothing installed in its place is put back first
+# (put_back_outgoing_app_bundle), since it is the last whole bundle there is,
+# and that line is printed. Non-zero, with an error on stderr, when any
+# sibling is still there afterwards.
 reclaim_app_bundle_siblings() {
     local installed_bundle="${1-}"
-    local incoming outgoing
+    local incoming outgoing discard
 
     [ -n "$installed_bundle" ] || return 1
     put_back_outgoing_app_bundle "$installed_bundle" || return 1
     incoming="$(app_bundle_sibling "$installed_bundle" incoming)"
     outgoing="$(app_bundle_sibling "$installed_bundle" outgoing)"
-    rm -rf "$incoming" "$outgoing" 2>/dev/null || true
-    if [ -e "$incoming" ] || [ -e "$outgoing" ]; then
-        echo "error: could not remove $incoming and $outgoing, left by an earlier install" >&2
+    discard="$(app_bundle_sibling "$installed_bundle" discard)"
+    rm -rf "$discard" 2>/dev/null || true
+    discard_app_bundle_sibling "$installed_bundle" incoming || true
+    discard_app_bundle_sibling "$installed_bundle" outgoing || true
+    if [ -e "$incoming" ] || [ -e "$outgoing" ] || [ -e "$discard" ]; then
+        echo "error: could not remove $incoming, $outgoing and $discard, left by an earlier install" >&2
         return 1
     fi
 }
@@ -686,7 +731,7 @@ stage_app_bundle() {
         return 1
     fi
     if ! copy_app_bundle "$source_bundle" "$incoming"; then
-        rm -rf "$incoming" 2>/dev/null || true
+        discard_app_bundle_sibling "$installed_bundle" incoming || true
         echo "error: could not copy $source_bundle to $incoming" >&2
         return 1
     fi
@@ -750,7 +795,8 @@ swap_in_staged_app_bundle() {
 #
 # The new bundle is staged beside the installed one and swapped in by two
 # renames (stage_app_bundle, swap_in_staged_app_bundle), and the bundle it
-# replaced is removed afterwards. Nothing deletes the installed bundle and
+# replaced is removed afterwards, by way of the discard sibling
+# (discard_app_bundle_sibling). Nothing deletes the installed bundle and
 # copies over it in place, because the installed path has to hold a whole
 # bundle whenever the app quits. On macOS 27, a quitting app makes
 # LaunchServices ask Background Task Management whether the app may stay in
@@ -785,11 +831,11 @@ install_app_bundle() {
         0) ;;
         2) return 2 ;;
         *)
-            rm -rf "$(app_bundle_sibling "$installed_bundle" incoming)" 2>/dev/null || true
+            discard_app_bundle_sibling "$installed_bundle" incoming || true
             return 1
             ;;
     esac
-    rm -rf "$(app_bundle_sibling "$installed_bundle" outgoing)" 2>/dev/null || true
+    discard_app_bundle_sibling "$installed_bundle" outgoing || true
     if ! register_app_bundle "$installed_bundle"; then
         echo "warning: installed $installed_bundle but could not register it with LaunchServices" >&2
     fi
