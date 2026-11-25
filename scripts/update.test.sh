@@ -2993,12 +2993,15 @@ test_a_failed_install_leaves_the_app_running() {
 
 # A swap that can put neither the new bundle in place nor the old one back
 # leaves nothing installed, with the app still running in front of the empty
-# path (install_app_bundle's status 2). The install says so and where the
-# bundle that was installed is, and records that the installed path no longer
-# holds what the run found (BUNDLE_RESTORE_FAILED), so main reports a rollback
-# that did not complete and logs the recovery steps rather than a failed
-# install that left everything as it was. The mv stub refuses the staged
-# bundle's rename into place and the rename back.
+# path (install_app_bundle's status 2). Nothing later in the run puts the old
+# bundle back, so the install tries the rename back once more. When that fails
+# too, it says nothing is installed and where the bundle that was installed
+# is, warns not to quit TBD until a bundle is back with the command that puts
+# it back, and records that the installed path no longer holds what the run
+# found (BUNDLE_RESTORE_FAILED), so main reports a rollback that did not
+# complete and logs the recovery steps rather than a failed install that left
+# everything as it was. The mv stub refuses the staged bundle's rename into
+# place and every rename back.
 test_an_install_that_leaves_nothing_installed_says_where_the_bundle_is() {
     local case_dir out rc events apps installed incoming outgoing kept
     case_dir="$(mkcase install-leaves-nothing)"
@@ -3017,12 +3020,17 @@ test_an_install_that_leaves_nothing_installed_says_where_the_bundle_is() {
     assert_eq "an install that leaves nothing installed fails the run" "1" "$rc"
     assert_eq "the staged bundle's rename into place is refused" "1" \
         "$(mv_refusals "$case_dir/bin" "$incoming" "$installed")"
-    assert_eq "and so is the rename back" "1" \
+    assert_eq "the rename back is refused, and refused again when it is retried" "2" \
         "$(mv_refusals "$case_dir/bin" "$outgoing" "$installed")"
     assert_contains_literal "the error says nothing is installed, and where the bundle that was is" \
         "ERROR: could not install to $installed, and nothing is installed there now; the bundle that was is at $outgoing" \
         "$out"
     assert_contains_literal "and where its kept copy is" "a copy at $kept" "$out"
+    assert_contains_literal "a warning says not to quit TBD until a bundle is back" \
+        "WARNING: nothing is installed at $installed. Do not quit TBD until a whole bundle is back there" \
+        "$out"
+    assert_contains_literal "and names the command that puts it back" \
+        "Put back the bundle that was installed with: mv $outgoing $installed" "$out"
     assert_contains "the run reports a rollback that did not complete" \
         "ERROR: the rollback of the failed install did not complete" "$out"
     assert_contains "with the recovery steps" "run 'tbd version'" "$out"
@@ -3037,6 +3045,50 @@ test_an_install_that_leaves_nothing_installed_says_where_the_bundle_is() {
     assert_not_contains "the app is never signalled" "^pkill" "$(cat "$events")"
     assert_not_contains "nothing is handed over" "^handover" "$(cat "$events")"
     assert_not_contains "no app is launched, by main or by the exit trap" "^open" "$(cat "$events")"
+    if [ -f "$case_dir/app" ]; then
+        pass "the app the run never stopped is still running"
+    else
+        fail "the app the run never stopped is still running"
+    fi
+}
+
+# The second try at the rename back is what keeps a passing failure from
+# leaving the installed path empty: here the stub refuses the rename back only
+# once, the retry puts the bundle that was installed back in place, and the
+# run ends as a failed install that changed nothing, with no warning and no
+# rollback to report. Without the retry the path stays empty, and this fails.
+test_an_install_that_leaves_nothing_installed_retries_the_put_back() {
+    local case_dir out rc events apps installed incoming outgoing
+    case_dir="$(mkcase install-put-back-retried)"
+    events="$case_dir/events.log"
+    apps="$case_dir/Applications"
+    installed="$apps/TBD.app"
+    incoming="$apps/.TBD-install-incoming"
+    outgoing="$apps/.TBD-install-outgoing"
+    mkdir -p "$apps"
+    mkbundle "$installed" "before-the-update" >/dev/null
+    mkrefusingmv "$case_dir/bin"
+    refuse_mv "$case_dir/bin" "$incoming" "$installed"
+    refuse_mv "$case_dir/bin" "$outgoing" "$installed" once
+    out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "the failed install fails the run" "1" "$rc"
+    assert_eq "the swap's own rename back is refused" "1" \
+        "$(mv_refusals "$case_dir/bin" "$outgoing" "$installed")"
+    assert_eq "the retry puts the bundle that was installed back" "before-the-update" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    if [ -x "$installed/Contents/MacOS/TBDApp" ]; then
+        pass "the installed bundle is whole"
+    else
+        fail "the installed bundle is whole"
+    fi
+    assert_contains_literal "the log says it is back" \
+        "the bundle that was installed there is back in place" "$out"
+    assert_eq "nothing is left at the outgoing sibling" "gone" "$(path_state "$outgoing")"
+    assert_eq "the staged bundle is removed" "gone" "$(path_state "$incoming")"
+    assert_not_contains "no warning is logged" "WARNING: nothing is installed" "$out"
+    assert_not_contains "nor a rollback that did not complete" "did not complete" "$out"
+    assert_not_contains "the app is never signalled" "^pkill" "$(cat "$events")"
+    assert_not_contains "no app is launched" "^open" "$(cat "$events")"
     if [ -f "$case_dir/app" ]; then
         pass "the app the run never stopped is still running"
     else
@@ -4393,6 +4445,7 @@ test_the_app_quits_in_front_of_the_whole_new_bundle
 test_the_installed_bundle_stays_whole_while_the_update_copies
 test_a_failed_install_leaves_the_app_running
 test_an_install_that_leaves_nothing_installed_says_where_the_bundle_is
+test_an_install_that_leaves_nothing_installed_retries_the_put_back
 test_an_app_started_during_the_handover_is_stopped_before_the_launch
 test_signing_stays_inside_the_case_with_and_without_ci
 test_a_failed_handover_relaunches_the_stopped_app

@@ -885,11 +885,14 @@ roll_back_bundle() {
 # bundle, so the app quits in front of one whenever it quits (see
 # stop_app_before_handover). A failure leaves the installed bundle as it was,
 # so there is nothing to roll back. Clears BUNDLE_RESTORE_FAILED, and sets it
-# in the one failure that does not leave the installed bundle as it was.
+# in the one failure that does not leave the installed bundle as it was: a
+# swap that could put back neither the new bundle nor, after a second try,
+# the old one, which also logs a warning not to quit TBD until a bundle is
+# back.
 install_new_bundle() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
-    local note status=0
+    local note outgoing status=0
     BUNDLE_RESTORE_FAILED=false
 
     # What an interrupted install left beside the installed bundle goes
@@ -922,9 +925,21 @@ install_new_bundle() {
         0) return 0 ;;
         2)
             # The new bundle could not be renamed into place, nor the old one
-            # back into it.
+            # back into it, and the app is still running in front of the
+            # empty path: if it quits now, every session can go with it (see
+            # stop_app_before_handover). Nothing later in the run puts the
+            # old bundle back, so it gets one more try here.
+            outgoing="$(app_bundle_sibling "$installed_bundle" outgoing)"
+            note="$(put_back_outgoing_app_bundle "$installed_bundle" 2>&1)" || true
+            if [ -d "$installed_bundle" ]; then
+                discard_app_bundle_sibling "$installed_bundle" incoming || true
+                log_error "could not install to $installed_bundle; the bundle that was installed there is back in place, renamed back from $outgoing on a second try"
+                return 1
+            fi
+            [ -z "$note" ] || log "$note"
             BUNDLE_RESTORE_FAILED=true
-            log_error "could not install to $installed_bundle, and nothing is installed there now; the bundle that was is at $(app_bundle_sibling "$installed_bundle" outgoing), and a copy at $PREVIOUS_BUNDLE — put one back before TBD quits"
+            log_error "could not install to $installed_bundle, and nothing is installed there now; the bundle that was is at $outgoing, and a copy at $PREVIOUS_BUNDLE — put one back before TBD quits"
+            log "WARNING: nothing is installed at $installed_bundle. Do not quit TBD until a whole bundle is back there: an app that quits in front of a missing bundle can have every agent session force-quit with it. Put back the bundle that was installed with: mv $outgoing $installed_bundle"
             ;;
         *)
             log_error "could not install to $installed_bundle — what was installed there is untouched"

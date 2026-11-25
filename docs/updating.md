@@ -438,12 +438,16 @@ complete, has changed nothing there: the installed bundle is the one the run
 started with, whole. The run removes what it copied, puts the `.build/release`
 link back, and exits non-zero, but relaunches nothing: the install comes
 before the app is stopped, so the app is still running. The one install
-failure that does change `/Applications` is a swap whose second rename fails
-and whose first cannot then be undone. Nothing is installed at
-`/Applications/TBD.app` then, with the app still running in front of the empty
-path, so the error names `/Applications/.TBD-install-outgoing`, where the
-bundle that was installed is, and asks you to rename it back before TBD
-quits. The next install does that itself before it starts.
+failure that can change `/Applications` is a swap whose second rename fails
+and whose first cannot then be undone, which leaves nothing at
+`/Applications/TBD.app` with the app still running in front of the empty path.
+The run tries the rename back once more, and if that works it ends as an
+install that changed nothing. If it fails again, the error names
+`/Applications/.TBD-install-outgoing`, where the bundle that was installed is,
+and a `WARNING` line says not to quit TBD until a whole bundle is back, with
+the command that puts it back:
+`mv /Applications/.TBD-install-outgoing /Applications/TBD.app`. The next
+install does that itself before it starts.
 
 The relaunch waits on both halves of that rollback. When either fails — the
 run kept no bundle to put back because nothing was installed when it began,
