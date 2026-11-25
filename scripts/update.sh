@@ -738,12 +738,28 @@ build_products() {
 # With nothing installed there is nothing to keep, and a bundle an earlier
 # update kept is left where it is: it is still a route back for the operator,
 # but it is not this run's to restore (see BUNDLE_STASHED).
+#
+# The same goes for an installed bundle that is already the build this run
+# installs (INSTALLING_COMMIT, against the commit in its
+# TBDBuildIdentity.json), such as one an earlier run left there when it was
+# cut short after its swap, in front of a daemon still on the previous build.
+# A copy of it is no way back. Kept in place of the earlier bundle, it would
+# erase the route back to the previous build, and a failed handover would
+# "restore" the new app in front of the old daemon and relaunch it.
 keep_installed_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
-    local keep_dir partial discard moved_aside=false
+    local keep_dir partial discard installed_commit moved_aside=false
     BUNDLE_STASHED=false
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
+        if [ -d "$PREVIOUS_BUNDLE" ]; then
+            log "leaving $PREVIOUS_BUNDLE, which an earlier update kept, where it is"
+        fi
+        return 0
+    fi
+    installed_commit="$(json_field "$(cat "$installed_bundle/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
+    if [ -n "$INSTALLING_COMMIT" ] && [ "$installed_commit" = "$INSTALLING_COMMIT" ]; then
+        log "$installed_bundle is already the build this run installs, $INSTALLING_COMMIT — keeping no copy of it"
         if [ -d "$PREVIOUS_BUNDLE" ]; then
             log "leaving $PREVIOUS_BUNDLE, which an earlier update kept, where it is"
         fi
@@ -862,14 +878,16 @@ BUNDLE_RESTORE_FAILED=false
 # The rollback of the bundle after a failed handover: restore_previous_bundle,
 # with a failure recorded in BUNDLE_RESTORE_FAILED for main.
 #
-# It restores only a bundle this run kept (BUNDLE_STASHED). A run that found
-# nothing installed has nothing of its own to put back, and that counts as a
-# rollback that did not complete: main leaves the app stopped and logs the
-# recovery steps. Whatever this run installed stays installed, as on a first
-# update, rather than being removed. Removing it would restore the empty
-# install the run began with, but the stopped app already keeps this run from
-# launching it, and removing it takes away the bundle the recovery steps tell
-# the operator to open once it and the daemon are the same build.
+# It restores only a bundle this run kept (BUNDLE_STASHED). A run that kept
+# none — it found nothing installed, or found the build it installs already
+# installed (keep_installed_bundle) — has nothing of its own to put back, and
+# that counts as a rollback that did not complete: main leaves the app
+# stopped and logs the recovery steps. Whatever this run installed stays
+# installed, as on a first update, rather than being removed. Removing it
+# would restore the install the run began with, but the stopped app already
+# keeps this run from launching it, and removing it takes away the bundle the
+# recovery steps tell the operator to open once it and the daemon are the
+# same build.
 roll_back_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
     if [ "$BUNDLE_STASHED" = true ]; then
@@ -877,7 +895,7 @@ roll_back_bundle() {
         return 0
     fi
     BUNDLE_RESTORE_FAILED=true
-    log_error "no previous app bundle to restore — this run found nothing installed at $installed_bundle, so what it installed there stays"
+    log_error "no previous app bundle to restore — this run kept none of its own, so what it installed at $installed_bundle stays"
     if [ -d "$PREVIOUS_BUNDLE" ]; then
         log "not restoring $PREVIOUS_BUNDLE: an earlier update kept it, and it is not the build this run replaced"
     fi

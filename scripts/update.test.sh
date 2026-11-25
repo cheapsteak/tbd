@@ -3320,6 +3320,58 @@ test_a_failed_handover_never_restores_an_earlier_updates_bundle() {
     assert_contains "the recovery offers another tbd update" "run 'tbd update' again" "$out"
 }
 
+# THE REGRESSION: a run cut short after its swap leaves the new build
+# installed in front of a daemon still on the previous build, with the bundle
+# it replaced kept. The next `tbd update` kept a copy of what it found
+# installed, the new build, in place of that kept bundle, so the route back to
+# the previous build was gone, and a failed handover "restored" the new app in
+# front of the old daemon and relaunched it. A run that finds the build it
+# installs already installed, read from the bundle's build identity, now keeps
+# no copy of it and leaves the earlier kept bundle where it is, whether the
+# handover completes or fails; a failed one restores nothing and leaves the
+# app stopped with the recovery steps.
+test_an_update_over_its_own_build_leaves_the_kept_bundle_alone() {
+    local how case_dir out rc events installed kept new_commit
+    for how in completes fails; do
+        case_dir="$(mkcase "over-own-build-$how")"
+        events="$case_dir/events.log"
+        installed="$case_dir/Applications/TBD.app"
+        kept="$case_dir/home/tbd/updates/previous/TBD.app"
+        # The commit the run installs: the fixture remote's main, which the
+        # update clone checks out.
+        new_commit="$(git -C "$case_dir/remote" rev-parse HEAD)"
+        mkdir -p "$case_dir/Applications"
+        mkbundle "$installed" "left-by-the-cut-short-run" "$new_commit" >/dev/null
+        mkbundle "$kept" "before-the-cut-short-run" 0000000000000000000000000000000000000000 >/dev/null
+        if [ "$how" = fails ]; then
+            out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+            assert_eq "a failed handover fails the run" "1" "$rc"
+        else
+            out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+            assert_eq "a completed handover succeeds" "0" "$rc"
+        fi
+        assert_contains_literal "the run says the build it installs is already installed (handover $how)" \
+            "$installed is already the build this run installs, $new_commit — keeping no copy of it" "$out"
+        assert_eq "the earlier kept bundle stays (handover $how)" "before-the-cut-short-run" \
+            "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+        assert_contains_literal "and the log says so (handover $how)" \
+            "leaving $kept, which an earlier update kept, where it is" "$out"
+        assert_eq "the run's own build is installed (handover $how)" "$case_dir/home/tbd/updates/src" \
+            "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    done
+    assert_not_contains "a failed handover restores nothing" "restored previous app bundle" "$out"
+    assert_contains_literal "it says it kept nothing to restore" \
+        "ERROR: no previous app bundle to restore — this run kept none of its own" "$out"
+    assert_contains "the incomplete rollback is logged as an error" \
+        "ERROR: the rollback of the failed install did not complete" "$out"
+    assert_not_contains "no app is launched, by main or by the exit trap" "^open" "$(cat "$events")"
+    if [ -f "$case_dir/app" ]; then
+        fail "the app stays stopped when the run kept no bundle to restore"
+    else
+        pass "the app stays stopped when the run kept no bundle to restore"
+    fi
+}
+
 # A run that leaves by `exit` (or a signal) while the installation is moving
 # never reaches main's own rollback, and the exit trap cannot tell which
 # bundle is installed or which daemon is serving. Launching the app there
@@ -4586,6 +4638,7 @@ test_a_failed_handover_relaunches_the_stopped_app
 test_a_failed_handover_whose_restore_fails_leaves_the_app_stopped
 test_a_rollback_whose_link_put_back_fails_does_not_name_a_spent_kept_bundle
 test_a_failed_handover_never_restores_an_earlier_updates_bundle
+test_an_update_over_its_own_build_leaves_the_kept_bundle_alone
 test_an_exit_mid_handover_leaves_the_app_stopped
 test_an_exit_after_the_handover_still_relaunches_the_app
 test_a_rollback_waits_for_the_app_exit_to_settle

@@ -78,7 +78,9 @@ these steps in order.
   run or a failed signature leaves everything as it was. First it copies the
   installed bundle to `~/tbd/updates/previous/TBD.app`, where it stays — it
   is what a failed handover puts back, and afterwards it is the quickest way
-  to return to the build you were on. Then it copies the new bundle in beside
+  to return to the build you were on. (Not when the installed bundle is
+  already the build being installed; see "Going back to the previous
+  build".) Then it copies the new bundle in beside
   the installed one, to a hidden `/Applications/.TBD-install-incoming`, and
   swaps the two with two renames back to back: the installed bundle to
   `/Applications/.TBD-install-outgoing`, the new one to `TBD.app`. The
@@ -369,7 +371,10 @@ the order you would reach for them.
   update copies the app bundle it is replacing to
   `~/tbd/updates/previous/TBD.app` and leaves it there. An update that finds
   nothing installed keeps nothing, and leaves a bundle an earlier update kept
-  where it is. Put it back the way an install does, so that
+  where it is. So does one that finds the build it is installing already
+  installed, as a run cut short after its swap leaves it: a copy of that
+  build is no way back, and would replace the bundle that is. Put it back the
+  way an install does, so that
   `/Applications/TBD.app` is never missing if the app quits meanwhile (see
   "Stops the app" above).
 
@@ -462,10 +467,11 @@ install did not complete, and the recovery steps below.
 The rollback only ever puts back the bundle the same run kept. A bundle an
 earlier update left at `~/tbd/updates/previous/TBD.app` is not the build the
 run replaced, and installing it would put some older app in front of
-whichever daemon is left, so a run that kept nothing leaves it where it is and
-logs that it did not restore it. The new build stays in `/Applications`, as on
-the first update, so that it is there to open once it and the daemon are the
-same build.
+whichever daemon is left, so a run that kept nothing — it found nothing
+installed, or found its own build installed already — leaves it where it is
+and logs that it did not restore it. The new build stays in `/Applications`,
+as on the first update, so that it is there to open once it and the daemon
+are the same build.
 
 A run interrupted while it installs the bundle and hands the daemon over —
 Ctrl-C, a signal, or a step that exits — does not launch the app again
