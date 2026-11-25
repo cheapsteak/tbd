@@ -78,9 +78,10 @@ these steps in order.
   run or a failed signature leaves everything as it was. First it copies the
   installed bundle to `~/tbd/updates/previous/TBD.app`, where it stays — it
   is what a failed handover puts back, and afterwards it is the quickest way
-  to return to the build you were on. (Not when the installed bundle is
-  already the build being installed; see "Going back to the previous
-  build".) Then it copies the new bundle in beside
+  to return to the build you were on. (Not when the installed bundle is the
+  build being installed and the daemon is not, as a run cut short after its
+  swap leaves it; see "Going back to the previous build".) Then it copies
+  the new bundle in beside
   the installed one, to a hidden `/Applications/.TBD-install-incoming`, and
   swaps the two with two renames back to back: the installed bundle to
   `/Applications/.TBD-install-outgoing`, the new one to `TBD.app`. The
@@ -371,10 +372,14 @@ the order you would reach for them.
   update copies the app bundle it is replacing to
   `~/tbd/updates/previous/TBD.app` and leaves it there. An update that finds
   nothing installed keeps nothing, and leaves a bundle an earlier update kept
-  where it is. So does one that finds the build it is installing already
-  installed, as a run cut short after its swap leaves it: a copy of that
-  build is no way back, and would replace the bundle that is. Put it back the
-  way an install does, so that
+  where it is. So does one that finds what a run cut short after its swap
+  leaves: the very build it is installing — the same commit, update clone
+  and dirty flag in the bundle's `Contents/TBDBuildIdentity.json` —
+  installed in front of a daemon on another commit. A copy of that build is
+  no way back, and would replace the bundle that is. Any other bundle is
+  kept, even one of the same commit: a re-run whose daemon already runs it,
+  or a build of that commit from another worktree. Put it back the way an
+  install does, so that
   `/Applications/TBD.app` is never missing if the app quits meanwhile (see
   "Stops the app" above).
 

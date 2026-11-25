@@ -3379,14 +3379,39 @@ test_a_failed_handover_never_restores_an_earlier_updates_bundle() {
     assert_contains "the recovery offers another tbd update" "run 'tbd update' again" "$out"
 }
 
+# Give <bundle> the build identity this harness's run stamps on its own build
+# of <commit>, from the update clone of <case>: the fields bundle_build_key
+# compares. A non-empty <source> or <dirty> stands in for that field.
+stamp_clone_identity() {
+    local bundle="$1" case_dir="$2" commit="$3"
+    local source="${4:-$case_dir/home/tbd/updates/src}" dirty="${5:-false}"
+    printf '{"commit": "%s", "sourceWorktree": "%s", "dirty": %s}\n' \
+        "$commit" "$source" "$dirty" > "$bundle/Contents/TBDBuildIdentity.json"
+}
+
+# Make the daemon of a case made by mkcase report <commit> as its build.
+daemon_reports_commit() {
+    local case_dir="$1" commit="$2"
+    cat > "$case_dir/state/status.json" << EOF
+{
+  "executablePath": "$case_dir/worktree/.build/debug/TBDDaemon",
+  "buildIdentity": {
+    "commit": "$commit",
+    "sourceWorktree": "$case_dir/worktree"
+  }
+}
+EOF
+}
+
 # THE REGRESSION: a run cut short after its swap leaves the new build
 # installed in front of a daemon still on the previous build, with the bundle
 # it replaced kept. The next `tbd update` kept a copy of what it found
 # installed, the new build, in place of that kept bundle, so the route back to
 # the previous build was gone, and a failed handover "restored" the new app in
 # front of the old daemon and relaunched it. A run that finds the build it
-# installs already installed, read from the bundle's build identity, now keeps
-# no copy of it and leaves the earlier kept bundle where it is, whether the
+# installs already installed (same commit, source worktree and dirty flag),
+# with the daemon on another commit (here the fixture's 1111…), now keeps no
+# copy of it and leaves the earlier kept bundle where it is, whether the
 # handover completes or fails; a failed one restores nothing and leaves the
 # app stopped with the recovery steps.
 test_an_update_over_its_own_build_leaves_the_kept_bundle_alone() {
@@ -3400,7 +3425,8 @@ test_an_update_over_its_own_build_leaves_the_kept_bundle_alone() {
         # update clone checks out.
         new_commit="$(git -C "$case_dir/remote" rev-parse HEAD)"
         mkdir -p "$case_dir/Applications"
-        mkbundle "$installed" "left-by-the-cut-short-run" "$new_commit" >/dev/null
+        mkbundle "$installed" "left-by-the-cut-short-run" >/dev/null
+        stamp_clone_identity "$installed" "$case_dir" "$new_commit"
         mkbundle "$kept" "before-the-cut-short-run" 0000000000000000000000000000000000000000 >/dev/null
         if [ "$how" = fails ]; then
             out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
@@ -3410,7 +3436,7 @@ test_an_update_over_its_own_build_leaves_the_kept_bundle_alone() {
             assert_eq "a completed handover succeeds" "0" "$rc"
         fi
         assert_contains_literal "the run says the build it installs is already installed (handover $how)" \
-            "$installed is already the build this run installs, $new_commit — keeping no copy of it" "$out"
+            "$installed is already the build this run installs, $new_commit, in front of a daemon on 1111111111111111111111111111111111111111 — keeping no copy of it" "$out"
         assert_eq "the earlier kept bundle stays (handover $how)" "before-the-cut-short-run" \
             "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
         assert_contains_literal "and the log says so (handover $how)" \
@@ -3429,6 +3455,52 @@ test_an_update_over_its_own_build_leaves_the_kept_bundle_alone() {
     else
         pass "the app stays stopped when the run kept no bundle to restore"
     fi
+}
+
+# The keep is skipped only for the bundle a run cut short after its swap
+# leaves. Anything else that names the commit being installed is kept as
+# before, and a failed handover restores it and relaunches the app: a re-run
+# over a completed update, whose daemon runs the installed build; and a
+# bundle of that commit that is another build, from another worktree (a
+# restart.sh build) or a dirty tree, even in front of a daemon on another
+# commit. Skipping on the commit alone, as the keep did, kept nothing in each
+# case and left the app stopped with no way back.
+test_an_update_over_the_same_commit_keeps_another_build() {
+    local variant case_dir out rc events installed kept new_commit
+    for variant in daemon-runs-it other-worktree dirty; do
+        case_dir="$(mkcase "same-commit-$variant")"
+        events="$case_dir/events.log"
+        installed="$case_dir/Applications/TBD.app"
+        kept="$case_dir/home/tbd/updates/previous/TBD.app"
+        new_commit="$(git -C "$case_dir/remote" rev-parse HEAD)"
+        mkdir -p "$case_dir/Applications"
+        mkbundle "$installed" "installed-before-the-run" >/dev/null
+        mkbundle "$kept" "earlier-update" >/dev/null
+        case "$variant" in
+            daemon-runs-it)
+                stamp_clone_identity "$installed" "$case_dir" "$new_commit"
+                daemon_reports_commit "$case_dir" "$new_commit"
+                ;;
+            other-worktree)
+                stamp_clone_identity "$installed" "$case_dir" "$new_commit" "$case_dir/worktree"
+                ;;
+            dirty)
+                stamp_clone_identity "$installed" "$case_dir" "$new_commit" "" true
+                ;;
+        esac
+        out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+        assert_eq "a failed handover fails the run ($variant)" "1" "$rc"
+        assert_not_contains "the keep is not skipped ($variant)" "keeping no copy of it" "$out"
+        assert_contains_literal "the installed bundle is kept ($variant)" \
+            "kept the previous app bundle at $kept" "$out"
+        assert_contains "the failed handover restores it ($variant)" "restored previous app bundle" "$out"
+        assert_eq "the bundle from before the run is installed again ($variant)" \
+            "installed-before-the-run" "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+        assert_not_contains "the rollback completes ($variant)" "did not complete" "$out"
+        assert_contains "and the app is relaunched ($variant)" \
+            "relaunching the app this run stopped before the handover" "$out"
+        assert_eq "once ($variant)" "1" "$(grep -c '^open ' "$events")"
+    done
 }
 
 # A run that leaves by `exit` (or a signal) while the installation is moving
@@ -4710,6 +4782,7 @@ test_a_failed_handover_whose_restore_fails_leaves_the_app_stopped
 test_a_rollback_whose_link_put_back_fails_does_not_name_a_spent_kept_bundle
 test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_update_over_its_own_build_leaves_the_kept_bundle_alone
+test_an_update_over_the_same_commit_keeps_another_build
 test_an_exit_mid_handover_leaves_the_app_stopped
 test_an_exit_after_the_handover_still_relaunches_the_app
 test_a_rollback_waits_for_the_app_exit_to_settle

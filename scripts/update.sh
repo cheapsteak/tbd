@@ -723,6 +723,19 @@ build_products() {
 
 # MARK: - Keeping the previous app bundle
 
+# The fields of a bundle's Contents/TBDBuildIdentity.json that tell one build
+# from another, as `<commit>|<sourceWorktree>|<dirty>`. builtAt differs
+# between two builds of one tree, and the rest follow from these. Non-zero,
+# with nothing printed, when the bundle names no commit.
+bundle_build_key() {
+    local identity commit
+    identity="$(cat "${1-}/Contents/TBDBuildIdentity.json" 2>/dev/null)" || return 1
+    commit="$(json_field "$identity" commit)" || return 1
+    [ -n "$commit" ] || return 1
+    printf '%s|%s|%s\n' "$commit" \
+        "$(json_field "$identity" sourceWorktree)" "$(json_field "$identity" dirty)"
+}
+
 # Keep a copy of the installed bundle at $UPDATE_HOME/previous/TBD.app. Two
 # jobs: it is what a failed handover puts back, and it is the fastest route to
 # the previous build afterwards — a reinstall with no rebuild (see
@@ -739,16 +752,24 @@ build_products() {
 # update kept is left where it is: it is still a route back for the operator,
 # but it is not this run's to restore (see BUNDLE_STASHED).
 #
-# The same goes for an installed bundle that is already the build this run
-# installs (INSTALLING_COMMIT, against the commit in its
-# TBDBuildIdentity.json), such as one an earlier run left there when it was
-# cut short after its swap, in front of a daemon still on the previous build.
-# A copy of it is no way back. Kept in place of the earlier bundle, it would
-# erase the route back to the previous build, and a failed handover would
-# "restore" the new app in front of the old daemon and relaunch it.
+# The same goes for the one installed bundle that a run cut short after its
+# swap leaves: the build this run installs, installed in front of a daemon
+# still on another build. A copy of it is no way back. Kept in place of the
+# earlier bundle, it would erase the route back to the build the daemon
+# runs, and a failed handover would "restore" the new app in front of the
+# old daemon and relaunch it. So the keep is skipped only when both hold:
+# the installed bundle is the build in <new_bundle> (bundle_build_key: same
+# commit, source worktree and dirty flag, so a restart.sh build of the same
+# commit, or a dirty one, is another build), and the running daemon is on
+# another commit (RUNNING_COMMIT, known and different). A re-run over a
+# completed update, whose daemon is the installed build, keeps as any run
+# does, and its failed handover restores and relaunches.
+#
+#   keep_installed_bundle [<installed_bundle>] [<new_bundle>]
 keep_installed_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
-    local keep_dir partial discard installed_commit moved_aside=false
+    local new_bundle="${2-}"
+    local keep_dir partial discard installed_key moved_aside=false
     BUNDLE_STASHED=false
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
@@ -757,9 +778,11 @@ keep_installed_bundle() {
         fi
         return 0
     fi
-    installed_commit="$(json_field "$(cat "$installed_bundle/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
-    if [ -n "$INSTALLING_COMMIT" ] && [ "$installed_commit" = "$INSTALLING_COMMIT" ]; then
-        log "$installed_bundle is already the build this run installs, $INSTALLING_COMMIT — keeping no copy of it"
+    installed_key="$(bundle_build_key "$installed_bundle")" || installed_key=""
+    if [ -n "$installed_key" ] && [ -n "$new_bundle" ] &&
+        [ "$installed_key" = "$(bundle_build_key "$new_bundle")" ] &&
+        [ -n "$RUNNING_COMMIT" ] && [ "$RUNNING_COMMIT" != "${installed_key%%|*}" ]; then
+        log "$installed_bundle is already the build this run installs, ${installed_key%%|*}, in front of a daemon on $RUNNING_COMMIT — keeping no copy of it"
         if [ -d "$PREVIOUS_BUNDLE" ]; then
             log "leaving $PREVIOUS_BUNDLE, which an earlier update kept, where it is"
         fi
@@ -932,7 +955,7 @@ install_new_bundle() {
 
     # Keeping the previous bundle: a copy, so a failure here has moved
     # nothing.
-    keep_installed_bundle "$installed_bundle" || return 1
+    keep_installed_bundle "$installed_bundle" "$bundle_dir" || return 1
 
     # Installing: the new bundle is staged beside the installed one and
     # swapped in by two renames (install_app_bundle). The RUNNING app is
@@ -1219,6 +1242,11 @@ INSTALL_IN_FLIGHT=false
 # The commit the run is installing, set by main as the installation starts
 # to move. report_interrupted_install compares the installed bundle with it.
 INSTALLING_COMMIT=""
+
+# The commit of the daemon that was running when the run started, from its
+# status, or empty when none answered or it named none. Set by main beside
+# INSTALLING_COMMIT; keep_installed_bundle reads it.
+RUNNING_COMMIT=""
 
 # The update clone's .build/release as main finds and moves it: the link
 # itself, what it named when the run started, and whether the run pointed it
@@ -2211,6 +2239,7 @@ main() {
     # before the first thing moves and comes down once the run knows where it
     # stands again.
     INSTALLING_COMMIT="$new_commit"
+    RUNNING_COMMIT="$old_commit"
     INSTALL_IN_FLIGHT=true
     local handed_over=false
     if install_new_bundle "$bundle_dir" "$INSTALLED_BUNDLE"; then
