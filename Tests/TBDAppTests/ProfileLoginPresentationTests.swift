@@ -126,8 +126,8 @@ private func cachedBars(ageNote: String?) -> MenuUsage {
 private var failingNote: MenuUsage { .note("usage unavailable — retrying · last data 3h ago") }
 
 @Test func menuRowUsage_needsLoginWithFreshBars_keepsTheBarsWithTheNeedsLoginNote() {
-    // Login detection can lag, so the cached bars stay and the hint is the
-    // grey note after them.
+    // Bars from before the login went away are still real numbers until the
+    // daemon drops them, so they stay and the hint is the grey note after them.
     let expected = cachedBars(ageNote: ProfileLoginPresentation.menuNeedsLoginNote)
     #expect(ProfileLoginPresentation.menuRowUsage(cachedBars(ageNote: nil),
                                                   kind: .oauth, loginIdentity: nil) == expected)

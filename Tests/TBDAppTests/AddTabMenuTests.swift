@@ -308,8 +308,9 @@ private func attachments(_ title: NSAttributedString?) -> [NSTextAttachment] {
 
 @MainActor
 @Test func notLoggedInOAuthRowWithUsageKeepsTheBarsAndTheNeedsLoginNote() throws {
-    // No login, but a healthy snapshot is cached: the bars stay, because login
-    // detection can lag, and "needs /login" is the grey note after them.
+    // No login, but a healthy snapshot from before the login went away is
+    // still cached: the bars stay, and "needs /login" is the grey note after
+    // them.
     let spare = makeProfile(name: "Spare", usageSnapshot: healthySnapshot())
     let menu = AddTabMenu.build(profiles: [spare], coordinator: makeCoordinator())
 
