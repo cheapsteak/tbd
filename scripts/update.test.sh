@@ -3109,8 +3109,8 @@ test_an_install_that_leaves_nothing_installed_says_where_the_bundle_is() {
     assert_contains_literal "a warning says not to quit TBD until a bundle is back" \
         "WARNING: nothing is installed at $installed. Do not quit TBD until a whole bundle is back there" \
         "$out"
-    assert_contains_literal "and names the command that puts it back" \
-        "Put back the bundle that was installed with: mv $outgoing $installed" "$out"
+    assert_contains_literal "and names the command that puts it back, its paths quoted" \
+        "Put back the bundle that was installed with: mv \"$outgoing\" \"$installed\"" "$out"
     assert_contains "the run reports a rollback that did not complete" \
         "ERROR: the rollback of the failed install did not complete" "$out"
     assert_contains "with the recovery steps" "run 'tbd version'" "$out"
@@ -3130,6 +3130,48 @@ test_an_install_that_leaves_nothing_installed_says_where_the_bundle_is() {
     else
         fail "the app the run never stopped is still running"
     fi
+}
+
+# The warning offers the rename back only for a tree that is a bundle, by
+# the test the put-back itself makes. A tree at the outgoing name that is not
+# whole (here the installed bundle had no executable Contents/MacOS/TBDApp
+# to begin with) is no bundle to put in front of a quitting app, so the
+# warning points at the kept copy instead, and says to rename the tree away
+# first, since the documented way back runs only once that name is free.
+# Offering `mv` for it, as the warning did, fails.
+test_an_install_that_leaves_nothing_installed_points_past_a_broken_bundle() {
+    local case_dir out rc apps installed incoming outgoing discard kept
+    case_dir="$(mkcase install-leaves-nothing-broken)"
+    apps="$case_dir/Applications"
+    installed="$apps/TBD.app"
+    incoming="$apps/.TBD-install-incoming"
+    outgoing="$apps/.TBD-install-outgoing"
+    discard="$apps/.TBD-install-discard"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    mkdir -p "$apps"
+    mkbundle "$installed" "before-the-update" >/dev/null
+    rm -f "$installed/Contents/MacOS/TBDApp"
+    mkrefusingmv "$case_dir/bin"
+    refuse_mv "$case_dir/bin" "$incoming" "$installed"
+    # The swap's own rename back; the retry after it (the put-back) turns the
+    # tree down before it renames anything.
+    refuse_mv "$case_dir/bin" "$outgoing" "$installed"
+    out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "an install that leaves nothing installed fails the run" "1" "$rc"
+    assert_eq "nothing is installed" "gone" "$(path_state "$installed")"
+    assert_eq "the tree that was installed is at the outgoing sibling" "before-the-update" \
+        "$(cat "$outgoing/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_contains_literal "the put-back refuses it" \
+        "not putting back $installed from $outgoing: it lacks" "$out"
+    assert_contains_literal "a warning says not to quit TBD until a bundle is back" \
+        "WARNING: nothing is installed at $installed. Do not quit TBD until a whole bundle is back there" \
+        "$out"
+    assert_not_contains "it offers no rename of the broken tree into place" \
+        "Put back the bundle that was installed with" "$out"
+    assert_contains_literal "it points at the kept copy instead" \
+        "The bundle that was installed, at $outgoing, is not whole, so put back the copy at $kept instead" "$out"
+    assert_contains_literal "and says to rename the broken tree away first, its paths quoted" \
+        "mv \"$outgoing\" \"$discard\"" "$out"
 }
 
 # The second try at the rename back is what keeps a passing failure from
@@ -4920,6 +4962,7 @@ test_the_app_quits_in_front_of_the_whole_new_bundle
 test_the_installed_bundle_stays_whole_while_the_update_copies
 test_a_failed_install_leaves_the_app_running
 test_an_install_that_leaves_nothing_installed_says_where_the_bundle_is
+test_an_install_that_leaves_nothing_installed_points_past_a_broken_bundle
 test_an_install_that_leaves_nothing_installed_retries_the_put_back
 test_an_app_started_during_the_handover_is_stopped_before_the_launch
 test_signing_stays_inside_the_case_with_and_without_ci

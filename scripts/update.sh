@@ -728,9 +728,9 @@ build_products() {
 # it renames the earlier kept bundle to the discard sibling, then the whole
 # new copy from the partial sibling into its place. Only that state is put
 # back — nothing at $PREVIOUS_BUNDLE, the partial sibling still there, and a
-# discard tree that looks whole (Contents/Info.plist and an executable
-# Contents/MacOS/TBDApp, the check put_back_outgoing_app_bundle makes) —
-# because a discard tree with no partial beside it is one a delete was
+# discard tree that looks whole (app_bundle_looks_whole, the check
+# put_back_outgoing_app_bundle makes) — because a discard tree with no
+# partial beside it is one a delete was
 # working through. Called at the start of every keep, before the siblings
 # are cleared, and by the report of an interrupted run. Non-zero, with a
 # warning naming where the bundle is, when the rename back fails.
@@ -739,7 +739,7 @@ put_back_discarded_kept_bundle() {
     keep_dir="$(dirname "$PREVIOUS_BUNDLE")"
     discard="$keep_dir/.TBD.app.discard"
     if [ -e "$PREVIOUS_BUNDLE" ] || [ ! -d "$keep_dir/.TBD.app.partial" ] ||
-        [ ! -f "$discard/Contents/Info.plist" ] || [ ! -x "$discard/Contents/MacOS/TBDApp" ]; then
+        ! app_bundle_looks_whole "$discard"; then
         return 0
     fi
     if ! mv "$discard" "$PREVIOUS_BUNDLE"; then
@@ -1047,7 +1047,16 @@ install_new_bundle() {
             [ -z "$note" ] || log "$note"
             BUNDLE_RESTORE_FAILED=true
             log_error "could not install to $installed_bundle, and nothing is installed there now; the bundle that was is at $outgoing, and a copy at $PREVIOUS_BUNDLE — put one back before TBD quits"
-            log "WARNING: nothing is installed at $installed_bundle. Do not quit TBD until a whole bundle is back there: an app that quits in front of a missing bundle can have every agent session force-quit with it. Put back the bundle that was installed with: mv $outgoing $installed_bundle"
+            # The rename back is the quickest fix, but only for a tree that
+            # is a bundle (app_bundle_looks_whole, the test the put-back
+            # makes). Otherwise the kept copy is the bundle to put back, and
+            # the documented way to do that runs only once the outgoing name
+            # is free.
+            if app_bundle_looks_whole "$outgoing"; then
+                log "WARNING: nothing is installed at $installed_bundle. Do not quit TBD until a whole bundle is back there: an app that quits in front of a missing bundle can have every agent session force-quit with it. Put back the bundle that was installed with: mv \"$outgoing\" \"$installed_bundle\""
+            else
+                log "WARNING: nothing is installed at $installed_bundle. Do not quit TBD until a whole bundle is back there: an app that quits in front of a missing bundle can have every agent session force-quit with it. The bundle that was installed, at $outgoing, is not whole, so put back the copy at $PREVIOUS_BUNDLE instead: rename the tree at $outgoing away (mv \"$outgoing\" \"$(app_bundle_sibling "$installed_bundle" discard)\"), then follow 'Going back to the previous build' in docs/updating.md"
+            fi
             ;;
         *)
             log_error "could not install to $installed_bundle — what was installed there is untouched"

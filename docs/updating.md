@@ -458,8 +458,13 @@ install that changed nothing. If it fails again, the error names
 `/Applications/.TBD-install-outgoing`, where the bundle that was installed is,
 and a `WARNING` line says not to quit TBD until a whole bundle is back, with
 the command that puts it back:
-`mv /Applications/.TBD-install-outgoing /Applications/TBD.app`. The next
-install does that itself before it starts.
+`mv "/Applications/.TBD-install-outgoing" "/Applications/TBD.app"`. The next
+install does that itself before it starts. Only a tree there that looks like
+a whole bundle — `Contents/Info.plist` present and `Contents/MacOS/TBDApp`
+executable, the test the put-back makes — gets that command. For any other,
+the warning points at the kept copy instead, and says to rename the tree out
+of the way to `/Applications/.TBD-install-discard` first, since the way back
+under "Going back to the previous build" runs only once that name is free.
 
 The relaunch waits on both halves of that rollback. When either fails — the
 run kept no bundle to put back because nothing was installed when it began,

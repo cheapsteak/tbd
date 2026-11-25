@@ -617,6 +617,17 @@ app_bundle_sibling() {
         "$(basename "$installed_bundle" .app)" "$role"
 }
 
+# True when <dir> looks like a whole app bundle: Contents/Info.plist present
+# and Contents/MacOS/TBDApp executable. A tree that a copy or a delete was cut
+# short in can lack either. The one test for every caller that decides
+# whether a tree left beside a bundle is a bundle to put back or to point the
+# operator at: put_back_outgoing_app_bundle here, and update.sh.
+#
+#   app_bundle_looks_whole <dir>
+app_bundle_looks_whole() {
+    [ -f "${1-}/Contents/Info.plist" ] && [ -x "${1-}/Contents/MacOS/TBDApp" ]
+}
+
 # Put back a bundle an install left at the outgoing sibling with nothing
 # installed in its place: an install that stopped between its two renames.
 # A moment before, that bundle was the installed one, whole, so it is the one
@@ -624,8 +635,8 @@ app_bundle_sibling() {
 #
 #   put_back_outgoing_app_bundle <installed_bundle>
 #
-# Only a tree that looks whole goes back: Contents/Info.plist present and
-# Contents/MacOS/TBDApp executable. Nothing deletes the outgoing sibling in
+# Only a tree that looks whole goes back (app_bundle_looks_whole). Nothing
+# deletes the outgoing sibling in
 # place (discard_app_bundle_sibling renames it away first), but a tree there
 # that fails the check is still no bundle to put in front of a quitting app,
 # so it is left for an install's cleanup (reclaim_app_bundle_siblings) and
@@ -643,7 +654,7 @@ put_back_outgoing_app_bundle() {
     if [ -e "$installed_bundle" ] || [ ! -d "$outgoing" ]; then
         return 0
     fi
-    if [ ! -f "$outgoing/Contents/Info.plist" ] || [ ! -x "$outgoing/Contents/MacOS/TBDApp" ]; then
+    if ! app_bundle_looks_whole "$outgoing"; then
         printf 'not putting back %s from %s: it lacks Contents/Info.plist or an executable Contents/MacOS/TBDApp, so it is left for an install to clear\n' \
             "$installed_bundle" "$outgoing"
         return 0
