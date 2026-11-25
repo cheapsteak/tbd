@@ -152,7 +152,7 @@ private func makeExecutable(named name: String, in directory: URL) throws {
 
 @MainActor
 @Test func addTabMenu_withProfiles_insertsIndentedItemsAfterClaude() {
-    // One logged-in oauth profile, one not — the titles carry the identity suffix.
+    // One logged-in oauth profile, one not — each title is the name alone.
     let work = makeProfile(name: "Work", loginIdentity: "dev@acme.example")
     let personal = makeProfile(name: "Personal")
     let menu = AddTabMenu.build(profiles: [work, personal], coordinator: makeCoordinator())
@@ -161,12 +161,12 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     let first = menu.items[idx + 1]
     let second = menu.items[idx + 2]
 
-    #expect(first.title == "Work — dev@acme.example")
+    #expect(first.title == "Work")
     #expect(first.indentationLevel == 0)
     #expect(first.image != nil)
     #expect(first.representedObject as? UUID == work.profile.id)
 
-    #expect(second.title == "Personal — needs /login")
+    #expect(second.title == "Personal")
     #expect(second.indentationLevel == 0)
     #expect(second.image != nil)
     #expect(second.representedObject as? UUID == personal.profile.id)
@@ -176,21 +176,24 @@ private func makeExecutable(named name: String, in directory: URL) throws {
 }
 
 @MainActor
-@Test func addTabMenu_profileItemTitles_reflectLoginIdentityPerKind() {
-    // oauth + email → suffixed with the email; oauth + nil → "needs /login";
-    // non-oauth kinds → bare name regardless of any stray identity.
-    let loggedIn = makeProfile(name: "Work", loginIdentity: "a@b.co")
+@Test func addTabMenu_profileItemTitles_areTheNameAloneForEveryKind() {
+    // oauth + email, oauth + nil and a non-oauth kind with a stray identity:
+    // each plain title is the bare name. The email and the login hint live
+    // elsewhere (the tooltip and the note column).
+    let loggedIn = makeProfile(name: "Work", loginIdentity: "a@acme.example")
     let needsLogin = makeProfile(name: "Spare")
-    let proxy = makeProfile(name: "Router", kind: .apiKey)
+    let proxy = makeProfile(name: "Router", kind: .apiKey, loginIdentity: "x@acme.example")
     let menu = AddTabMenu.build(
         profiles: [loggedIn, needsLogin, proxy],
         coordinator: makeCoordinator()
     )
 
     let idx = claudeIndex(menu)
-    #expect(menu.items[idx + 1].title == "Work — a@b.co")
-    #expect(menu.items[idx + 2].title == "Spare — needs /login")
+    #expect(menu.items[idx + 1].title == "Work")
+    #expect(menu.items[idx + 2].title == "Spare")
     #expect(menu.items[idx + 3].title == "Router")
+    #expect(menu.items[idx + 1].toolTip == "a@acme.example")
+    #expect(menu.items[idx + 3].toolTip == nil)
 }
 
 @MainActor
@@ -247,25 +250,75 @@ private func attachments(_ title: NSAttributedString?) -> [NSTextAttachment] {
 @MainActor
 @Test func profileRowsAreOneLineWithBars() {
     // A profile with usage draws its bars after the name, on the same line.
-    // The plain title stays the name with its login suffix.
-    let gmail = makeProfile(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: healthySnapshot())
-    let bare = makeProfile(name: "Work", loginIdentity: "a@b.co")
+    // The plain title is the name alone; the login email is not on the row.
+    let gmail = makeProfile(name: "Gmail", loginIdentity: "g@acme.example", usageSnapshot: healthySnapshot())
+    let bare = makeProfile(name: "Work", loginIdentity: "a@acme.example")
     let menu = AddTabMenu.build(profiles: [gmail, bare], coordinator: makeCoordinator())
 
     let idx = claudeIndex(menu)
     let gmailItem = menu.items[idx + 1]
-    #expect(gmailItem.title == ProfileLoginPresentation.menuItemTitle(for: gmail))
-    #expect(gmailItem.title == "Gmail — g@x.co")
+    #expect(gmailItem.title == "Gmail")
     let flattened = gmailItem.attributedTitle?.string ?? ""
-    #expect(flattened.hasPrefix("Gmail — g@x.co"))
+    #expect(flattened.hasPrefix("Gmail"))
+    #expect(flattened.contains("—") == false)
+    #expect(flattened.contains("acme.example") == false)
     #expect(flattened.contains("\n") == false)
     let barsSizes = attachments(gmailItem.attributedTitle).compactMap { $0.image?.size }
     #expect(barsSizes.contains(NSSize(width: 200, height: 13)))
 
     // A profile with no usage keeps its plain title and no attributed one.
     let bareItem = menu.items[idx + 2]
-    #expect(bareItem.title == "Work — a@b.co")
+    #expect(bareItem.title == "Work")
     #expect(bareItem.attributedTitle == nil)
+}
+
+@MainActor
+@Test func profileRowToolTipLeadsWithTheLoginEmail() throws {
+    let gmail = makeProfile(name: "Gmail", loginIdentity: "g@acme.example", usageSnapshot: healthySnapshot())
+    let bare = makeProfile(name: "Work", loginIdentity: " a@acme.example ")
+    let menu = AddTabMenu.build(profiles: [gmail, bare], coordinator: makeCoordinator())
+
+    let idx = claudeIndex(menu)
+    // With bars: the email on the first line, the usage on the next.
+    let gmailToolTip = try #require(menu.items[idx + 1].toolTip)
+    let lines = gmailToolTip.components(separatedBy: "\n")
+    #expect(lines.count == 2)
+    #expect(lines.first == "g@acme.example")
+    #expect(lines.last?.hasPrefix("5-hour: 40% used") == true)
+
+    // With no usage: the trimmed email alone.
+    #expect(menu.items[idx + 2].toolTip == "a@acme.example")
+}
+
+@MainActor
+@Test func notLoggedInOAuthRowShowsTheNeedsLoginNote() throws {
+    // No login and no usage: the name alone, then "needs /login" in the
+    // column where the bars go. No email, so no tooltip.
+    let spare = makeProfile(name: "Spare")
+    let menu = AddTabMenu.build(profiles: [spare], coordinator: makeCoordinator())
+
+    let item = menu.items[claudeIndex(menu) + 1]
+    #expect(item.title == "Spare")
+    let drawn = try #require(item.attributedTitle)
+    #expect(drawn.string.hasPrefix("Spare"))
+    #expect(drawn.string.hasSuffix("needs /login"))
+    #expect(drawn.string.contains("—") == false)
+    #expect(item.toolTip == nil)
+}
+
+@MainActor
+@Test func nonOAuthRowToolTipHasNoIdentityLine() throws {
+    // A stray identity on a key profile never reaches the menu.
+    let key = makeProfile(name: "Key", kind: .apiKey, loginIdentity: "x@acme.example",
+                          usageSnapshot: healthySnapshot())
+    let menu = AddTabMenu.build(profiles: [key], coordinator: makeCoordinator())
+
+    let item = menu.items[claudeIndex(menu) + 1]
+    #expect(item.title == "Key")
+    let toolTip = try #require(item.toolTip)
+    #expect(toolTip.contains("\n") == false)
+    #expect(toolTip.contains("acme.example") == false)
+    #expect(toolTip.hasPrefix("5-hour: 40% used"))
 }
 
 @MainActor

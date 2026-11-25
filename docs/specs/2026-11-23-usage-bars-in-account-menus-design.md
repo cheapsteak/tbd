@@ -33,22 +33,28 @@ glance which account has room.
 ## What the user sees
 
 **Each account row** is one line: the account name, then the two bars in a column shared by every
-row of that menu.
+row of that menu. Both menus show the name alone, with no login email after it, so a long email does
+not widen the menu.
 
 - Each bar has a short label, the bar and a percent: `5h ▬▬▬|▭ 40%` and `wk ▬|▭▭▭ 16%`.
 - The bars look and behave like the worktree picker's. The fill and the percent take the pace color:
   green when the account is on track to stay under 75%, orange when it is on track to reach 75–100%,
   red when it is on track to run out. A dark tick marks how far through the window the account is.
-- The row does not show reset times. The row's tooltip does, for example
-  "5-hour: 40% used · resets at 8pm — Weekly: 16% used · resets at Fri 7pm".
+- The row does not show the login email or the reset times. The row's tooltip does. Its first line
+  is the login email, for example "dev@acme.example". Its next line is the reset times, for example
+  "5-hour: 40% used · resets at 8pm — Weekly: 16% used · resets at Fri 7pm". A row with no bars has
+  only the email line, and a profile with no email has only the reset times. Only an oauth profile
+  with a detected login has an email line.
 - **No 5-hour limit.** Some accounts, such as Ultra accounts, have a weekly limit only. Their 5h slot
   stays empty and keeps its width, so the weekly bar lines up with the weekly bars of the other rows.
 - **No usage data.** The row shows the name only, as it does today.
+- **Not logged in.** In the + menu, an oauth profile with no detected login and no usage data shows
+  the note "needs /login" where the bars go. If it has bars or a note of its own, those show
+  instead. The tab menu shows no login hint.
 - **Old or failing data.** Both menus follow the rule the + menu's second line follows today
   (`ProfileUsagePresentation.secondaryLine`). If the last fetch failed, the row shows the short note
   in place of the bars, for example "usage unavailable — retrying · last data 3h ago". If the data
-  is good but old, the row
-  shows the bars, then a small grey age note.
+  is good but old, the row shows the bars, then a small grey age note, for example "1d ago".
 - **Current account.** A standard macOS checkmark marks it, in place of the "●" prefix.
 - **Default (logged in).** The row shows no bars, as today. TBD keeps no usage data for the default
   login.
@@ -148,21 +154,26 @@ Measurements, in points:
 
 `AccountMenuRow` builds a row's attributed title for both menus:
 
-1. the name, in the menu font. Each menu keeps the name text it shows today: the profile name in
-   the tab menu, and the name with its login suffix ("— needs /login") in the + menu;
+1. the name alone, in the menu font, in both menus;
 2. a clear spacer image, so every row's bars start at the same x. Its width is the widest name
    among the rows of that menu that show bars or a note, minus this row's name, plus a 22 pt gap;
 3. the bars picture, vertically centered on the text;
 4. the grey note, when there is one.
 
-The item's plain `title` stays the name alone, for type-to-select and accessibility, as `AddTabMenu`
-already does. The current account sets `state = .on`. The tooltip carries the reset times.
+The item's plain `title` is the name alone too, for type-to-select and accessibility. The current
+account sets `state = .on`.
+
+The tooltip (`AccountMenuRow.toolTip(for:identity:)`) carries the login email on its first line and
+the reset times on the next. The email comes from `ProfileLoginPresentation.menuIdentity`: the
+trimmed login identity of an `.oauth` profile, and nil for every other kind or when no login was
+detected. Both menus pass it, the tab menu through `TabContextMenu.Account.identity`.
 
 A pure function, `ProfileUsagePresentation.menuUsage(for:now:)`, picks one of four results for a
 row:
 
 - **Bars:** the snapshot is healthy and has a 5-hour or a weekly all-models bucket.
-- **Bars with an age note:** the same, and `stalenessNote` reports the data as old.
+- **Bars with an age note:** the same, and `stalenessNote` reports the data as old. The note is the
+  age alone, for example "1d ago".
 - **A note only:** the snapshot is not healthy and `stalenessNote` has a note.
 - **Nothing:** no snapshot, or no note.
 
@@ -170,6 +181,10 @@ row:
 
 `AddTabMenu.build` makes each account row with `AccountMenuRow`. The row keeps its blank leading icon,
 which indents it under "Claude".
+
+When `menuUsage` gives nothing for an oauth profile with no detected login, the row shows the note
+"needs /login" in its place (`ProfileLoginPresentation.menuRowUsage`). Bars or a note the profile
+already has stay as they are.
 
 ### What is deleted
 
@@ -202,7 +217,11 @@ Unit tests, with no menu shown:
 - **Usage states:** each of the four `menuUsage` results comes from the snapshot that should give it.
 - **Bars picture:** each bucket draws in the fill level `bucketPresentation` gives it. The
   accessibility description reads as specified.
-- **+ menu:** account rows are one line, the indent stays, and "Choose account…" follows them.
+- **+ menu:** account rows are one line, the indent stays, and "Choose account…" follows them. Each
+  row's title is the name alone. A logged-in oauth profile's tooltip leads with its email, and a
+  not-logged-in one with no usage shows "needs /login".
+- **Tooltip:** the email line and the reset-times line each appear alone when the other is missing,
+  and a row with neither has no tooltip. The tab menu's rows carry the email too.
 - **Right-click layer:** `hitTest(_:)` returns the layer for a right-click and for a Control-click,
   and nil for a plain left click, for a right-click at another point, and for a right-click in
   another window.

@@ -612,17 +612,23 @@ enum AddTabMenu {
             claudeItem.target = coordinator
             menu.addItem(claudeItem)
 
-            // One item per profile: the profile's name with its login suffix
-            // (" — email" / " — needs /login" for oauth profiles), then its
-            // usage bars or note in a column every row shares
-            // (`AccountMenuRow`). Each gets a transparent placeholder icon the
-            // same size as the Claude asterisk so its title lines up in the
-            // same title column as "Claude" — the empty icon slot is the
-            // visual nesting cue. The profile id rides along in
-            // `representedObject` for MenuCoordinator.addClaudeProfile.
+            // One item per profile: the profile's name alone, then its usage
+            // bars or note in a column every row shares (`AccountMenuRow`).
+            // The login email goes on the row's tooltip, so a long one does
+            // not widen the menu; an oauth profile with no login and nothing
+            // else to show gets "needs /login" as its note
+            // (`ProfileLoginPresentation.menuRowUsage`). Each gets a
+            // transparent placeholder icon the same size as the Claude
+            // asterisk so its title lines up in the same title column as
+            // "Claude" — the empty icon slot is the visual nesting cue. The
+            // profile id rides along in `representedObject` for
+            // MenuCoordinator.addClaudeProfile.
             let rows: [(name: String, usage: ProfileUsagePresentation.MenuUsage)] = profiles.map {
-                (name: ProfileLoginPresentation.menuItemTitle(for: $0),
-                 usage: ProfileUsagePresentation.menuUsage(for: $0, style: resetStyle))
+                (name: $0.profile.tabDisplayName,
+                 usage: ProfileLoginPresentation.menuRowUsage(
+                     ProfileUsagePresentation.menuUsage(for: $0, style: resetStyle),
+                     kind: $0.profile.kind,
+                     loginIdentity: $0.loginIdentity))
             }
             let nameColumnWidth = AccountMenuRow.nameColumnWidth(rows)
             for (entry, row) in zip(profiles, rows) {
@@ -632,7 +638,10 @@ enum AddTabMenu {
                     keyEquivalent: ""
                 )
                 AccountMenuRow.apply(
-                    to: item, name: row.name, usage: row.usage, nameColumnWidth: nameColumnWidth)
+                    to: item, name: row.name, usage: row.usage,
+                    identity: ProfileLoginPresentation.menuIdentity(
+                        kind: entry.profile.kind, loginIdentity: entry.loginIdentity),
+                    nameColumnWidth: nameColumnWidth)
                 item.image = blankIcon(size: claudeIcon.size)
                 item.representedObject = entry.profile.id
                 item.target = coordinator
@@ -1254,7 +1263,9 @@ private struct TabBarItem: View {
                 TabContextMenu.Account(
                     profileID: entry.profile.id,
                     name: entry.profile.name,
-                    usage: ProfileUsagePresentation.menuUsage(for: entry, style: resetStyle))
+                    usage: ProfileUsagePresentation.menuUsage(for: entry, style: resetStyle),
+                    identity: ProfileLoginPresentation.menuIdentity(
+                        kind: entry.profile.kind, loginIdentity: entry.loginIdentity))
             },
             // An in-place swap of a mid-run session interrupts the current
             // run, so Swap profile warns before the user picks an account.

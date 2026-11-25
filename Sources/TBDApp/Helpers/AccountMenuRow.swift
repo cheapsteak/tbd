@@ -71,22 +71,25 @@ enum AccountMenuRow {
         return title
     }
 
-    /// The reset times the row leaves out, for example
+    /// What the row leaves out: the account's login email on the first line,
+    /// then the reset times, for example
     /// "5-hour: 40% used · resets at 8pm — Weekly: 16% used · resets at Fri 7pm".
-    /// nil unless the row shows bars.
-    static func toolTip(for usage: MenuUsage) -> String? {
-        guard case let .bars(session, weekly, _) = usage else { return nil }
-        var parts: [String] = []
-        if let session { parts.append(toolTipPart("5-hour", session)) }
-        if let weekly { parts.append(toolTipPart("Weekly", weekly)) }
-        return parts.isEmpty ? nil : parts.joined(separator: " — ")
+    /// The reset times show only when the row shows bars. Either line stands
+    /// alone when the other is missing; nil when both are.
+    static func toolTip(for usage: MenuUsage, identity: String?) -> String? {
+        let lines = [identity, resetTimes(for: usage)]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     /// Sets the item's title and tooltip. The plain `title` stays the name
-    /// alone, for type-to-select and accessibility.
+    /// alone, for type-to-select and accessibility. `identity` is the login
+    /// email the tooltip leads with (`ProfileLoginPresentation.menuIdentity`).
     static func apply(to item: NSMenuItem,
                       name: String,
                       usage: MenuUsage,
+                      identity: String?,
                       nameColumnWidth: CGFloat) {
         if let attributed = attributedTitle(name: name, usage: usage,
                                             nameColumnWidth: nameColumnWidth) {
@@ -94,10 +97,19 @@ enum AccountMenuRow {
         }
         // Setting attributedTitle copies its flattened string into `title`.
         item.title = name
-        item.toolTip = toolTip(for: usage)
+        item.toolTip = toolTip(for: usage, identity: identity)
     }
 
     // MARK: - Pieces
+
+    /// The reset times, one window after the other. nil unless the row shows bars.
+    private static func resetTimes(for usage: MenuUsage) -> String? {
+        guard case let .bars(session, weekly, _) = usage else { return nil }
+        var parts: [String] = []
+        if let session { parts.append(toolTipPart("5-hour", session)) }
+        if let weekly { parts.append(toolTipPart("Weekly", weekly)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " — ")
+    }
 
     private static func spacer(width: CGFloat) -> NSAttributedString {
         let size = NSSize(width: width, height: 1)
