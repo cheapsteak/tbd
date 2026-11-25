@@ -62,55 +62,44 @@ private let legacyScopedSnapshot = snapshot(buckets: gmailSnapshot.buckets + [
     bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable"),
 ])
 
-// MARK: - Usage suffix composition
+// MARK: - Compact usage summary
 
-@Suite("ProfileUsagePresentation — menu suffix")
-struct UsageSuffixTests {
-    @Test func fullSnapshotComposesCompactSuffix() {
-        let suffix = ProfileUsagePresentation.usageSuffix(for: gmailSnapshot, timeZone: utc)
-        #expect(suffix == " · 5h 0% ↺11:10pm · wk 76%")
+@Suite("ProfileUsagePresentation — usage summary")
+struct UsageSummaryTests {
+    @Test func fullSnapshotComposesCompactSummary() {
+        let summary = ProfileUsagePresentation.usageSummary(for: gmailSnapshot, timeZone: utc)
+        #expect(summary == "5h 0% ↺11:10pm · wk 76%")
     }
 
-    @Test func missingSnapshotProducesEmptySuffix() {
-        #expect(ProfileUsagePresentation.usageSuffix(for: nil) == "")
+    @Test func missingSnapshotHasNoSummary() {
+        #expect(ProfileUsagePresentation.usageSummary(for: nil) == nil)
     }
 
-    @Test func emptyBucketsProduceEmptySuffix() {
-        #expect(ProfileUsagePresentation.usageSuffix(for: snapshot(buckets: [])) == "")
+    @Test func emptyBucketsHaveNoSummary() {
+        #expect(ProfileUsagePresentation.usageSummary(for: snapshot(buckets: [])) == nil)
     }
 
     @Test func legacyScopedBucketRendersNoFamilySegment() {
-        #expect(ProfileUsagePresentation.usageSuffix(for: legacyScopedSnapshot, timeZone: utc)
-                == " · 5h 0% ↺11:10pm · wk 76%")
+        #expect(ProfileUsagePresentation.usageSummary(for: legacyScopedSnapshot, timeZone: utc)
+                == "5h 0% ↺11:10pm · wk 76%")
     }
 
-    @Test func snapshotWithOnlyAScopedBucketHasNoSuffix() {
+    @Test func snapshotWithOnlyAScopedBucketHasNoSummary() {
         let scopedOnly = snapshot(buckets: [
             bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable"),
         ])
-        #expect(ProfileUsagePresentation.usageSuffix(for: scopedOnly, timeZone: utc) == "")
+        #expect(ProfileUsagePresentation.usageSummary(for: scopedOnly, timeZone: utc) == nil)
         #expect(ProfileUsagePresentation.usageDetailLine(for: scopedOnly, timeZone: utc) == nil)
     }
 
     @Test func sessionWithoutResetOmitsClockFragment() {
         let noReset = snapshot(buckets: [bucket(kind: "session", percent: 29)])
-        #expect(ProfileUsagePresentation.usageSuffix(for: noReset, timeZone: utc) == " · 5h 29%")
+        #expect(ProfileUsagePresentation.usageSummary(for: noReset, timeZone: utc) == "5h 29%")
     }
 
     @Test func percentsRoundToWholeNumbers() {
         let fractional = snapshot(buckets: [bucket(kind: "session", percent: 75.6)])
-        #expect(ProfileUsagePresentation.usageSuffix(for: fractional, timeZone: utc) == " · 5h 76%")
-    }
-
-    @Test func menuItemTitleCombinesIdentityAndUsage() {
-        let gmail = entry(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: gmailSnapshot)
-        #expect(ProfileUsagePresentation.menuItemTitle(for: gmail, timeZone: utc)
-                == "Gmail — g@x.co · 5h 0% ↺11:10pm · wk 76%")
-    }
-
-    @Test func menuItemTitleWithoutSnapshotIsIdentityOnly() {
-        let bare = entry(name: "Work", loginIdentity: "a@b.co")
-        #expect(ProfileUsagePresentation.menuItemTitle(for: bare) == "Work — a@b.co")
+        #expect(ProfileUsagePresentation.usageSummary(for: fractional, timeZone: utc) == "5h 76%")
     }
 }
 
@@ -151,8 +140,8 @@ struct TwoLineMenuTests {
         ])
         #expect(ProfileUsagePresentation.usageDetailLine(for: withFuture, timeZone: utc)
                 == "5h 16% used · resets 11:10pm · week 79%")
-        #expect(ProfileUsagePresentation.usageSuffix(for: withFuture, timeZone: utc)
-                == " · 5h 16% ↺11:10pm · wk 79%")
+        #expect(ProfileUsagePresentation.usageSummary(for: withFuture, timeZone: utc)
+                == "5h 16% ↺11:10pm · wk 79%")
     }
 
     @Test func sessionWithoutResetOmitsClockFragmentButKeepsUsed() {
