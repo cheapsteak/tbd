@@ -4569,6 +4569,40 @@ test_an_interruption_between_the_keeps_renames_puts_the_kept_bundle_back() {
         "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
 }
 
+# The report renames the earlier kept bundle back whichever way it reports.
+# When the .build/release link cannot be put back the run gets the full
+# recovery report, which sends the operator to
+# ~/tbd/updates/previous/TBD.app, so the bundle has to be there. Renaming it
+# back only on the way to the nothing-needs-recovering report, as the report
+# did, leaves it at the discard name here, and fails.
+test_an_interruption_between_the_keeps_renames_with_the_link_stuck_puts_the_kept_bundle_back() {
+    local case_dir out rc kept partial discard
+    case_dir="$(mkcase interrupted-between-keep-renames-link-stuck)"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    partial="$case_dir/home/tbd/updates/previous/.TBD.app.partial"
+    discard="$case_dir/home/tbd/updates/previous/.TBD.app.discard"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$case_dir/Applications/TBD.app" "before-the-update" >/dev/null
+    mkbundle "$kept" "earlier-update" >/dev/null
+    mkrefusingmv "$case_dir/bin"
+    interrupt_mv "$case_dir/bin" "$partial" "$kept"
+    out="$(FAKE_REAL_INSTALL=1 FAKE_LINK_PUT_BACK_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        pass "an interrupted run fails"
+    else
+        fail "an interrupted run fails"
+    fi
+    assert_contains "the link put-back fails" "ERROR: could not point .* back at" "$out"
+    assert_contains "so the run gets the full report" \
+        "ERROR: the run was interrupted while installing and handing over" "$out"
+    assert_contains_literal "whose recovery steps name the kept bundle" "is kept at $kept" "$out"
+    assert_eq "which is back under its own name" "earlier-update" \
+        "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "nothing is left at the discard name" "gone" "$(path_state "$discard")"
+    assert_contains_literal "and the report says it put it back" \
+        "put back $kept from $discard, where an interrupted keep had left it" "$out"
+}
+
 test_a_completed_handover_keeps_the_previous_bundle() {
     local root out
     root="$TEST_TMP/handover-keep"
@@ -5032,6 +5066,7 @@ test_a_rollback_never_deletes_the_kept_bundle_in_place
 test_a_failed_keep_puts_the_earlier_kept_bundle_back
 test_the_next_keep_puts_back_a_kept_bundle_left_at_the_discard_name
 test_an_interruption_between_the_keeps_renames_puts_the_kept_bundle_back
+test_an_interruption_between_the_keeps_renames_with_the_link_stuck_puts_the_kept_bundle_back
 test_a_completed_handover_keeps_the_previous_bundle
 test_a_first_install_has_no_previous_bundle
 test_a_failed_first_install_records_that_nothing_was_restored

@@ -1570,8 +1570,9 @@ leave_app_stopped_for_recovery() {
 # and the report says so. A put-back that fails leaves the link naming the
 # new build, which is reported as any other interruption is. An exit between
 # the keep's two renames leaves the earlier kept bundle at the discard
-# sibling, and the report renames it back first
-# (put_back_discarded_kept_bundle), or, when it cannot, reports the run as
+# sibling. The report renames it back before anything else, whichever way it
+# reports, since every recovery step points at $PREVIOUS_BUNDLE
+# (put_back_discarded_kept_bundle), and when it cannot, reports the run as
 # any other interruption too. What else such an exit leaves beside the
 # installed bundle or the kept one, the next install clears.
 #
@@ -1607,12 +1608,15 @@ leave_app_stopped_for_recovery() {
 # bundle was swapped. Running `tbd update` again completes the move, and the
 # report says so.
 report_interrupted_install() {
-    local note installed_commit
+    local note installed_commit kept_bundle_back=true
     note="$(put_back_outgoing_app_bundle "$INSTALLED_BUNDLE" 2>&1)" || true
+    # Whichever report follows, the recovery steps send the operator to
+    # $PREVIOUS_BUNDLE, so the earlier kept bundle goes back there first.
+    put_back_discarded_kept_bundle || kept_bundle_back=false
     if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_STOP_BEGUN" != true ] &&
-        [ "$KEEP_SKIPPED_FOR_OWN_BUILD" != true ] &&
+        [ "$KEEP_SKIPPED_FOR_OWN_BUILD" != true ] && [ "$kept_bundle_back" = true ] &&
         { [ -z "${APP_BUNDLE_INSTALL_STEP:-}" ] || [ "$APP_BUNDLE_INSTALL_STEP" = staging ]; } &&
-        put_release_link_back && put_back_discarded_kept_bundle; then
+        put_release_link_back; then
         [ -z "$note" ] || log "$note"
         if release_link_names_the_start_build; then
             log "the run was interrupted before it installed anything: the new build never reached $INSTALLED_BUNDLE, the app was not stopped, nothing was handed over and ${RELEASE_LINK:-.build/release} is back the way the run found it, so TBD is still running the build it started with, and nothing needs recovering"
