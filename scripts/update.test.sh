@@ -2642,7 +2642,9 @@ test_local_build_takes_the_link_back_from_a_download() {
 # hand_over_to_new_daemon — keeping the installed bundle, installing the new
 # one, rolling back — with only the handover itself faked: it records
 # "bundle-at-handover" and the installed bundle's SourceWorktreePath.txt, then
-# "handover", and fails under FAKE_HANDOVER_FAILS=1. Every bundle copy goes
+# "handover", and fails under FAKE_HANDOVER_FAILS=1. FAKE_KEPT_BUNDLE_VANISHES=1
+# deletes the kept bundle from inside the handover, so the rollback after it
+# finds nothing to put back. Every bundle copy goes
 # through the bundle-cp stub (mkstub_tbd), which records what the installed
 # path holds while it copies, and FAKE_COPY_FAILS=1 fails the copy of a new
 # bundle into place. (Through the library's TBD_BUNDLE_CP seam, set as
@@ -2752,6 +2754,9 @@ run_update_around_handover() {
                         >> "$FAKE_EVENTS_LOG"
                     printf "handover %s\n" "$1" >> "$FAKE_EVENTS_LOG"
                     [ "${FAKE_HANDOVER_EXITS:-0}" = 1 ] && exit 3
+                    if [ "${FAKE_KEPT_BUNDLE_VANISHES:-0}" = 1 ]; then
+                        rm -rf "$PREVIOUS_BUNDLE"
+                    fi
                     [ "${FAKE_HANDOVER_FAILS:-0}" != 1 ]
                 }
             else
@@ -3327,6 +3332,35 @@ test_a_rollback_whose_link_put_back_fails_does_not_name_a_spent_kept_bundle() {
         "is kept at $kept" "$out"
     assert_contains_literal "they say the bundle this run replaced is installed again" \
         "the bundle this run replaced is installed at $installed again" "$out"
+    assert_not_contains "no app is launched" "^open" "$(cat "$events")"
+}
+
+# The recovery steps say the rollback put the replaced bundle back only when
+# it did. A kept copy this run made that is gone before the rollback finds
+# nothing to restore, which leaves the copy gone just as a restore that spent
+# it does. Inferring the restore from that, as the steps did, tells the
+# operator a bundle is installed again that never was; they now say the
+# kept copy is gone. Here the kept copy is deleted during the handover.
+test_a_rollback_that_finds_the_kept_bundle_gone_does_not_claim_a_restore() {
+    local case_dir out rc events installed kept
+    case_dir="$(mkcase rollback-kept-gone)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" >/dev/null
+    out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 FAKE_KEPT_BUNDLE_VANISHES=1 \
+        run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "a failed handover fails the run" "1" "$rc"
+    assert_contains_literal "the run kept a copy" "kept the previous app bundle at $kept" "$out"
+    assert_contains "the rollback finds nothing to restore" \
+        "ERROR: no previous app bundle to restore" "$out"
+    assert_not_contains "nothing is restored" "restored previous app bundle" "$out"
+    assert_contains "so the rollback did not complete" \
+        "ERROR: the rollback of the failed install did not complete" "$out"
+    assert_not_contains "the recovery steps claim no restore" "the rollback put it back" "$out"
+    assert_contains_literal "they say the kept copy is gone" \
+        "the bundle this run replaced was kept at $kept, and nothing is there now" "$out"
     assert_not_contains "no app is launched" "^open" "$(cat "$events")"
 }
 
@@ -4892,6 +4926,7 @@ test_signing_stays_inside_the_case_with_and_without_ci
 test_a_failed_handover_relaunches_the_stopped_app
 test_a_failed_handover_whose_restore_fails_leaves_the_app_stopped
 test_a_rollback_whose_link_put_back_fails_does_not_name_a_spent_kept_bundle
+test_a_rollback_that_finds_the_kept_bundle_gone_does_not_claim_a_restore
 test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_update_over_its_own_build_leaves_the_kept_bundle_alone
 test_an_update_over_the_same_commit_keeps_another_build

@@ -879,6 +879,12 @@ keep_installed_bundle() {
 # relaunch it as a rollback that worked.
 BUNDLE_STASHED=false
 
+# True once restore_previous_bundle has put the bundle this run kept back in
+# place, spending the kept copy. The recovery steps read it rather than
+# infer a restore from a kept copy that is gone, which a restore that found
+# the copy already gone leaves too.
+BUNDLE_RESTORED=false
+
 # True when keep_installed_bundle kept nothing because the installed bundle
 # was already the build this run installs, in front of a daemon on another
 # commit: what a run cut short after its swap leaves. The bundle at
@@ -931,6 +937,7 @@ restore_previous_bundle() {
     if [ ! -e "$discard" ] && mv "$PREVIOUS_BUNDLE" "$discard"; then
         rm -rf "$discard"
     fi
+    BUNDLE_RESTORED=true
     if [ "$APP_BUNDLE_INSTALL_STEP" = registered ]; then
         log "restored previous app bundle"
     else
@@ -1524,10 +1531,14 @@ leave_app_stopped_for_recovery() {
     log "or open $INSTALLED_BUNDLE yourself once it and the daemon are the same build ($INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json names the bundle's commit)"
     # A rollback that put the bundle this run kept back has spent the copy,
     # and only the link failed: that bundle is installed, and nothing is kept.
-    if [ "$BUNDLE_STASHED" = true ] && [ ! -d "$PREVIOUS_BUNDLE" ]; then
+    # A kept copy this run made that is gone without a restore is gone: the
+    # restore found nothing to put back.
+    if [ "$BUNDLE_RESTORED" = true ]; then
         log "the bundle this run replaced is installed at $INSTALLED_BUNDLE again: the rollback put it back"
     elif [ "$KEEP_SKIPPED_FOR_OWN_BUILD" = true ] && [ -d "$PREVIOUS_BUNDLE" ]; then
         log "$(cut_short_kept_bundle_note) — see 'Going back to the previous build' in docs/updating.md"
+    elif [ "$BUNDLE_STASHED" = true ] && [ ! -d "$PREVIOUS_BUNDLE" ]; then
+        log "the bundle this run replaced was kept at $PREVIOUS_BUNDLE, and nothing is there now, so there is no kept bundle to go back to — see 'Going back to the previous build' in docs/updating.md for the other routes"
     else
         log "the bundle this run replaced, if there was one, is kept at $PREVIOUS_BUNDLE — see 'Going back to the previous build' in docs/updating.md"
     fi
