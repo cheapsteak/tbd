@@ -470,13 +470,18 @@ It logs which half failed, then an error saying the rollback of the failed
 install did not complete, and the recovery steps below.
 
 The rollback only ever puts back the bundle the same run kept. A bundle an
-earlier update left at `~/tbd/updates/previous/TBD.app` is not the build the
-run replaced, and installing it would put some older app in front of
-whichever daemon is left, so a run that kept nothing — it found nothing
-installed, or found its own build installed already — leaves it where it is
-and logs that it did not restore it. The new build stays in `/Applications`,
-as on the first update, so that it is there to open once it and the daemon
-are the same build.
+earlier update left at `~/tbd/updates/previous/TBD.app` may be any older
+build, and installing it unchecked could put some older app in front of
+whichever daemon is left, so a run that kept nothing leaves it where it is
+and logs that it did not restore it. When the run kept nothing because it
+found nothing installed, that bundle is not the build the run replaced, and
+the log says so. When it kept nothing because it found its own build
+installed in front of a daemon on another commit, that bundle is the one the
+cut-short update before it replaced: most likely the build the daemon is
+still running, and so the way back. The rollback line and the recovery steps
+both say that, and to put it back by hand once `tbd version` confirms it.
+The new build stays in `/Applications`, as on the first update, so that it
+is there to open once it and the daemon are the same build.
 
 A run interrupted while it installs the bundle and hands the daemon over —
 Ctrl-C, a signal, or a step that exits — does not launch the app again

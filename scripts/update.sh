@@ -771,6 +771,7 @@ keep_installed_bundle() {
     local new_bundle="${2-}"
     local keep_dir partial discard installed_key moved_aside=false
     BUNDLE_STASHED=false
+    KEEP_SKIPPED_FOR_OWN_BUILD=false
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
         if [ -d "$PREVIOUS_BUNDLE" ]; then
@@ -782,6 +783,7 @@ keep_installed_bundle() {
     if [ -n "$installed_key" ] && [ -n "$new_bundle" ] &&
         [ "$installed_key" = "$(bundle_build_key "$new_bundle")" ] &&
         [ -n "$RUNNING_COMMIT" ] && [ "$RUNNING_COMMIT" != "${installed_key%%|*}" ]; then
+        KEEP_SKIPPED_FOR_OWN_BUILD=true
         log "$installed_bundle is already the build this run installs, ${installed_key%%|*}, in front of a daemon on $RUNNING_COMMIT — keeping no copy of it"
         if [ -d "$PREVIOUS_BUNDLE" ]; then
             log "leaving $PREVIOUS_BUNDLE, which an earlier update kept, where it is"
@@ -843,6 +845,21 @@ keep_installed_bundle() {
 # would install that build in front of whichever daemon is left, and let main
 # relaunch it as a rollback that worked.
 BUNDLE_STASHED=false
+
+# True when keep_installed_bundle kept nothing because the installed bundle
+# was already the build this run installs, in front of a daemon on another
+# commit: what a run cut short after its swap leaves. The bundle at
+# $PREVIOUS_BUNDLE is then the one that cut-short run replaced, most likely
+# the build the daemon still runs, and so the way back, though this run did
+# not keep it and does not restore it (cut_short_kept_bundle_note).
+KEEP_SKIPPED_FOR_OWN_BUILD=false
+
+# One wording, for the rollback (roll_back_bundle) and the recovery steps
+# (leave_app_stopped_for_recovery) alike, for what $PREVIOUS_BUNDLE holds
+# when the keep was skipped (KEEP_SKIPPED_FOR_OWN_BUILD).
+cut_short_kept_bundle_note() {
+    printf '%s\n' "this run kept no copy of $INSTALLED_BUNDLE, which was already the new build; $PREVIOUS_BUNDLE holds the bundle the update cut short before this run replaced, most likely the build the daemon is still running (${RUNNING_COMMIT:-unknown}), and the way back to it"
+}
 
 # Put the kept bundle back in place of the new one, by the same staged swap an
 # install makes (install_app_bundle), which also tells LaunchServices, and
@@ -919,7 +936,9 @@ roll_back_bundle() {
     fi
     BUNDLE_RESTORE_FAILED=true
     log_error "no previous app bundle to restore — this run kept none of its own, so what it installed at $installed_bundle stays"
-    if [ -d "$PREVIOUS_BUNDLE" ]; then
+    if [ -d "$PREVIOUS_BUNDLE" ] && [ "$KEEP_SKIPPED_FOR_OWN_BUILD" = true ]; then
+        log "$(cut_short_kept_bundle_note); not restoring it, since this run did not keep it — put it back yourself once 'tbd version' shows the daemon is that build"
+    elif [ -d "$PREVIOUS_BUNDLE" ]; then
         log "not restoring $PREVIOUS_BUNDLE: an earlier update kept it, and it is not the build this run replaced"
     fi
 }
@@ -1474,6 +1493,8 @@ leave_app_stopped_for_recovery() {
     # and only the link failed: that bundle is installed, and nothing is kept.
     if [ "$BUNDLE_STASHED" = true ] && [ ! -d "$PREVIOUS_BUNDLE" ]; then
         log "the bundle this run replaced is installed at $INSTALLED_BUNDLE again: the rollback put it back"
+    elif [ "$KEEP_SKIPPED_FOR_OWN_BUILD" = true ] && [ -d "$PREVIOUS_BUNDLE" ]; then
+        log "$(cut_short_kept_bundle_note) — see 'Going back to the previous build' in docs/updating.md"
     else
         log "the bundle this run replaced, if there was one, is kept at $PREVIOUS_BUNDLE — see 'Going back to the previous build' in docs/updating.md"
     fi
