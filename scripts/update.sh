@@ -820,6 +820,10 @@ BUNDLE_STASHED=false
 # delete cut short leaves nothing partial at $PREVIOUS_BUNDLE, where the
 # recovery steps send the operator. The next keep clears the discard sibling.
 # A rename that fails leaves the copy whole where it is.
+#
+# A registration with LaunchServices that fails is no failed restore: the
+# bundle is back, and only its tbd:// routing and icon may lag. But the line
+# that reports the restore says so (APP_BUNDLE_INSTALL_STEP).
 restore_previous_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
     local discard
@@ -838,7 +842,11 @@ restore_previous_bundle() {
     if [ ! -e "$discard" ] && mv "$PREVIOUS_BUNDLE" "$discard"; then
         rm -rf "$discard"
     fi
-    log "restored previous app bundle"
+    if [ "$APP_BUNDLE_INSTALL_STEP" = registered ]; then
+        log "restored previous app bundle"
+    else
+        log "restored previous app bundle, but LaunchServices could not register it, so tbd:// links may not reach it and its icon may be stale"
+    fi
 }
 
 # True once a failed install (install_new_bundle) or handover

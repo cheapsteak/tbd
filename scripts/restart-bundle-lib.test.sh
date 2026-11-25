@@ -1139,6 +1139,46 @@ end old" "$(cat "$log" 2>/dev/null)"
     unset FAKE_LSREGISTER_LOG
 }
 
+# Registering with LaunchServices changes nothing about what is installed, so
+# a registration that fails still installs: install_app_bundle warns and
+# succeeds. It records the difference in APP_BUNDLE_INSTALL_STEP, `installed`
+# rather than `registered`, for a caller that reports what it installed
+# (update.sh's rollback), and register_app_bundle fails when lsregister does,
+# where it used to swallow the failure.
+test_install_whose_registration_fails_still_installs() {
+    local root apps rc
+    root="$TEST_TMP/install-unregistered"
+    apps="$root/Applications"
+    mkdir -p "$apps"
+    mkfakebundle "$apps/TBD.app" old >/dev/null
+    mkfakebundle "$root/new/TBD.app" new >/dev/null
+    cat > "$root/failing-lsregister" << 'EOF'
+#!/bin/sh
+exit 1
+EOF
+    chmod +x "$root/failing-lsregister"
+
+    rc=0
+    TBD_LSREGISTER="$root/failing-lsregister" register_app_bundle "$apps/TBD.app" || rc=$?
+    assert_eq "register_app_bundle fails when lsregister does" "1" "$rc"
+
+    rc=0
+    TBD_LSREGISTER="$root/failing-lsregister" \
+        install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>"$root/stderr" || rc=$?
+    assert_eq "an install whose registration fails still succeeds" "0" "$rc"
+    assert_eq "and installs the new bundle" "new" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "it records the bundle as installed, not registered" "installed" \
+        "$APP_BUNDLE_INSTALL_STEP"
+    assert_contains "and warns" "could not register it with LaunchServices" \
+        "$(cat "$root/stderr" 2>/dev/null)"
+
+    rc=0
+    install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+    assert_eq "an install that registers succeeds" "0" "$rc"
+    assert_eq "it records the bundle as registered" "registered" "$APP_BUNDLE_INSTALL_STEP"
+}
+
 # The TBD_BUNDLE_CP seam is for a test to set once the library is sourced, as
 # the cases above do. One a real install inherits from its environment is
 # ignored: sourcing sets it to /bin/cp. Here the library is sourced the way
@@ -2770,6 +2810,7 @@ test_install_ignores_a_gnu_cp_first_on_path
 test_install_siblings_sit_beside_the_installed_bundle
 test_install_keeps_a_whole_bundle_installed_while_it_copies
 test_install_whose_copy_fails_leaves_the_installed_bundle
+test_install_whose_registration_fails_still_installs
 test_install_ignores_an_inherited_copy_command
 test_install_clears_what_an_interrupted_install_left
 test_install_renames_a_sibling_away_before_deleting_it

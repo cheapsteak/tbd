@@ -3979,6 +3979,43 @@ test_a_failed_handover_restores_the_previous_bundle() {
     assert_contains "the restored bundle is re-registered with LaunchServices" \
         "lsregister -f $root/Applications/TBD.app" \
         "$(cat "$root/lsregister.log" 2>/dev/null)"
+    assert_not_contains "a registration that worked is not reported as failed" \
+        "could not register" "$out"
+}
+
+# Registering the restored bundle with LaunchServices changes nothing about
+# what is installed, so a registration that fails fails nothing: the rollback
+# still puts the previous bundle back and counts as done. But the line that
+# reports the restore says the bundle is not registered, where it used to
+# report a plain restore. Here every lsregister call fails.
+test_a_rollback_says_when_the_restored_bundle_is_not_registered() {
+    local root out
+    root="$TEST_TMP/handover-restore-unregistered"
+    mkdir -p "$root/bin" "$root/Applications"
+    mkstub_tbd "$root/bin"
+    cat > "$root/failing-lsregister" << 'EOF'
+#!/bin/sh
+printf 'lsregister %s\n' "$*" >> "${FAKE_LSREGISTER_LOG:-/dev/null}"
+exit 1
+EOF
+    chmod +x "$root/failing-lsregister"
+    mkbundle "$root/Applications/TBD.app" "old-worktree" >/dev/null
+    mkbundle "$root/new/TBD.app" "new-clone" >/dev/null
+    mksuccessor "$root/newdaemon"
+
+    # The daemon that answers reports another binary, so the handover fails.
+    out="$(TBD_LSREGISTER="$root/failing-lsregister" \
+        run_install_and_handover "$root" "/somewhere/else/TBDDaemon" 1 2>/dev/null)"
+
+    assert_contains "a handover that never completes fails the step" "rc=1" "$out"
+    assert_contains_literal "the restore says LaunchServices could not register the bundle" \
+        "restored previous app bundle, but LaunchServices could not register it" "$out"
+    assert_contains "a registration that fails is no failed restore" \
+        "bundle_restore_failed=false" "$out"
+    assert_eq "the previous bundle is installed" "old-worktree" \
+        "$(cat "$root/Applications/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_contains_literal "the restored bundle was offered to LaunchServices" \
+        "lsregister -f $root/Applications/TBD.app" "$(cat "$root/lsregister.log" 2>/dev/null)"
 }
 
 # THE REGRESSION: once the rollback had put the kept bundle back, it deleted
@@ -4526,6 +4563,7 @@ test_a_predecessor_that_never_exits_fails_the_handover
 test_a_successor_that_dies_fails_the_handover_at_once
 test_a_cold_start_hands_over_without_a_predecessor
 test_a_failed_handover_restores_the_previous_bundle
+test_a_rollback_says_when_the_restored_bundle_is_not_registered
 test_a_rollback_never_deletes_the_kept_bundle_in_place
 test_a_failed_keep_puts_the_earlier_kept_bundle_back
 test_a_completed_handover_keeps_the_previous_bundle

@@ -792,7 +792,9 @@ swap_in_staged_app_bundle() {
 #              bundle, then copying the new bundle beside it. The new bundle
 #              has not reached the installed path.
 #   swapping   the two renames have begun. A swap that fails stays here.
-#   installed  the new bundle is installed.
+#   installed  the new bundle is installed, but not registered with
+#              LaunchServices: the registration is still to come, or failed.
+#   registered the new bundle is installed and registered.
 APP_BUNDLE_INSTALL_STEP=""
 
 # Install a signed bundle in place of the installed one and re-register it.
@@ -853,7 +855,9 @@ install_app_bundle() {
     esac
     APP_BUNDLE_INSTALL_STEP=installed
     discard_app_bundle_sibling "$installed_bundle" outgoing || true
-    if ! register_app_bundle "$installed_bundle"; then
+    if register_app_bundle "$installed_bundle"; then
+        APP_BUNDLE_INSTALL_STEP=registered
+    else
         echo "warning: installed $installed_bundle but could not register it with LaunchServices" >&2
     fi
 }
@@ -861,21 +865,25 @@ install_app_bundle() {
 # Tell LaunchServices about a bundle that appeared or moved at <path>, as
 # install_app_bundle does after every install, an update's rollback included —
 # a bundle LaunchServices does not know about takes no tbd:// URL and shows a
-# stale icon.
+# stale icon. Non-zero when lsregister or the touch below fails. That changes
+# nothing about what is installed, so install_app_bundle only warns, and
+# records it (APP_BUNDLE_INSTALL_STEP) for a caller that reports the install.
 register_app_bundle() {
     local installed_bundle="${1-}"
+    local status=0
 
     [ -n "$installed_bundle" ] || return 1
 
     if [ -x "$TBD_LSREGISTER" ]; then
-        "$TBD_LSREGISTER" -f "$installed_bundle" >/dev/null 2>&1 || true
+        "$TBD_LSREGISTER" -f "$installed_bundle" >/dev/null 2>&1 || status=1
     fi
 
     # Bump the installed bundle's mtime so Notification Center and System
     # Settings pick up an updated AppIcon.icns instead of serving a stale
     # icon-cache entry. `lsregister -f` alone does not always invalidate those
     # caches; `touch` does.
-    touch "$installed_bundle"
+    touch "$installed_bundle" || status=1
+    return "$status"
 }
 
 # MARK: - App process control

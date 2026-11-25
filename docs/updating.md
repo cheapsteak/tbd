@@ -424,8 +424,10 @@ up performs the first of those itself. It waits until three seconds have
 passed since the app it stopped exited, so that nothing moves the bundle
 while macOS may still be checking it, then swaps the kept bundle back in the
 same way an install does — copied in beside the new one, then two renames —
-and tells LaunchServices about it. It logs `restored previous app bundle`,
-puts the update clone's `.build/release` link back the way the run found it,
+and tells LaunchServices about it. It logs `restored previous app bundle`
+(with a note when LaunchServices could not register it, which fails nothing
+but can leave `tbd://` links and the icon stale), puts the update clone's
+`.build/release` link back the way the run found it,
 relaunches the app it stopped before the handover, and exits non-zero. That is
 the case the kept bundle exists for — a new app driving the old daemon is a
 state nobody should be left in. The kept copy is spent: it is the bundle now
