@@ -22,7 +22,7 @@ import Testing
 
     // MARK: - Control combos
 
-    @Test(arguments: [
+    private static let controlCombos: [(String, Data)] = [
         ("C-Space", Data([0x00])),
         ("C-@", Data([0x00])),
         ("C-a", Data([0x01])),
@@ -34,7 +34,9 @@ import Testing
         ("C-]", Data([0x1d])),
         ("C-^", Data([0x1e])),
         ("C-_", Data([0x1f])),
-    ])
+    ]
+
+    @Test(arguments: Self.controlCombos)
     func controlCombosProduceTheirC0Byte(name: String, expected: Data) {
         let actual = HolderNamedKeys.bytes(for: name, modes: nil)
         #expect(actual == expected, """
@@ -44,7 +46,7 @@ import Testing
 
     // MARK: - Fixed-byte named keys (mode-independent)
 
-    @Test(arguments: [
+    private static let fixedByteKeys: [(String, Data)] = [
         ("Enter", Data([0x0d])),
         ("Return", Data([0x0d])),
         ("Escape", Data([0x1b])),
@@ -54,7 +56,9 @@ import Testing
         ("BSpace", Data([0x7f])),
         ("BackSpace", Data([0x7f])),
         ("Space", Data([0x20])),
-    ])
+    ]
+
+    @Test(arguments: Self.fixedByteKeys)
     func fixedByteKeysAreModeIndependent(name: String, expected: Data) {
         let actual = HolderNamedKeys.bytes(for: name, modes: nil)
         #expect(actual == expected, """
@@ -64,14 +68,16 @@ import Testing
 
     // MARK: - Cursor family, DECCKM on: SS3 (`ESC O <final>`)
 
-    @Test(arguments: [
+    private static let ss3CursorKeys: [(String, Data)] = [
         ("Up", Data([0x1b, 0x4f, 0x41])),
         ("Down", Data([0x1b, 0x4f, 0x42])),
         ("Right", Data([0x1b, 0x4f, 0x43])),
         ("Left", Data([0x1b, 0x4f, 0x44])),
         ("Home", Data([0x1b, 0x4f, 0x48])),
         ("End", Data([0x1b, 0x4f, 0x46])),
-    ])
+    ]
+
+    @Test(arguments: Self.ss3CursorKeys)
     func cursorKeysUnderApplicationCursorTakeSS3Form(name: String, expected: Data) {
         let actual = HolderNamedKeys.bytes(for: name, modes: Self.cursorOn)
         #expect(actual == expected, """
@@ -81,14 +87,16 @@ import Testing
 
     // MARK: - Cursor family, DECCKM off (and the `nil`-modes default): CSI (`ESC [ <final>`)
 
-    @Test(arguments: [
+    private static let csiCursorKeys: [(String, Data)] = [
         ("Up", Data([0x1b, 0x5b, 0x41])),
         ("Down", Data([0x1b, 0x5b, 0x42])),
         ("Right", Data([0x1b, 0x5b, 0x43])),
         ("Left", Data([0x1b, 0x5b, 0x44])),
         ("Home", Data([0x1b, 0x5b, 0x48])),
         ("End", Data([0x1b, 0x5b, 0x46])),
-    ])
+    ]
+
+    @Test(arguments: Self.csiCursorKeys)
     func cursorKeysWithoutApplicationCursorTakeCSIForm(name: String, expected: Data) {
         let actual = HolderNamedKeys.bytes(for: name, modes: Self.cursorOff)
         #expect(actual == expected, """
@@ -108,7 +116,7 @@ import Testing
 
     // MARK: - Paging and editing keys (mode-independent)
 
-    @Test(arguments: [
+    private static let pagingAndEditingKeys: [(String, Data)] = [
         ("PageUp", Data([0x1b, 0x5b, 0x35, 0x7e])),
         ("PPage", Data([0x1b, 0x5b, 0x35, 0x7e])),
         ("PageDown", Data([0x1b, 0x5b, 0x36, 0x7e])),
@@ -117,7 +125,9 @@ import Testing
         ("IC", Data([0x1b, 0x5b, 0x32, 0x7e])),
         ("Delete", Data([0x1b, 0x5b, 0x33, 0x7e])),
         ("DC", Data([0x1b, 0x5b, 0x33, 0x7e])),
-    ])
+    ]
+
+    @Test(arguments: Self.pagingAndEditingKeys)
     func pagingAndEditingKeysAreModeIndependent(name: String, expected: Data) {
         let actual = HolderNamedKeys.bytes(for: name, modes: nil)
         #expect(actual == expected, """
@@ -127,7 +137,7 @@ import Testing
 
     // MARK: - Function keys (mode-independent)
 
-    @Test(arguments: [
+    private static let functionKeys: [(String, Data)] = [
         ("F1", Data([0x1b, 0x4f, 0x50])),
         ("F2", Data([0x1b, 0x4f, 0x51])),
         ("F3", Data([0x1b, 0x4f, 0x52])),
@@ -140,7 +150,9 @@ import Testing
         ("F10", Data([0x1b, 0x5b, 0x32, 0x31, 0x7e])),
         ("F11", Data([0x1b, 0x5b, 0x32, 0x33, 0x7e])),
         ("F12", Data([0x1b, 0x5b, 0x32, 0x34, 0x7e])),
-    ])
+    ]
+
+    @Test(arguments: Self.functionKeys)
     func functionKeysAreModeIndependent(name: String, expected: Data) {
         let actual = HolderNamedKeys.bytes(for: name, modes: nil)
         #expect(actual == expected, """
