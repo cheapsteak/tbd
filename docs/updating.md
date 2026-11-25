@@ -73,10 +73,51 @@ these steps in order.
 - **Assembles and signs** the new `TBD.app`, using the same code
   `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
   carries the sidecar and a `SourceWorktreePath.txt` naming the update clone.
+- **Installs** `/Applications/TBD.app`, with the app still running. Nothing
+  before this step touches the running installation, so a failed build, a dry
+  run or a failed signature leaves everything as it was. First it copies the
+  installed bundle to `~/tbd/updates/previous/TBD.app`, where it stays — it
+  is what a failed handover puts back, and afterwards it is the quickest way
+  to return to the build you were on. Then it copies the new bundle in beside
+  the installed one, to a hidden `/Applications/.TBD-install-incoming`, and
+  swaps the two with two renames back to back: the installed bundle to
+  `/Applications/.TBD-install-outgoing`, the new one to `TBD.app`. The
+  replaced bundle is then renamed to `/Applications/.TBD-install-discard` and
+  deleted there, so a delete cut short never leaves part of a bundle under
+  the outgoing name. So `/Applications/TBD.app` holds a whole
+  bundle throughout, save the moment between the two renames, which matters
+  because the app can quit at any time (see the next step). A copy that fails
+  leaves the installed bundle untouched, removes what it copied and ends the
+  run, with the app still up. Each copy is an APFS clone where the volume
+  allows, which costs almost no disk space. The running app does not notice
+  the swap: it keeps running the program it started from. An install
+  interrupted part-way can leave any of the three hidden directories behind,
+  and the next install removes them before it starts; if nothing is installed
+  and a whole bundle (with `Contents/Info.plist` and an executable
+  `Contents/MacOS/TBDApp`) sits at `.TBD-install-outgoing`, the last run
+  stopped between its two renames, so that bundle is put back first rather
+  than removed.
+  `scripts/restart.sh` installs the same way.
 - **Stops the app**, unless you pass `--no-app`, and waits for it to exit:
-  SIGTERM, five seconds, then SIGKILL, each outcome logged. Nothing before this
-  step touches the running installation, so a failed build, a dry run or a
-  failed signature leaves the app up. It goes before the daemon because an app
+  SIGTERM, five seconds, then SIGKILL, each outcome logged. It comes after the
+  install because the bundle has to be whole when the app quits. On macOS 27,
+  quitting an app makes macOS check whether the app may keep running in the
+  background, and it answers by reading the app's bundle in `/Applications`.
+  If the bundle is missing or half-copied at that moment, the check fails, and
+  about a second later macOS force-quits every process grouped with the app —
+  which can include the daemon, every pty holder and every agent session
+  under them. TBD is allowed in the background, so a complete bundle passes,
+  the new build as well as the old. Measured on a run that stopped the app
+  first and then moved the old bundle aside, macOS read the path 12 ms after
+  the app quit, 1 ms after the old bundle had gone, found nothing, and killed
+  31 pty holders and their sessions; on other runs the read landed after the
+  new copy had finished, and passed. With the new bundle already whole in
+  place there is nothing to race. Nothing moves the bundle in the seconds
+  after the app quits either: a handover that completes leaves it alone, and
+  the rollback after one that fails waits three seconds from the app's exit
+  before it starts (`APP_EXIT_SETTLE_SECONDS` in `scripts/update.sh`), well
+  past the measured read 12 ms after the quit and the force-quit about a
+  second later. The app stops before the daemon is handed over because an app
   still running during the handover reconnects to the new daemon and
   re-attaches the session it shows, and the new daemon keeps that claim after
   the app is replaced, refusing the replacement's attach. From here on, every
@@ -84,10 +125,6 @@ these steps in order.
   bundle is being installed and the daemon handed over, and a failed handover
   whose rollback does not complete, both described under "Going back to the
   previous build".
-- **Installs** `/Applications/TBD.app`. The bundle being replaced is moved to
-  `~/tbd/updates/previous/TBD.app` first, and stays there — it is what a failed
-  handover puts back, and afterwards it is the quickest way to return to the
-  build you were on.
 - **Hands the daemon over**, as described below, and waits until the new
   daemon is the one answering: the old daemon's process has exited, and
   `tbd daemon status` then reports the new binary's path. The path alone
@@ -124,9 +161,12 @@ these steps in order.
 Sessions live in pty holders — one `TBDHolder` process per session — not in
 the daemon or the app, so neither restarting the app nor replacing the daemon
 ends a session: the outgoing daemon lets go of each holder and the new one
-adopts it again. The risk is the new daemon's startup reconcile. One that read
-a slow answer on a machine still digesting a build as a missing session would
-park live sessions wholesale. Four things make the handover safe.
+adopts it again. The app is stopped only once the new bundle is complete in
+`/Applications`, because macOS checks that bundle when the app quits (see
+"Stops the app" above). The remaining risk is the new daemon's startup
+reconcile. One that read a slow answer on a machine still digesting a build
+as a missing session would park live sessions wholesale. Four things make the
+handover safe.
 
 - **The successor claims the pid file first.** It starts with
   `TBD_HANDOVER_FROM_PID` naming its predecessor, writes its own pid over the
@@ -326,15 +366,48 @@ There is no automated rollback, by design. Three routes back exist instead, in
 the order you would reach for them.
 
 - **From the kept bundle**, the fastest, because it needs no build. Every
-  update moves the app bundle it is replacing to
+  update copies the app bundle it is replacing to
   `~/tbd/updates/previous/TBD.app` and leaves it there. An update that finds
   nothing installed keeps nothing, and leaves a bundle an earlier update kept
-  where it is. Put it back with
-  `rm -rf /Applications/TBD.app && /bin/cp -cR ~/tbd/updates/previous/TBD.app
-  /Applications/TBD.app`, then relaunch. That bundle's
-  `Contents/SourceWorktreePath.txt` names the tree the previous daemon came
-  from, so `scripts/restart.sh --release` run from inside that tree completes
-  the rollback for the daemon as well.
+  where it is. Put it back the way an install does, so that
+  `/Applications/TBD.app` is never missing if the app quits meanwhile (see
+  "Stops the app" above).
+
+  First look for `/Applications/.TBD-install-outgoing` (`ls -a /Applications`
+  lists it). If it is there with nothing at `/Applications/TBD.app`, an
+  install stopped between its two renames, and it is the bundle that was
+  installed, whole. Rename it back before anything else:
+  `mv /Applications/.TBD-install-outgoing /Applications/TBD.app`. If it is
+  there beside an installed bundle, it is left over from an earlier install:
+  rename it to `/Applications/.TBD-install-discard` and delete it there. The
+  command below does nothing while that name is taken. Then:
+
+  ```bash
+  ( cd /Applications &&
+    [ ! -e .TBD-install-outgoing ] &&
+    rm -rf .TBD-install-incoming .TBD-install-discard &&
+    /bin/cp -cR ~/tbd/updates/previous/TBD.app .TBD-install-incoming &&
+    { [ ! -e TBD.app ] || mv TBD.app .TBD-install-outgoing; } &&
+    mv .TBD-install-incoming TBD.app &&
+    if [ -e .TBD-install-outgoing ]; then
+      mv .TBD-install-outgoing .TBD-install-discard && rm -rf .TBD-install-discard
+    fi )
+  ```
+
+  - **The `rm`** – clears what an interrupted install may have left at the
+    incoming and discard names, neither of which holds a bundle anything puts
+    back.
+  - **The copy** – puts the kept bundle beside the installed one; a copy that
+    fails stops the command before the installed bundle moves.
+  - **The two `mv`s** – swap it in back to back, so the installed path is
+    empty only between them. With nothing installed, only the second runs.
+  - **The last step** – removes the bundle it replaced by way of the discard
+    name.
+
+  Then relaunch. The restored bundle's `Contents/SourceWorktreePath.txt`
+  names the tree the previous daemon came from, so `scripts/restart.sh
+  --release` run from inside that tree completes the rollback for the daemon
+  as well.
 - **From the update clone.** `~/tbd/updates/src` keeps its full history. Check
   out the commit you want (`git -C ~/tbd/updates/src checkout --detach
   <commit>`) and run `scripts/restart.sh --release` from inside it. That
@@ -347,23 +420,40 @@ the order you would reach for them.
   clone is the thing that is broken.
 
 An update that gets as far as installing and then cannot bring the new daemon
-up performs the first of those itself: it moves the kept bundle back, tells
-LaunchServices about it, logs `restored previous app bundle`, puts the update
-clone's `.build/release` link back the way the run found it, relaunches the
-app it stopped before the handover, and exits non-zero. That is the case the
-kept bundle exists for — a new app driving the old daemon is a state nobody
-should be left in. The relaunch also covers a handover that failed after the
-old daemon had already exited: an app that finds no daemon starts one.
+up performs the first of those itself. It waits until three seconds have
+passed since the app it stopped exited, so that nothing moves the bundle
+while macOS may still be checking it, then swaps the kept bundle back in the
+same way an install does — copied in beside the new one, then two renames —
+and tells LaunchServices about it. It logs `restored previous app bundle`,
+puts the update clone's `.build/release` link back the way the run found it,
+relaunches the app it stopped before the handover, and exits non-zero. That is
+the case the kept bundle exists for — a new app driving the old daemon is a
+state nobody should be left in. The kept copy is spent: it is the bundle now
+installed. The relaunch also covers a handover that failed after the old
+daemon had already exited: an app that finds no daemon starts one. Under
+`--no-app` the app was never stopped, so the swap back runs without the wait.
+
+An install that fails, because the copy into `/Applications` does not
+complete, has changed nothing there: the installed bundle is the one the run
+started with, whole. The run removes what it copied, puts the `.build/release`
+link back, and exits non-zero, but relaunches nothing: the install comes
+before the app is stopped, so the app is still running. The one install
+failure that does change `/Applications` is a swap whose second rename fails
+and whose first cannot then be undone. Nothing is installed at
+`/Applications/TBD.app` then, with the app still running in front of the empty
+path, so the error names `/Applications/.TBD-install-outgoing`, where the
+bundle that was installed is, and asks you to rename it back before TBD
+quits. The next install does that itself before it starts.
 
 The relaunch waits on both halves of that rollback. When either fails — the
-run kept no bundle to move back because nothing was installed when it began,
+run kept no bundle to put back because nothing was installed when it began,
 as on the first update, or the bundle or the `.build/release` link cannot be
 put back — the new build may still be what an app would launch, or what it
 would start a daemon from, so the run leaves the app it stopped not running.
 It logs which half failed, then an error saying the rollback of the failed
 install did not complete, and the recovery steps below.
 
-The rollback only ever moves back the bundle the same run kept. A bundle an
+The rollback only ever puts back the bundle the same run kept. A bundle an
 earlier update left at `~/tbd/updates/previous/TBD.app` is not the build the
 run replaced, and installing it would put some older app in front of
 whichever daemon is left, so a run that kept nothing leaves it where it is and
@@ -373,11 +463,24 @@ same build.
 
 A run interrupted while it installs the bundle and hands the daemon over —
 Ctrl-C, a signal, or a step that exits — does not launch the app again
-either. At that point the run cannot tell which bundle is in `/Applications`
-or which daemon is serving, and putting the kept bundle back is no safer than
-relaunching, because the new daemon may already be up. So it leaves the app
-it stopped not running and logs an error saying the run was interrupted
-mid-handover and the app is not running.
+either. `/Applications/TBD.app` holds a whole bundle either way: the build the
+run started with if the interruption came before the swap, the new build if
+it came after. (An interruption between the swap's two renames leaves the
+path empty for a moment, and the run puts the bundle it had renamed away
+straight back; a run killed outright there leaves that to the next install.)
+The run logs which of the two is installed, read from the bundle's
+`Contents/TBDBuildIdentity.json`. What it cannot tell is which daemon is
+serving, and putting the kept bundle back is no safer than relaunching,
+because the new daemon may already be up. So it leaves the app as it is — not
+running if the run had stopped it, still running if the interruption came
+before the stop — and logs an error saying the run was interrupted while
+installing and handing over, with a line saying the app is not running when
+the run had stopped it, or may not be running when the interruption came
+while the run was still stopping it. When the new build is installed but the
+run had not yet begun stopping the app or begun the handover, the run says
+so: TBD is still running the previous build in front of the newly installed
+bundle, nothing was handed over, and `tbd update` run again completes the
+move.
 
 To recover from either:
 
@@ -391,9 +494,10 @@ To recover from either:
   as described above, if the run got far enough to keep one. A run that found
   nothing installed kept none, and a bundle there is an earlier update's.
 
-An interruption before the install starts, or after the handover has
-completed, launches the app again as usual: before, nothing has moved; after,
-the bundle and the daemon are the same new build.
+An interruption before the install starts leaves the app running, because
+nothing has moved and the app has not been stopped. One after the handover
+has completed launches the app again as usual, because the bundle and the
+daemon are then the same new build.
 
 Either way, run the script from the worktree you want installed — never an
 absolute path to another tree's copy — or you will build one tree and leave

@@ -6,7 +6,7 @@ A column, once added, stays in the schema forever. Migrations are frozen, the mi
 
 Dropping a column is the first schema change an older build cannot tolerate. Adding a column is safe in both directions: an older build never names the new column, and SQLite fills it with its default or NULL. Dropping is not. A GRDB record writes every property it declares, so an older build that still declares the column fails every insert and update into that table once the column is gone. For `terminal` that means every session spawn.
 
-That older build is not hypothetical. `tbd update` moves the bundle it replaces to `~/tbd/updates/previous/TBD.app` and keeps it there as the no-rebuild route back ([`docs/updating.md`](../updating.md)). An update that installs a new build and then cannot bring the new daemon up restores that bundle automatically. By then the new daemon may already have run, so a drop it made would leave the restored build broken.
+That older build is not hypothetical. `tbd update` keeps a copy of the bundle it replaces at `~/tbd/updates/previous/TBD.app` as the no-rebuild route back ([`docs/updating.md`](../updating.md)). An update that installs a new build and then cannot bring the new daemon up restores that bundle automatically. By then the new daemon may already have run, so a drop it made would leave the restored build broken.
 
 ## Decision
 

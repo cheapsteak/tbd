@@ -260,11 +260,20 @@ the fetch and detach of `~/tbd/updates/src` run as before, and then
 3. **Stop here on `--dry-run`**, with the previous link restored.
 4. **Point** `~/tbd/updates/src/.build/release` at the tree, by an atomic
    rename of a symlink. The unchanged tail follows: `assemble_app_bundle`,
-   `sign_app_bundle`, `install_and_handover`, the CLI refresh, the app stage
-   and the wake. The handover starts the daemon through that link, so it runs
-   the downloaded binary.
-5. **On a failed handover**, the previous app bundle is restored as before,
-   and the link is pointed back at the tree still running.
+   `sign_app_bundle`, `install_new_bundle`, the app stop,
+   `hand_over_to_new_daemon`, the CLI refresh, the app stage and the wake.
+   The handover starts the daemon through that link, so it runs the
+   downloaded binary.
+5. **On a failed install or handover**, the link is pointed back at the tree
+   still running, in both cases and whether or not the bundle goes back too.
+   - A failed install has not changed the installed app bundle, because the
+     new bundle is copied in beside it and swapped in only once whole. There
+     is no bundle to put back. The one exception is a swap whose second
+     rename fails and whose first cannot then be undone: nothing is
+     installed, the error names where the old bundle is, and the next install
+     puts it back before it starts.
+   - A failed handover swaps the previous app bundle back in the same way,
+     then points the link back.
 6. **On success**, record the tree that was live when the run started as the
    rollback tree (`~/tbd/updates/prebuilt/.previous`).
 7. **On every exit**, whichever branch the run leaves by, reconcile

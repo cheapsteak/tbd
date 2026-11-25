@@ -574,37 +574,278 @@ provision_signing_identity() (
     exit 0
 )
 
-# Copy a signed bundle over the installed one and re-register it.
+# The cp that copy_app_bundle runs. Sourcing this file always sets it to
+# `/bin/cp`, whatever the environment holds, so nothing a real install
+# inherits decides what it runs. A test points it at a copy that records what
+# the installed path holds while the copy runs by setting it once the file is
+# sourced: scripts/restart-bundle-lib.test.sh for one call, and
+# scripts/update.test.sh as the install begins, since update.sh's main
+# sources this file again as it starts.
+TBD_BUNDLE_CP=/bin/cp
+
+# Copy a bundle, as an APFS clone where the volume allows.
+#
+#   copy_app_bundle <source_bundle> <destination>
+#
+# `cp -cR` uses APFS clonefile (copy-on-write, ~zero disk cost). It is
+# `/bin/cp` by absolute path because -c is BSD-only: a dev shell that puts GNU
+# coreutils first on PATH (nix, direnv, Homebrew's gnubin) resolves a bare `cp`
+# to one that rejects the flag, and the install fails. <destination> must not
+# exist, or cp copies into it rather than making it.
+copy_app_bundle() {
+    "$TBD_BUNDLE_CP" -cR "${1-}" "${2-}"
+}
+
+# The path of one of the three siblings an install passes through:
+#
+#   app_bundle_sibling <installed_bundle> incoming|outgoing|discard
+#
+# The new bundle is copied to the incoming sibling while the installed bundle
+# stays where it is. Then the installed bundle is renamed to the outgoing
+# sibling and the incoming one renamed into its place (see
+# swap_in_staged_app_bundle). A sibling that is done with is renamed to the
+# discard sibling and deleted there (discard_app_bundle_sibling). All three
+# sit in the installed bundle's own directory, so each move is a rename
+# within one volume. All are dot-prefixed, so Finder hides them, and lack the
+# `.app` extension, so none is named as an application. For
+# /Applications/TBD.app they are /Applications/.TBD-install-incoming,
+# /Applications/.TBD-install-outgoing and /Applications/.TBD-install-discard.
+app_bundle_sibling() {
+    local installed_bundle="${1-}"
+    local role="${2-}"
+    printf '%s/.%s-install-%s\n' "$(dirname "$installed_bundle")" \
+        "$(basename "$installed_bundle" .app)" "$role"
+}
+
+# Put back a bundle an install left at the outgoing sibling with nothing
+# installed in its place: an install that stopped between its two renames.
+# A moment before, that bundle was the installed one, whole, so it is the one
+# that belongs there.
+#
+#   put_back_outgoing_app_bundle <installed_bundle>
+#
+# Only a tree that looks whole goes back: Contents/Info.plist present and
+# Contents/MacOS/TBDApp executable. Nothing deletes the outgoing sibling in
+# place (discard_app_bundle_sibling renames it away first), but a tree there
+# that fails the check is still no bundle to put in front of a quitting app,
+# so it is left for an install's cleanup (reclaim_app_bundle_siblings) and
+# the line printed says why.
+#
+# Prints a line saying what it put back or why it did not, and nothing when
+# there was nothing to put back. Non-zero, with an error on stderr, when the
+# rename fails.
+put_back_outgoing_app_bundle() {
+    local installed_bundle="${1-}"
+    local outgoing
+
+    [ -n "$installed_bundle" ] || return 1
+    outgoing="$(app_bundle_sibling "$installed_bundle" outgoing)"
+    if [ -e "$installed_bundle" ] || [ ! -d "$outgoing" ]; then
+        return 0
+    fi
+    if [ ! -f "$outgoing/Contents/Info.plist" ] || [ ! -x "$outgoing/Contents/MacOS/TBDApp" ]; then
+        printf 'not putting back %s from %s: it lacks Contents/Info.plist or an executable Contents/MacOS/TBDApp, so it is left for an install to clear\n' \
+            "$installed_bundle" "$outgoing"
+        return 0
+    fi
+    if ! mv "$outgoing" "$installed_bundle"; then
+        echo "error: nothing is installed at $installed_bundle, and the bundle an interrupted install left at $outgoing could not be put back" >&2
+        return 1
+    fi
+    printf 'put back %s from %s, where an interrupted install had left it\n' \
+        "$installed_bundle" "$outgoing"
+}
+
+# Remove the incoming or outgoing sibling of <installed_bundle> by renaming
+# it to the discard sibling and deleting it there.
+#
+#   discard_app_bundle_sibling <installed_bundle> incoming|outgoing
+#
+# A delete cut short leaves part of a tree behind. Under the outgoing name the
+# next install would find it with nothing installed and take it for the
+# bundle to put back; under the discard name nothing reads it, and the next
+# install clears it (reclaim_app_bundle_siblings). Non-zero when the sibling
+# is still at its own name afterwards.
+discard_app_bundle_sibling() {
+    local installed_bundle="${1-}"
+    local role="${2-}"
+    local sibling discard
+
+    sibling="$(app_bundle_sibling "$installed_bundle" "$role")"
+    discard="$(app_bundle_sibling "$installed_bundle" discard)"
+    [ -e "$sibling" ] || return 0
+    rm -rf "$discard" 2>/dev/null || true
+    # A discard the rm could not remove would make mv move the sibling into it.
+    if [ -e "$discard" ] || ! mv "$sibling" "$discard"; then
+        return 1
+    fi
+    rm -rf "$discard" 2>/dev/null || true
+}
+
+# Clear the siblings of <installed_bundle> before an install uses them.
+#
+#   reclaim_app_bundle_siblings <installed_bundle>
+#
+# An interrupted install can leave any of them behind: a partial copy at the
+# incoming sibling, the bundle it replaced at the outgoing one, part of a
+# deleted tree at the discard one. Nothing but an install creates them, and
+# every install starts here, so this create-time cleanup is their reclaimer.
+# An outgoing bundle with nothing installed in its place is put back first
+# (put_back_outgoing_app_bundle), since it is the last whole bundle there is,
+# and that line is printed. Non-zero, with an error on stderr, when any
+# sibling is still there afterwards.
+reclaim_app_bundle_siblings() {
+    local installed_bundle="${1-}"
+    local incoming outgoing discard
+
+    [ -n "$installed_bundle" ] || return 1
+    put_back_outgoing_app_bundle "$installed_bundle" || return 1
+    incoming="$(app_bundle_sibling "$installed_bundle" incoming)"
+    outgoing="$(app_bundle_sibling "$installed_bundle" outgoing)"
+    discard="$(app_bundle_sibling "$installed_bundle" discard)"
+    rm -rf "$discard" 2>/dev/null || true
+    discard_app_bundle_sibling "$installed_bundle" incoming || true
+    discard_app_bundle_sibling "$installed_bundle" outgoing || true
+    if [ -e "$incoming" ] || [ -e "$outgoing" ] || [ -e "$discard" ]; then
+        echo "error: could not remove $incoming, $outgoing and $discard, left by an earlier install" >&2
+        return 1
+    fi
+}
+
+# Copy <source_bundle> to the incoming sibling of <installed_bundle>, and leave
+# the installed bundle alone. A copy that fails is removed, so a failed stage
+# changes nothing.
+#
+#   stage_app_bundle <source_bundle> <installed_bundle>
+stage_app_bundle() {
+    local source_bundle="${1-}"
+    local installed_bundle="${2-}"
+    local incoming
+
+    if [ -z "$source_bundle" ] || [ -z "$installed_bundle" ]; then
+        echo "error: stage_app_bundle needs a bundle and an install path" >&2
+        return 1
+    fi
+    incoming="$(app_bundle_sibling "$installed_bundle" incoming)"
+    if [ -e "$incoming" ]; then
+        echo "error: $incoming is in the way" >&2
+        return 1
+    fi
+    if ! copy_app_bundle "$source_bundle" "$incoming"; then
+        discard_app_bundle_sibling "$installed_bundle" incoming || true
+        echo "error: could not copy $source_bundle to $incoming" >&2
+        return 1
+    fi
+}
+
+# Put the staged bundle in place of the installed one. The installed bundle is
+# renamed to the outgoing sibling and the staged one renamed into its place,
+# with nothing between the two renames, so the installed path holds a whole
+# bundle before the first and after the second and is empty only for the
+# moment between them. With nothing installed, the staged bundle is renamed
+# into place on its own.
+#
+#   swap_in_staged_app_bundle <installed_bundle>
+#
+# Returns 0 when the staged bundle is installed, with the bundle it replaced,
+# if any, at the outgoing sibling. Returns 1 when the installed path is as it
+# was. Returns 2 when the second rename failed and the replaced bundle could
+# not be put back either, so that nothing is installed and the replaced bundle
+# is at the outgoing sibling, where the next install puts it back.
+swap_in_staged_app_bundle() {
+    local installed_bundle="${1-}"
+    local incoming outgoing
+
+    [ -n "$installed_bundle" ] || return 1
+    incoming="$(app_bundle_sibling "$installed_bundle" incoming)"
+    outgoing="$(app_bundle_sibling "$installed_bundle" outgoing)"
+    if [ ! -d "$incoming" ]; then
+        echo "error: no bundle is staged at $incoming" >&2
+        return 1
+    fi
+    if [ ! -e "$installed_bundle" ]; then
+        mv "$incoming" "$installed_bundle" || return 1
+        return 0
+    fi
+    if [ -e "$outgoing" ]; then
+        echo "error: $outgoing is in the way" >&2
+        return 1
+    fi
+
+    mv "$installed_bundle" "$outgoing" || return 1
+    if mv "$incoming" "$installed_bundle"; then
+        return 0
+    fi
+    if mv "$outgoing" "$installed_bundle"; then
+        echo "error: could not move $incoming into place; the bundle that was installed is back at $installed_bundle" >&2
+        return 1
+    fi
+    echo "error: could not move $incoming into place, nor the bundle that was installed back from $outgoing: nothing is installed at $installed_bundle" >&2
+    return 2
+}
+
+# Install a signed bundle in place of the installed one and re-register it.
 #
 #   install_app_bundle <bundle_dir> <installed_bundle>
 #
 # /Applications is the only path macOS 15 accepts for requestAuthorization;
-# bundles elsewhere return UNErrorDomain Code=1 with no permission dialog.
-# `cp -cR` uses APFS clonefile (copy-on-write, ~zero disk cost). It is
-# `/bin/cp` by absolute path because -c is BSD-only: a dev shell that puts GNU
-# coreutils first on PATH (nix, direnv, Homebrew's gnubin) resolves a bare `cp`
-# to one that rejects the flag, and the install fails. All TBD worktrees share
-# CFBundleIdentifier=com.github.cheapsteak.tbd, so whichever tree most recently
-# installed "wins" /Applications — the same last-install-wins behavior already
-# documented for tbd:// URL routing.
+# bundles elsewhere return UNErrorDomain Code=1 with no permission dialog. All
+# TBD worktrees share CFBundleIdentifier=com.github.cheapsteak.tbd, so
+# whichever tree most recently installed "wins" /Applications — the same
+# last-install-wins behavior already documented for tbd:// URL routing.
+#
+# The new bundle is staged beside the installed one and swapped in by two
+# renames (stage_app_bundle, swap_in_staged_app_bundle), and the bundle it
+# replaced is removed afterwards, by way of the discard sibling
+# (discard_app_bundle_sibling). Nothing deletes the installed bundle and
+# copies over it in place, because the installed path has to hold a whole
+# bundle whenever the app quits. On macOS 27, a quitting app makes
+# LaunchServices ask Background Task Management whether the app may stay in
+# the background, and BTM answers from its record for the bundle identifier,
+# which it finds by reading the bundle at the app's installed path. A path
+# that is missing or half-copied at that instant fails the read,
+# LaunchServices takes the failure for "not allowed", and about a second
+# later it force-quits every process in the app's coalition: TBD's daemon,
+# every pty holder and every agent session under them. A whole bundle with
+# this bundle identifier passes, the old build or the new. Both callers
+# install while the app is running, and it can quit at any moment, so the
+# installed path is never without a whole bundle except between the two
+# renames. A copy that fails leaves the installed bundle untouched.
+#
+# Returns 0 once the new bundle is installed, and otherwise what
+# swap_in_staged_app_bundle says about the installed path: 1 when it is as it
+# was, 2 when nothing is installed.
 install_app_bundle() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
+    local status=0
 
     if [ -z "$bundle_dir" ] || [ -z "$installed_bundle" ]; then
         echo "error: install_app_bundle needs a bundle dir and an install path" >&2
         return 1
     fi
 
-    rm -rf "$installed_bundle"
-    /bin/cp -cR "$bundle_dir" "$installed_bundle" || return 1
-    register_app_bundle "$installed_bundle"
+    reclaim_app_bundle_siblings "$installed_bundle" || return 1
+    stage_app_bundle "$bundle_dir" "$installed_bundle" || return 1
+    swap_in_staged_app_bundle "$installed_bundle" || status=$?
+    case "$status" in
+        0) ;;
+        2) return 2 ;;
+        *)
+            discard_app_bundle_sibling "$installed_bundle" incoming || true
+            return 1
+            ;;
+    esac
+    discard_app_bundle_sibling "$installed_bundle" outgoing || true
+    if ! register_app_bundle "$installed_bundle"; then
+        echo "warning: installed $installed_bundle but could not register it with LaunchServices" >&2
+    fi
 }
 
-# Tell LaunchServices about a bundle that appeared or moved at <path>. Its own
-# function because an update that has to put the previous bundle back must
-# re-register it exactly as an install does — a bundle LaunchServices does not
-# know about takes no tbd:// URL and shows a stale icon.
+# Tell LaunchServices about a bundle that appeared or moved at <path>, as
+# install_app_bundle does after every install, an update's rollback included —
+# a bundle LaunchServices does not know about takes no tbd:// URL and shows a
+# stale icon.
 register_app_bundle() {
     local installed_bundle="${1-}"
 

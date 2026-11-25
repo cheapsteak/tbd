@@ -65,6 +65,20 @@ HANDOVER_STOP_GRACE=5
 # grace only spares it a SIGKILL while it tears down its windows.
 APP_STOP_GRACE=5
 
+# How long nothing may move the installed app bundle after the app has been
+# stopped, in seconds. When an app quits, macOS 27 reads its bundle at the
+# installed path to decide whether it may stay in the background, and a bundle
+# that is missing or half-copied at that instant gets every process in the
+# app's coalition force-quit, sessions included (see
+# stop_app_before_handover). The read measured came 12 ms after the quit, and
+# the force-quit about a second after that, so three seconds is a wide margin.
+# Only a rollback after a failed handover waits on it: it is the one step that
+# moves the bundle after the app stop, and a handover can fail within
+# milliseconds.
+# TBD_UPDATE_APP_EXIT_SETTLE_SECONDS overrides it for one run; the test
+# harness sets it to 0.
+APP_EXIT_SETTLE_SECONDS=3
+
 # Where the new binaries come from. `build` compiles them here, as every update
 # always has. `release` downloads the build the release workflow published for
 # a commit on main, verifies it, and installs that instead, so the update
@@ -419,9 +433,10 @@ on_update_exit() {
     # Main relaunches the app itself on every return it expects. This catches
     # the ones it does not — an exit from inside a step, or a signal — so no
     # run ends with the app stopped for a handover and never started again.
-    # Except while the installation is moving: an exit then leaves a state
-    # this run cannot name, and launching an app into it could pair a new app
-    # with an old daemon. That exit is reported instead.
+    # Except while the installation is moving: an exit then can leave the
+    # installed bundle and the daemon on different builds, and launching an
+    # app into that could pair a new app with an old daemon. That exit is
+    # reported instead.
     if [ "$INSTALL_IN_FLIGHT" = true ]; then
         report_interrupted_install
     else
@@ -708,20 +723,24 @@ build_products() {
 
 # MARK: - Keeping the previous app bundle
 
-# Move the installed bundle out of the way, keeping it whole at
-# $UPDATE_HOME/previous/TBD.app. Two jobs: it is what a failed handover puts
-# back, and it is the fastest route to the previous build afterwards — a
-# reinstall with no rebuild (see docs/updating.md).
+# Keep a copy of the installed bundle at $UPDATE_HOME/previous/TBD.app. Two
+# jobs: it is what a failed handover puts back, and it is the fastest route to
+# the previous build afterwards — a reinstall with no rebuild (see
+# docs/updating.md).
 #
-# A move, not a copy: the bundle is small, the move is atomic within a volume,
-# and a half-copied "previous" is worse than none. The running app is
-# unaffected either way — it holds its executable by inode, not by path.
+# A copy of the bundle while it is still installed, not a move of the bundle
+# once the install has replaced it: a keep that fails then fails before
+# anything in /Applications has moved, and the kept bundle is never left
+# half-moved across volumes. Where both paths share a volume the copy is an
+# APFS clone and costs nothing. main runs it while the app is still running,
+# and the app is unaffected.
 #
 # With nothing installed there is nothing to keep, and a bundle an earlier
 # update kept is left where it is: it is still a route back for the operator,
 # but it is not this run's to restore (see BUNDLE_STASHED).
-stash_installed_bundle() {
+keep_installed_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
+    local keep_dir partial discard
     BUNDLE_STASHED=false
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
@@ -730,53 +749,96 @@ stash_installed_bundle() {
         fi
         return 0
     fi
-    mkdir -p "$(dirname "$PREVIOUS_BUNDLE")" || return 1
-    rm -rf "$PREVIOUS_BUNDLE"
-    if ! mv "$installed_bundle" "$PREVIOUS_BUNDLE"; then
-        log_error "could not move $installed_bundle aside — installing nothing"
+    keep_dir="$(dirname "$PREVIOUS_BUNDLE")"
+    if ! mkdir -p "$keep_dir"; then
+        log_error "could not make $keep_dir — installing nothing"
         return 1
     fi
+    # A half-copied previous is worse than none: the recovery steps and
+    # docs/updating.md send the operator to it. So the copy goes to a sibling
+    # and is renamed into place only once whole, and the bundle it replaces
+    # is renamed away before it is deleted, so that a run cut short anywhere
+    # here leaves at $PREVIOUS_BUNDLE the earlier kept bundle, whole, or
+    # nothing. The next keep clears whatever either sibling still holds,
+    # which makes it their reclaimer.
+    partial="$keep_dir/.TBD.app.partial"
+    discard="$keep_dir/.TBD.app.discard"
+    rm -rf "$partial" "$discard"
+    # A leftover the rm could not remove would make cp copy into it, or mv
+    # move into it.
+    if [ -e "$partial" ] || [ -e "$discard" ] ||
+        ! copy_app_bundle "$installed_bundle" "$partial"; then
+        rm -rf "$partial"
+        log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
+        return 1
+    fi
+    if { [ -e "$PREVIOUS_BUNDLE" ] && ! mv "$PREVIOUS_BUNDLE" "$discard"; } ||
+        ! mv "$partial" "$PREVIOUS_BUNDLE"; then
+        rm -rf "$partial"
+        log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
+        return 1
+    fi
+    rm -rf "$discard"
     BUNDLE_STASHED=true
     log "kept the previous app bundle at $PREVIOUS_BUNDLE"
 }
 
-# True once stash_installed_bundle has moved the installed bundle to
+# True once keep_installed_bundle has copied the installed bundle to
 # $PREVIOUS_BUNDLE in this run. Only then is the bundle there the build this
 # run replaced. Otherwise anything at $PREVIOUS_BUNDLE was kept by an earlier
-# update and may be any older build, and moving it into $INSTALLED_BUNDLE
+# update and may be any older build, and putting it in $INSTALLED_BUNDLE
 # would install that build in front of whichever daemon is left, and let main
 # relaunch it as a rollback that worked.
 BUNDLE_STASHED=false
 
-# Put the kept bundle back where it was and tell LaunchServices. Called when
-# the installation is in place but the daemon behind it is not, which would
-# otherwise leave a new app talking to an old daemon. Only for a bundle this
-# run kept; roll_back_bundle checks that first.
+# Put the kept bundle back in place of the new one, by the same staged swap an
+# install makes (install_app_bundle), which also tells LaunchServices, and
+# spend the kept copy. Called when the new bundle is in place but the daemon
+# behind it is not, which would otherwise leave a new app talking to an old
+# daemon. Only for a bundle this run kept; roll_back_bundle checks that first.
+#
+# It waits for the app's exit to settle before anything moves
+# (wait_for_app_exit_to_settle): a handover can fail within milliseconds of
+# the app stop, and macOS reads the installed bundle just after an app quits.
+#
+# The spent copy is removed as keep_installed_bundle removes the one it
+# replaces: renamed to the discard sibling first and deleted there, so a
+# delete cut short leaves nothing partial at $PREVIOUS_BUNDLE, where the
+# recovery steps send the operator. The next keep clears the discard sibling.
+# A rename that fails leaves the copy whole where it is.
 restore_previous_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
+    local discard
     if [ ! -d "$PREVIOUS_BUNDLE" ]; then
         log_error "no previous app bundle to restore — $installed_bundle is the new build"
         return 1
     fi
-    rm -rf "$installed_bundle"
-    if ! mv "$PREVIOUS_BUNDLE" "$installed_bundle"; then
-        log_error "could not restore the previous app bundle from $PREVIOUS_BUNDLE"
+    wait_for_app_exit_to_settle
+    if ! install_app_bundle "$PREVIOUS_BUNDLE" "$installed_bundle"; then
+        log_error "could not put the previous app bundle back from $PREVIOUS_BUNDLE"
         return 1
     fi
-    register_app_bundle "$installed_bundle"
+    discard="$(dirname "$PREVIOUS_BUNDLE")/.TBD.app.discard"
+    rm -rf "$discard"
+    # A discard the rm could not remove would make mv move the copy into it.
+    if [ ! -e "$discard" ] && mv "$PREVIOUS_BUNDLE" "$discard"; then
+        rm -rf "$discard"
+    fi
     log "restored previous app bundle"
 }
 
-# True once a failed install_and_handover could not put the previous bundle
-# back, or kept none of its own to put back, so $INSTALLED_BUNDLE may still be
-# the new build, or nothing. main reads it before relaunching the app it
+# True once a failed install (install_new_bundle) or handover
+# (hand_over_to_new_daemon) has left $INSTALLED_BUNDLE holding something other
+# than the build it held when the run began: the new build, because a failed
+# handover could not put the previous bundle back or kept none of its own to
+# put back, or nothing at all. main reads it before relaunching the app it
 # stopped: launched from there, that app would drive the old daemon, or start
-# the new one if none is running, which is the mismatch the rollback exists to
-# prevent.
+# the new one if none is running, which is the mismatch the rollback exists
+# to prevent.
 BUNDLE_RESTORE_FAILED=false
 
-# install_and_handover's rollback of the bundle: restore_previous_bundle, with
-# a failure recorded in BUNDLE_RESTORE_FAILED for main.
+# The rollback of the bundle after a failed handover: restore_previous_bundle,
+# with a failure recorded in BUNDLE_RESTORE_FAILED for main.
 #
 # It restores only a bundle this run kept (BUNDLE_STASHED). A run that found
 # nothing installed has nothing of its own to put back, and that counts as a
@@ -799,40 +861,75 @@ roll_back_bundle() {
     fi
 }
 
-# Put the new bundle in place and move the fleet onto it, undoing the
-# installation if the successor daemon never arrives.
+# Put the new bundle in place, keeping a copy of the one it replaces.
 #
-#   install_and_handover <bundle_dir> <installed_bundle> <new_daemon>
+#   install_new_bundle <bundle_dir> <installed_bundle>
+#
+# The first of the three steps that move the installation; main stops the app
+# after it and then calls hand_over_to_new_daemon. It runs while the app is
+# still running, and it never leaves the installed path without a whole
+# bundle, so the app quits in front of one whenever it quits (see
+# stop_app_before_handover). A failure leaves the installed bundle as it was,
+# so there is nothing to roll back. Clears BUNDLE_RESTORE_FAILED, and sets it
+# in the one failure that does not leave the installed bundle as it was.
+install_new_bundle() {
+    local bundle_dir="${1-}"
+    local installed_bundle="${2-}"
+    local note status=0
+    BUNDLE_RESTORE_FAILED=false
+
+    # What an interrupted install left beside the installed bundle goes
+    # first, so that a bundle one left outgoing, with nothing installed in its
+    # place, is back before the keep below looks for what is installed.
+    if ! note="$(reclaim_app_bundle_siblings "$installed_bundle")"; then
+        log_error "could not clear what an earlier install left beside $installed_bundle — installing nothing"
+        return 1
+    fi
+    [ -z "$note" ] || log "$note"
+
+    # Keeping the previous bundle: a copy, so a failure here has moved
+    # nothing.
+    keep_installed_bundle "$installed_bundle" || return 1
+
+    # Installing: the new bundle is staged beside the installed one and
+    # swapped in by two renames (install_app_bundle). The RUNNING app is
+    # untouched — it holds its executable by inode, and the stop that follows
+    # finds it by its command line, which still names this path — so this is
+    # still reversible until something launches from the new path.
+    #
+    # It happens BEFORE the handover on purpose. During the socket gap an app
+    # may decide the daemon is missing and spawn one (main stops the installed
+    # app before the handover, but not under --no-app), and the daemon it
+    # spawns is the one named by the bundle's SourceWorktreePath. That must
+    # already be the update clone, or a rescue spawn in that window reinstates
+    # the old binary underneath the new install.
+    install_app_bundle "$bundle_dir" "$installed_bundle" || status=$?
+    case "$status" in
+        0) return 0 ;;
+        2)
+            # The new bundle could not be renamed into place, nor the old one
+            # back into it.
+            BUNDLE_RESTORE_FAILED=true
+            log_error "could not install to $installed_bundle, and nothing is installed there now; the bundle that was is at $(app_bundle_sibling "$installed_bundle" outgoing), and a copy at $PREVIOUS_BUNDLE — put one back before TBD quits"
+            ;;
+        *)
+            log_error "could not install to $installed_bundle — what was installed there is untouched"
+            ;;
+    esac
+    return 1
+}
+
+# Move the fleet onto the new build, putting the previous bundle back if the
+# successor daemon never arrives.
+#
+#   hand_over_to_new_daemon <installed_bundle> <new_daemon>
 #
 # Sets HANDOVER_STARTED to the moment the handover began, which is the cutoff
 # the wake sweep filters parked sessions against, and BUNDLE_RESTORE_FAILED
 # when a failure could not be rolled back.
-install_and_handover() {
-    local bundle_dir="${1-}"
-    local installed_bundle="${2-}"
-    local new_daemon="${3-}"
-    BUNDLE_RESTORE_FAILED=false
-
-    # Keeping the previous bundle: undone by moving it back, which is what the
-    # two failure paths below do when this run kept one. A failure here has
-    # moved nothing, so there is nothing to roll back.
-    stash_installed_bundle "$installed_bundle" || return 1
-
-    # Installing: the new bundle replaces the old one on disk. The RUNNING app
-    # is untouched — it holds its executable by inode — so this is still
-    # reversible until something launches from the new path.
-    #
-    # It happens BEFORE the handover on purpose. During the socket gap an app
-    # may decide the daemon is missing and spawn one (main stops the installed
-    # app first, but not under --no-app), and the daemon it spawns is the one
-    # named by the bundle's SourceWorktreePath. That must already be the update
-    # clone, or a rescue spawn in that window reinstates the old binary
-    # underneath the new install.
-    if ! install_app_bundle "$bundle_dir" "$installed_bundle"; then
-        log_error "could not install to $installed_bundle"
-        roll_back_bundle "$installed_bundle"
-        return 1
-    fi
+hand_over_to_new_daemon() {
+    local installed_bundle="${1-}"
+    local new_daemon="${2-}"
 
     # The handover is the one step with no undo: the predecessor daemon is
     # gone. Everything before it can still be put back, and a handover that
@@ -1051,16 +1148,32 @@ stop_handover_successor() {
 # did not complete.
 APP_RELAUNCH_PENDING=false
 
-# True while install_and_handover is moving the installation: from just before
-# the installed bundle is moved aside until main knows where the run stands
-# again. Read by on_update_exit, which must not relaunch the app into a
-# half-moved installation.
+# True from just before the stop before the handover signals the app, and
+# cleared again when that stop finds no app running. APP_RELAUNCH_PENDING
+# goes up only once the stop has returned, which can take seconds, so an exit
+# in between reads this to know the app may already have exited.
+APP_STOP_BEGUN=false
+
+# True while main is moving the installation — install_new_bundle, the app
+# stop, hand_over_to_new_daemon: from just before the install begins until
+# main knows where the run stands again. Read by on_update_exit, which must
+# not relaunch the app into an installation whose bundle and daemon may be
+# different builds.
 INSTALL_IN_FLIGHT=false
+
+# The commit the run is installing, set by main as the installation starts
+# to move. report_interrupted_install compares the installed bundle with it.
+INSTALLING_COMMIT=""
 
 # How the stop before the handover ended: none, stopped, killed, survived or
 # unknown. The second stop in restart_app keeps its outcome to itself, so this stays
 # the answer to whether an app was running when the run began to move things.
 APP_STOP_OUTCOME=none
+
+# The value of SECONDS when the stop before the handover returned having found
+# an app, and empty when it found none or never ran. A rollback waits
+# APP_EXIT_SETTLE_SECONDS from it (wait_for_app_exit_to_settle).
+APP_STOPPED_AT=""
 
 # Stop the app running from the installed bundle and wait until it has exited.
 # Prints how that ended — none, stopped, killed, survived or unknown — and logs
@@ -1077,17 +1190,41 @@ log_app_stop() {
     log "$(describe_app_stop "${1-}" "$APP_STOP_GRACE" "$INSTALLED_BUNDLE")"
 }
 
-# Stop the app before the daemon is handed over, unless --no-app.
+# Stop the app before the daemon is handed over, unless --no-app. main calls
+# it after install_new_bundle and before hand_over_to_new_daemon, and each
+# neighbour is there for its own reason.
 #
-# An app left running through the handover sees its daemon go, reconnects to
-# the successor, and re-attaches the session it has on screen. The restart
-# after the handover then kills it, and the successor goes on holding that
-# dead viewer's claim on the session's terminal, refusing the attach of the
-# app that replaces it. Stopped here, the app is gone before the successor
-# exists.
+# Before the handover: an app left running through the handover sees its
+# daemon go, reconnects to the successor, and re-attaches the session it has
+# on screen. The restart after the handover then kills it, and the successor
+# goes on holding that dead viewer's claim on the session's terminal, refusing
+# the attach of the app that replaces it. Stopped here, the app is gone before
+# the successor exists.
+#
+# After the install: the bundle at $INSTALLED_BUNDLE has to be whole when the
+# app quits. On macOS 27, when an app quits, LaunchServices asks Background
+# Task Management whether it may keep running in the background. BTM answers
+# from its record for the app's bundle identifier, and builds that identifier
+# by reading the bundle at its installed path. A path that is missing or
+# half-copied fails the read, LaunchServices takes the failure for "not
+# allowed", and about a second later it force-quits every process in the
+# app's coalition. The daemon, every pty holder and every agent session under
+# them can be in that coalition, so that one answer ends every session. TBD is
+# allowed in the background, and a whole bundle with that identifier passes,
+# the new build as well as the old. Field measurement with the stop placed
+# before the install: BTM read the path 12 ms after the app quit, 1 ms after
+# the old bundle had been moved aside and 14 ms before the new one began
+# copying, found nothing, and LaunchServices killed 31 holders and their
+# sessions. On other runs the read happened to land after the copy, saw the
+# new bundle, and passed. The install never leaves the path without a whole
+# bundle, save for the moment between two renames (install_app_bundle), and
+# it finishes before the stop, so the app quits in front of the new bundle.
+# In the seconds after the stop nothing moves the bundle at all: a handover
+# that completes leaves it alone, and the rollback after one that fails waits
+# APP_EXIT_SETTLE_SECONDS from the stop first (wait_for_app_exit_to_settle).
 #
 # Under --no-app the app is left alone: an app that stays alive owns its
-# claims legitimately.
+# claims legitimately, and an app that does not quit faces no check.
 stop_app_before_handover() {
     if [ "$OPT_NO_APP" = true ]; then
         log "--no-app: the running app stays up through the handover"
@@ -1095,7 +1232,13 @@ stop_app_before_handover() {
     fi
     log "stopping the app before the handover"
     local status=0
+    APP_STOP_BEGUN=true
     APP_STOP_OUTCOME="$(stop_installed_app)" || status=$?
+    if [ "$APP_STOP_OUTCOME" = none ]; then
+        APP_STOP_BEGUN=false
+    else
+        APP_STOPPED_AT="$SECONDS"
+    fi
     log_app_stop "$APP_STOP_OUTCOME"
     if [ "$status" -ne 0 ]; then
         log "WARNING: handing over anyway — an app still running may re-attach to the new daemon"
@@ -1106,6 +1249,32 @@ stop_app_before_handover() {
     if [ "$APP_STOP_OUTCOME" != none ]; then
         APP_RELAUNCH_PENDING=true
     fi
+}
+
+# Wait until the app's exit has settled: APP_EXIT_SETTLE_SECONDS (or
+# TBD_UPDATE_APP_EXIT_SETTLE_SECONDS) since the stop before the handover found
+# and stopped the app (APP_STOPPED_AT), so that nothing moves the installed
+# bundle while macOS may still be reading it for that exit. No wait when this
+# run stopped no app — under --no-app, or with none running — since then no
+# exit is being checked.
+#
+# SECONDS counts whole seconds, so a difference of n can be as little as just
+# over n-1 seconds. Waiting until the difference reaches the settle plus one
+# makes sure the whole settle has passed.
+wait_for_app_exit_to_settle() {
+    local settle="${TBD_UPDATE_APP_EXIT_SETTLE_SECONDS:-$APP_EXIT_SETTLE_SECONDS}"
+    local remaining
+
+    [ -n "$APP_STOPPED_AT" ] || return 0
+    if ! _is_whole_number "$settle"; then
+        log "WARNING: TBD_UPDATE_APP_EXIT_SETTLE_SECONDS is not a whole number of seconds: [$settle] — waiting ${APP_EXIT_SETTLE_SECONDS}s"
+        settle="$APP_EXIT_SETTLE_SECONDS"
+    fi
+    [ "$settle" -gt 0 ] || return 0
+    remaining=$((settle + 1 - (SECONDS - APP_STOPPED_AT)))
+    [ "$remaining" -gt 0 ] || return 0
+    log "waiting ${remaining}s for the app's exit to settle before the installed bundle moves"
+    sleep "$remaining"
 }
 
 # Launch the installed bundle and report whether it came up. A failed launch
@@ -1148,8 +1317,12 @@ relaunch_stopped_app() {
 # run that ends with an installation it cannot vouch for, where the bundle at
 # $INSTALLED_BUNDLE and the daemon an app launched from it would reach, or
 # start, may be different builds: an exit while the installation is moving
-# (report_interrupted_install), and a failed handover whose rollback did not
-# complete (main). Each logs its own error before calling this.
+# (report_interrupted_install), and a failed install or handover whose
+# rollback did not complete (main). Each logs its own error before calling
+# this. An app this run never stopped — the install failed, or the exit came
+# before the stop — is still running, and is left that way. An exit while the
+# stop was under way (APP_STOP_BEGUN, with no relaunch pending yet) may have
+# stopped it, and the line says so.
 #
 # APP_RELAUNCH_PENDING comes down before INSTALL_IN_FLIGHT, so an exit between
 # the two still finds nothing to relaunch.
@@ -1159,27 +1332,73 @@ leave_app_stopped_for_recovery() {
     INSTALL_IN_FLIGHT=false
     if [ "$was_stopped" = true ]; then
         log "the app was stopped for the handover and is not running; it is not relaunched, because which build it would start and which daemon it would reach are unknown"
+    elif [ "$APP_STOP_BEGUN" = true ]; then
+        log "the run ended while stopping the app for the handover, so the app may have been stopped and may not be running; it is not relaunched, because which build it would start and which daemon it would reach are unknown"
     fi
     log "to recover: run 'tbd version' to see which build the daemon is running, then run 'tbd update' again"
     log "or open $INSTALLED_BUNDLE yourself once it and the daemon are the same build ($INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json names the bundle's commit)"
     log "the bundle this run replaced, if there was one, is kept at $PREVIOUS_BUNDLE — see 'Going back to the previous build' in docs/updating.md"
 }
 
-# Report a run that ended while install_and_handover was moving the
-# installation, and leave the app this run stopped where it is.
+# Report a run that ended while main was moving the installation
+# (INSTALL_IN_FLIGHT), and leave the app this run stopped where it is.
 #
-# Relaunching would be a guess. The run left from somewhere between moving the
-# installed bundle aside and the successor daemon reporting itself, so
-# $INSTALLED_BUNDLE may hold the new build, the old one or nothing, and the
+# The bundle is the part the run can name. An install and a rollback both
+# swap whole bundles (install_app_bundle), so $INSTALLED_BUNDLE holds the
+# build from before the swap or the one after it. Only an exit between the
+# swap's two renames leaves it empty, and the bundle renamed away then goes
+# straight back (put_back_outgoing_app_bundle). Which build is there is read
+# from its sidecar and logged (describe_installed_bundle).
+#
+# The rest is a guess. The app may or may not have been stopped yet, and the
 # daemon may be the predecessor, the successor or neither. Rolling back from
-# here is no safer: with the successor possibly serving, putting the old
-# bundle back puts the old app in front of the new daemon, the mirror image of
-# the mismatch the rollback exists to prevent. An app launched into any of
-# that reaches, or starts, whichever daemon it finds. So the run says what
-# happened and how to recover, and the operator chooses.
+# here is no safer than relaunching: with the successor possibly serving,
+# putting the old bundle back puts the old app in front of the new daemon, the
+# mirror image of the mismatch the rollback exists to prevent. An app launched
+# into any of that reaches, or starts, whichever daemon it finds. So the run
+# says what happened and how to recover, and the operator chooses.
+#
+# One case the run can name outright: the new build is installed, but the run
+# ended before it began stopping the app (APP_STOP_BEGUN) or began the
+# handover. TBD is then still running the previous build in front of the new
+# bundle, which is accepted rather than undone here: in a source build the
+# update clone's .build/release already holds the new binaries from the build
+# step, so a daemon respawned from it is the new build whether or not the
+# bundle was swapped. Running `tbd update` again completes the move, and the
+# report says so.
 report_interrupted_install() {
-    log_error "the run was interrupted while installing and handing over; the installation may be part old build, part new"
+    local note installed_commit
+    log_error "the run was interrupted while installing and handing over; the installed app and the daemon may be different builds"
+    note="$(put_back_outgoing_app_bundle "$INSTALLED_BUNDLE" 2>&1)" || true
+    [ -z "$note" ] || log "$note"
+    log "$(describe_installed_bundle)"
+    installed_commit="$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
+    if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_STOP_BEGUN" != true ] &&
+        [ -n "$INSTALLING_COMMIT" ] && [ "$installed_commit" = "$INSTALLING_COMMIT" ]; then
+        log "nothing was handed over and the app was not stopped: TBD is still running the previous build, in front of the newly installed bundle — run 'tbd update' again, which completes the move"
+    fi
     leave_app_stopped_for_recovery
+}
+
+# One line saying which build $INSTALLED_BUNDLE holds, read from the
+# TBDBuildIdentity.json in its Contents/ and compared with INSTALLING_COMMIT.
+describe_installed_bundle() {
+    local commit
+    if [ ! -d "$INSTALLED_BUNDLE" ]; then
+        printf 'nothing is installed at %s\n' "$INSTALLED_BUNDLE"
+        return 0
+    fi
+    commit="$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
+    if [ -z "$commit" ]; then
+        printf '%s holds a bundle whose build identity cannot be read\n' "$INSTALLED_BUNDLE"
+    elif [ "$commit" = "$INSTALLING_COMMIT" ]; then
+        printf '%s holds the new build, %s\n' "$INSTALLED_BUNDLE" "$commit"
+    elif [ -n "$INSTALLING_COMMIT" ]; then
+        printf '%s holds build %s, not the %s this run was installing\n' \
+            "$INSTALLED_BUNDLE" "$commit" "$INSTALLING_COMMIT"
+    else
+        printf '%s holds build %s\n' "$INSTALLED_BUNDLE" "$commit"
+    fi
 }
 
 # The app restart, with its opt-out. Separate from restart_app so both branches
@@ -1845,28 +2064,55 @@ main() {
 
     # Up to here nothing outside the update clone has changed: walking away
     # costs a wasted build and nothing else. From here the running
-    # installation moves. The app goes first, so that no viewer is attached
-    # when the daemon changes hands (see stop_app_before_handover); from this
-    # line on, every way out of the run launches it again, save an
-    # interruption while the installation is moving and a failed handover
-    # whose rollback did not complete.
-    stop_app_before_handover
-
-    # install_and_handover says at each line what undoing that line costs.
-    # INSTALL_IN_FLIGHT covers the stretch where an exit it never returns from
-    # (a signal, or an `exit` inside it) would leave an installation this run
-    # cannot name: on_update_exit then reports it and leaves the app stopped
-    # rather than relaunching into it. It goes up before the first thing moves
-    # and comes down once the run knows where it stands again.
+    # installation moves, in three steps whose order is load-bearing:
+    #
+    #   1. install_new_bundle keeps a copy of the installed bundle and swaps
+    #      the new one into /Applications while the app is still running.
+    #   2. stop_app_before_handover stops the app, so that no viewer is
+    #      attached when the daemon changes hands.
+    #   3. hand_over_to_new_daemon moves the fleet onto the new build.
+    #
+    # The installed bundle has to be whole whenever the app quits: on macOS
+    # 27, a bundle missing or half-copied at that moment gets everything in
+    # the app's coalition force-quit — the daemon, every holder and every
+    # agent session (see stop_app_before_handover). So the install stages the
+    # new bundle beside the old one and swaps them by two renames, and it
+    # finishes before the stop. After the stop nothing moves the bundle until
+    # the handover has finished, or has failed and its rollback has waited
+    # for the app's exit to settle.
+    #
+    # A failed install never reaches the stop and leaves the installed bundle
+    # as it was, so the app keeps running in front of it. From the stop on,
+    # every way out of the run launches the app again, save an interruption
+    # while the installation is moving and a failed handover whose rollback
+    # did not complete.
+    #
+    # install_new_bundle and hand_over_to_new_daemon say at each line what
+    # undoing that line costs. INSTALL_IN_FLIGHT covers the stretch where an
+    # exit main never returns from (a signal, or an `exit` inside a step)
+    # can leave the installed bundle and the daemon on different builds:
+    # on_update_exit then reports which build is installed and leaves the app
+    # stopped, if it was stopped, rather than relaunching into it. It goes up
+    # before the first thing moves and comes down once the run knows where it
+    # stands again.
+    INSTALLING_COMMIT="$new_commit"
     INSTALL_IN_FLIGHT=true
-    if ! install_and_handover "$bundle_dir" "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon"; then
-        # install_and_handover has put the previous app bundle back, or set
-        # BUNDLE_RESTORE_FAILED. Put the daemon path back with it, so a reboot
-        # respawns the build that is still running. Then the app, in that
-        # order: an app that finds no daemon starts one from that path. The
-        # flag stays up until both halves are known to have worked, so an exit
-        # before then still leaves the app stopped rather than launching it
-        # against a bundle or a path that may name the new build.
+    local handed_over=false
+    if install_new_bundle "$bundle_dir" "$INSTALLED_BUNDLE"; then
+        stop_app_before_handover
+        hand_over_to_new_daemon "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon" && handed_over=true
+    fi
+    if [ "$handed_over" = false ]; then
+        # The install or the handover failed. A failed install has left the
+        # installed bundle as it was, and a failed handover has put the
+        # previous one back; either sets BUNDLE_RESTORE_FAILED when it could
+        # not. Put the daemon path back with it, so a reboot respawns the
+        # build that is still running. Then the app, in that order: an app
+        # that finds no daemon starts one from that path. After a failed
+        # install the app was never stopped, so there is nothing to relaunch.
+        # The flag stays up until both halves are known to have worked, so an
+        # exit before then still leaves the app stopped rather than launching
+        # it against a bundle or a path that may name the new build.
         local link_restored=true
         put_release_link_back || link_restored=false
         if [ "$BUNDLE_RESTORE_FAILED" = false ] && [ "$link_restored" = true ]; then
@@ -1875,8 +2121,8 @@ main() {
         else
             # Half a rollback leaves what an interruption does: an app
             # launched now could drive, or start, a daemon from another
-            # build. restore_previous_bundle and put_release_link_back have
-            # each logged which half failed.
+            # build. install_new_bundle or restore_previous_bundle, and
+            # put_release_link_back, have each logged which half failed.
             log_error "the rollback of the failed install did not complete; the installed app and the daemon it would reach or start may be different builds"
             leave_app_stopped_for_recovery
         fi
