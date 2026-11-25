@@ -3684,6 +3684,56 @@ path_state() {
     if [ -e "$1" ]; then echo present; else echo gone; fi
 }
 
+# A stand-in for `mv` at <bin>/mv, for a run with <bin> first on its PATH. It
+# refuses the renames refuse_mv names, records each refusal in <bin>/mv.log
+# as `refused mv <source>|<destination>`, and makes every other move with
+# /bin/mv.
+#
+#   mkrefusingmv <bin>
+mkrefusingmv() {
+    local bin="$1"
+    mkdir -p "$bin"
+    cat > "$bin/mv" << EOF
+#!/bin/sh
+pair="\$1|\$2"
+if grep -qxF -- "\$pair" "$bin/mv-refuses" 2>/dev/null; then
+    printf 'refused mv %s\n' "\$pair" >> "$bin/mv.log"
+    exit 1
+fi
+if grep -qxF -- "\$pair" "$bin/mv-refuses-once" 2>/dev/null &&
+    ! grep -qxF -- "\$pair" "$bin/mv-refused-once" 2>/dev/null; then
+    printf '%s\n' "\$pair" >> "$bin/mv-refused-once"
+    printf 'refused mv %s\n' "\$pair" >> "$bin/mv.log"
+    exit 1
+fi
+exec /bin/mv "\$@"
+EOF
+    chmod +x "$bin/mv"
+}
+
+# Make the mv stub at <bin> (mkrefusingmv) refuse to rename <source> to
+# <destination>: every time, or with `once`, the first time only.
+#
+#   refuse_mv <bin> <source> <destination> [once]
+refuse_mv() {
+    local bin="$1" source="$2" destination="$3" when="${4-}"
+    if [ "$when" = once ]; then
+        printf '%s|%s\n' "$source" "$destination" >> "$bin/mv-refuses-once"
+    else
+        printf '%s|%s\n' "$source" "$destination" >> "$bin/mv-refuses"
+    fi
+}
+
+# How many times the mv stub at <bin> refused to rename <source> to
+# <destination>.
+#
+#   mv_refusals <bin> <source> <destination>
+mv_refusals() {
+    local count
+    count="$(grep -cxF -- "refused mv $2|$3" "$1/mv.log" 2>/dev/null)"
+    printf '%s\n' "${count:-0}"
+}
+
 # Write a stand-in successor daemon at <path>: a script that records its pid
 # in <path>.pid and then becomes a copy of sleep named TBDDaemon, so that it
 # stays up the way a daemon that started does, and daemon_process_is_running
@@ -3813,6 +3863,49 @@ EOF
         "^rm -rf $kept\$" "$(cat "$root/rm.log" 2>/dev/null)"
     assert_contains_literal "the rm is aimed at the discard name" \
         "rm -rf $discard" "$(cat "$root/rm.log" 2>/dev/null)"
+}
+
+# A keep renames the bundle an earlier update kept to the discard name, then
+# renames its own copy into place. When that last rename fails, the earlier
+# bundle goes back to its own name: the run installs nothing, so it is still
+# the route back, and left at the discard name the next keep would delete it.
+# The mv stub refuses only that last rename here. Returning without moving
+# the earlier bundle back leaves it at the discard name, and fails.
+test_a_failed_keep_puts_the_earlier_kept_bundle_back() {
+    local root out installed kept partial discard
+    root="$TEST_TMP/keep-rename-fails"
+    installed="$root/Applications/TBD.app"
+    kept="$root/updates/previous/TBD.app"
+    partial="$root/updates/previous/.TBD.app.partial"
+    discard="$root/updates/previous/.TBD.app.discard"
+    mkdir -p "$root/Applications"
+    mkbundle "$installed" "installed-now" >/dev/null
+    mkbundle "$kept" "earlier-update" >/dev/null
+    mkrefusingmv "$root/bin"
+    refuse_mv "$root/bin" "$partial" "$kept"
+
+    out="$(
+        export PATH="$root/bin:$PATH"
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        PREVIOUS_BUNDLE="$kept"
+        keep_installed_bundle "$installed"
+        printf 'rc=%s stashed=%s\n' "$?" "$BUNDLE_STASHED"
+    )"
+
+    assert_eq "the keep's last rename is the one refused" "1" \
+        "$(mv_refusals "$root/bin" "$partial" "$kept")"
+    assert_contains "a keep whose last rename fails fails, and keeps nothing" \
+        "rc=1 stashed=false" "$out"
+    assert_contains "and says it installs nothing" "installing nothing" "$out"
+    assert_eq "the earlier kept bundle is back under its own name" "earlier-update" \
+        "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "nothing waits at the discard name for the next keep to delete" "gone" \
+        "$(path_state "$discard")"
+    assert_eq "the copy is removed" "gone" "$(path_state "$partial")"
+    assert_eq "the installed bundle is untouched" "installed-now" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
 }
 
 test_a_completed_handover_keeps_the_previous_bundle() {
@@ -4265,6 +4358,7 @@ test_a_successor_that_dies_fails_the_handover_at_once
 test_a_cold_start_hands_over_without_a_predecessor
 test_a_failed_handover_restores_the_previous_bundle
 test_a_rollback_never_deletes_the_kept_bundle_in_place
+test_a_failed_keep_puts_the_earlier_kept_bundle_back
 test_a_completed_handover_keeps_the_previous_bundle
 test_a_first_install_has_no_previous_bundle
 test_a_failed_first_install_records_that_nothing_was_restored

@@ -740,7 +740,7 @@ build_products() {
 # but it is not this run's to restore (see BUNDLE_STASHED).
 keep_installed_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
-    local keep_dir partial discard
+    local keep_dir partial discard moved_aside=false
     BUNDLE_STASHED=false
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
@@ -772,9 +772,23 @@ keep_installed_bundle() {
         log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
         return 1
     fi
-    if { [ -e "$PREVIOUS_BUNDLE" ] && ! mv "$PREVIOUS_BUNDLE" "$discard"; } ||
-        ! mv "$partial" "$PREVIOUS_BUNDLE"; then
+    if [ -e "$PREVIOUS_BUNDLE" ]; then
+        if ! mv "$PREVIOUS_BUNDLE" "$discard"; then
+            rm -rf "$partial"
+            log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
+            return 1
+        fi
+        moved_aside=true
+    fi
+    if ! mv "$partial" "$PREVIOUS_BUNDLE"; then
         rm -rf "$partial"
+        # The earlier kept bundle goes back to its own name. The run installs
+        # nothing, so it is still the operator's route back, and left at the
+        # discard name the next keep would delete it.
+        if [ "$moved_aside" = true ] && [ ! -e "$PREVIOUS_BUNDLE" ] &&
+            ! mv "$discard" "$PREVIOUS_BUNDLE"; then
+            log "WARNING: the bundle an earlier update kept is at $discard, and could not be moved back to $PREVIOUS_BUNDLE"
+        fi
         log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
         return 1
     fi
