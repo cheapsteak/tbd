@@ -1220,6 +1220,56 @@ INSTALL_IN_FLIGHT=false
 # to move. report_interrupted_install compares the installed bundle with it.
 INSTALLING_COMMIT=""
 
+# The update clone's .build/release as main finds and moves it: the link
+# itself, what it named when the run started, and whether the run pointed it
+# at a downloaded build (only a release install does). Globals rather than
+# main's locals, because the exit trap puts the link back too
+# (report_interrupted_install).
+RELEASE_LINK=""
+PREVIOUS_RELEASE_TARGET=""
+RELEASE_LINK_MOVED=false
+
+# Put .build/release back where it was when this run started. After the link
+# was pointed at the download it goes back to exactly what it named; before
+# that (and on the local-build path) only a download it was taken from needs
+# putting back, since SwiftPM's own directory is SwiftPM's.
+#
+# Non-zero, with the failure logged, when the link could not be put back. It
+# then still names the new build, and an app that finds no daemon starts one
+# from it, so the failed-handover path relaunches nothing.
+put_release_link_back() {
+    if [ "$RELEASE_LINK_MOVED" = true ]; then
+        if [ -n "$PREVIOUS_RELEASE_TARGET" ]; then
+            if ! point_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"; then
+                log_error "could not point $RELEASE_LINK back at $PREVIOUS_RELEASE_TARGET"
+                return 1
+            fi
+            log "pointed $RELEASE_LINK back at $PREVIOUS_RELEASE_TARGET"
+        elif ! rm -f "$RELEASE_LINK"; then
+            log_error "could not remove $RELEASE_LINK, which names the new build"
+            return 1
+        fi
+    elif ! restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"; then
+        log_error "could not point $RELEASE_LINK back at $PREVIOUS_RELEASE_TARGET"
+        return 1
+    fi
+}
+
+# True when .build/release, once put back (put_release_link_back), names the
+# build that was running when the run started: the run pointed it at a
+# download and back again, or a local build took it from a download that it
+# names again. A local build into SwiftPM's own directory leaves the new
+# build there, which no put-back undoes. Also true before main has found the
+# link, when nothing has been built.
+release_link_names_the_start_build() {
+    [ -n "$RELEASE_LINK" ] || return 0
+    [ "$RELEASE_LINK_MOVED" != true ] || return 0
+    case "$PREVIOUS_RELEASE_TARGET" in
+        "$PREBUILT_HOME"/*) return 0 ;;
+    esac
+    return 1
+}
+
 # How the stop before the handover ended: none, stopped, killed, survived or
 # unknown. The second stop in restart_app keeps its outcome to itself, so this stays
 # the answer to whether an app was running when the run began to move things.
@@ -1409,8 +1459,15 @@ leave_app_stopped_for_recovery() {
 # a copy of the installed bundle, or copied the new one beside it
 # (APP_BUNDLE_INSTALL_STEP empty or staging), so before the app stop and the
 # handover. The installed bundle, the app and the daemon are as the run found
-# them, and the report says so and that nothing needs recovering. What such
-# an exit leaves beside the installed bundle or the kept one, the next install
+# them. The update clone's .build/release may not be: main pointed it at the
+# new build before the install began, and the app's next daemon start reads
+# it. So the report puts it back as a failed install does
+# (put_release_link_back) and says that nothing needs recovering only when it
+# names the build the run started with again. After a local build it holds
+# the new build whatever the link says (release_link_names_the_start_build),
+# and the report says so. A put-back that fails leaves the link naming the
+# new build, which is reported as any other interruption is. What such an
+# exit leaves beside the installed bundle or the kept one, the next install
 # clears.
 #
 # Otherwise the bundle is the part the run can name. An install and a
@@ -1440,9 +1497,15 @@ report_interrupted_install() {
     local note installed_commit
     note="$(put_back_outgoing_app_bundle "$INSTALLED_BUNDLE" 2>&1)" || true
     if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_STOP_BEGUN" != true ] &&
-        { [ -z "${APP_BUNDLE_INSTALL_STEP:-}" ] || [ "$APP_BUNDLE_INSTALL_STEP" = staging ]; }; then
+        { [ -z "${APP_BUNDLE_INSTALL_STEP:-}" ] || [ "$APP_BUNDLE_INSTALL_STEP" = staging ]; } &&
+        put_release_link_back; then
         [ -z "$note" ] || log "$note"
-        log "the run was interrupted before it installed anything: the new build never reached $INSTALLED_BUNDLE, the app was not stopped and the daemon was not touched, so TBD is still running the build it started with, and nothing needs recovering"
+        if release_link_names_the_start_build; then
+            log "the run was interrupted before it installed anything: the new build never reached $INSTALLED_BUNDLE, the app was not stopped, nothing was handed over and ${RELEASE_LINK:-.build/release} is back the way the run found it, so TBD is still running the build it started with, and nothing needs recovering"
+        else
+            log "the run was interrupted before it installed anything: the new build never reached $INSTALLED_BUNDLE, the app was not stopped and nothing was handed over, so TBD is still running the build it started with"
+            log "the new build stays in $RELEASE_LINK, where this run built it, as after any install that fails: a daemon started from there before the next update is the new build, so run 'tbd update' again to install it"
+        fi
         log "$(describe_installed_bundle)"
         return 0
     fi
@@ -1953,20 +2016,21 @@ main() {
     fetch_latest || return 1
     maybe_reexec "$@"
 
-    local new_commit build_dir update_source release_link previous_release_target=""
-    local release_link_moved=false
+    local new_commit build_dir update_source
+    PREVIOUS_RELEASE_TARGET=""
+    RELEASE_LINK_MOVED=false
     new_commit="$(git -C "$UPDATE_SRC" rev-parse HEAD 2>/dev/null || true)"
     log "latest main is ${new_commit:-unknown}"
     build_dir="$UPDATE_SRC/.build/$BUILD_CONFIG"
-    release_link="$UPDATE_SRC/.build/release"
+    RELEASE_LINK="$UPDATE_SRC/.build/release"
 
     # Reconcile the prebuilt trees before anything is downloaded, and arm the
     # same reconcile for every exit (on_update_exit). The tree live now is
     # kept on the way out even when the link no longer names it, because
     # until an install completes it is still what the daemon runs from.
-    PREBUILT_START_LIVE="$(link_target "$release_link" || true)"
-    PREBUILT_RECONCILE_LINK="$release_link"
-    reconcile_prebuilt "$PREBUILT_HOME" "$release_link"
+    PREBUILT_START_LIVE="$(link_target "$RELEASE_LINK" || true)"
+    PREBUILT_RECONCILE_LINK="$RELEASE_LINK"
+    reconcile_prebuilt "$PREBUILT_HOME" "$RELEASE_LINK"
 
     update_source="$(resolve_update_source)"
     sync_check_ref
@@ -2031,18 +2095,18 @@ main() {
         # SwiftPM's own directory, and copied into the tree. The link is
         # handed to SwiftPM for the build and put back on failure, so a
         # failed compile leaves a reboot respawning what is running now.
-        previous_release_target="$(link_target "$release_link" || true)"
-        release_link_yield_to_swiftpm "$release_link" "$PREBUILT_HOME"
+        PREVIOUS_RELEASE_TARGET="$(link_target "$RELEASE_LINK" || true)"
+        release_link_yield_to_swiftpm "$RELEASE_LINK" "$PREBUILT_HOME"
         local local_build_dir
         if ! build_products "$UPDATE_SRC" "${RELEASE_LOCAL_PRODUCTS[@]}" ||
             ! local_build_dir="$(swiftpm_build_dir "$UPDATE_SRC" "$BUILD_CONFIG")" ||
             ! merge_local_products "$local_build_dir" "$RELEASE_TREE"; then
-            restore_release_link "$release_link" "$previous_release_target"
+            restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"
             log_error "could not build ${RELEASE_LOCAL_PRODUCTS[*]} to go with the download — the running installation is untouched"
             return 1
         fi
         if [ "$OPT_DRY_RUN" = true ]; then
-            restore_release_link "$release_link" "$previous_release_target"
+            restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"
             log "dry run: downloaded and verified ${new_commit:-unknown} into $RELEASE_TREE, installing nothing"
             print_summary "$old_commit" "$new_commit" \
                 "$(commits_advanced "$old_commit" "$new_commit" || true)" 0 0 0
@@ -2052,23 +2116,23 @@ main() {
         # the handover, the app's reboot respawn and the CLI link all look
         # there already. What it pointed at before is kept above, so a failed
         # link or a failed handover can put it back.
-        if ! point_release_link "$release_link" "$RELEASE_TREE"; then
-            restore_release_link "$release_link" "$previous_release_target"
-            log_error "could not point $release_link at $RELEASE_TREE (a real directory there, or a failed rename) — the running installation is untouched"
+        if ! point_release_link "$RELEASE_LINK" "$RELEASE_TREE"; then
+            restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"
+            log_error "could not point $RELEASE_LINK at $RELEASE_TREE (a real directory there, or a failed rename) — the running installation is untouched"
             return 1
         fi
-        release_link_moved=true
-        log "pointed $release_link at $RELEASE_TREE"
+        RELEASE_LINK_MOVED=true
+        log "pointed $RELEASE_LINK at $RELEASE_TREE"
     else
         # A local build owns .build/release: hand it back to SwiftPM if a
         # download holds it. What it named is kept, and every exit short of a
         # completed install puts it back, so a failed compile or handover
         # leaves a reboot respawning the downloaded tree that is running now
         # rather than a partial or missing TBDDaemon.
-        previous_release_target="$(link_target "$release_link" || true)"
-        release_link_yield_to_swiftpm "$release_link" "$PREBUILT_HOME"
+        PREVIOUS_RELEASE_TARGET="$(link_target "$RELEASE_LINK" || true)"
+        release_link_yield_to_swiftpm "$RELEASE_LINK" "$PREBUILT_HOME"
         if ! build_products "$UPDATE_SRC"; then
-            restore_release_link "$release_link" "$previous_release_target"
+            restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"
             return 1
         fi
 
@@ -2091,32 +2155,6 @@ main() {
 
     local advanced
     advanced="$(commits_advanced "$old_commit" "$new_commit" || true)"
-
-    # Put .build/release back where it was when this run started. After the
-    # link was pointed at the download it goes back to exactly what it named;
-    # before that (and on the local-build path) only a download it was taken
-    # from needs putting back, since SwiftPM's own directory is SwiftPM's.
-    #
-    # Non-zero, with the failure logged, when the link could not be put back.
-    # It then still names the new build, and an app that finds no daemon
-    # starts one from it, so the failed-handover path relaunches nothing.
-    put_release_link_back() {
-        if [ "$release_link_moved" = true ]; then
-            if [ -n "$previous_release_target" ]; then
-                if ! point_release_link "$release_link" "$previous_release_target"; then
-                    log_error "could not point $release_link back at $previous_release_target"
-                    return 1
-                fi
-                log "pointed $release_link back at $previous_release_target"
-            elif ! rm -f "$release_link"; then
-                log_error "could not remove $release_link, which names the new build"
-                return 1
-            fi
-        elif ! restore_release_link "$release_link" "$previous_release_target"; then
-            log_error "could not point $release_link back at $previous_release_target"
-            return 1
-        fi
-    }
 
     if [ "$OPT_DRY_RUN" = true ]; then
         put_release_link_back

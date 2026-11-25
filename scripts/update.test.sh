@@ -2003,6 +2003,11 @@ EOF
 # download, verification, the link, the stamp — and the prune after it.
 # INSTALLED_BUNDLE moves to a scratch path besides, so nothing here could
 # reach a real /Applications/TBD.app even past the stubs.
+# FAKE_INSTALL_FAILS=1 fails the stubbed install. FAKE_INSTALL_INTERRUPTED=1
+# instead exits the whole run from inside it, as a signal during the staging
+# copy does, leaving the exit trap to report it; FAKE_LINK_PUT_BACK_FAILS=1
+# beside it fails every later point_release_link, so the trap cannot put
+# the link back.
 run_update_release() {
     local case_dir="$1"; shift
     env \
@@ -2026,6 +2031,13 @@ run_update_release() {
             sign_app_bundle() { :; }
             install_new_bundle() {
                 printf "install-bundle %s\n" "$2"
+                if [ "${FAKE_INSTALL_INTERRUPTED:-0}" = 1 ]; then
+                    APP_BUNDLE_INSTALL_STEP=staging
+                    if [ "${FAKE_LINK_PUT_BACK_FAILS:-0}" = 1 ]; then
+                        point_release_link() { return 1; }
+                    fi
+                    exit 143
+                fi
                 [ "${FAKE_INSTALL_FAILS:-0}" != 1 ]
             }
             hand_over_to_new_daemon() {
@@ -2371,6 +2383,53 @@ test_release_failed_install_restores_the_link() {
         "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
     assert_eq "a failed install leaves no new tree" "1111111111111111111111111111111111111111" \
         "$(prebuilt_entries "$case_dir")"
+}
+
+# THE REGRESSION: main points .build/release at the download before the
+# install begins, and a run interrupted while the install was still staging
+# left it there, while the report said nothing needed recovering. The app
+# that kept running starts its next daemon from that link, so that daemon
+# was the new build behind the old app. The exit trap now puts the link back
+# as a failed install does, and says nothing needs recovering only once it
+# has. When the put-back fails, the run is reported as any other
+# interruption: with the recovery steps, and no such claim.
+test_release_interrupted_staging_puts_the_link_back() {
+    local case_dir out previous link
+    case_dir="$(mkcase_release_live release-install-interrupted)"
+    previous="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    link="$case_dir/home/tbd/updates/src/.build/release"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_INSTALL_INTERRUPTED=1 \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "the run reaches the install" "install-bundle" "$out"
+    assert_not_contains "an interrupted run fails" "rc=0" "$out"
+    assert_not_contains "it never reaches the handover" "handover-daemon" "$out"
+    assert_eq "the exit points the link back at the running build" "$previous" "$(link_target "$link")"
+    assert_contains_literal "and says so" "pointed $link back at $previous" "$out"
+    assert_contains "the report says nothing was installed and nothing needs recovering" \
+        "the run was interrupted before it installed anything: .* is back the way the run found it, .* nothing needs recovering" "$out"
+    assert_not_contains "nor that the new build stays in .build/release" "the new build stays in" "$out"
+    assert_not_contains "nor that the app and the daemon may be different builds" \
+        "may be different builds" "$out"
+    assert_eq "the exit leaves no new tree" "1111111111111111111111111111111111111111" \
+        "$(prebuilt_entries "$case_dir")"
+
+    case_dir="$(mkcase_release_live release-install-interrupted-link-stuck)"
+    previous="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    link="$case_dir/home/tbd/updates/src/.build/release"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_INSTALL_INTERRUPTED=1 FAKE_LINK_PUT_BACK_FAILS=1 \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_not_contains "an interrupted run fails (link stuck)" "rc=0" "$out"
+    if [ "$(link_target "$link")" != "$previous" ]; then
+        pass "a put-back that fails leaves the link on the new build"
+    else
+        fail "a put-back that fails leaves the link on the new build"
+    fi
+    assert_contains "the failed put-back is logged" "ERROR: could not point .* back at" "$out"
+    assert_not_contains "the report does not say nothing needs recovering (link stuck)" \
+        "nothing needs recovering" "$out"
+    assert_contains "it is reported as an interrupted install" \
+        "ERROR: the run was interrupted while installing and handing over" "$out"
+    assert_contains "with the recovery steps" "to recover:" "$out"
 }
 
 # The trees under <case>/home/tbd/updates/prebuilt, by name, space-separated
@@ -3541,7 +3600,8 @@ test_an_update_clears_what_an_interrupted_install_left() {
 # and the report names the build the installed path holds, read from its
 # build identity. An exit before the swap leaves the build the run started
 # with, and an app the run never stopped, still running, and the report says
-# nothing was installed and nothing needs recovering; one after the swap
+# nothing was installed (and, this being a local build, that the new build
+# stays in the clone's .build/release); one after the swap
 # leaves the new build. An exit after the install but before the stop leaves
 # the new build installed with the previous build still running in front of
 # it and nothing handed over, and the report says so and that `tbd update`
@@ -3559,8 +3619,12 @@ test_an_interrupted_install_reports_which_build_is_installed() {
     mkbundle "$installed" "before-the-update" "$old_commit" >/dev/null
     out="$(FAKE_REAL_INSTALL=1 FAKE_EXITS_AFTER_KEEP=1 run_update_around_handover "$case_dir")"; rc=$?
     assert_eq "the run exits with the status it left by (before the swap)" "5" "$rc"
-    assert_contains "the report says nothing was installed and nothing needs recovering (before the swap)" \
-        "$nothing_installed: .* nothing needs recovering" "$out"
+    assert_contains "the report says nothing was installed (before the swap)" \
+        "$nothing_installed: .* so TBD is still running the build it started with" "$out"
+    assert_contains "and that the local build stays in .build/release (before the swap)" \
+        "the new build stays in .*/\.build/release, where this run built it" "$out"
+    assert_not_contains "so it does not say nothing needs recovering (before the swap)" \
+        "nothing needs recovering" "$out"
     assert_not_contains "it does not say the app and the daemon may be different builds (before the swap)" \
         "may be different builds" "$out"
     assert_not_contains "nor give recovery steps (before the swap)" "to recover:" "$out"
@@ -3640,11 +3704,14 @@ test_an_interrupted_install_reports_which_build_is_installed() {
 # The staging copy is the longest step before the swap, and it runs inside
 # the library's install_app_bundle. A run interrupted there has moved nothing
 # that runs, and the report says so: nothing was installed, the app was not
-# stopped, the daemon was not touched and nothing needs recovering, with no
-# claim that the app and the daemon may be different builds and no recovery
-# steps. Here the copy into the incoming sibling writes part of a tree and the
-# run is sent SIGTERM. Reporting it as an interruption of the install and
-# handover, as every exit while INSTALL_IN_FLIGHT was, fails.
+# stopped and nothing was handed over, with no claim that the app and the
+# daemon may be different builds and no recovery steps. This is a local
+# build, so the new build stays in the clone's .build/release, and the report
+# says that too rather than that nothing needs recovering (the release path,
+# where the link goes back, is test_release_interrupted_staging_puts_the_link_back).
+# Here the copy into the incoming sibling writes part of a tree and the run is
+# sent SIGTERM. Reporting it as an interruption of the install and handover,
+# as every exit while INSTALL_IN_FLIGHT was, fails.
 test_an_interruption_while_staging_reports_that_nothing_was_installed() {
     local case_dir out rc events installed incoming
     case_dir="$(mkcase interrupted-while-staging)"
@@ -3662,8 +3729,12 @@ test_an_interruption_while_staging_reports_that_nothing_was_installed() {
     fi
     assert_contains_literal "the run was interrupted during the staging copy" \
         "-> $incoming at " "$(cat "$events")"
-    assert_contains "the report says nothing was installed and nothing needs recovering" \
-        "the run was interrupted before it installed anything: .* nothing needs recovering" "$out"
+    assert_contains "the report says nothing was installed" \
+        "the run was interrupted before it installed anything: .* so TBD is still running the build it started with" "$out"
+    assert_contains "and that the local build stays in .build/release" \
+        "the new build stays in .*/\.build/release, where this run built it" "$out"
+    assert_not_contains "so it does not say nothing needs recovering" \
+        "nothing needs recovering" "$out"
     assert_not_contains "it is not reported as an interrupted install and handover" \
         "ERROR: the run was interrupted while installing and handing over" "$out"
     assert_not_contains "it does not say the app and the daemon may be different builds" \
@@ -4684,6 +4755,7 @@ test_release_no_asset_manual_builds_locally
 test_release_non_arm64_builds_locally
 test_release_failed_handover_restores_the_link
 test_release_failed_install_restores_the_link
+test_release_interrupted_staging_puts_the_link_back
 test_release_dry_run_keeps_nothing_it_downloaded
 test_release_failed_app_build_leaves_no_new_tree
 test_release_failed_link_restores_the_running_link

@@ -478,10 +478,17 @@ Ctrl-C, a signal, or a step that exits — does not launch the app again
 either. An interruption before the swap, while the run clears what an earlier
 install left, keeps a copy of the installed bundle or copies the new one in
 beside it, has changed nothing that runs: `/Applications/TBD.app` is still the
-build the run started with, the app has not been stopped, and the daemon has
-not been touched. The run logs that it was interrupted before it installed
-anything and that nothing needs recovering, and the next update clears what
-it left beside either bundle. An interruption after the swap leaves the new
+build the run started with, the app has not been stopped, and nothing has been
+handed over. The update clone's `.build/release` has moved, though — it names
+the new build before the install begins, and the app starts its next daemon
+from it — so the run puts it back as a failed install does. Then it logs that
+it was interrupted before it installed anything and, once the link names the
+build it started with again, that nothing needs recovering. A local build has
+written the new build into `.build/release` itself, which no link undoes, so
+after one the run says the new build stays there and that `tbd update` run
+again installs it. A link that cannot be put back is reported as an
+interruption after the swap is, below. The next update clears what the run
+left beside either bundle. An interruption after the swap leaves the new
 build installed. (An interruption between the swap's two renames leaves the
 path empty for a moment, and the run puts the bundle it had renamed away
 straight back; a run killed outright there leaves that to the next install.)
