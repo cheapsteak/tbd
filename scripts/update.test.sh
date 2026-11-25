@@ -4532,6 +4532,45 @@ test_the_next_keep_puts_back_a_kept_bundle_left_at_the_discard_name() {
     assert_not_contains "nor said to be" "put back $kept" "$out"
 }
 
+# When the earlier kept bundle cannot be renamed back from the discard name,
+# that name holds its only copy, and the keep's clearing of the siblings
+# would delete the very path the warning just named. So the keep fails and
+# the run installs nothing, and the bundle stays where it is. Ignoring the
+# failure and clearing, as the keep did, deletes it, and fails here. The mv
+# stub refuses the rename back.
+test_a_keep_that_cannot_put_back_the_discarded_bundle_deletes_nothing() {
+    local root out installed kept partial discard
+    root="$TEST_TMP/keep-cannot-put-back"
+    installed="$root/Applications/TBD.app"
+    kept="$root/updates/previous/TBD.app"
+    partial="$root/updates/previous/.TBD.app.partial"
+    discard="$root/updates/previous/.TBD.app.discard"
+    mkdir -p "$root/Applications"
+    mkbundle "$installed" "installed-now" >/dev/null
+    mkbundle "$discard" "earlier-update" >/dev/null
+    mkbundle "$partial" "copy-of-the-installed-bundle" >/dev/null
+    mkrefusingmv "$root/bin"
+    refuse_mv "$root/bin" "$discard" "$kept"
+    out="$(
+        export PATH="$root/bin:$PATH"
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        PREVIOUS_BUNDLE="$kept"
+        keep_installed_bundle "$installed"
+        printf 'rc=%s stashed=%s\n' "$?" "$BUNDLE_STASHED"
+    )"
+    assert_eq "the rename back is the one refused" "1" "$(mv_refusals "$root/bin" "$discard" "$kept")"
+    assert_contains "the keep fails, and keeps nothing" "rc=1 stashed=false" "$out"
+    assert_contains_literal "a warning names where the bundle is" \
+        "WARNING: the bundle an earlier update kept is at $discard" "$out"
+    assert_contains "and the run installs nothing" "installing nothing" "$out"
+    assert_eq "the earlier kept bundle is still at the discard name" "earlier-update" \
+        "$(cat "$discard/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "the installed bundle is untouched" "installed-now" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+}
+
 # THE REGRESSION: a run cut short between the keep's two renames left the
 # bundle an earlier update kept at the discard name, with nothing at
 # ~/tbd/updates/previous/TBD.app where the docs send the operator, and the
@@ -5065,6 +5104,7 @@ test_a_rollback_says_when_the_restored_bundle_is_not_registered
 test_a_rollback_never_deletes_the_kept_bundle_in_place
 test_a_failed_keep_puts_the_earlier_kept_bundle_back
 test_the_next_keep_puts_back_a_kept_bundle_left_at_the_discard_name
+test_a_keep_that_cannot_put_back_the_discarded_bundle_deletes_nothing
 test_an_interruption_between_the_keeps_renames_puts_the_kept_bundle_back
 test_an_interruption_between_the_keeps_renames_with_the_link_stuck_puts_the_kept_bundle_back
 test_a_completed_handover_keeps_the_previous_bundle

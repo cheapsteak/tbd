@@ -800,8 +800,13 @@ keep_installed_bundle() {
     KEEP_SKIPPED_FOR_OWN_BUILD=false
     # First, whatever happens next, the earlier kept bundle a keep cut short
     # between its two renames left at the discard sibling goes back to its
-    # name, before anything below clears that sibling.
-    put_back_discarded_kept_bundle || true
+    # name, before anything below clears that sibling. When it cannot, that
+    # sibling holds the only copy, which the clearing below would delete, so
+    # the run installs nothing.
+    if ! put_back_discarded_kept_bundle; then
+        log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE without deleting the bundle an earlier update kept — installing nothing"
+        return 1
+    fi
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
         if [ -d "$PREVIOUS_BUNDLE" ]; then
