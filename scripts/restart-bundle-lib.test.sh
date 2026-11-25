@@ -1144,7 +1144,7 @@ end old" "$(cat "$log" 2>/dev/null)"
 # succeeds. It records the difference in APP_BUNDLE_INSTALL_STEP, `installed`
 # rather than `registered`, for a caller that reports what it installed
 # (update.sh's rollback), and register_app_bundle fails when lsregister does,
-# where it used to swallow the failure.
+# or is not there to run, where it used to swallow both.
 test_install_whose_registration_fails_still_installs() {
     local root apps rc
     root="$TEST_TMP/install-unregistered"
@@ -1177,6 +1177,20 @@ EOF
     install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
     assert_eq "an install that registers succeeds" "0" "$rc"
     assert_eq "it records the bundle as registered" "registered" "$APP_BUNDLE_INSTALL_STEP"
+
+    # An lsregister that is not there registers nothing either. Counting
+    # that as registered, as register_app_bundle did, fails here.
+    rc=0
+    TBD_LSREGISTER="$root/no-such-lsregister" register_app_bundle "$apps/TBD.app" || rc=$?
+    assert_eq "register_app_bundle fails when there is no lsregister to run" "1" "$rc"
+    rc=0
+    TBD_LSREGISTER="$root/no-such-lsregister" \
+        install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>"$root/stderr" || rc=$?
+    assert_eq "an install with no lsregister still succeeds" "0" "$rc"
+    assert_eq "it records the bundle as installed, not registered (no lsregister)" "installed" \
+        "$APP_BUNDLE_INSTALL_STEP"
+    assert_contains "and warns (no lsregister)" "could not register it with LaunchServices" \
+        "$(cat "$root/stderr" 2>/dev/null)"
 }
 
 # The TBD_BUNDLE_CP seam is for a test to set once the library is sourced, as

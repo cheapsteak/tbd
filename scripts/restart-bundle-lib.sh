@@ -876,9 +876,11 @@ install_app_bundle() {
 # Tell LaunchServices about a bundle that appeared or moved at <path>, as
 # install_app_bundle does after every install, an update's rollback included —
 # a bundle LaunchServices does not know about takes no tbd:// URL and shows a
-# stale icon. Non-zero when lsregister or the touch below fails. That changes
-# nothing about what is installed, so install_app_bundle only warns, and
-# records it (APP_BUNDLE_INSTALL_STEP) for a caller that reports the install.
+# stale icon. Non-zero when $TBD_LSREGISTER is not executable, when it or the
+# touch below fails. That changes nothing about what is installed, so
+# install_app_bundle only warns and still returns 0 (so restart.sh, which
+# calls it under `set -e`, carries on), and records it
+# (APP_BUNDLE_INSTALL_STEP) for a caller that reports the install.
 register_app_bundle() {
     local installed_bundle="${1-}"
     local status=0
@@ -887,6 +889,10 @@ register_app_bundle() {
 
     if [ -x "$TBD_LSREGISTER" ]; then
         "$TBD_LSREGISTER" -f "$installed_bundle" >/dev/null 2>&1 || status=1
+    else
+        # No lsregister to run registers nothing, which is a failure to
+        # register as much as one that runs and fails.
+        status=1
     fi
 
     # Bump the installed bundle's mtime so Notification Center and System
