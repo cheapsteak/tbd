@@ -49,15 +49,18 @@ not widen the menu.
   stays empty and keeps its width, so the weekly bar lines up with the weekly bars of the other rows.
 - **No usage data.** The row shows the name alone, except in the + menu case under "Not logged in".
 - **Not logged in.** In the + menu, an oauth profile with no detected login says so where the bars
-  go. With no usage data, the row shows the note "needs /login". With bars from its last healthy
-  snapshot, the row keeps the bars and shows "needs /login" as the small grey note after them, in
-  place of any age note. The bars stay because login detection can lag behind a working login, and
-  hiding real numbers would cost more than the hint. A profile whose fetch is failing shows its own
-  note. The tab menu shows no login hint.
+  go. With no usage data, or a failing fetch, the row shows the note "needs /login": with no login
+  the fetch cannot recover until the user logs in, so the login hint is the one thing on the row to
+  act on. With bars from its last healthy snapshot, the row keeps the bars, and the small grey note
+  after them leads with "needs /login", then the age when the data is old, for example
+  "needs /login · 2d ago". The bars stay because login detection can lag behind a working login,
+  and hiding real numbers would cost more than the hint; the age keeps old numbers from reading as
+  current. The tab menu shows no login hint.
 - **Old or failing data.** Both menus follow the rule of `ProfileUsagePresentation.secondaryLine`.
   If the last fetch failed, the row shows the short note in place of the bars, for example "usage
   unavailable — retrying · last data 3h ago". If the data is good but old, the row shows the bars,
-  then a small grey age note, for example "1d ago".
+  then a small grey age note, for example "1d ago". In the + menu, a profile with no detected login
+  shows the login hint with both, as "Not logged in" describes.
 - **Current account.** A standard macOS checkmark marks it.
 - **Default (logged in).** The row shows no bars. TBD keeps no usage data for the default login.
 - **Highlight.** When the pointer is on a row, the name turns white as usual. The bars keep their
@@ -185,9 +188,9 @@ row:
 which indents it under "Claude".
 
 For an oauth profile with no detected login, `ProfileLoginPresentation.menuRowUsage` adds the login
-hint to what `menuUsage` gives. When `menuUsage` gives nothing, the row shows the note "needs /login"
-in its place. When it gives bars, the row keeps them and shows "needs /login" as their grey note, in
-place of any age note. A note the profile already has stays as it is.
+hint to what `menuUsage` gives. When `menuUsage` gives nothing or a note, the row shows the note
+"needs /login" in its place. When it gives bars, the row keeps them, and their grey note is
+"needs /login", followed by the age note when there is one: "needs /login · 2d ago".
 
 ### What is deleted
 
@@ -222,8 +225,8 @@ Unit tests, with no menu shown:
   accessibility description reads as specified.
 - **+ menu:** account rows are one line, the indent stays, and "Choose account…" follows them. Each
   row's title is the name alone. A logged-in oauth profile's tooltip leads with its email. A
-  not-logged-in one shows "needs /login": as its note with no usage, and as the grey note after its
-  bars, in place of an age note, when it has bars.
+  not-logged-in one shows "needs /login": as its note with no usage or a failing fetch's note, and
+  leading the grey note after its bars, before any age, when it has bars.
 - **Tooltip:** the email line and the reset-times line each appear alone when the other is missing,
   and a row with neither has no tooltip. The tab menu's rows carry the email too.
 - **Right-click layer:** `hitTest(_:)` returns the layer for a right-click and for a Control-click,
