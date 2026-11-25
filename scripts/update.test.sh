@@ -279,6 +279,8 @@ EOF
 # FAKE_KEEP_COPY_INTERRUPTED=1, a copy into ~/tbd/updates/previous/ (the keep)
 # writes part of a tree there and sends SIGTERM to the run that started it,
 # the way an interruption mid-copy would, before it copies anything else.
+# FAKE_STAGE_COPY_INTERRUPTED=1 does the same to a copy into an install's
+# incoming sibling (the staging copy).
 mkstub_tbd() {
     local bin="$1"
     mkdir -p "$bin"
@@ -378,6 +380,14 @@ printf 'copy %s -> %s at %s installed %s\n' "$src" "$dst" "$(date +%s)" "$(insta
 case "$dst" in
     */updates/previous/*)
         if [ "${FAKE_KEEP_COPY_INTERRUPTED:-0}" = 1 ]; then
+            mkdir -p "$dst/Contents"
+            printf 'half' > "$dst/Contents/half-copied"
+            kill -TERM "$PPID"
+            exit 1
+        fi
+        ;;
+    *-install-incoming)
+        if [ "${FAKE_STAGE_COPY_INTERRUPTED:-0}" = 1 ]; then
             mkdir -p "$dst/Contents"
             printf 'half' > "$dst/Contents/half-copied"
             kill -TERM "$PPID"
@@ -3442,7 +3452,8 @@ test_an_update_clears_what_an_interrupted_install_left() {
 # An exit while the installation moves is reported rather than rolled back,
 # and the report names the build the installed path holds, read from its
 # build identity. An exit before the swap leaves the build the run started
-# with, and an app the run never stopped, still running; one after the swap
+# with, and an app the run never stopped, still running, and the report says
+# nothing was installed and nothing needs recovering; one after the swap
 # leaves the new build. An exit after the install but before the stop leaves
 # the new build installed with the previous build still running in front of
 # it and nothing handed over, and the report says so and that `tbd update`
@@ -3451,6 +3462,7 @@ test_an_update_clears_what_an_interrupted_install_left() {
 test_an_interrupted_install_reports_which_build_is_installed() {
     local case_dir out rc events installed old_commit new_commit
     local still_running="TBD is still running the previous build, in front of the newly installed bundle"
+    local nothing_installed="the run was interrupted before it installed anything"
     old_commit=0000000000000000000000000000000000000000
     case_dir="$(mkcase interrupted-before-swap)"
     events="$case_dir/events.log"
@@ -3459,8 +3471,11 @@ test_an_interrupted_install_reports_which_build_is_installed() {
     mkbundle "$installed" "before-the-update" "$old_commit" >/dev/null
     out="$(FAKE_REAL_INSTALL=1 FAKE_EXITS_AFTER_KEEP=1 run_update_around_handover "$case_dir")"; rc=$?
     assert_eq "the run exits with the status it left by (before the swap)" "5" "$rc"
-    assert_contains "the interruption is reported (before the swap)" \
-        "ERROR: the run was interrupted while installing and handing over" "$out"
+    assert_contains "the report says nothing was installed and nothing needs recovering (before the swap)" \
+        "$nothing_installed: .* nothing needs recovering" "$out"
+    assert_not_contains "it does not say the app and the daemon may be different builds (before the swap)" \
+        "may be different builds" "$out"
+    assert_not_contains "nor give recovery steps (before the swap)" "to recover:" "$out"
     assert_contains_literal "the report names the build from before the run" \
         "$installed holds build $old_commit, not the" "$out"
     assert_eq "that build is still installed" "before-the-update" \
@@ -3493,6 +3508,8 @@ test_an_interrupted_install_reports_which_build_is_installed() {
         "nothing was handed over and the app was not stopped" "$out"
     assert_contains_literal "and that tbd update completes the move" \
         "run 'tbd update' again, which completes the move" "$out"
+    assert_not_contains "once the swap is done, the report does not say nothing was installed" \
+        "$nothing_installed" "$out"
     assert_not_contains "the app is never signalled (after the install)" "^pkill" "$(cat "$events")"
     assert_not_contains "nothing is handed over (after the install)" "^handover" "$(cat "$events")"
     assert_not_contains "no app is launched (after the install)" "^open" "$(cat "$events")"
@@ -3529,6 +3546,50 @@ test_an_interrupted_install_reports_which_build_is_installed() {
         "holds the new build" "$out"
     assert_not_contains "once the handover has begun, the report does not say nothing was handed over (--no-app)" \
         "$still_running" "$out"
+    assert_not_contains "nor that nothing was installed (--no-app)" "$nothing_installed" "$out"
+}
+
+# The staging copy is the longest step before the swap, and it runs inside
+# the library's install_app_bundle. A run interrupted there has moved nothing
+# that runs, and the report says so: nothing was installed, the app was not
+# stopped, the daemon was not touched and nothing needs recovering, with no
+# claim that the app and the daemon may be different builds and no recovery
+# steps. Here the copy into the incoming sibling writes part of a tree and the
+# run is sent SIGTERM. Reporting it as an interruption of the install and
+# handover, as every exit while INSTALL_IN_FLIGHT was, fails.
+test_an_interruption_while_staging_reports_that_nothing_was_installed() {
+    local case_dir out rc events installed incoming
+    case_dir="$(mkcase interrupted-while-staging)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    incoming="$case_dir/Applications/.TBD-install-incoming"
+    mkdir -p "$case_dir/Applications" "$case_dir/tmp"
+    mkbundle "$installed" "before-the-update" 0000000000000000000000000000000000000000 >/dev/null
+    out="$(TMPDIR="$case_dir/tmp" FAKE_REAL_INSTALL=1 FAKE_STAGE_COPY_INTERRUPTED=1 \
+        run_update_around_handover "$case_dir")"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        pass "an interrupted run fails"
+    else
+        fail "an interrupted run fails"
+    fi
+    assert_contains_literal "the run was interrupted during the staging copy" \
+        "-> $incoming at " "$(cat "$events")"
+    assert_contains "the report says nothing was installed and nothing needs recovering" \
+        "the run was interrupted before it installed anything: .* nothing needs recovering" "$out"
+    assert_not_contains "it is not reported as an interrupted install and handover" \
+        "ERROR: the run was interrupted while installing and handing over" "$out"
+    assert_not_contains "it does not say the app and the daemon may be different builds" \
+        "may be different builds" "$out"
+    assert_not_contains "nor give recovery steps" "to recover:" "$out"
+    assert_eq "the installed bundle is the one from before the update" "before-the-update" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_not_contains "the app is never signalled" "^pkill" "$(cat "$events")"
+    assert_not_contains "no app is launched" "^open" "$(cat "$events")"
+    if [ -f "$case_dir/app" ]; then
+        pass "the app the run never stopped is still running"
+    else
+        fail "the app the run never stopped is still running"
+    fi
 }
 
 # The stop before the handover records that it stopped an app only once it
@@ -3591,8 +3652,8 @@ test_an_interrupted_keep_leaves_no_partial_previous_bundle() {
     fi
     assert_contains_literal "the run was interrupted during the keep" \
         "copy $installed -> $case_dir/home/tbd/updates/previous/" "$(cat "$events")"
-    assert_contains "the interruption is reported" \
-        "ERROR: the run was interrupted while installing and handing over" "$out"
+    assert_contains "the interruption is reported as one that installed nothing" \
+        "the run was interrupted before it installed anything" "$out"
     assert_eq "the kept bundle is still the earlier update's" "earlier-update" \
         "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
     if [ -x "$kept/Contents/MacOS/TBDApp" ] && [ ! -e "$kept/Contents/half-copied" ]; then
@@ -4456,6 +4517,7 @@ test_an_exit_after_the_handover_still_relaunches_the_app
 test_a_rollback_waits_for_the_app_exit_to_settle
 test_an_update_clears_what_an_interrupted_install_left
 test_an_interrupted_install_reports_which_build_is_installed
+test_an_interruption_while_staging_reports_that_nothing_was_installed
 test_an_exit_during_the_app_stop_says_the_app_may_be_stopped
 test_an_interrupted_keep_leaves_no_partial_previous_bundle
 test_no_app_never_stops_the_app

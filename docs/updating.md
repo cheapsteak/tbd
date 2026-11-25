@@ -467,12 +467,17 @@ same build.
 
 A run interrupted while it installs the bundle and hands the daemon over —
 Ctrl-C, a signal, or a step that exits — does not launch the app again
-either. `/Applications/TBD.app` holds a whole bundle either way: the build the
-run started with if the interruption came before the swap, the new build if
-it came after. (An interruption between the swap's two renames leaves the
+either. An interruption before the swap, while the run clears what an earlier
+install left, keeps a copy of the installed bundle or copies the new one in
+beside it, has changed nothing that runs: `/Applications/TBD.app` is still the
+build the run started with, the app has not been stopped, and the daemon has
+not been touched. The run logs that it was interrupted before it installed
+anything and that nothing needs recovering, and the next update clears what
+it left beside either bundle. An interruption after the swap leaves the new
+build installed. (An interruption between the swap's two renames leaves the
 path empty for a moment, and the run puts the bundle it had renamed away
 straight back; a run killed outright there leaves that to the next install.)
-The run logs which of the two is installed, read from the bundle's
+The run logs which build is installed, read from the bundle's
 `Contents/TBDBuildIdentity.json`. What it cannot tell is which daemon is
 serving, and putting the kept bundle back is no safer than relaunching,
 because the new daemon may already be up. So it leaves the app as it is — not

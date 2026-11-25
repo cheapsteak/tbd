@@ -1372,12 +1372,21 @@ leave_app_stopped_for_recovery() {
 # Report a run that ended while main was moving the installation
 # (INSTALL_IN_FLIGHT), and leave the app this run stopped where it is.
 #
-# The bundle is the part the run can name. An install and a rollback both
-# swap whole bundles (install_app_bundle), so $INSTALLED_BUNDLE holds the
-# build from before the swap or the one after it. Only an exit between the
-# swap's two renames leaves it empty, and the bundle renamed away then goes
-# straight back (put_back_outgoing_app_bundle). Which build is there is read
-# from its sidecar and logged (describe_installed_bundle).
+# An exit before the new bundle reached the installed path changed nothing
+# that runs: it came while the install cleared what an earlier one left, kept
+# a copy of the installed bundle, or copied the new one beside it
+# (APP_BUNDLE_INSTALL_STEP empty or staging), so before the app stop and the
+# handover. The installed bundle, the app and the daemon are as the run found
+# them, and the report says so and that nothing needs recovering. What such
+# an exit leaves beside the installed bundle or the kept one, the next install
+# clears.
+#
+# Otherwise the bundle is the part the run can name. An install and a
+# rollback both swap whole bundles (install_app_bundle), so $INSTALLED_BUNDLE
+# holds the build from before the swap or the one after it. Only an exit
+# between the swap's two renames leaves it empty, and the bundle renamed away
+# then goes straight back (put_back_outgoing_app_bundle). Which build is there
+# is read from its sidecar and logged (describe_installed_bundle).
 #
 # The rest is a guess. The app may or may not have been stopped yet, and the
 # daemon may be the predecessor, the successor or neither. Rolling back from
@@ -1387,8 +1396,8 @@ leave_app_stopped_for_recovery() {
 # into any of that reaches, or starts, whichever daemon it finds. So the run
 # says what happened and how to recover, and the operator chooses.
 #
-# One case the run can name outright: the new build is installed, but the run
-# ended before it began stopping the app (APP_STOP_BEGUN) or began the
+# One more case the run can name outright: the new build is installed, but
+# the run ended before it began stopping the app (APP_STOP_BEGUN) or began the
 # handover. TBD is then still running the previous build in front of the new
 # bundle, which is accepted rather than undone here: in a source build the
 # update clone's .build/release already holds the new binaries from the build
@@ -1397,8 +1406,15 @@ leave_app_stopped_for_recovery() {
 # report says so.
 report_interrupted_install() {
     local note installed_commit
-    log_error "the run was interrupted while installing and handing over; the installed app and the daemon may be different builds"
     note="$(put_back_outgoing_app_bundle "$INSTALLED_BUNDLE" 2>&1)" || true
+    if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_STOP_BEGUN" != true ] &&
+        { [ -z "${APP_BUNDLE_INSTALL_STEP:-}" ] || [ "$APP_BUNDLE_INSTALL_STEP" = staging ]; }; then
+        [ -z "$note" ] || log "$note"
+        log "the run was interrupted before it installed anything: the new build never reached $INSTALLED_BUNDLE, the app was not stopped and the daemon was not touched, so TBD is still running the build it started with, and nothing needs recovering"
+        log "$(describe_installed_bundle)"
+        return 0
+    fi
+    log_error "the run was interrupted while installing and handing over; the installed app and the daemon may be different builds"
     [ -z "$note" ] || log "$note"
     log "$(describe_installed_bundle)"
     installed_commit="$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
