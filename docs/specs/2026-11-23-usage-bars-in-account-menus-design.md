@@ -47,17 +47,24 @@ not widen the menu.
   with a detected login has an email line.
 - **No 5-hour limit.** Some accounts, such as Ultra accounts, have a weekly limit only. Their 5h slot
   stays empty and keeps its width, so the weekly bar lines up with the weekly bars of the other rows.
-- **No usage data.** The row shows the name only, as it does today.
-- **Not logged in.** In the + menu, an oauth profile with no detected login and no usage data shows
-  the note "needs /login" where the bars go. If it has bars or a note of its own, those show
-  instead. The tab menu shows no login hint.
-- **Old or failing data.** Both menus follow the rule the + menu's second line follows today
-  (`ProfileUsagePresentation.secondaryLine`). If the last fetch failed, the row shows the short note
-  in place of the bars, for example "usage unavailable — retrying · last data 3h ago". If the data
-  is good but old, the row shows the bars, then a small grey age note, for example "1d ago".
-- **Current account.** A standard macOS checkmark marks it, in place of the "●" prefix.
-- **Default (logged in).** The row shows no bars, as today. TBD keeps no usage data for the default
-  login.
+- **No usage data.** The row shows the name alone, except in the + menu case under "Not logged in".
+- **Not logged in.** In the + menu, an oauth profile with no detected login says so where the bars
+  go. With no usage data, or a failing fetch, the row shows the note "needs /login": with no login
+  the fetch cannot recover until the user logs in, so the login hint is the one thing on the row to
+  act on. With bars, the row keeps the bars, and the small grey note after them leads with
+  "needs /login", then the age when the data is old, for example "needs /login · 2d ago". Those
+  bars are the last snapshot from before the login went away: the daemon polls an oauth profile
+  only while it has a login, and its next full sweep, about every 90 seconds, drops the snapshot.
+  Until then the bars are still real numbers for that account, and the age keeps them from reading
+  as current. The tab menu shows no login hint.
+- **Old or failing data.** Every row follows the rule of `ProfileUsagePresentation.secondaryLine`,
+  except a + menu row of an oauth profile with no detected login. If the last fetch failed, the row
+  shows the short note in place of the bars, for example "usage unavailable — retrying · last data
+  3h ago". If the data is good but old, the row shows the bars, then a small grey age note, for
+  example "1d ago". On a + menu row with no detected login, "needs /login" replaces a failing note
+  and comes before the age beside old bars, as "Not logged in" describes.
+- **Current account.** A standard macOS checkmark marks it.
+- **Default (logged in).** The row shows no bars. TBD keeps no usage data for the default login.
 - **Highlight.** When the pointer is on a row, the name turns white as usual. The bars keep their
   colors.
 - **Appearance.** Light and dark mode follow the system.
@@ -182,9 +189,10 @@ row:
 `AddTabMenu.build` makes each account row with `AccountMenuRow`. The row keeps its blank leading icon,
 which indents it under "Claude".
 
-When `menuUsage` gives nothing for an oauth profile with no detected login, the row shows the note
-"needs /login" in its place (`ProfileLoginPresentation.menuRowUsage`). Bars or a note the profile
-already has stay as they are.
+For an oauth profile with no detected login, `ProfileLoginPresentation.menuRowUsage` adds the login
+hint to what `menuUsage` gives. When `menuUsage` gives nothing or a note, the row shows the note
+"needs /login" in its place. When it gives bars, the row keeps them, and their grey note is
+"needs /login", followed by the age note when there is one: "needs /login · 2d ago".
 
 ### What is deleted
 
@@ -218,8 +226,9 @@ Unit tests, with no menu shown:
 - **Bars picture:** each bucket draws in the fill level `bucketPresentation` gives it. The
   accessibility description reads as specified.
 - **+ menu:** account rows are one line, the indent stays, and "Choose account…" follows them. Each
-  row's title is the name alone. A logged-in oauth profile's tooltip leads with its email, and a
-  not-logged-in one with no usage shows "needs /login".
+  row's title is the name alone. A logged-in oauth profile's tooltip leads with its email. A
+  not-logged-in one shows "needs /login": as its note with no usage or a failing fetch's note, and
+  leading the grey note after its bars, before any age, when it has bars.
 - **Tooltip:** the email line and the reset-times line each appear alone when the other is missing,
   and a row with neither has no tooltip. The tab menu's rows carry the email too.
 - **Right-click layer:** `hitTest(_:)` returns the layer for a right-click and for a Control-click,

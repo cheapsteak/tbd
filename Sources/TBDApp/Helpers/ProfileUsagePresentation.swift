@@ -231,24 +231,6 @@ enum ProfileUsagePresentation {
         return parts.joined(separator: " · ")
     }
 
-    /// "+"-menu suffix form of `usageSummary` — " · 5h 0% ↺23:10 · …", or ""
-    /// when there is nothing to show (profiles without a snapshot keep their
-    /// plain identity title).
-    static func usageSuffix(for snapshot: ProfileUsageSnapshot?,
-                            timeZone: TimeZone = .current) -> String {
-        guard let summary = usageSummary(for: snapshot, timeZone: timeZone) else { return "" }
-        return " · " + summary
-    }
-
-    /// Full "+"-menu row title: `ProfileLoginPresentation.menuItemTitle` plus
-    /// the compact usage suffix, e.g.
-    /// "Gmail — gmail@… · 5h 0% ↺23:10 · wk 76%".
-    static func menuItemTitle(for entry: ModelProfileWithUsage,
-                              timeZone: TimeZone = .current) -> String {
-        ProfileLoginPresentation.menuItemTitle(for: entry)
-            + usageSuffix(for: entry.usageSnapshot, timeZone: timeZone)
-    }
-
     // MARK: - Two-line menu composition
 
     /// A menu row rendered on two lines: an identity `primary` ("Name — email")
@@ -257,8 +239,7 @@ enum ProfileUsagePresentation {
     /// logged in / poller hasn't fetched yet), which keeps their single-line
     /// identity treatment. The worktree picker's rows compose from `menuLine`
     /// so the two-line rules live in one place; the account menus draw bars
-    /// instead (`menuUsage`). `menuItemTitle`/`usageSuffix` remain for
-    /// anything still single-line.
+    /// instead (`menuUsage`).
     struct MenuLineModel: Equatable {
         let primary: String
         let secondary: String?
@@ -661,11 +642,16 @@ enum ProfileUsagePresentation {
     /// name.
     enum MenuUsage: Equatable {
         /// The 5-hour and weekly bars; a missing bucket leaves its slot empty.
-        /// `ageNote`, such as "1d ago", is set when the data is healthy but old.
+        /// `ageNote` is the grey note after the bars: the age, such as
+        /// "1d ago", when the data is healthy but old. The "+" menu leads it
+        /// with "needs /login" for a profile with no detected login
+        /// (`ProfileLoginPresentation.menuRowUsage`).
         case bars(session: BucketPresentation?, weekly: BucketPresentation?, ageNote: String?)
-        /// A short note in place of the bars, for a fetch that is failing.
+        /// A short grey note in place of the bars: a failing fetch's note
+        /// from `menuUsage`, or the "+" menu's "needs /login" for a profile
+        /// with no detected login (`ProfileLoginPresentation.menuRowUsage`).
         case note(String)
-        /// The name alone.
+        /// The name alone: `menuUsage` has no bars and no note to show.
         case none
     }
 

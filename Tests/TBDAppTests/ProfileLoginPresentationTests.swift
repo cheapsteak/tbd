@@ -112,24 +112,54 @@ private typealias MenuUsage = ProfileUsagePresentation.MenuUsage
     #expect(usage == .note(ProfileLoginPresentation.menuNeedsLoginNote))
 }
 
-@Test func menuRowUsage_needsLoginWithUsage_keepsTheUsage() {
-    let bars = MenuUsage.bars(session: nil, weekly: nil, ageNote: "1d ago")
-    #expect(ProfileLoginPresentation.menuRowUsage(bars, kind: .oauth, loginIdentity: nil) == bars)
+/// Bars from a healthy snapshot: 40% of the 5-hour window, 16% of the week.
+/// No reset times, so nothing depends on the clock.
+private func cachedBars(ageNote: String?) -> MenuUsage {
+    .bars(session: ProfileUsagePresentation.bucketPresentation(
+              ClaudeUsageLimitBucket(kind: "session", percent: 40, severity: "normal")),
+          weekly: ProfileUsagePresentation.bucketPresentation(
+              ClaudeUsageLimitBucket(kind: "weekly_all", percent: 16, severity: "normal")),
+          ageNote: ageNote)
+}
 
-    let note = MenuUsage.note("not logged in")
-    #expect(ProfileLoginPresentation.menuRowUsage(note, kind: .oauth, loginIdentity: "  ") == note)
+/// A failing fetch's note, as `menuUsage` gives it.
+private var failingNote: MenuUsage { .note("usage unavailable — retrying · last data 3h ago") }
+
+@Test func menuRowUsage_needsLoginWithFreshBars_keepsTheBarsWithTheNeedsLoginNote() {
+    // Bars from before the login went away are still real numbers until the
+    // daemon drops them, so they stay and the hint is the grey note after them.
+    let expected = cachedBars(ageNote: ProfileLoginPresentation.menuNeedsLoginNote)
+    #expect(ProfileLoginPresentation.menuRowUsage(cachedBars(ageNote: nil),
+                                                  kind: .oauth, loginIdentity: nil) == expected)
+}
+
+@Test func menuRowUsage_needsLoginWithOldBars_keepsTheAgeAfterTheHint() {
+    // Old bars keep their age, so they never read as current.
+    let usage = ProfileLoginPresentation.menuRowUsage(cachedBars(ageNote: "1d ago"),
+                                                      kind: .oauth, loginIdentity: "  ")
+    #expect(usage == cachedBars(ageNote: "needs /login · 1d ago"))
+}
+
+@Test func menuRowUsage_needsLoginWithANote_replacesTheNoteWithTheHint() {
+    // With no login the fetch cannot recover until the user logs in, so the
+    // login hint is the note worth showing.
+    let usage = ProfileLoginPresentation.menuRowUsage(failingNote, kind: .oauth, loginIdentity: "  ")
+    #expect(usage == .note(ProfileLoginPresentation.menuNeedsLoginNote))
 }
 
 @Test func menuRowUsage_loggedIn_keepsTheUsage() {
-    let usage = ProfileLoginPresentation.menuRowUsage(
-        MenuUsage.none, kind: .oauth, loginIdentity: "dev@acme.example")
-    #expect(usage == MenuUsage.none)
+    for usage in [MenuUsage.none, cachedBars(ageNote: nil), cachedBars(ageNote: "1d ago"), failingNote] {
+        #expect(ProfileLoginPresentation.menuRowUsage(
+            usage, kind: .oauth, loginIdentity: "dev@acme.example") == usage, "\(usage)")
+    }
 }
 
 @Test func menuRowUsage_nonOAuthKinds_keepTheUsage() {
     for kind in [CredentialKind.oauthToken, .apiKey, .bedrock] {
-        let usage = ProfileLoginPresentation.menuRowUsage(MenuUsage.none, kind: kind, loginIdentity: nil)
-        #expect(usage == MenuUsage.none, "\(kind)")
+        for usage in [MenuUsage.none, cachedBars(ageNote: nil), cachedBars(ageNote: "1d ago"), failingNote] {
+            #expect(ProfileLoginPresentation.menuRowUsage(usage, kind: kind, loginIdentity: nil) == usage,
+                    "\(kind) \(usage)")
+        }
     }
 }
 

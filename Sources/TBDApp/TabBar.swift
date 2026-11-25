@@ -615,8 +615,11 @@ enum AddTabMenu {
             // One item per profile: the profile's name alone, then its usage
             // bars or note in a column every row shares (`AccountMenuRow`).
             // The login email goes on the row's tooltip, so a long one does
-            // not widen the menu; an oauth profile with no login and nothing
-            // else to show gets "needs /login" as its note
+            // not widen the menu. An oauth profile with no login shows
+            // "needs /login" where the bars go, in place of any note. Bars
+            // from before its login went away stay until the daemon's next
+            // sweep drops them, and the grey note after them leads with the
+            // hint, before the age ("needs /login · 2d ago")
             // (`ProfileLoginPresentation.menuRowUsage`). Each gets a
             // transparent placeholder icon the same size as the Claude
             // asterisk so its title lines up in the same title column as

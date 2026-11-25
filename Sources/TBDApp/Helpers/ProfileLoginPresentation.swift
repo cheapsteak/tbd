@@ -63,14 +63,30 @@ enum ProfileLoginPresentation {
 
     /// What a "+" new-tab menu row shows after the name. The row shows the
     /// name alone, so a profile that needs `/login` says so in the usage
-    /// column, and only when its usage has nothing to show there: bars or a
-    /// note it already has stay as they are.
+    /// column:
+    /// - with no usage, or with a note, "needs /login" is the row's note.
+    ///   With no detected login the fetch cannot recover until the user logs
+    ///   in, so the login hint is the one thing on the row to act on, and it
+    ///   replaces a failing fetch's note;
+    /// - with bars, the bars stay and the grey note after them leads with
+    ///   "needs /login", then the age when the data is old
+    ///   ("needs /login · 2d ago"). Such bars are the last snapshot from
+    ///   before the login went away: the daemon polls an oauth profile only
+    ///   while it has a login, and its next full sweep (about every 90 s)
+    ///   drops the snapshot. Until then they are still real numbers for that
+    ///   account, and the age keeps them from reading as current.
+    /// A logged-in profile and every kind but `.oauth` keep their usage.
     static func menuRowUsage(_ usage: ProfileUsagePresentation.MenuUsage,
                              kind: CredentialKind,
                              loginIdentity: String?) -> ProfileUsagePresentation.MenuUsage {
-        guard case .none = usage,
-              needsLogin(kind: kind, loginIdentity: loginIdentity) else { return usage }
-        return .note(menuNeedsLoginNote)
+        guard needsLogin(kind: kind, loginIdentity: loginIdentity) else { return usage }
+        switch usage {
+        case .none, .note:
+            return .note(menuNeedsLoginNote)
+        case let .bars(session, weekly, ageNote):
+            let note = ageNote.map { "\(menuNeedsLoginNote) · \($0)" } ?? menuNeedsLoginNote
+            return .bars(session: session, weekly: weekly, ageNote: note)
+        }
     }
 
     /// Identity fragment for the Settings row caption. nil for non-oauth kinds.
