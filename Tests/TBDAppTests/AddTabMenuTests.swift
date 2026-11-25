@@ -307,6 +307,24 @@ private func attachments(_ title: NSAttributedString?) -> [NSTextAttachment] {
 }
 
 @MainActor
+@Test func notLoggedInOAuthRowWithUsageKeepsTheBarsAndTheNeedsLoginNote() throws {
+    // No login, but a healthy snapshot is cached: the bars stay, because login
+    // detection can lag, and "needs /login" is the grey note after them.
+    let spare = makeProfile(name: "Spare", usageSnapshot: healthySnapshot())
+    let menu = AddTabMenu.build(profiles: [spare], coordinator: makeCoordinator())
+
+    let item = menu.items[claudeIndex(menu) + 1]
+    #expect(item.title == "Spare")
+    let drawn = try #require(item.attributedTitle)
+    #expect(drawn.string.hasPrefix("Spare"))
+    #expect(drawn.string.hasSuffix("needs /login"))
+    let barsSizes = attachments(drawn).compactMap { $0.image?.size }
+    #expect(barsSizes.contains(NSSize(width: 200, height: 13)))
+    // No email, so the tooltip is the reset times alone.
+    #expect(item.toolTip?.hasPrefix("5-hour: 40% used") == true)
+}
+
+@MainActor
 @Test func nonOAuthRowToolTipHasNoIdentityLine() throws {
     // A stray identity on a key profile never reaches the menu.
     let key = makeProfile(name: "Key", kind: .apiKey, loginIdentity: "x@acme.example",

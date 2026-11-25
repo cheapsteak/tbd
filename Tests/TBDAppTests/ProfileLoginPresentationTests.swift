@@ -112,24 +112,48 @@ private typealias MenuUsage = ProfileUsagePresentation.MenuUsage
     #expect(usage == .note(ProfileLoginPresentation.menuNeedsLoginNote))
 }
 
-@Test func menuRowUsage_needsLoginWithUsage_keepsTheUsage() {
-    let bars = MenuUsage.bars(session: nil, weekly: nil, ageNote: "1d ago")
-    #expect(ProfileLoginPresentation.menuRowUsage(bars, kind: .oauth, loginIdentity: nil) == bars)
+/// Bars from a healthy snapshot: 40% of the 5-hour window, 16% of the week.
+/// No reset times, so nothing depends on the clock.
+private func cachedBars(ageNote: String?) -> MenuUsage {
+    .bars(session: ProfileUsagePresentation.bucketPresentation(
+              ClaudeUsageLimitBucket(kind: "session", percent: 40, severity: "normal")),
+          weekly: ProfileUsagePresentation.bucketPresentation(
+              ClaudeUsageLimitBucket(kind: "weekly_all", percent: 16, severity: "normal")),
+          ageNote: ageNote)
+}
 
+@Test func menuRowUsage_needsLoginWithBars_keepsTheBarsWithTheNeedsLoginNote() {
+    // Login detection can lag, so the cached bars stay and the hint takes the
+    // grey note's place after them.
+    let expected = cachedBars(ageNote: ProfileLoginPresentation.menuNeedsLoginNote)
+    #expect(ProfileLoginPresentation.menuRowUsage(cachedBars(ageNote: nil),
+                                                  kind: .oauth, loginIdentity: nil) == expected)
+}
+
+@Test func menuRowUsage_needsLoginWithOldBars_replacesTheAgeNote() {
+    let usage = ProfileLoginPresentation.menuRowUsage(cachedBars(ageNote: "1d ago"),
+                                                      kind: .oauth, loginIdentity: "  ")
+    #expect(usage == cachedBars(ageNote: "needs /login"))
+}
+
+@Test func menuRowUsage_needsLoginWithANote_keepsTheNote() {
     let note = MenuUsage.note("not logged in")
     #expect(ProfileLoginPresentation.menuRowUsage(note, kind: .oauth, loginIdentity: "  ") == note)
 }
 
 @Test func menuRowUsage_loggedIn_keepsTheUsage() {
-    let usage = ProfileLoginPresentation.menuRowUsage(
-        MenuUsage.none, kind: .oauth, loginIdentity: "dev@acme.example")
-    #expect(usage == MenuUsage.none)
+    for usage in [MenuUsage.none, cachedBars(ageNote: nil), cachedBars(ageNote: "1d ago")] {
+        #expect(ProfileLoginPresentation.menuRowUsage(
+            usage, kind: .oauth, loginIdentity: "dev@acme.example") == usage, "\(usage)")
+    }
 }
 
 @Test func menuRowUsage_nonOAuthKinds_keepTheUsage() {
     for kind in [CredentialKind.oauthToken, .apiKey, .bedrock] {
-        let usage = ProfileLoginPresentation.menuRowUsage(MenuUsage.none, kind: kind, loginIdentity: nil)
-        #expect(usage == MenuUsage.none, "\(kind)")
+        for usage in [MenuUsage.none, cachedBars(ageNote: nil), cachedBars(ageNote: "1d ago")] {
+            #expect(ProfileLoginPresentation.menuRowUsage(usage, kind: kind, loginIdentity: nil) == usage,
+                    "\(kind) \(usage)")
+        }
     }
 }
 
