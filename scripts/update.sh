@@ -1374,7 +1374,13 @@ leave_app_stopped_for_recovery() {
     fi
     log "to recover: run 'tbd version' to see which build the daemon is running, then run 'tbd update' again"
     log "or open $INSTALLED_BUNDLE yourself once it and the daemon are the same build ($INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json names the bundle's commit)"
-    log "the bundle this run replaced, if there was one, is kept at $PREVIOUS_BUNDLE — see 'Going back to the previous build' in docs/updating.md"
+    # A rollback that put the bundle this run kept back has spent the copy,
+    # and only the link failed: that bundle is installed, and nothing is kept.
+    if [ "$BUNDLE_STASHED" = true ] && [ ! -d "$PREVIOUS_BUNDLE" ]; then
+        log "the bundle this run replaced is installed at $INSTALLED_BUNDLE again: the rollback put it back"
+    else
+        log "the bundle this run replaced, if there was one, is kept at $PREVIOUS_BUNDLE — see 'Going back to the previous build' in docs/updating.md"
+    fi
 }
 
 # Report a run that ended while main was moving the installation

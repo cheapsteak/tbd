@@ -2592,8 +2592,11 @@ test_local_build_takes_the_link_back_from_a_download() {
 # function.) FAKE_EXITS_AFTER_KEEP=1 exits the whole run once the installed
 # bundle has been kept, before anything has moved. FAKE_EXITS_AFTER_INSTALL=1
 # exits the whole run with status 6 once the install has completed, before
-# the app is stopped or anything is handed over. The case must create
-# <case>/Applications for the install to land in.
+# the app is stopped or anything is handed over. FAKE_LINK_PUT_BACK_FAILS=1
+# fails main's put-back of the .build/release link after a failed install or
+# handover (restore_release_link, replaced as the install begins, since main
+# sources its library as it starts). The case must create <case>/Applications
+# for the install to land in.
 # FAKE_HANDOVER_EXITS=1 exits the whole run from inside the handover, the way
 # a step that calls `exit` or a signal does, so that only the exit trap is
 # left to decide about the app; with the stubbed install as well as the real
@@ -2657,6 +2660,9 @@ run_update_around_handover() {
             eval "stubless_$(declare -f install_new_bundle)"
             install_new_bundle() {
                 TBD_BUNDLE_CP="$FAKE_BUNDLE_CP"
+                if [ "${FAKE_LINK_PUT_BACK_FAILS:-0}" = 1 ]; then
+                    restore_release_link() { return 1; }
+                fi
                 stubless_install_new_bundle "$@"
             }
             if [ "${FAKE_STAMP_STOP:-0}" = 1 ]; then
@@ -3233,6 +3239,36 @@ test_a_failed_handover_whose_restore_fails_leaves_the_app_stopped() {
     assert_contains "the error reaches update.log too" \
         "ERROR: the rollback of the failed install did not complete" \
         "$(cat "$case_dir/home/tbd/updates/update.log" 2>/dev/null)"
+}
+
+# A rollback that puts the kept bundle back spends it, so when only the
+# put-back of the .build/release link then fails, nothing is kept at
+# ~/tbd/updates/previous/TBD.app any more, and the recovery steps must not
+# send the operator there: they say the bundle this run replaced is installed
+# again. Saying it is kept at that path, as they did, fails.
+test_a_rollback_whose_link_put_back_fails_does_not_name_a_spent_kept_bundle() {
+    local case_dir out rc events installed kept
+    case_dir="$(mkcase rollback-link-fails)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" >/dev/null
+    out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 FAKE_LINK_PUT_BACK_FAILS=1 \
+        run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "a failed handover fails the run" "1" "$rc"
+    assert_contains "the rollback puts the kept bundle back" "restored previous app bundle" "$out"
+    assert_contains "the link put-back fails" "ERROR: could not point .* back at" "$out"
+    assert_contains "so the rollback did not complete" \
+        "ERROR: the rollback of the failed install did not complete" "$out"
+    assert_eq "the bundle from before the update is installed" "before-the-update" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "the kept copy is spent" "gone" "$(path_state "$kept")"
+    assert_not_contains "the recovery steps do not send the operator to the spent copy" \
+        "is kept at $kept" "$out"
+    assert_contains_literal "they say the bundle this run replaced is installed again" \
+        "the bundle this run replaced is installed at $installed again" "$out"
+    assert_not_contains "no app is launched" "^open" "$(cat "$events")"
 }
 
 # THE REGRESSION: the rollback put back whatever sat at
@@ -4548,6 +4584,7 @@ test_an_app_started_during_the_handover_is_stopped_before_the_launch
 test_signing_stays_inside_the_case_with_and_without_ci
 test_a_failed_handover_relaunches_the_stopped_app
 test_a_failed_handover_whose_restore_fails_leaves_the_app_stopped
+test_a_rollback_whose_link_put_back_fails_does_not_name_a_spent_kept_bundle
 test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_exit_mid_handover_leaves_the_app_stopped
 test_an_exit_after_the_handover_still_relaunches_the_app
