@@ -136,17 +136,22 @@ import Testing
         try await database.writerForTests.write { connection in
             try TerminalRecord(from: terminal).insert(connection)
         }
-        let raw = try database.writerForTests.read { connection in
-            return try Row.fetchOne(
-                connection,
-                sql: """
-                    SELECT sessionIncarnationID, pendingSessionIncarnationID
-                    FROM terminal WHERE id = ?
-                    """,
-                arguments: [terminal.id.uuidString])
-        }
-        #expect(raw?["sessionIncarnationID"] as String? == incarnationID.uuidString)
-        #expect(raw?["pendingSessionIncarnationID"] as String? == pendingIncarnationID.uuidString)
+        let stored: (session: String?, pending: String?)? =
+            try await database.writerForTests.read { connection in
+                return try Row.fetchOne(
+                    connection,
+                    sql: """
+                        SELECT sessionIncarnationID, pendingSessionIncarnationID
+                        FROM terminal WHERE id = ?
+                        """,
+                    arguments: [terminal.id.uuidString]
+                ).map { row in
+                    (session: row["sessionIncarnationID"] as String?,
+                     pending: row["pendingSessionIncarnationID"] as String?)
+                }
+            }
+        #expect(stored?.session == incarnationID.uuidString)
+        #expect(stored?.pending == pendingIncarnationID.uuidString)
         let decoded = try await database.terminals.get(id: terminal.id)
         #expect(decoded?.sessionIncarnationID == incarnationID)
         #expect(decoded?.pendingSessionIncarnationID == pendingIncarnationID)

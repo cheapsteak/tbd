@@ -80,13 +80,14 @@ struct TerminalServerNameStoreTests {
             id: UUID(), worktreeID: wt.id, label: "Web app", kind: .shell,
             lineCount: 1, serverName: "web", exitCode: 127)
         try await db.writerForTests.write { try TerminalHistoryRecord(from: entry).insert($0) }
-        let row: Row? = try await db.writerForTests.read { conn -> Row? in
+        let row: (serverName: String?, exitCode: Int?)? = try await db.writerForTests.read { conn in
             try Row.fetchOne(conn, sql: "SELECT serverName, exitCode FROM terminal_history WHERE id = ?",
                              arguments: [entry.id.uuidString])
+                .map { (serverName: $0["serverName"] as String?, exitCode: $0["exitCode"] as Int?) }
         }
         let stored = try #require(row)
-        #expect(stored["serverName"] as String? == "web")
-        #expect(stored["exitCode"] as Int? == 127)
+        #expect(stored.serverName == "web")
+        #expect(stored.exitCode == 127)
         let listed = try #require(try await db.terminalHistory.list(worktreeID: wt.id).first)
         #expect(listed.serverName == "web")
         #expect(listed.exitCode == 127)
