@@ -1575,6 +1575,14 @@ leave_app_stopped_for_recovery() {
 # any other interruption too. What else such an exit leaves beside the
 # installed bundle or the kept one, the next install clears.
 #
+# Not so for a run whose keep found the build it installs already installed,
+# in front of a daemon on another commit (KEEP_SKIPPED_FOR_OWN_BUILD): its
+# bundle never had to reach the installed path, because it was there before
+# the run began, and app and daemon were different builds all along. An exit
+# before its swap is reported as any other interruption, with the line below
+# for a new build installed in front of the previous one, and the recovery
+# steps.
+#
 # Otherwise the bundle is the part the run can name. An install and a
 # rollback both swap whole bundles (install_app_bundle), so $INSTALLED_BUNDLE
 # holds the build from before the swap or the one after it. Only an exit
@@ -1602,6 +1610,7 @@ report_interrupted_install() {
     local note installed_commit
     note="$(put_back_outgoing_app_bundle "$INSTALLED_BUNDLE" 2>&1)" || true
     if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_STOP_BEGUN" != true ] &&
+        [ "$KEEP_SKIPPED_FOR_OWN_BUILD" != true ] &&
         { [ -z "${APP_BUNDLE_INSTALL_STEP:-}" ] || [ "$APP_BUNDLE_INSTALL_STEP" = staging ]; } &&
         put_release_link_back && put_back_discarded_kept_bundle; then
         [ -z "$note" ] || log "$note"

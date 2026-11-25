@@ -508,7 +508,12 @@ hidden name beside it, the new copy not yet in its place — leaves nothing at
 `~/tbd/updates/previous/TBD.app` for a moment, so the run renames the earlier
 bundle back before it reports, and the next update does the same before it
 clears anything. The next update clears what else the run left beside
-either bundle. An interruption after the swap leaves the new
+either bundle. A run that found the build it is installing already installed
+in front of a daemon on another commit, and so kept no copy (see "Going back
+to the previous build"), is the exception: the new build was in
+`/Applications` before it began, so an interruption before its swap is
+reported as one after the swap is, with the recovery steps. An interruption
+after the swap leaves the new
 build installed. (An interruption between the swap's two renames leaves the
 path empty for a moment, and the run puts the bundle it had renamed away
 straight back; a run killed outright there leaves that to the next install.)

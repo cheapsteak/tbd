@@ -3589,6 +3589,45 @@ test_an_update_over_the_same_commit_keeps_another_build() {
     done
 }
 
+# A run whose keep found its own build already installed, in front of a
+# daemon on another commit, starts with app and daemon on different builds.
+# Interrupted while it stages, it has installed nothing new, but the new app
+# is still in front of the old daemon, so it is reported as an interruption
+# after the swap: with the line for a new build installed in front of the
+# previous one, and the recovery steps. Reporting it as one that installed
+# nothing and needs no recovery, as the report did, fails.
+test_an_interrupted_update_over_its_own_build_gives_the_recovery_steps() {
+    local case_dir out rc events installed new_commit
+    case_dir="$(mkcase interrupted-over-own-build)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    new_commit="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    mkdir -p "$case_dir/Applications" "$case_dir/tmp"
+    mkbundle "$installed" "left-by-the-cut-short-run" >/dev/null
+    stamp_clone_identity "$installed" "$case_dir" "$new_commit"
+    mkbundle "$case_dir/home/tbd/updates/previous/TBD.app" "before-the-cut-short-run" >/dev/null
+    out="$(TMPDIR="$case_dir/tmp" FAKE_REAL_INSTALL=1 FAKE_STAGE_COPY_INTERRUPTED=1 \
+        run_update_around_handover "$case_dir")"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        pass "an interrupted run fails"
+    else
+        fail "an interrupted run fails"
+    fi
+    assert_contains "the keep was skipped" "keeping no copy of it" "$out"
+    assert_contains_literal "the run was interrupted during the staging copy" \
+        "-> $case_dir/Applications/.TBD-install-incoming at " "$(cat "$events")"
+    assert_not_contains "it does not say nothing was installed" \
+        "the run was interrupted before it installed anything" "$out"
+    assert_not_contains "nor that nothing needs recovering" "nothing needs recovering" "$out"
+    assert_contains "it is reported as an interrupted install" \
+        "ERROR: the run was interrupted while installing and handing over" "$out"
+    assert_contains "naming the new build in front of the previous one" \
+        "TBD is still running the previous build, in front of the newly installed bundle" "$out"
+    assert_contains "with the recovery steps" "to recover:" "$out"
+    assert_eq "the installed bundle is still the one the cut-short run left" \
+        "left-by-the-cut-short-run" "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+}
+
 # A run that leaves by `exit` (or a signal) while the installation is moving
 # never reaches main's own rollback, and the exit trap cannot tell which
 # bundle is installed or which daemon is serving. Launching the app there
@@ -4973,6 +5012,7 @@ test_a_rollback_that_finds_the_kept_bundle_gone_does_not_claim_a_restore
 test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_update_over_its_own_build_leaves_the_kept_bundle_alone
 test_an_update_over_the_same_commit_keeps_another_build
+test_an_interrupted_update_over_its_own_build_gives_the_recovery_steps
 test_an_exit_mid_handover_leaves_the_app_stopped
 test_an_exit_after_the_handover_still_relaunches_the_app
 test_a_rollback_waits_for_the_app_exit_to_settle
