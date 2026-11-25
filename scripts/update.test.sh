@@ -4094,7 +4094,9 @@ path_state() {
 # A stand-in for `mv` at <bin>/mv, for a run with <bin> first on its PATH. It
 # refuses the renames refuse_mv names, records each refusal in <bin>/mv.log
 # as `refused mv <source>|<destination>`, and makes every other move with
-# /bin/mv.
+# /bin/mv. In place of a rename interrupt_mv names, it sends the process that
+# ran it SIGTERM, as an interruption at that point would, and records
+# `interrupted mv <source>|<destination>`.
 #
 #   mkrefusingmv <bin>
 mkrefusingmv() {
@@ -4103,6 +4105,11 @@ mkrefusingmv() {
     cat > "$bin/mv" << EOF
 #!/bin/sh
 pair="\$1|\$2"
+if grep -qxF -- "\$pair" "$bin/mv-interrupts" 2>/dev/null; then
+    printf 'interrupted mv %s\n' "\$pair" >> "$bin/mv.log"
+    kill -TERM "\$PPID"
+    exit 1
+fi
 if grep -qxF -- "\$pair" "$bin/mv-refuses" 2>/dev/null; then
     printf 'refused mv %s\n' "\$pair" >> "$bin/mv.log"
     exit 1
@@ -4129,6 +4136,14 @@ refuse_mv() {
     else
         printf '%s|%s\n' "$source" "$destination" >> "$bin/mv-refuses"
     fi
+}
+
+# Make the mv stub at <bin> (mkrefusingmv) interrupt the run in place of
+# renaming <source> to <destination>.
+#
+#   interrupt_mv <bin> <source> <destination>
+interrupt_mv() {
+    printf '%s|%s\n' "$2" "$3" >> "$1/mv-interrupts"
 }
 
 # How many times the mv stub at <bin> refused to rename <source> to
@@ -4349,6 +4364,93 @@ test_a_failed_keep_puts_the_earlier_kept_bundle_back() {
         "$(path_state "$discard")"
     assert_eq "the copy is removed" "gone" "$(path_state "$partial")"
     assert_eq "the installed bundle is untouched" "installed-now" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+}
+
+# A keep cut short between its two renames leaves nothing at the kept path,
+# the earlier kept bundle at the discard name and its own whole copy at the
+# partial name. The next keep renames the earlier bundle back before it
+# clears either sibling, whatever it does after: here it finds nothing
+# installed and keeps nothing of its own, so the earlier bundle is the only
+# route back. Clearing the siblings first, as the keep did, deletes it. A
+# discard tree with no partial beside it is one a delete was working
+# through, and is never put back.
+test_the_next_keep_puts_back_a_kept_bundle_left_at_the_discard_name() {
+    local root out kept partial discard
+    root="$TEST_TMP/keep-after-interrupted-renames"
+    kept="$root/updates/previous/TBD.app"
+    partial="$root/updates/previous/.TBD.app.partial"
+    discard="$root/updates/previous/.TBD.app.discard"
+    mkbundle "$discard" "earlier-update" >/dev/null
+    mkbundle "$partial" "copy-of-the-installed-bundle" >/dev/null
+    out="$(
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        PREVIOUS_BUNDLE="$kept"
+        keep_installed_bundle "$root/Applications/TBD.app"
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "the keep succeeds" "rc=0" "$out"
+    assert_eq "the earlier kept bundle is back under its own name" "earlier-update" \
+        "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "nothing is left at the discard name" "gone" "$(path_state "$discard")"
+    assert_contains_literal "the keep says it put it back" \
+        "put back $kept from $discard, where an interrupted keep had left it" "$out"
+    assert_contains_literal "and leaves it there as the route back" \
+        "leaving $kept, which an earlier update kept, where it is" "$out"
+
+    root="$TEST_TMP/keep-after-interrupted-delete"
+    kept="$root/updates/previous/TBD.app"
+    discard="$root/updates/previous/.TBD.app.discard"
+    mkbundle "$discard" "spent-copy" >/dev/null
+    out="$(
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        PREVIOUS_BUNDLE="$kept"
+        keep_installed_bundle "$root/Applications/TBD.app"
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "the keep succeeds (delete in progress)" "rc=0" "$out"
+    assert_eq "a discard tree with no partial beside it is not put back" "gone" "$(path_state "$kept")"
+    assert_not_contains "nor said to be" "put back $kept" "$out"
+}
+
+# THE REGRESSION: a run cut short between the keep's two renames left the
+# bundle an earlier update kept at the discard name, with nothing at
+# ~/tbd/updates/previous/TBD.app where the docs send the operator, and the
+# report said nothing needed recovering. The report now renames it back
+# first. Here the stand-in mv sends the run SIGTERM in place of the keep's
+# second rename.
+test_an_interruption_between_the_keeps_renames_puts_the_kept_bundle_back() {
+    local case_dir out rc installed kept partial discard
+    case_dir="$(mkcase interrupted-between-keep-renames)"
+    installed="$case_dir/Applications/TBD.app"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    partial="$case_dir/home/tbd/updates/previous/.TBD.app.partial"
+    discard="$case_dir/home/tbd/updates/previous/.TBD.app.discard"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" >/dev/null
+    mkbundle "$kept" "earlier-update" >/dev/null
+    mkrefusingmv "$case_dir/bin"
+    interrupt_mv "$case_dir/bin" "$partial" "$kept"
+    out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        pass "an interrupted run fails"
+    else
+        fail "an interrupted run fails"
+    fi
+    assert_contains_literal "the run was interrupted between the keep's renames" \
+        "interrupted mv $partial|$kept" "$(cat "$case_dir/bin/mv.log" 2>/dev/null)"
+    assert_eq "the earlier kept bundle is back under its own name" "earlier-update" \
+        "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "nothing is left at the discard name" "gone" "$(path_state "$discard")"
+    assert_contains_literal "the report says it put it back" \
+        "put back $kept from $discard, where an interrupted keep had left it" "$out"
+    assert_contains "and that nothing was installed" \
+        "the run was interrupted before it installed anything" "$out"
+    assert_eq "the installed bundle is the one from before the update" "before-the-update" \
         "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
 }
 
@@ -4810,6 +4912,8 @@ test_a_failed_handover_restores_the_previous_bundle
 test_a_rollback_says_when_the_restored_bundle_is_not_registered
 test_a_rollback_never_deletes_the_kept_bundle_in_place
 test_a_failed_keep_puts_the_earlier_kept_bundle_back
+test_the_next_keep_puts_back_a_kept_bundle_left_at_the_discard_name
+test_an_interruption_between_the_keeps_renames_puts_the_kept_bundle_back
 test_a_completed_handover_keeps_the_previous_bundle
 test_a_first_install_has_no_previous_bundle
 test_a_failed_first_install_records_that_nothing_was_restored

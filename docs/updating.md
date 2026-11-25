@@ -497,8 +497,13 @@ build it started with again, that nothing needs recovering. A local build has
 written the new build into `.build/release` itself, which no link undoes, so
 after one the run says the new build stays there and that `tbd update` run
 again installs it. A link that cannot be put back is reported as an
-interruption after the swap is, below. The next update clears what the run
-left beside either bundle. An interruption after the swap leaves the new
+interruption after the swap is, below. An interruption between the two
+renames that keep a copy — the bundle an earlier update kept renamed to a
+hidden name beside it, the new copy not yet in its place — leaves nothing at
+`~/tbd/updates/previous/TBD.app` for a moment, so the run renames the earlier
+bundle back before it reports, and the next update does the same before it
+clears anything. The next update clears what else the run left beside
+either bundle. An interruption after the swap leaves the new
 build installed. (An interruption between the swap's two renames leaves the
 path empty for a moment, and the run puts the bundle it had renamed away
 straight back; a run killed outright there leaves that to the next install.)

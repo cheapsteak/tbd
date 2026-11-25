@@ -723,6 +723,32 @@ build_products() {
 
 # MARK: - Keeping the previous app bundle
 
+# Put the bundle an earlier update kept back at $PREVIOUS_BUNDLE from the
+# discard sibling, where a keep cut short between its two renames leaves it:
+# it renames the earlier kept bundle to the discard sibling, then the whole
+# new copy from the partial sibling into its place. Only that state is put
+# back — nothing at $PREVIOUS_BUNDLE, the partial sibling still there, and a
+# discard tree that looks whole (Contents/Info.plist and an executable
+# Contents/MacOS/TBDApp, the check put_back_outgoing_app_bundle makes) —
+# because a discard tree with no partial beside it is one a delete was
+# working through. Called at the start of every keep, before the siblings
+# are cleared, and by the report of an interrupted run. Non-zero, with a
+# warning naming where the bundle is, when the rename back fails.
+put_back_discarded_kept_bundle() {
+    local keep_dir discard
+    keep_dir="$(dirname "$PREVIOUS_BUNDLE")"
+    discard="$keep_dir/.TBD.app.discard"
+    if [ -e "$PREVIOUS_BUNDLE" ] || [ ! -d "$keep_dir/.TBD.app.partial" ] ||
+        [ ! -f "$discard/Contents/Info.plist" ] || [ ! -x "$discard/Contents/MacOS/TBDApp" ]; then
+        return 0
+    fi
+    if ! mv "$discard" "$PREVIOUS_BUNDLE"; then
+        log "WARNING: the bundle an earlier update kept is at $discard, and could not be moved back to $PREVIOUS_BUNDLE"
+        return 1
+    fi
+    log "put back $PREVIOUS_BUNDLE from $discard, where an interrupted keep had left it"
+}
+
 # The fields of a bundle's Contents/TBDBuildIdentity.json that tell one build
 # from another, as `<commit>|<sourceWorktree>|<dirty>`. builtAt differs
 # between two builds of one tree, and the rest follow from these. Non-zero,
@@ -772,6 +798,10 @@ keep_installed_bundle() {
     local keep_dir partial discard installed_key moved_aside=false
     BUNDLE_STASHED=false
     KEEP_SKIPPED_FOR_OWN_BUILD=false
+    # First, whatever happens next, the earlier kept bundle a keep cut short
+    # between its two renames left at the discard sibling goes back to its
+    # name, before anything below clears that sibling.
+    put_back_discarded_kept_bundle || true
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
         if [ -d "$PREVIOUS_BUNDLE" ]; then
@@ -800,8 +830,11 @@ keep_installed_bundle() {
     # and is renamed into place only once whole, and the bundle it replaces
     # is renamed away before it is deleted, so that a run cut short anywhere
     # here leaves at $PREVIOUS_BUNDLE the earlier kept bundle, whole, or
-    # nothing. The next keep clears whatever either sibling still holds,
-    # which makes it their reclaimer.
+    # nothing. Nothing only between the two renames, with the earlier kept
+    # bundle whole at the discard sibling, which the report of the
+    # interruption or the next keep puts back first
+    # (put_back_discarded_kept_bundle). The next keep then clears whatever
+    # either sibling still holds, which makes it their reclaimer.
     partial="$keep_dir/.TBD.app.partial"
     discard="$keep_dir/.TBD.app.discard"
     rm -rf "$partial" "$discard"
@@ -1515,9 +1548,12 @@ leave_app_stopped_for_recovery() {
 # names the build the run started with again. After a local build it holds
 # the new build whatever the link says (release_link_names_the_start_build),
 # and the report says so. A put-back that fails leaves the link naming the
-# new build, which is reported as any other interruption is. What such an
-# exit leaves beside the installed bundle or the kept one, the next install
-# clears.
+# new build, which is reported as any other interruption is. An exit between
+# the keep's two renames leaves the earlier kept bundle at the discard
+# sibling, and the report renames it back first
+# (put_back_discarded_kept_bundle), or, when it cannot, reports the run as
+# any other interruption too. What else such an exit leaves beside the
+# installed bundle or the kept one, the next install clears.
 #
 # Otherwise the bundle is the part the run can name. An install and a
 # rollback both swap whole bundles (install_app_bundle), so $INSTALLED_BUNDLE
@@ -1547,7 +1583,7 @@ report_interrupted_install() {
     note="$(put_back_outgoing_app_bundle "$INSTALLED_BUNDLE" 2>&1)" || true
     if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_STOP_BEGUN" != true ] &&
         { [ -z "${APP_BUNDLE_INSTALL_STEP:-}" ] || [ "$APP_BUNDLE_INSTALL_STEP" = staging ]; } &&
-        put_release_link_back; then
+        put_release_link_back && put_back_discarded_kept_bundle; then
         [ -z "$note" ] || log "$note"
         if release_link_names_the_start_build; then
             log "the run was interrupted before it installed anything: the new build never reached $INSTALLED_BUNDLE, the app was not stopped, nothing was handed over and ${RELEASE_LINK:-.build/release} is back the way the run found it, so TBD is still running the build it started with, and nothing needs recovering"
