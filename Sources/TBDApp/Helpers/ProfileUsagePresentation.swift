@@ -643,12 +643,15 @@ enum ProfileUsagePresentation {
     enum MenuUsage: Equatable {
         /// The 5-hour and weekly bars; a missing bucket leaves its slot empty.
         /// `ageNote` is the grey note after the bars: the age, such as
-        /// "1d ago", when the data is healthy but old. The "+" menu puts
-        /// "needs /login" there instead (`ProfileLoginPresentation.menuRowUsage`).
+        /// "1d ago", when the data is healthy but old. The "+" menu leads it
+        /// with "needs /login" for a profile with no detected login
+        /// (`ProfileLoginPresentation.menuRowUsage`).
         case bars(session: BucketPresentation?, weekly: BucketPresentation?, ageNote: String?)
-        /// A short note in place of the bars, for a fetch that is failing.
+        /// A short grey note in place of the bars: a failing fetch's note
+        /// from `menuUsage`, or the "+" menu's "needs /login" for a profile
+        /// with no detected login (`ProfileLoginPresentation.menuRowUsage`).
         case note(String)
-        /// The name alone.
+        /// The name alone: `menuUsage` has no bars and no note to show.
         case none
     }
 
