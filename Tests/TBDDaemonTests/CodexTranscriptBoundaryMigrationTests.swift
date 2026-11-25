@@ -90,15 +90,17 @@ import Testing
             try TerminalRecord(from: terminal).insert(dbConnection)
         }
 
-        let rawRow = try db.writerForTests.read { dbConnection in
+        // Outer optional: the row exists. Inner optional: the column, which
+        // is NULL for the `.none` argument.
+        let storedBoundary: Int64?? = try await db.writerForTests.read { dbConnection in
             return try Row.fetchOne(
                 dbConnection,
                 sql: "SELECT codexTranscriptBoundaryOffset FROM terminal WHERE id = ?",
                 arguments: [terminal.id.uuidString]
-            )
+            ).map { row in row["codexTranscriptBoundaryOffset"] as Int64? }
         }
-        let row = try #require(rawRow)
-        #expect((row["codexTranscriptBoundaryOffset"] as Int64?) == boundary)
+        let rowBoundary = try #require(storedBoundary)
+        #expect(rowBoundary == boundary)
 
         let fetched = try #require(try await db.terminals.get(id: terminal.id))
         #expect(fetched.codexTranscriptBoundaryOffset == boundary)
