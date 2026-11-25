@@ -749,17 +749,25 @@ put_back_discarded_kept_bundle() {
     log "put back $PREVIOUS_BUNDLE from $discard, where an interrupted keep had left it"
 }
 
-# The fields of a bundle's Contents/TBDBuildIdentity.json that tell one build
-# from another, as `<commit>|<sourceWorktree>|<dirty>`. builtAt differs
-# between two builds of one tree, and the rest follow from these. Non-zero,
-# with nothing printed, when the bundle names no commit.
-bundle_build_key() {
-    local identity commit
-    identity="$(cat "${1-}/Contents/TBDBuildIdentity.json" 2>/dev/null)" || return 1
-    commit="$(json_field "$identity" commit)" || return 1
-    [ -n "$commit" ] || return 1
+# The fields of a build identity that tell one build from another, as
+# `<commit>|<sourceWorktree>|<dirty>`, read from <json>, or from the object at
+# <field> in it. builtAt differs between two builds of one tree, and the rest
+# follow from these. Non-zero, with nothing printed, when it names no commit.
+#
+#   build_key_of <json> [<field>]
+build_key_of() {
+    local json="${1-}" at="${2:+$2.}" commit
+    commit="$(json_field "$json" "${at}commit")" && [ -n "$commit" ] || return 1
     printf '%s|%s|%s\n' "$commit" \
-        "$(json_field "$identity" sourceWorktree)" "$(json_field "$identity" dirty)"
+        "$(json_field "$json" "${at}sourceWorktree")" "$(json_field "$json" "${at}dirty")"
+}
+
+# The build key (build_key_of) of a bundle's Contents/TBDBuildIdentity.json,
+# or of <sidecar>.
+#
+#   bundle_build_key <dir> [<sidecar>]
+bundle_build_key() {
+    build_key_of "$(cat "${2:-${1-}/Contents/TBDBuildIdentity.json}" 2>/dev/null)"
 }
 
 # True when two bundles are the same build (bundle_build_key): same commit,
@@ -770,16 +778,40 @@ same_build() {
     key="$(bundle_build_key "${1-}")" && [ "$key" = "$(bundle_build_key "${2-}")" ]
 }
 
-# The commit a build identity sidecar names, for the facts the rollback and
-# the recovery report go by: `none` when nothing is at <dir>, `unreadable`
-# when the sidecar names no commit. <sidecar> defaults to a bundle's.
+# True when <dir> holds the build the daemon reported when the run began
+# (RUNNING_BUILD): the same commit, source worktree and dirty flag, or the
+# same commit when the daemon did not report the other two. False when it
+# reported no build.
 #
-#   build_commit <dir> [<sidecar>]
-build_commit() {
-    local dir="${1-}" commit
-    [ -e "$dir" ] || { echo none; return 0; }
-    commit="$(json_field "$(cat "${2:-$dir/Contents/TBDBuildIdentity.json}" 2>/dev/null)" commit)"
-    printf '%s\n' "${commit:-unreadable}"
+#   is_daemons_build <dir> [<sidecar>]
+is_daemons_build() {
+    local key
+    key="$(bundle_build_key "$@")" || return 1
+    case "$RUNNING_BUILD" in
+        "") return 1 ;;
+        *"||"* | *"|") [ "${key%%|*}" = "${RUNNING_BUILD%%|*}" ] ;;
+        *) [ "$key" = "$RUNNING_BUILD" ] ;;
+    esac
+}
+
+# A build key as the report prints it: the commit, then the worktree it was
+# built from and whether that was dirty, when the key says.
+build_text() {
+    local commit="${1%%|*}" rest="${1#*|}" worktree dirty=""
+    worktree="${rest%|*}"
+    [ "${rest##*|}" != true ] || dirty=", dirty"
+    printf '%s%s%s\n' "$commit" "${worktree:+ from $worktree}" "$dirty"
+}
+
+# The build at <dir> as the report prints it (build_text): `none` when
+# nothing is there, `unreadable` when its identity names no commit.
+#
+#   describe_build <dir> [<sidecar>]
+describe_build() {
+    local key
+    [ -e "${1-}" ] || { echo none; return 0; }
+    key="$(bundle_build_key "$@")" || { echo unreadable; return 0; }
+    build_text "$key"
 }
 
 # Keep a copy of the installed bundle at $UPDATE_HOME/previous/TBD.app. Two
@@ -883,8 +915,8 @@ keep_installed_bundle() {
 
 # True once keep_installed_bundle has copied the installed bundle to
 # $PREVIOUS_BUNDLE in this run, so the bundle there is the one this run
-# replaced. roll_back_bundle goes by it only when the daemon's build is
-# unknown.
+# replaced. roll_back_bundle goes by it only when the daemon reported no
+# build or the kept bundle names none.
 BUNDLE_STASHED=false
 
 # Put the kept bundle back in place of the new one, by the same staged swap an
@@ -943,16 +975,18 @@ restore_previous_bundle() {
 # to prevent.
 BUNDLE_RESTORE_FAILED=false
 
-# The rollback of the bundle after a failed handover, which leaves the daemon
-# the run began with running: RUNNING_COMMIT is its build. The rollback puts
-# in front of it the bundle built from that commit, reading each candidate's
-# build identity (build_commit):
+# The rollback of the bundle after a failed handover. It puts back the bundle
+# of the build the daemon reported when the run began (RUNNING_BUILD), which
+# is still the daemon running unless the handover failed after the
+# predecessor had exited. It reads each candidate's build identity
+# (is_daemons_build):
 #
 #   - the installed bundle is that build (a re-run over the build the daemon
 #     runs): nothing to put back;
 #   - the kept bundle is: restore_previous_bundle puts it back;
-#   - the daemon's build is unknown: the kept bundle goes back only if this
-#     run kept it (BUNDLE_STASHED), as the bundle the run found installed;
+#   - this run kept the bundle (BUNDLE_STASHED), and the daemon reported no
+#     build or the kept bundle names none: it goes back, since it is the
+#     bundle that was installed when the run began;
 #   - otherwise no bundle of the daemon's build is at hand.
 #
 # Anything short of a matching bundle in front of the daemon is recorded in
@@ -963,14 +997,15 @@ BUNDLE_RESTORE_FAILED=false
 # open once it and the daemon are the same build.
 roll_back_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
-    if [ -n "$RUNNING_COMMIT" ] && [ "$(build_commit "$installed_bundle")" = "$RUNNING_COMMIT" ]; then
-        log "$installed_bundle is already build $RUNNING_COMMIT, which the daemon runs — nothing to put back"
-    elif { [ -n "$RUNNING_COMMIT" ] && [ "$(build_commit "$PREVIOUS_BUNDLE")" = "$RUNNING_COMMIT" ]; } ||
-        { [ -z "$RUNNING_COMMIT" ] && [ "$BUNDLE_STASHED" = true ]; }; then
+    if is_daemons_build "$installed_bundle"; then
+        log "$installed_bundle is already build $(build_text "$RUNNING_BUILD"), which the daemon runs — nothing to put back"
+    elif is_daemons_build "$PREVIOUS_BUNDLE" ||
+        { [ "$BUNDLE_STASHED" = true ] &&
+            { [ -z "$RUNNING_BUILD" ] || ! bundle_build_key "$PREVIOUS_BUNDLE" >/dev/null; }; }; then
         restore_previous_bundle "$installed_bundle" || BUNDLE_RESTORE_FAILED=true
-    elif [ -n "$RUNNING_COMMIT" ]; then
+    elif [ -n "$RUNNING_BUILD" ]; then
         BUNDLE_RESTORE_FAILED=true
-        log_error "no previous app bundle to restore — neither $installed_bundle nor $PREVIOUS_BUNDLE is build $RUNNING_COMMIT, which the daemon runs"
+        log_error "no previous app bundle to restore — neither $installed_bundle nor $PREVIOUS_BUNDLE is build $(build_text "$RUNNING_BUILD"), which the daemon runs"
     else
         BUNDLE_RESTORE_FAILED=true
         log_error "no previous app bundle to restore — the daemon's build is unknown, and this run kept none"
@@ -1308,15 +1343,18 @@ APP_STOP_BEGUN=false
 # different builds.
 INSTALL_IN_FLIGHT=false
 
-# The commit the run is installing, set by main as the installation starts
-# to move, for the recovery report (report_installation_facts).
+# The commit the run is installing and the new bundle's build key
+# (bundle_build_key, empty when it names no commit), set by main as the
+# installation starts to move, for the report of an interruption
+# (report_interrupted_install, report_installation_facts).
 INSTALLING_COMMIT=""
+INSTALLING_BUILD=""
 
-# The commit of the daemon that was running when the run started, from its
-# status, or empty when none answered or it named none. Set by main beside
-# INSTALLING_COMMIT; the rollback (roll_back_bundle) and the recovery report
-# go by it.
-RUNNING_COMMIT=""
+# The build key (build_key_of) of the daemon that was running when the run
+# started, from its status, or empty when none answered or it named no
+# commit. Set by main beside INSTALLING_BUILD; the rollback (roll_back_bundle)
+# and the recovery report go by it (is_daemons_build).
+RUNNING_BUILD=""
 
 # The update clone's .build/release as main finds and moves it: the link
 # itself, what it named when the run started, and whether the run pointed it
@@ -1527,47 +1565,47 @@ leave_app_stopped_for_recovery() {
 # Say where the installation stands, from what can be read now rather than
 # from which steps the run took, then one verdict drawn from those facts:
 #
-#   - the bundle at $INSTALLED_BUNDLE and its build (build_commit);
-#   - the daemon's build: the one it ran when the run started
-#     (RUNNING_COMMIT), and unknown once the handover has begun, since from
+#   - the build being installed;
+#   - the bundle at $INSTALLED_BUNDLE and its build (describe_build);
+#   - the daemon's build: the one it reported when the run started
+#     (RUNNING_BUILD), and unknown once the handover has begun, since from
 #     then on the daemon may be the predecessor, the successor or neither;
 #   - the kept bundle and its build: at $PREVIOUS_BUNDLE, or at the discard
 #     name where a keep cut short left it and the rename back failed
 #     (put_back_discarded_kept_bundle's case);
-#   - .build/release, from which an app that finds no daemon starts one, and
-#     the build its sidecar names.
+#   - the update clone's build directory for this run's configuration
+#     (.build/release, or .build/debug under --debug), from which an app of
+#     that configuration that finds no daemon starts one, and the build its
+#     sidecar names.
 #
-# Nothing needs recovering only when the installed bundle and the daemon are
-# known to be the same build and .build/release holds that build too.
+# Nothing needs recovering only when the installed bundle and that build
+# directory are both known to hold the daemon's build (is_daemons_build).
 # Otherwise the recovery steps follow, naming the kept bundle where it is.
 report_installation_facts() {
-    local installed daemon="" keep_dir kept="" link="" target
-    installed="$(build_commit "$INSTALLED_BUNDLE")"
-    [ -n "${HANDOVER_STARTED:-}" ] || daemon="$RUNNING_COMMIT"
+    local new="${INSTALLING_COMMIT:-unknown}" daemon=unknown keep_dir kept="" dir="" target
+    [ -z "$INSTALLING_BUILD" ] || new="$(build_text "$INSTALLING_BUILD")"
+    [ -n "${HANDOVER_STARTED:-}" ] || [ -z "$RUNNING_BUILD" ] || daemon="$(build_text "$RUNNING_BUILD")"
     keep_dir="$(dirname "$PREVIOUS_BUNDLE")"
     if [ -d "$PREVIOUS_BUNDLE" ]; then
         kept="$PREVIOUS_BUNDLE"
     elif [ -d "$keep_dir/.TBD.app.partial" ] && app_bundle_looks_whole "$keep_dir/.TBD.app.discard"; then
         kept="$keep_dir/.TBD.app.discard"
     fi
-    log "new build: ${INSTALLING_COMMIT:-unknown}"
-    log "installed bundle at $INSTALLED_BUNDLE: build $installed"
-    log "daemon: build ${daemon:-unknown}${HANDOVER_STARTED:+ — the handover had begun}"
+    log "new build: $new"
+    log "installed bundle at $INSTALLED_BUNDLE: build $(describe_build "$INSTALLED_BUNDLE")"
+    log "daemon: build $daemon${HANDOVER_STARTED:+ — the handover had begun}"
     if [ -n "$kept" ]; then
-        log "kept bundle at $kept: build $(build_commit "$kept")"
+        log "kept bundle at $kept: build $(describe_build "$kept")"
     else
         log "kept bundle: none"
     fi
     if [ -n "$RELEASE_LINK" ]; then
-        link="$(build_commit "$RELEASE_LINK" "$RELEASE_LINK/TBDBuildIdentity.json")"
-        if target="$(link_target "$RELEASE_LINK")"; then
-            log "release link $RELEASE_LINK names $target: build $link"
-        else
-            log "release link $RELEASE_LINK: build $link"
-        fi
+        dir="$(dirname "$RELEASE_LINK")/$BUILD_CONFIG"
+        target="$(link_target "$dir" || true)"
+        log "build directory $dir${target:+, a link to $target}: build $(describe_build "$dir" "$dir/TBDBuildIdentity.json")"
     fi
-    if [ -n "$daemon" ] && [ "$installed" = "$daemon" ] &&
-        { [ -z "$RELEASE_LINK" ] || [ "$link" = "$daemon" ]; }; then
+    if [ -z "${HANDOVER_STARTED:-}" ] && is_daemons_build "$INSTALLED_BUNDLE" &&
+        { [ -z "$dir" ] || is_daemons_build "$dir" "$dir/TBDBuildIdentity.json"; }; then
         log "the installed app and the daemon are the same build, so nothing needs recovering; if the app is not running, open $INSTALLED_BUNDLE"
         return 0
     fi
@@ -1595,11 +1633,11 @@ report_installation_facts() {
 #     $PREVIOUS_BUNDLE, where the recovery steps send the operator
 #     (put_back_discarded_kept_bundle);
 #   - .build/release goes back as after a failed install
-#     (put_release_link_back), but only while no swap has run
-#     (APP_BUNDLE_INSTALL_STEP empty or staging): main pointed it at the new
-#     build before the install began, and an app's next daemon start reads
-#     it. After a swap the new build is installed, and the link names the
-#     build beside it.
+#     (put_release_link_back) unless, read after the put-back above, the
+#     installed bundle is the build being installed (INSTALLING_BUILD): main
+#     pointed the link at the new build before the install began, and an
+#     app's next daemon start reads it, so it stays on the new build only
+#     beside the new bundle.
 #
 # What else such an exit leaves beside the installed bundle or the kept one,
 # the next install clears.
@@ -1609,9 +1647,10 @@ report_interrupted_install() {
     note="$(put_back_outgoing_app_bundle "$INSTALLED_BUNDLE" 2>&1)" || true
     [ -z "$note" ] || log "$note"
     put_back_discarded_kept_bundle || true
-    case "${APP_BUNDLE_INSTALL_STEP:-}" in
-        "" | staging) put_release_link_back || true ;;
-    esac
+    if [ -z "$INSTALLING_BUILD" ] ||
+        [ "$(bundle_build_key "$INSTALLED_BUNDLE")" != "$INSTALLING_BUILD" ]; then
+        put_release_link_back || true
+    fi
     leave_app_stopped_for_recovery
 }
 
@@ -2285,8 +2324,9 @@ main() {
     # before the first thing moves and comes down once the run knows where it
     # stands again.
     INSTALLING_COMMIT="$new_commit"
-    RUNNING_COMMIT="$old_commit"
-    local handed_over=false already_installed=false
+    INSTALLING_BUILD="$(bundle_build_key "$bundle_dir" || true)"
+    RUNNING_BUILD="$(build_key_of "$status_json" buildIdentity || true)"
+    local handed_over=false already_installed=false kept_key tree
     ! same_build "$INSTALLED_BUNDLE" "$bundle_dir" || already_installed=true
     INSTALL_IN_FLIGHT=true
     if install_new_bundle "$bundle_dir" "$INSTALLED_BUNDLE"; then
@@ -2327,10 +2367,18 @@ main() {
     # holds the bundle the install replaced; the exit reconcile keeps it and
     # the new live tree and removes everything older. Not so when the build
     # was installed already: the keep kept nothing (keep_installed_bundle),
-    # so the record goes on naming the tree that pairs with the bundle an
-    # earlier update kept.
-    [ "$already_installed" = true ] ||
+    # so the bundle there is an earlier update's. The record then names a
+    # prebuilt tree of that bundle's build if one is still here, and
+    # otherwise stays as it was.
+    if [ "$already_installed" = false ]; then
         record_prebuilt_rollback "$PREBUILT_HOME" "$PREBUILT_START_LIVE"
+    elif kept_key="$(bundle_build_key "$PREVIOUS_BUNDLE")"; then
+        for tree in "$PREBUILT_HOME"/*; do
+            [ "$(bundle_build_key "$tree" "$tree/TBDBuildIdentity.json")" = "$kept_key" ] || continue
+            record_prebuilt_rollback "$PREBUILT_HOME" "$tree"
+            break
+        done
+    fi
 
     refresh_installed_cli "$build_dir/TBDCLI"
 

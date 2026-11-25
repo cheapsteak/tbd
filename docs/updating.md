@@ -278,9 +278,13 @@ A release install does this:
   this is the same as after a local build. The build identity records
   `provenance: release` and the CI run it came from.
 - **Keeps two trees**: the one now running and the one it replaced, which is
-  what `~/tbd/updates/previous/TBD.app` pairs with. Every run reconciles
-  `~/tbd/updates/prebuilt/` at its start and on every exit, so a dry run or a
-  failed run keeps nothing it downloaded and older trees are deleted.
+  what `~/tbd/updates/previous/TBD.app` pairs with. A run that found its own
+  build already installed kept no bundle, so the second tree it keeps is one
+  of the same build as the bundle at `~/tbd/updates/previous/TBD.app`, if
+  one is still there, and otherwise the same second tree as before. Every
+  run reconciles `~/tbd/updates/prebuilt/` at its start and on every exit, so
+  a dry run or a failed run keeps nothing it downloaded and older trees are
+  deleted.
 
 When nothing is published, a manual run builds locally as it always has, and
 an `--auto` run logs it and waits for the next check. A machine that is not
@@ -428,21 +432,25 @@ the order you would reach for them.
   clone is the thing that is broken.
 
 An update that gets as far as installing and then cannot bring the new daemon
-up rolls back by itself. The daemon it started with is still the one
-running, so the rollback puts back the bundle that matches the running
-daemon, going by the commit in each bundle's `Contents/TBDBuildIdentity.json`
-and the commit the daemon reported when the run began. When the installed
-bundle already is that build — a re-run over the build the daemon runs —
-there is nothing to put back. When the kept bundle is, the run waits until
+up rolls back by itself. The rollback puts back the bundle of the build the
+daemon reported when the run began, which is still the daemon running
+unless the handover failed after the old daemon had exited. A bundle is that
+build when its `Contents/TBDBuildIdentity.json` names the same commit,
+source worktree and dirty flag as the daemon's, or the same commit when the
+daemon reported only that. When the installed bundle already is that build —
+a re-run over the build the daemon runs — there is nothing to put back. When
+the kept bundle is, the run waits until
 three seconds have passed since the app it stopped exited, so that nothing
 moves the bundle while macOS may still be checking it, then swaps the kept
 bundle back in the same way an install does — copied in beside the new one,
 then two renames — and tells LaunchServices about it. It logs `restored
 previous app bundle` (with a note when LaunchServices could not register it,
 which fails nothing but can leave `tbd://` links and the icon stale). The
-kept copy is spent: it is the bundle now installed. When the daemon reported
-no build, the run puts back the kept bundle only if it kept that bundle
-itself. Either way it then puts the update clone's `.build/release` link back
+kept copy is spent: it is the bundle now installed. A kept bundle that the
+run copied from `/Applications` itself goes back too when the daemon
+reported no build, or when the bundle's identity names none, since it is the
+bundle that was installed when the run began. Either way the run then puts
+the update clone's `.build/release` link back
 the way the run found it, relaunches the app it stopped before the handover,
 and exits non-zero. That is the case the kept bundle exists for — a new app
 driving the old daemon is a state nobody should be left in. The relaunch
@@ -500,10 +508,10 @@ safe whatever the interruption cut short:
   keep a copy left at a hidden name beside `~/tbd/updates/previous/TBD.app`
   is renamed back. The next update does the same before it clears anything,
   and installs nothing when it cannot.
-- **The release link** – if the swap had not yet run, the update clone's
-  `.build/release` goes back as after a failed install. The run points it at
-  the new build before the install begins, and an app starts its next daemon
-  from it.
+- **The release link** – unless the bundle installed once the step above is
+  done is the new build, the update clone's `.build/release` goes back as
+  after a failed install. The run points it at the new build before the
+  install begins, and an app starts its next daemon from it.
 
 Then the run logs an error saying it was interrupted while installing, a
 line saying the app is not running when the run had stopped it, or may not
@@ -511,24 +519,27 @@ be running when the interruption came while the run was still stopping it,
 and reports what is installed, what the daemon runs and where the kept
 bundle is:
 
-- **New build** – the commit the run was installing.
+- **New build** – the build the run was installing.
 - **Installed bundle** – the build `/Applications/TBD.app` holds, read from
   its `Contents/TBDBuildIdentity.json`, or none.
 - **Daemon** – the build it reported when the run began, or unknown once the
   handover had begun.
 - **Kept bundle** – where it is and its build, or none.
-- **Release link** – where `.build/release` points and the build it holds.
+- **Build directory** – the update clone's `.build/release`, or
+  `.build/debug` under `--debug`, where an app of that build starts a daemon
+  from: where it points and the build it holds.
 
-When the installed bundle and the daemon are known to be the same build and
-`.build/release` holds that build too, nothing needs recovering, and the run
-says so. An interruption before the swap leaves that on a run that installs
-a downloaded build, when app and daemon were the same build to begin with. A
-local build has written the new build into `.build/release` itself, which no
-link undoes, and an interruption after the swap leaves the new build
-installed in front of the daemon the run started with or, once the handover
-has begun, one it cannot name, so each of those gets the recovery steps,
-which name the kept bundle where it is. The next update clears what else the
-run left beside either bundle.
+Each build is given as its commit, the worktree it was built from and
+whether that was dirty, as far as its identity says. When the installed
+bundle and the build directory are known to hold the daemon's build, nothing
+needs recovering, and the run says so. An interruption before the swap
+leaves that on a run that installs a downloaded build, when app and daemon
+were the same build to begin with. A local build has written the new build
+into its build directory itself, which no link undoes, and an interruption
+after the swap leaves the new build installed in front of the daemon the run
+started with or, once the handover has begun, one it cannot name, so each
+of those gets the recovery steps, which name the kept bundle where it is.
+The next update clears what else the run left beside either bundle.
 
 To recover from either:
 
