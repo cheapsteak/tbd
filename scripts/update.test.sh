@@ -45,6 +45,11 @@ ln -s "$BASH" "$TEST_TMP/bash-pin/bash"
 PATH="$TEST_TMP/bash-pin:$PATH"
 export PATH
 
+# A rollback after the app stop waits APP_EXIT_SETTLE_SECONDS before it moves
+# the installed bundle. No case here has a macOS reading that bundle, so every
+# run skips the wait, save the one case that measures it and sets its own.
+export TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=0
+
 # Source the script for the pure-function cases. Sourcing defines functions and
 # runs nothing: main is guarded on BASH_SOURCE. TBD_HOME is set first because
 # the derived paths are computed at source time.
@@ -260,6 +265,16 @@ EOF
 # macOS reads the bundle of an app that quits: `bundle-at-stop` followed by
 # the bundle's SourceWorktreePath.txt, or by `absent` when nothing is there,
 # or `incomplete` when the bundle has no executable.
+#
+# And `bundle-cp`, for the library's TBD_BUNDLE_CP seam, through which every
+# bundle copy goes. It copies with /bin/cp and records in FAKE_EVENTS_LOG what
+# FAKE_INSTALLED_BUNDLE holds as the copy starts and once it has finished, in
+# the same words as bundle-at-stop:
+#   copy <source> -> <destination> at <epoch seconds> installed <what>
+#   copied <destination> installed <what>
+# With FAKE_COPY_FAILS=1, a copy into an install's incoming sibling fails
+# once it has copied, as a copy that ran out of space at its last file would,
+# leaving its tree behind for the install to remove.
 mkstub_tbd() {
     local bin="$1"
     mkdir -p "$bin"
@@ -336,6 +351,32 @@ EOF
     cat > "$bin/security" << 'EOF'
 #!/bin/sh
 exit 1
+EOF
+    cat > "$bin/bundle-cp" << 'EOF'
+#!/bin/sh
+installed_state() {
+    if [ ! -d "${FAKE_INSTALLED_BUNDLE-}" ]; then
+        echo absent
+    elif [ ! -x "$FAKE_INSTALLED_BUNDLE/Contents/MacOS/TBDApp" ]; then
+        echo incomplete
+    else
+        cat "$FAKE_INSTALLED_BUNDLE/Contents/SourceWorktreePath.txt" 2>/dev/null
+    fi
+}
+src=""
+dst=""
+for arg in "$@"; do
+    src="$dst"
+    dst="$arg"
+done
+log="${FAKE_EVENTS_LOG:-/dev/null}"
+printf 'copy %s -> %s at %s installed %s\n' "$src" "$dst" "$(date +%s)" "$(installed_state)" >> "$log"
+/bin/cp "$@" || exit $?
+printf 'copied %s installed %s\n' "$dst" "$(installed_state)" >> "$log"
+case "$dst" in
+    *-install-incoming) [ "${FAKE_COPY_FAILS:-0}" != 1 ] || exit 1 ;;
+esac
+exit 0
 EOF
     chmod +x "$bin"/*
 }
@@ -1959,7 +2000,10 @@ run_update_release() {
             INSTALLED_BUNDLE="$FAKE_INSTALLED_BUNDLE"
             assemble_app_bundle() { mkdir -p "$2/TBD.app/Contents/MacOS"; }
             sign_app_bundle() { :; }
-            install_new_bundle() { :; }
+            install_new_bundle() {
+                printf "install-bundle %s\n" "$2"
+                [ "${FAKE_INSTALL_FAILS:-0}" != 1 ]
+            }
             hand_over_to_new_daemon() {
                 printf "handover-daemon %s\n" "$2"
                 [ "${FAKE_HANDOVER_FAILS:-0}" = 1 ] && return 1
@@ -2287,6 +2331,24 @@ test_release_failed_handover_restores_the_link() {
         "$(prebuilt_entries "$case_dir")"
 }
 
+# A failed install puts the link back as a failed handover does, so that a
+# reboot respawns the build that is still running, and never reaches the
+# handover. (FAKE_INSTALL_FAILS=1 fails the stubbed install_new_bundle.)
+test_release_failed_install_restores_the_link() {
+    local case_dir out previous
+    case_dir="$(mkcase_release_live release-install-fails)"
+    previous="$case_dir/home/tbd/updates/prebuilt/1111111111111111111111111111111111111111"
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 FAKE_INSTALL_FAILS=1 \
+        run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "the run reaches the install" "install-bundle" "$out"
+    assert_not_contains "a failed install never reaches the handover" "handover-daemon" "$out"
+    assert_contains "a failed install fails the run" "rc=1" "$out"
+    assert_eq "a failed install points the link back at the running build" "$previous" \
+        "$(link_target "$case_dir/home/tbd/updates/src/.build/release")"
+    assert_eq "a failed install leaves no new tree" "1111111111111111111111111111111111111111" \
+        "$(prebuilt_entries "$case_dir")"
+}
+
 # The trees under <case>/home/tbd/updates/prebuilt, by name, space-separated
 # and sorted. Dotfiles (the rollback record) are not trees.
 prebuilt_entries() {
@@ -2497,15 +2559,20 @@ test_local_build_takes_the_link_back_from_a_download() {
 # hand_over_to_new_daemon — keeping the installed bundle, installing the new
 # one, rolling back — with only the handover itself faked: it records
 # "bundle-at-handover" and the installed bundle's SourceWorktreePath.txt, then
-# "handover", and fails under FAKE_HANDOVER_FAILS=1. FAKE_INSTALL_FAILS=1
-# beside it fails the copy into place after the installed bundle has been
-# kept, by handing the real install_new_bundle a bundle directory that does
-# not exist. (Not by stubbing install_app_bundle: main sources
-# restart-bundle-lib.sh as it starts, which would replace the stub.) The case
-# must create <case>/Applications for the install to land in.
-# FAKE_HANDOVER_EXITS=1 exits the whole run from inside it, the way a step
-# that calls `exit` or a signal does, so that only the exit trap is left to
-# decide about the app.
+# "handover", and fails under FAKE_HANDOVER_FAILS=1. Every bundle copy goes
+# through the bundle-cp stub (mkstub_tbd), which records what the installed
+# path holds while it copies, and FAKE_COPY_FAILS=1 fails the copy of a new
+# bundle into place. (Through the library's TBD_BUNDLE_CP seam rather than a
+# stub of a library function: main sources restart-bundle-lib.sh as it
+# starts, which would replace the stub.) FAKE_EXITS_AFTER_KEEP=1 exits the
+# whole run once the installed bundle has been kept, before anything has
+# moved. The case must create <case>/Applications for the install to land in.
+# FAKE_HANDOVER_EXITS=1 exits the whole run from inside the handover, the way
+# a step that calls `exit` or a signal does, so that only the exit trap is
+# left to decide about the app; with the stubbed install as well as the real
+# one.
+# FAKE_STAMP_STOP=1 records "app-stop-returned at <epoch seconds>" once the
+# stop before the handover has returned.
 # FAKE_EXITS_BEFORE_APP_STAGE=1 exits the run the same way after the handover
 # has completed, from the CLI refresh that runs just before the app stage.
 # FAKE_APP_STARTS_DURING_HANDOVER=1 brings an app up while the handover runs,
@@ -2545,6 +2612,7 @@ run_update_around_handover() {
         FAKE_INSTALLED_BUNDLE="$case_dir/Applications/TBD.app" \
         FAKE_DAEMON_LOG="$case_dir/tbdd.log" \
         FAKE_SUCCESSOR_BIN="$successor_bin" \
+        TBD_BUNDLE_CP="$case_dir/bin/bundle-cp" \
         PATH="$case_dir/bin:$PATH" \
         bash -c '
             script="$1"; shift
@@ -2552,19 +2620,27 @@ run_update_around_handover() {
             source "$script"
             INSTALLED_BUNDLE="$FAKE_INSTALLED_BUNDLE"
             DAEMON_LOG="$FAKE_DAEMON_LOG"
+            if [ "${FAKE_STAMP_STOP:-0}" = 1 ]; then
+                eval "real_$(declare -f stop_app_before_handover)"
+                stop_app_before_handover() {
+                    real_stop_app_before_handover
+                    printf "app-stop-returned at %s\n" "$(date +%s)" >> "$FAKE_EVENTS_LOG"
+                }
+            fi
             if [ "${FAKE_REAL_HANDOVER:-0}" = 1 ]; then
                 HANDOVER_TIMEOUT="${FAKE_HANDOVER_TIMEOUT:-$HANDOVER_TIMEOUT}"
                 HANDOVER_STOP_GRACE=1
             elif [ "${FAKE_REAL_INSTALL:-0}" = 1 ]; then
-                if [ "${FAKE_INSTALL_FAILS:-0}" = 1 ]; then
-                    eval "real_$(declare -f install_new_bundle)"
-                    install_new_bundle() { real_install_new_bundle "$1.missing" "$2"; }
+                if [ "${FAKE_EXITS_AFTER_KEEP:-0}" = 1 ]; then
+                    eval "real_$(declare -f keep_installed_bundle)"
+                    keep_installed_bundle() { real_keep_installed_bundle "$@"; exit 5; }
                 fi
                 handover() {
                     printf "bundle-at-handover %s\n" \
                         "$(cat "$INSTALLED_BUNDLE/Contents/SourceWorktreePath.txt" 2>/dev/null)" \
                         >> "$FAKE_EVENTS_LOG"
                     printf "handover %s\n" "$1" >> "$FAKE_EVENTS_LOG"
+                    [ "${FAKE_HANDOVER_EXITS:-0}" = 1 ] && exit 3
                     [ "${FAKE_HANDOVER_FAILS:-0}" != 1 ]
                 }
             else
@@ -2795,24 +2871,75 @@ test_the_app_quits_in_front_of_the_whole_new_bundle() {
     fi
 }
 
+# THE REGRESSION: the install emptied the installed path and only then copied
+# the new bundle in — moved aside, or deleted — so for as long as the copy ran
+# the app was running in front of a missing or half-copied bundle, and an app
+# that quit then (a Cmd-Q, a crash) took every session with it. The new bundle
+# is now copied in beside the installed one and swapped in once whole. The
+# bundle-cp stub records what the installed path holds as each copy starts and
+# once it has finished: every record must be the whole bundle from before the
+# update, and one of the copies must be the new bundle's, into the staging
+# sibling. An install that empties the path first records `absent`, and one
+# that copies past the seam records no copy at all.
+test_the_installed_bundle_stays_whole_while_the_update_copies() {
+    local case_dir rc events installed incoming
+    case_dir="$(mkcase installed-whole-while-copying)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    incoming="$case_dir/Applications/.TBD-install-incoming"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" >/dev/null
+    FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir" >/dev/null; rc=$?
+    assert_eq "the update succeeds" "0" "$rc"
+    assert_eq "the new bundle is copied to the staging sibling once" "1" \
+        "$(grep -c -F -- "-> $incoming at " "$events")"
+    assert_eq "every copy starts and ends with the whole bundle from before the update installed" \
+        "before-the-update" \
+        "$(sed -n -e 's/^copy .* installed //p' -e 's/^copied .* installed //p' "$events" | sort -u)"
+    assert_eq "the new build is installed" "$case_dir/home/tbd/updates/src" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "no staging sibling is left" "gone" "$(path_state "$incoming")"
+    assert_eq "no outgoing sibling is left" "gone" \
+        "$(path_state "$case_dir/Applications/.TBD-install-outgoing")"
+}
+
 # With the install ahead of the stop, a failed install happens with the app
-# still running. The real install runs, keeps the installed bundle and then
-# fails its copy into place: the run puts the kept bundle back and fails, and
-# because the app was never stopped it is never signalled, nothing launches
-# it again, and nothing reports an interruption or a rollback left undone.
+# still running. The real install runs, keeps a copy of the installed bundle,
+# and then the copy of the new bundle into the staging sibling fails, leaving
+# its tree behind: the run removes it and fails with the installed bundle as
+# it was, whole throughout, and because the app was never stopped it is never
+# signalled, nothing launches it again, and nothing reports an interruption or
+# a rollback left undone.
 test_a_failed_install_leaves_the_app_running() {
-    local case_dir out rc events installed
+    local case_dir out rc events installed incoming
     case_dir="$(mkcase app-failed-install)"
     events="$case_dir/events.log"
     installed="$case_dir/Applications/TBD.app"
+    incoming="$case_dir/Applications/.TBD-install-incoming"
     mkdir -p "$case_dir/Applications"
     mkbundle "$installed" "before-the-update" >/dev/null
-    out="$(FAKE_REAL_INSTALL=1 FAKE_INSTALL_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+    out="$(FAKE_REAL_INSTALL=1 FAKE_COPY_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
     assert_eq "a failed install fails the run" "1" "$rc"
     assert_contains_literal "the failed copy is logged" "ERROR: could not install to $installed" "$out"
-    assert_contains "the bundle this run kept goes back" "restored previous app bundle" "$out"
+    assert_contains "and says the installed bundle is untouched" \
+        "what was installed there is untouched" "$out"
+    assert_eq "the copy into the staging sibling was made" "1" \
+        "$(grep -c -F -- "-> $incoming at " "$events")"
+    assert_eq "the installed path holds the bundle from before the update throughout" \
+        "before-the-update" \
+        "$(sed -n -e 's/^copy .* installed //p' -e 's/^copied .* installed //p' "$events" | sort -u)"
     assert_eq "the installed bundle is the one from before the update" "before-the-update" \
         "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    if [ -x "$installed/Contents/MacOS/TBDApp" ]; then
+        pass "the installed bundle is whole"
+    else
+        fail "the installed bundle is whole"
+    fi
+    assert_eq "the failed copy is removed" "gone" "$(path_state "$incoming")"
+    assert_eq "nothing was moved out" "gone" \
+        "$(path_state "$case_dir/Applications/.TBD-install-outgoing")"
+    assert_not_contains "nothing is put back, since nothing moved" \
+        "restored previous app bundle" "$out"
     assert_not_contains "the app is never signalled" "^pkill" "$(cat "$events")"
     assert_not_contains "nothing is handed over" "^handover" "$(cat "$events")"
     assert_not_contains "no app is launched, by main or by the exit trap" "^open" "$(cat "$events")"
@@ -3065,6 +3192,158 @@ test_an_exit_after_the_handover_still_relaunches_the_app() {
     fi
 }
 
+# The rollback after a failed handover is the one step that moves the
+# installed bundle after the app stop, and a handover can fail within
+# milliseconds of it, while macOS may still be reading the bundle for the
+# app's exit. So the rollback waits for the exit to settle before it starts on
+# the bundle. Here the settle is three seconds and the handover fails at once:
+# the rollback's copy of the kept bundle must start at least two whole clock
+# seconds after the stop returned (`date +%s` counts whole seconds, so three
+# seconds can read as two), where without the wait it starts in the same
+# second or the next. Under --no-app this run stopped no app, so no exit is
+# being checked, and the same staged rollback runs without a wait.
+test_a_rollback_waits_for_the_app_exit_to_settle() {
+    local case_dir out rc events installed incoming kept stopped_at copied_at
+    case_dir="$(mkcase rollback-settles)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    incoming="$case_dir/Applications/.TBD-install-incoming"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" >/dev/null
+    out="$(TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=3 FAKE_STAMP_STOP=1 FAKE_REAL_INSTALL=1 \
+        FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "a failed handover fails the run" "1" "$rc"
+    assert_contains "the wait is logged" "for the app's exit to settle" "$out"
+    stopped_at="$(sed -n 's/^app-stop-returned at //p' "$events" | head -1)"
+    copied_at="$(grep -F -- "copy $kept -> $incoming at " "$events" |
+        sed -n 's/.* at \([0-9][0-9]*\) installed .*/\1/p' | head -1)"
+    if [ -n "$stopped_at" ] && [ -n "$copied_at" ] && [ $((copied_at - stopped_at)) -ge 2 ]; then
+        pass "the rollback starts on the bundle only once the settle has passed"
+    else
+        fail "the rollback starts on the bundle only once the settle has passed: stop returned at [$stopped_at], rollback copy at [$copied_at]"
+    fi
+    assert_before "the stop returns before the rollback copies the kept bundle" \
+        "$(first_line_starting "$events" "app-stop-returned")" \
+        "$(first_line_containing "$events" "copy $kept -> $incoming at ")"
+    assert_eq "the rollback puts the bundle from before the update back" "before-the-update" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "the rollback leaves no sibling behind" "gone gone" \
+        "$(path_state "$incoming") $(path_state "$case_dir/Applications/.TBD-install-outgoing")"
+    assert_eq "the app this run stopped is relaunched once" "1" "$(grep -c '^open ' "$events")"
+
+    case_dir="$(mkcase rollback-no-app)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    incoming="$case_dir/Applications/.TBD-install-incoming"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" >/dev/null
+    out="$(TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=3 FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 \
+        run_update_around_handover "$case_dir" --no-app)"; rc=$?
+    assert_eq "a failed handover fails the run (--no-app)" "1" "$rc"
+    assert_not_contains "with no app stopped, the rollback does not wait (--no-app)" \
+        "to settle" "$out"
+    assert_eq "the rollback still stages the kept bundle beside the installed one (--no-app)" "1" \
+        "$(grep -c -F -- "copy $kept -> $incoming at " "$events")"
+    assert_contains "and puts it back (--no-app)" "restored previous app bundle" "$out"
+    assert_eq "the bundle from before the update is installed (--no-app)" "before-the-update" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+}
+
+# An install that stops part-way leaves its siblings behind: a partial copy at
+# .TBD-install-incoming, and, when it stopped between its two renames, the
+# bundle it was replacing at .TBD-install-outgoing with nothing installed. The
+# next install clears both before it does anything else, which is their only
+# reclaimer, and puts an outgoing bundle back first when nothing is installed,
+# since that is the last whole bundle there is. Two runs. Leftovers beside an
+# installed bundle are removed, and the installed bundle is the one kept. An
+# outgoing bundle with nothing installed is put back, so it is the one kept,
+# rather than deleted with the rest.
+test_an_update_clears_what_an_interrupted_install_left() {
+    local case_dir out rc apps kept new_build
+    case_dir="$(mkcase leftovers-beside-installed)"
+    apps="$case_dir/Applications"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    new_build="$case_dir/home/tbd/updates/src"
+    mkdir -p "$apps/.TBD-install-incoming/Contents"
+    printf 'half' > "$apps/.TBD-install-incoming/Contents/half-copied"
+    mkbundle "$apps/TBD.app" "before-the-update" >/dev/null
+    mkbundle "$apps/.TBD-install-outgoing" "left-outgoing" >/dev/null
+    FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir" >/dev/null; rc=$?
+    assert_eq "an update beside leftovers succeeds" "0" "$rc"
+    assert_eq "the new build is installed" "$new_build" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "the bundle that was installed is the one kept, not the leftover" "before-the-update" \
+        "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "both leftovers are gone" "gone gone" \
+        "$(path_state "$apps/.TBD-install-incoming") $(path_state "$apps/.TBD-install-outgoing")"
+
+    case_dir="$(mkcase leftovers-mid-swap)"
+    apps="$case_dir/Applications"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    new_build="$case_dir/home/tbd/updates/src"
+    mkdir -p "$apps/.TBD-install-incoming/Contents"
+    printf 'half' > "$apps/.TBD-install-incoming/Contents/half-copied"
+    mkbundle "$apps/.TBD-install-outgoing" "stopped-mid-swap" >/dev/null
+    out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "an update after a run stopped mid-swap succeeds" "0" "$rc"
+    assert_contains_literal "the outgoing bundle is put back, and the log says so" \
+        "put back $apps/TBD.app from $apps/.TBD-install-outgoing" "$out"
+    assert_eq "the bundle put back is the one kept" "stopped-mid-swap" \
+        "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "the new build is installed (mid-swap)" "$new_build" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "both leftovers are gone (mid-swap)" "gone gone" \
+        "$(path_state "$apps/.TBD-install-incoming") $(path_state "$apps/.TBD-install-outgoing")"
+}
+
+# An exit while the installation moves is reported rather than rolled back,
+# and the report names the build the installed path holds, read from its
+# build identity. An exit before the swap leaves the build the run started
+# with, and an app the run never stopped, still running; one after the swap
+# leaves the new build.
+test_an_interrupted_install_reports_which_build_is_installed() {
+    local case_dir out rc events installed old_commit new_commit
+    old_commit=0000000000000000000000000000000000000000
+    case_dir="$(mkcase interrupted-before-swap)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" "$old_commit" >/dev/null
+    out="$(FAKE_REAL_INSTALL=1 FAKE_EXITS_AFTER_KEEP=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "the run exits with the status it left by (before the swap)" "5" "$rc"
+    assert_contains "the interruption is reported (before the swap)" \
+        "ERROR: the run was interrupted while installing and handing over" "$out"
+    assert_contains_literal "the report names the build from before the run" \
+        "$installed holds build $old_commit, not the" "$out"
+    assert_eq "that build is still installed" "before-the-update" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_not_contains "the app is never signalled (before the swap)" "^pkill" "$(cat "$events")"
+    assert_not_contains "no app is launched (before the swap)" "^open" "$(cat "$events")"
+    assert_not_contains "nothing claims the app was stopped (before the swap)" \
+        "the app was stopped for the handover" "$out"
+    if [ -f "$case_dir/app" ]; then
+        pass "the app the run never stopped is still running"
+    else
+        fail "the app the run never stopped is still running"
+    fi
+
+    case_dir="$(mkcase interrupted-after-swap)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" "$old_commit" >/dev/null
+    out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_EXITS=1 run_update_around_handover "$case_dir")"; rc=$?
+    new_commit="$(git -C "$case_dir/home/tbd/updates/src" rev-parse HEAD 2>/dev/null)"
+    assert_eq "the run exits with the status it left by (after the swap)" "3" "$rc"
+    assert_contains_literal "the report names the new build" \
+        "$installed holds the new build, $new_commit" "$out"
+    assert_contains "the app it stopped is left stopped" \
+        "the app was stopped for the handover and is not running" "$out"
+    assert_not_contains "no app is launched (after the swap)" "^open" "$(cat "$events")"
+}
+
 # --no-app leaves the running app alone on both sides of the handover, and
 # whether or not the handover completes: an app that stays alive owns its
 # claims on the new daemon legitimately, and nothing that was never stopped
@@ -3226,14 +3505,25 @@ test_a_cold_start_hands_over_without_a_predecessor() {
 # MARK: - Installing and handing over
 
 # A directory that looks enough like an assembled bundle for install and
-# restore to move it around. Echoes its path.
+# restore to move it around, with a build identity naming <commit> when one is
+# given. Echoes its path.
+#
+#   mkbundle <dir> <marker> [commit]
 mkbundle() {
-    local dir="$1" marker="$2"
+    local dir="$1" marker="$2" commit="${3-}"
     mkdir -p "$dir/Contents/MacOS"
     printf '%s' "$marker" > "$dir/Contents/SourceWorktreePath.txt"
     printf '#!/bin/sh\nexit 0\n' > "$dir/Contents/MacOS/TBDApp"
     chmod +x "$dir/Contents/MacOS/TBDApp"
+    if [ -n "$commit" ]; then
+        printf '{"commit": "%s"}\n' "$commit" > "$dir/Contents/TBDBuildIdentity.json"
+    fi
     printf '%s\n' "$dir"
+}
+
+# `present` when anything is at <path>, `gone` otherwise.
+path_state() {
+    if [ -e "$1" ]; then echo present; else echo gone; fi
 }
 
 # Write a stand-in successor daemon at <path>: a script that records its pid
@@ -3746,6 +4036,7 @@ test_summary_survives_an_unknown_commit
 test_cli_refresh_only_touches_an_existing_install
 test_the_app_is_stopped_before_the_handover
 test_the_app_quits_in_front_of_the_whole_new_bundle
+test_the_installed_bundle_stays_whole_while_the_update_copies
 test_a_failed_install_leaves_the_app_running
 test_an_app_started_during_the_handover_is_stopped_before_the_launch
 test_signing_stays_inside_the_case_with_and_without_ci
@@ -3754,6 +4045,9 @@ test_a_failed_handover_whose_restore_fails_leaves_the_app_stopped
 test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_exit_mid_handover_leaves_the_app_stopped
 test_an_exit_after_the_handover_still_relaunches_the_app
+test_a_rollback_waits_for_the_app_exit_to_settle
+test_an_update_clears_what_an_interrupted_install_left
+test_an_interrupted_install_reports_which_build_is_installed
 test_no_app_never_stops_the_app
 test_the_app_and_the_wake_wait_for_the_predecessor_to_exit
 test_a_predecessor_that_never_exits_fails_the_handover
@@ -3787,6 +4081,7 @@ test_release_no_asset_auto_skips
 test_release_no_asset_manual_builds_locally
 test_release_non_arm64_builds_locally
 test_release_failed_handover_restores_the_link
+test_release_failed_install_restores_the_link
 test_release_dry_run_keeps_nothing_it_downloaded
 test_release_failed_app_build_leaves_no_new_tree
 test_release_failed_link_restores_the_running_link

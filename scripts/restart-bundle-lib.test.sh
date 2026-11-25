@@ -8,7 +8,9 @@
 # `TBD_SIGNING_KEYCHAIN` inside the temp directory, so nothing here signs,
 # creates a keychain or a key, launches, registers, or kills anything real. The daemon process cases start copies of `sleep` of
 # their own and signal only those. macOS-only: the assembly reads `plutil` and
-# the install uses `/bin/cp -cR`.
+# the install uses `/bin/cp -cR`. The install cases that watch the installed
+# path while a copy runs point the `TBD_BUNDLE_CP` seam at a stub that records
+# it and copies with `/bin/cp`.
 # shellcheck disable=SC2329 # test_* helpers are dispatched dynamically below
 set -uo pipefail
 
@@ -1021,6 +1023,160 @@ EOF
     assert_eq "a re-sourced library registers through the stub too" \
         "lsregister -f $target" "$(cat "$FAKE_LSREGISTER_LOG" 2>/dev/null)"
     unset FAKE_LSREGISTER_LOG
+}
+
+# A directory that looks enough like an assembled bundle for an install to
+# move it around, carrying <marker> in its SourceWorktreePath.txt. Echoes its
+# path.
+mkfakebundle() {
+    local dir="$1" marker="$2"
+    mkdir -p "$dir/Contents/MacOS"
+    printf '%s' "$marker" > "$dir/Contents/SourceWorktreePath.txt"
+    printf '#!/bin/sh\nexit 0\n' > "$dir/Contents/MacOS/TBDApp"
+    chmod +x "$dir/Contents/MacOS/TBDApp"
+    printf '%s\n' "$dir"
+}
+
+# Write a stand-in for the library's TBD_BUNDLE_CP seam at <stub>. It records
+# in <log> what <installed> holds as each copy starts and once it has finished
+# — the bundle's marker, `absent`, or `incomplete` when it has no executable —
+# and copies with /bin/cp in between. With STUB_COPY_FAILS set it fails once
+# it has copied, leaving its tree behind as a copy cut off at its last file
+# would.
+#
+#   mkcopystub <stub> <installed> <log>
+mkcopystub() {
+    local stub="$1" installed="$2" log="$3"
+    cat > "$stub" << EOF
+#!/bin/sh
+state() {
+    if [ ! -d "$installed" ]; then
+        echo absent
+    elif [ ! -x "$installed/Contents/MacOS/TBDApp" ]; then
+        echo incomplete
+    else
+        cat "$installed/Contents/SourceWorktreePath.txt"
+    fi
+}
+printf 'start %s\n' "\$(state)" >> "$log"
+/bin/cp "\$@" || exit \$?
+printf 'end %s\n' "\$(state)" >> "$log"
+[ -z "\${STUB_COPY_FAILS:-}" ] || exit 1
+EOF
+    chmod +x "$stub"
+}
+
+test_install_siblings_sit_beside_the_installed_bundle() {
+    assert_eq "the incoming sibling is hidden beside the bundle, with no .app" \
+        "/Applications/.TBD-install-incoming" "$(app_bundle_sibling /Applications/TBD.app incoming)"
+    assert_eq "the outgoing sibling likewise" \
+        "/Applications/.TBD-install-outgoing" "$(app_bundle_sibling /Applications/TBD.app outgoing)"
+}
+
+# THE REGRESSION: the install removed the installed bundle and then copied the
+# new one over it, so the installed path was missing or half-copied for as
+# long as the copy ran, with the app running in front of it. On macOS 27 an
+# app that quits then has every process in its coalition force-quit: the
+# daemon, every holder and every agent session. The new bundle is now copied
+# in beside the installed one and swapped in once whole. The copy stub records
+# what the installed path holds as the copy starts and once it has finished,
+# and both must be the old bundle, whole. The old install records `absent`, or
+# nothing at all where it copies past the seam.
+test_install_keeps_a_whole_bundle_installed_while_it_copies() {
+    local root installed log rc=0
+    root="$TEST_TMP/install-whole-while-copying"
+    installed="$root/Applications/TBD.app"
+    log="$root/copies.log"
+    mkdir -p "$root/Applications"
+    mkfakebundle "$installed" old >/dev/null
+    mkfakebundle "$root/new/TBD.app" new >/dev/null
+    mkcopystub "$root/copy" "$installed" "$log"
+
+    export FAKE_LSREGISTER_LOG="$root/lsregister.log"
+    TBD_BUNDLE_CP="$root/copy" install_app_bundle "$root/new/TBD.app" "$installed" \
+        >/dev/null 2>&1 || rc=$?
+    assert_eq "the staged install succeeds" "0" "$rc"
+    assert_eq "the old bundle is installed, whole, as the copy starts and when it ends" \
+        "start old
+end old" "$(cat "$log" 2>/dev/null)"
+    assert_eq "the new bundle is installed" "new" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_no_dir "no incoming sibling is left" "$root/Applications/.TBD-install-incoming"
+    assert_no_dir "the replaced bundle is removed" "$root/Applications/.TBD-install-outgoing"
+    assert_eq "the new bundle is registered with LaunchServices" \
+        "lsregister -f $installed" "$(cat "$FAKE_LSREGISTER_LOG" 2>/dev/null)"
+    unset FAKE_LSREGISTER_LOG
+}
+
+# A copy that fails, here once it has copied everything, leaves the installed
+# bundle as it was and removes what it copied, and the install fails without
+# registering anything.
+test_install_whose_copy_fails_leaves_the_installed_bundle() {
+    local root installed log rc=0
+    root="$TEST_TMP/install-copy-fails"
+    installed="$root/Applications/TBD.app"
+    log="$root/copies.log"
+    mkdir -p "$root/Applications"
+    mkfakebundle "$installed" old >/dev/null
+    mkfakebundle "$root/new/TBD.app" new >/dev/null
+    mkcopystub "$root/copy" "$installed" "$log"
+
+    export FAKE_LSREGISTER_LOG="$root/lsregister.log"
+    TBD_BUNDLE_CP="$root/copy" STUB_COPY_FAILS=1 \
+        install_app_bundle "$root/new/TBD.app" "$installed" >/dev/null 2>&1 || rc=$?
+    assert_eq "a failed copy fails the install, with the installed bundle as it was" "1" "$rc"
+    assert_eq "the old bundle stays installed, whole, while the copy runs" \
+        "start old
+end old" "$(cat "$log" 2>/dev/null)"
+    assert_eq "the old bundle is still installed" "old" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_file "with its executable" "$installed/Contents/MacOS/TBDApp"
+    assert_no_dir "the failed copy is removed" "$root/Applications/.TBD-install-incoming"
+    assert_no_dir "nothing was moved out" "$root/Applications/.TBD-install-outgoing"
+    assert_eq "nothing is registered" "" "$(cat "$FAKE_LSREGISTER_LOG" 2>/dev/null)"
+    unset FAKE_LSREGISTER_LOG
+}
+
+# An install that stops part-way leaves its siblings behind, and the next one
+# clears them before it starts: they are created by nothing else. An outgoing
+# bundle with nothing installed is a run stopped between its two renames, and
+# it is put back rather than deleted, since it is the last whole bundle there
+# is. One with a bundle installed in front of it is only a leftover.
+test_install_clears_what_an_interrupted_install_left() {
+    local root apps out rc=0
+    root="$TEST_TMP/install-leftovers"
+    apps="$root/Applications"
+    mkdir -p "$apps/.TBD-install-incoming/Contents"
+    printf 'half' > "$apps/.TBD-install-incoming/Contents/half-copied"
+    mkfakebundle "$apps/TBD.app" old >/dev/null
+    mkfakebundle "$apps/.TBD-install-outgoing" left-outgoing >/dev/null
+    mkfakebundle "$root/new/TBD.app" new >/dev/null
+
+    out="$(put_back_outgoing_app_bundle "$apps/TBD.app" 2>&1)"
+    assert_eq "with a bundle installed, nothing is put back" "" "$out"
+    assert_eq "and the installed bundle is untouched" "old" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+    assert_eq "an install beside leftovers succeeds" "0" "$rc"
+    assert_eq "the new bundle is installed" "new" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_no_dir "the partial copy is gone" "$apps/.TBD-install-incoming"
+    assert_no_dir "the leftover outgoing bundle is gone" "$apps/.TBD-install-outgoing"
+
+    rm -rf "$apps/TBD.app"
+    mkdir -p "$apps/.TBD-install-incoming/Contents"
+    printf 'half' > "$apps/.TBD-install-incoming/Contents/half-copied"
+    mkfakebundle "$apps/.TBD-install-outgoing" stopped-mid-swap >/dev/null
+    rc=0
+    out="$(reclaim_app_bundle_siblings "$apps/TBD.app" 2>&1)" || rc=$?
+    assert_eq "clearing after a run stopped mid-swap succeeds" "0" "$rc"
+    assert_eq "it says what it put back" \
+        "put back $apps/TBD.app from $apps/.TBD-install-outgoing, where an interrupted install had left it" \
+        "$out"
+    assert_eq "the outgoing bundle is installed again" "stopped-mid-swap" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_no_dir "the partial copy is gone (mid-swap)" "$apps/.TBD-install-incoming"
+    assert_no_dir "nothing is left outgoing (mid-swap)" "$apps/.TBD-install-outgoing"
 }
 
 # MARK: - App process control
@@ -2399,6 +2555,10 @@ test_sign_rejects_a_missing_bundle_argument
 test_install_replaces_the_previous_bundle
 test_install_rejects_missing_arguments
 test_install_ignores_a_gnu_cp_first_on_path
+test_install_siblings_sit_beside_the_installed_bundle
+test_install_keeps_a_whole_bundle_installed_while_it_copies
+test_install_whose_copy_fails_leaves_the_installed_bundle
+test_install_clears_what_an_interrupted_install_left
 test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
 test_stop_waits_for_the_app_and_escalates
