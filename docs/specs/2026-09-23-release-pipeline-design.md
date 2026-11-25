@@ -260,9 +260,10 @@ the fetch and detach of `~/tbd/updates/src` run as before, and then
 3. **Stop here on `--dry-run`**, with the previous link restored.
 4. **Point** `~/tbd/updates/src/.build/release` at the tree, by an atomic
    rename of a symlink. The unchanged tail follows: `assemble_app_bundle`,
-   `sign_app_bundle`, `install_and_handover`, the CLI refresh, the app stage
-   and the wake. The handover starts the daemon through that link, so it runs
-   the downloaded binary.
+   `sign_app_bundle`, `install_new_bundle`, the app stop,
+   `hand_over_to_new_daemon`, the CLI refresh, the app stage and the wake.
+   The handover starts the daemon through that link, so it runs the
+   downloaded binary.
 5. **On a failed handover**, the previous app bundle is restored as before,
    and the link is pointed back at the tree still running.
 6. **On success**, record the tree that was live when the run started as the
