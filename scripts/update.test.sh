@@ -2434,7 +2434,8 @@ test_release_interrupted_staging_puts_the_link_back() {
     assert_contains_literal "the report names the installed build" \
         "installed bundle at $installed: build $running" "$out"
     assert_contains_literal "the daemon's" "daemon: build $running" "$out"
-    assert_contains_literal "and the link's" "release link $link names $previous: build $running" "$out"
+    assert_contains_literal "and the link's" \
+        "build directory $link, a link to $previous: build $running" "$out"
     assert_contains_literal "all three match, so nothing needs recovering" \
         "the installed app and the daemon are the same build, so nothing needs recovering" "$out"
     assert_not_contains "and there are no recovery steps" "to recover:" "$out"
@@ -2455,7 +2456,7 @@ test_release_interrupted_staging_puts_the_link_back() {
     fi
     assert_contains "the failed put-back is logged" "ERROR: could not point .* back at" "$out"
     assert_contains_literal "the report names the build the link holds (link stuck)" \
-        "release link $link names $case_dir/home/tbd/updates/prebuilt/$head: build $head" "$out"
+        "build directory $link, a link to $case_dir/home/tbd/updates/prebuilt/$head: build $head" "$out"
     assert_not_contains "it does not say nothing needs recovering (link stuck)" \
         "nothing needs recovering" "$out"
     assert_contains "it gives the recovery steps (link stuck)" "to recover:" "$out"
@@ -2463,11 +2464,10 @@ test_release_interrupted_staging_puts_the_link_back() {
 
 # A run whose installed bundle already is the build it installs — what a run
 # cut short after its swap leaves — keeps no bundle (keep_installed_bundle),
-# so the bundle at ~/tbd/updates/previous/TBD.app is still an earlier
-# update's, and the rollback record must go on naming the tree that pairs
-# with it (here 2222…). Recording the tree live at the start (1111…), as a
-# completed install otherwise does, fails, and the reconcile then deletes
-# 2222….
+# and the tree live at the start (1111…) is not the build of any bundle at
+# ~/tbd/updates/previous/TBD.app, so the rollback record stays as it was
+# (here 2222…). Recording the tree live at the start, as a completed install
+# otherwise does, fails, and the reconcile then deletes 2222….
 test_release_over_its_own_build_keeps_the_rollback_record() {
     local case_dir home head installed
     case_dir="$(mkcase_release_live release-over-own-build)"
@@ -2485,6 +2485,36 @@ test_release_over_its_own_build_keeps_the_rollback_record() {
         pass "and the earlier tree is kept"
     else
         fail "and the earlier tree is kept"
+    fi
+}
+
+# The same run, where a prebuilt tree of the kept bundle's build is still
+# here: the tree live at the start (1111…), as a failed handover whose bundle
+# could not be put back leaves it, with the link put back and the kept
+# bundle that tree's build. The record names that tree, and the reconcile
+# keeps it. Leaving the record on 2222…, which pairs with nothing kept,
+# fails.
+test_release_over_its_own_build_records_the_kept_bundles_tree() {
+    local case_dir home head live kept
+    case_dir="$(mkcase_release_live release-over-own-build-kept-tree)"
+    head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+    home="$case_dir/home/tbd/updates/prebuilt"
+    live="$home/1111111111111111111111111111111111111111"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    mkdir -p "$home/2222222222222222222222222222222222222222" "$case_dir/Applications"
+    printf '%s\n' "$home/2222222222222222222222222222222222222222" > "$home/.previous"
+    mkbundle "$case_dir/Applications/TBD.app" "left-by-the-cut-short-run" >/dev/null
+    stamp_clone_identity "$case_dir/Applications/TBD.app" "$case_dir" "$head"
+    mkbundle "$kept" "the-live-trees-build" >/dev/null
+    stamp_clone_identity "$kept" "$case_dir" 1111111111111111111111111111111111111111
+    cp "$kept/Contents/TBDBuildIdentity.json" "$live/TBDBuildIdentity.json"
+    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release >/dev/null
+    assert_eq "the rollback record names the tree of the kept bundle's build" \
+        "$live" "$(cat "$home/.previous" 2>/dev/null)"
+    if [ -d "$live" ]; then
+        pass "and that tree is kept"
+    else
+        fail "and that tree is kept"
     fi
 }
 
@@ -3498,7 +3528,7 @@ test_a_failed_handover_never_restores_an_earlier_updates_bundle() {
     assert_contains "the rollback says it had nothing to restore" \
         "ERROR: no previous app bundle to restore" "$out"
     assert_contains_literal "and why the earlier bundle was not used" \
-        "neither $installed nor $kept is build $CASE_DAEMON_COMMIT, which the daemon runs" "$out"
+        "neither $installed nor $kept is build $CASE_DAEMON_COMMIT from $case_dir/worktree, which the daemon runs" "$out"
     assert_contains "the app was stopped before the handover" "^pkill -f " "$(cat "$events")"
     assert_not_contains "no app is launched, by main or by the exit trap" "^open" "$(cat "$events")"
     if [ -f "$case_dir/app" ]; then
@@ -3591,7 +3621,7 @@ test_an_update_over_its_own_build_leaves_the_kept_bundle_alone() {
         [ "$how" = fails ] || continue
         assert_not_contains "a failed handover restores nothing" "restored previous app bundle" "$out"
         assert_contains_literal "no bundle of the daemon's build is at hand" \
-            "ERROR: no previous app bundle to restore — neither $installed nor $kept is build $CASE_DAEMON_COMMIT, which the daemon runs" "$out"
+            "ERROR: no previous app bundle to restore — neither $installed nor $kept is build $CASE_DAEMON_COMMIT from $case_dir/worktree, which the daemon runs" "$out"
         assert_contains "the incomplete rollback is logged as an error" \
             "ERROR: the rollback of the failed install did not complete" "$out"
         assert_contains_literal "the report names the installed build" \
@@ -3659,10 +3689,84 @@ test_a_failed_handover_over_the_daemons_build_restores_nothing() {
     assert_eq "a failed handover fails the run" "1" "$rc"
     assert_contains "the keep was skipped" "keeping no copy of it" "$out"
     assert_contains_literal "the rollback finds the installed bundle matches the daemon" \
-        "$installed is already build $new_commit, which the daemon runs — nothing to put back" "$out"
+        "$installed is already build $new_commit from $case_dir/worktree, which the daemon runs — nothing to put back" "$out"
     assert_not_contains "nothing is restored" "restored previous app bundle" "$out"
     assert_eq "the earlier kept bundle stays" "earlier-update" \
         "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_not_contains "the rollback completes" "did not complete" "$out"
+    assert_contains "and the app is relaunched" \
+        "relaunching the app this run stopped before the handover" "$out"
+    assert_eq "once" "1" "$(grep -c '^open ' "$events")"
+}
+
+# The rollback and the report compare whole builds — commit, source worktree
+# and dirty flag — when the daemon reports all three. Here the daemon and the
+# installed bundle are a dirty build, from another worktree, of the commit
+# the update installs, and the update installs the clone's clean build of
+# it. A failed handover puts the kept bundle back in front of that daemon,
+# and an exit after the install gives the recovery steps. Comparing commits
+# alone, as both did, takes the clone's build for the daemon's: the rollback
+# puts nothing back and relaunches the new app, and the report says nothing
+# needs recovering.
+test_the_rollback_and_the_report_compare_whole_builds() {
+    local how case_dir out rc events installed kept new_commit
+    for how in fails interrupted; do
+        case_dir="$(mkcase "whole-build-$how")"
+        events="$case_dir/events.log"
+        installed="$case_dir/Applications/TBD.app"
+        kept="$case_dir/home/tbd/updates/previous/TBD.app"
+        new_commit="$(git -C "$case_dir/remote" rev-parse HEAD)"
+        mkdir -p "$case_dir/Applications"
+        mkbundle "$installed" "the-daemons-build" >/dev/null
+        stamp_clone_identity "$installed" "$case_dir" "$new_commit" "$case_dir/worktree" true
+        printf '{"buildIdentity": {"commit": "%s", "sourceWorktree": "%s", "dirty": true}}\n' \
+            "$new_commit" "$case_dir/worktree" > "$case_dir/state/status.json"
+        if [ "$how" = fails ]; then
+            out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+            assert_eq "a failed handover fails the run" "1" "$rc"
+            assert_contains_literal "the installed bundle is kept, as another build" \
+                "kept the previous app bundle at $kept" "$out"
+            assert_not_contains "the clone's build is not taken for the daemon's" \
+                "nothing to put back" "$out"
+            assert_contains "the kept bundle goes back" "restored previous app bundle" "$out"
+            assert_eq "the daemon's build is installed again" "the-daemons-build" \
+                "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+            assert_contains "and the app is relaunched" \
+                "relaunching the app this run stopped before the handover" "$out"
+            assert_eq "once" "1" "$(grep -c '^open ' "$events")"
+        else
+            out="$(FAKE_REAL_INSTALL=1 FAKE_EXITS_AFTER_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+            assert_eq "the run exits with the status it left by" "6" "$rc"
+            assert_contains_literal "the report gives the daemon's whole build" \
+                "daemon: build $new_commit from $case_dir/worktree, dirty" "$out"
+            assert_contains_literal "and the installed bundle's" \
+                "installed bundle at $installed: build $new_commit from $case_dir/home/tbd/updates/src" "$out"
+            assert_not_contains "they differ, so it does not say nothing needs recovering" \
+                "nothing needs recovering" "$out"
+            assert_contains "it gives the recovery steps" "to recover:" "$out"
+        fi
+    done
+}
+
+# A bundle this run kept whose identity names no commit still goes back after
+# a failed handover when no bundle is the daemon's build: the run copied it
+# from the installed path, so it is the bundle that was installed when the
+# run began. Requiring a kept bundle of the daemon's build, as the rollback
+# did, leaves the new app installed and the app stopped.
+test_a_failed_handover_restores_a_kept_bundle_with_no_build_identity() {
+    local case_dir out rc events installed
+    case_dir="$(mkcase rollback-kept-unidentified)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" >/dev/null
+    out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "a failed handover fails the run" "1" "$rc"
+    assert_contains_literal "the run kept the installed bundle" \
+        "kept the previous app bundle at $case_dir/home/tbd/updates/previous/TBD.app" "$out"
+    assert_contains "the rollback puts it back" "restored previous app bundle" "$out"
+    assert_eq "the bundle from before the update is installed" "before-the-update" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
     assert_not_contains "the rollback completes" "did not complete" "$out"
     assert_contains "and the app is relaunched" \
         "relaunching the app this run stopped before the handover" "$out"
@@ -4028,7 +4132,7 @@ test_an_interruption_while_staging_reports_that_nothing_was_installed() {
     assert_contains_literal "the daemon is the one the run started with" \
         "daemon: build $CASE_DAEMON_COMMIT" "$out"
     assert_contains "the link holds the new build" \
-        "release link .*/\.build/release.*: build $new_commit" "$out"
+        "build directory .*/\.build/release.*: build $new_commit" "$out"
     assert_not_contains "so it does not say nothing needs recovering" \
         "nothing needs recovering" "$out"
     assert_contains "it gives the recovery steps" "to recover:" "$out"
@@ -4043,6 +4147,105 @@ test_an_interruption_while_staging_reports_that_nothing_was_installed() {
     else
         fail "the app the run never stopped is still running"
     fi
+}
+
+# An exit between the swap's two renames leaves the bundle that was installed
+# at the outgoing name and nothing installed. The report renames it back,
+# then reads what is installed: not the new build, so the .build/release link
+# goes back to what it named when the run started. With the new build
+# installed the link stays on it. Deciding by the step the install had
+# reached, as the report did, left the link on the new build beside the old
+# bundle.
+test_an_interrupted_swap_puts_the_link_back_with_the_bundle() {
+    local how root out installed link old_tree new_tree
+    for how in mid-swap after-swap; do
+        root="$TEST_TMP/interrupted-swap-link-$how"
+        installed="$root/Applications/TBD.app"
+        link="$root/src/.build/release"
+        old_tree="$root/prebuilt/1111111111111111111111111111111111111111"
+        new_tree="$root/prebuilt/2222222222222222222222222222222222222222"
+        mkdir -p "$root/Applications" "$root/updates" "$old_tree" "$root/src/.build"
+        mkbundle "$new_tree/TBD.app" "new-build" 2222222222222222222222222222222222222222 >/dev/null
+        ln -s "$new_tree" "$link"
+        if [ "$how" = mid-swap ]; then
+            mkbundle "$root/Applications/.TBD-install-outgoing" "before-the-update" \
+                1111111111111111111111111111111111111111 >/dev/null
+        else
+            cp -R "$new_tree/TBD.app" "$installed"
+        fi
+        out="$(
+            OPT_AUTO=false
+            UPDATE_HOME="$root/updates"
+            UPDATE_LOG="$root/updates/update.log"
+            PREVIOUS_BUNDLE="$root/updates/previous/TBD.app"
+            INSTALLED_BUNDLE="$installed"
+            RELEASE_LINK="$link"
+            RELEASE_LINK_MOVED=true
+            PREVIOUS_RELEASE_TARGET="$old_tree"
+            INSTALLING_BUILD="$(bundle_build_key "$new_tree/TBD.app")"
+            if [ "$how" = mid-swap ]; then
+                APP_BUNDLE_INSTALL_STEP=swapping
+            else
+                APP_BUNDLE_INSTALL_STEP=installed
+            fi
+            HANDOVER_STARTED=""
+            report_interrupted_install 2>&1
+        )"
+        if [ "$how" = mid-swap ]; then
+            assert_eq "the bundle that was installed is back" "before-the-update" \
+                "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+            assert_eq "and the link goes back with it" "$old_tree" "$(link_target "$link")"
+            assert_contains_literal "and says so" "pointed $link back at $old_tree" "$out"
+        else
+            assert_eq "the link stays on the new build beside it" "$new_tree" "$(link_target "$link")"
+            assert_not_contains "and is not put back" "pointed .* back at" "$out"
+        fi
+    done
+}
+
+# Under --debug the run's own build is in .build/debug, where an app of that
+# build starts a daemon from, so the report reads that directory. Here the
+# installed bundle and .build/release hold the daemon's build, and
+# .build/debug the new one: under --debug the report names .build/debug and
+# gives the recovery steps, and for a release run the same state needs no
+# recovering. Reading .build/release under --debug, as the report did, said
+# nothing needed recovering.
+test_the_report_reads_the_build_directory_of_the_runs_configuration() {
+    local config root out src
+    for config in debug release; do
+        root="$TEST_TMP/report-build-dir-$config"
+        src="$root/src"
+        mkdir -p "$root/updates" "$root/Applications" "$src/.build/release" "$src/.build/debug"
+        mkbundle "$root/Applications/TBD.app" "the-daemons-build" "$CASE_DAEMON_COMMIT" >/dev/null
+        printf '{"commit": "%s"}\n' "$CASE_DAEMON_COMMIT" > "$src/.build/release/TBDBuildIdentity.json"
+        printf '{"commit": "%s"}\n' 2222222222222222222222222222222222222222 \
+            > "$src/.build/debug/TBDBuildIdentity.json"
+        out="$(
+            OPT_AUTO=false
+            UPDATE_HOME="$root/updates"
+            UPDATE_LOG="$root/updates/update.log"
+            PREVIOUS_BUNDLE="$root/updates/previous/TBD.app"
+            INSTALLED_BUNDLE="$root/Applications/TBD.app"
+            RELEASE_LINK="$src/.build/release"
+            BUILD_CONFIG="$config"
+            HANDOVER_STARTED=""
+            RUNNING_BUILD="$CASE_DAEMON_COMMIT||"
+            report_installation_facts 2>&1
+        )"
+        if [ "$config" = debug ]; then
+            assert_contains_literal "under --debug the report reads .build/debug" \
+                "build directory $src/.build/debug: build 2222222222222222222222222222222222222222" "$out"
+            assert_not_contains "and not .build/release" "build directory .*/\.build/release" "$out"
+            assert_not_contains "so it does not say nothing needs recovering" \
+                "nothing needs recovering" "$out"
+            assert_contains "it gives the recovery steps" "to recover:" "$out"
+        else
+            assert_contains_literal "a release run reads .build/release" \
+                "build directory $src/.build/release: build $CASE_DAEMON_COMMIT" "$out"
+            assert_contains "where the daemon's build is, so nothing needs recovering" \
+                "nothing needs recovering" "$out"
+        fi
+    done
 }
 
 # The stop before the handover records that it stopped an app only once it
@@ -4568,7 +4771,7 @@ test_a_rollback_whose_swap_leaves_nothing_installed_retries_and_warns() {
             UPDATE_HOME="$root/updates"
             UPDATE_LOG="$root/updates/update.log"
             PREVIOUS_BUNDLE="$kept"
-            RUNNING_COMMIT="$CASE_DAEMON_COMMIT"
+            RUNNING_BUILD="$CASE_DAEMON_COMMIT||"
             roll_back_bundle "$installed" 2>&1
             printf 'restore_failed=%s\n' "$BUNDLE_RESTORE_FAILED"
         )"
@@ -5301,6 +5504,8 @@ test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_update_over_its_own_build_leaves_the_kept_bundle_alone
 test_a_failed_handover_restores_the_kept_bundle_that_matches_the_daemon
 test_a_failed_handover_over_the_daemons_build_restores_nothing
+test_the_rollback_and_the_report_compare_whole_builds
+test_a_failed_handover_restores_a_kept_bundle_with_no_build_identity
 test_an_update_over_the_same_commit_keeps_another_build
 test_an_interrupted_update_over_its_own_build_gives_the_recovery_steps
 test_an_exit_mid_handover_leaves_the_app_stopped
@@ -5309,6 +5514,8 @@ test_a_rollback_waits_for_the_app_exit_to_settle
 test_an_update_clears_what_an_interrupted_install_left
 test_an_interrupted_install_reports_which_build_is_installed
 test_an_interruption_while_staging_reports_that_nothing_was_installed
+test_an_interrupted_swap_puts_the_link_back_with_the_bundle
+test_the_report_reads_the_build_directory_of_the_runs_configuration
 test_an_exit_during_the_app_stop_says_the_app_may_be_stopped
 test_an_interrupted_keep_leaves_no_partial_previous_bundle
 test_no_app_never_stops_the_app
@@ -5356,6 +5563,7 @@ test_release_failed_handover_restores_the_link
 test_release_failed_install_restores_the_link
 test_release_interrupted_staging_puts_the_link_back
 test_release_over_its_own_build_keeps_the_rollback_record
+test_release_over_its_own_build_records_the_kept_bundles_tree
 test_release_dry_run_keeps_nothing_it_downloaded
 test_release_failed_app_build_leaves_no_new_tree
 test_release_failed_link_restores_the_running_link
