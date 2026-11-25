@@ -661,7 +661,7 @@ enum ProfileUsagePresentation {
     /// name.
     enum MenuUsage: Equatable {
         /// The 5-hour and weekly bars; a missing bucket leaves its slot empty.
-        /// `ageNote` is set when the data is healthy but old.
+        /// `ageNote`, such as "1d ago", is set when the data is healthy but old.
         case bars(session: BucketPresentation?, weekly: BucketPresentation?, ageNote: String?)
         /// A short note in place of the bars, for a fetch that is failing.
         case note(String)
@@ -685,10 +685,15 @@ enum ProfileUsagePresentation {
                 bucketPresentation($0, style: style, now: now, timeZone: timeZone)
             }
             if session != nil || weekly != nil {
-                // With no fetch time the note would read "no usage data yet",
-                // which the bars beside it contradict.
-                let ageNote = snapshot.fetchedAt == nil
-                    ? nil : stalenessNote(for: snapshot, kind: kind, now: now)
+                // Beside the bars the age alone says it, "1d ago", once
+                // `stalenessNote` finds the data old. With no fetch time that
+                // note would read "no usage data yet", which the bars
+                // contradict, so the row shows none.
+                var ageNote: String?
+                if let fetchedAt = snapshot.fetchedAt,
+                   stalenessNote(for: snapshot, kind: kind, now: now) != nil {
+                    ageNote = "\(ageText(since: fetchedAt, now: now)) ago"
+                }
                 return .bars(session: session, weekly: weekly, ageNote: ageNote)
             }
         }

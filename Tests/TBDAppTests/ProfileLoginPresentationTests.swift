@@ -4,8 +4,9 @@ import Testing
 import TBDShared
 
 // Pure string-composition rules for the login-identity badges (Phase 2a):
-// Settings row captions, and the " — email" / " — needs /login" menu suffix
-// used by both the "+" new-tab menu and the menu-bar profile switcher.
+// Settings row captions, the " — email" / " — needs /login" menu suffix used
+// by the menu-bar profile switcher and the worktree picker, and the account
+// menus' tooltip email and "+" menu "needs /login" note.
 
 private func makeEntry(
     kind: CredentialKind = .oauth,
@@ -80,6 +81,56 @@ private func probeSnapshot(_ statusKind: ProfileUsageStatusKind) -> ProfileUsage
 
     let bedrock = makeEntry(kind: .bedrock, awsRegion: "us-east-1")
     #expect(ProfileLoginPresentation.menuItemTitle(for: bedrock) == "Work")
+}
+
+// MARK: - menuIdentity
+
+@Test func menuIdentity_oauthLoggedIn_isTheTrimmedEmail() {
+    #expect(ProfileLoginPresentation.menuIdentity(kind: .oauth, loginIdentity: " dev@acme.example\n")
+            == "dev@acme.example")
+}
+
+@Test func menuIdentity_oauthNotLoggedIn_isNil() {
+    #expect(ProfileLoginPresentation.menuIdentity(kind: .oauth, loginIdentity: nil) == nil)
+    #expect(ProfileLoginPresentation.menuIdentity(kind: .oauth, loginIdentity: "  ") == nil)
+}
+
+@Test func menuIdentity_nonOAuthKinds_areNilEvenWithStrayIdentity() {
+    for kind in [CredentialKind.oauthToken, .apiKey, .bedrock] {
+        #expect(ProfileLoginPresentation.menuIdentity(kind: kind, loginIdentity: "x@acme.example") == nil,
+                "\(kind)")
+    }
+}
+
+// MARK: - menuRowUsage
+
+private typealias MenuUsage = ProfileUsagePresentation.MenuUsage
+
+@Test func menuRowUsage_needsLoginWithNoUsage_showsTheNeedsLoginNote() {
+    let usage = ProfileLoginPresentation.menuRowUsage(MenuUsage.none, kind: .oauth, loginIdentity: nil)
+    #expect(usage == .note("needs /login"))
+    #expect(usage == .note(ProfileLoginPresentation.menuNeedsLoginNote))
+}
+
+@Test func menuRowUsage_needsLoginWithUsage_keepsTheUsage() {
+    let bars = MenuUsage.bars(session: nil, weekly: nil, ageNote: "1d ago")
+    #expect(ProfileLoginPresentation.menuRowUsage(bars, kind: .oauth, loginIdentity: nil) == bars)
+
+    let note = MenuUsage.note("not logged in")
+    #expect(ProfileLoginPresentation.menuRowUsage(note, kind: .oauth, loginIdentity: "  ") == note)
+}
+
+@Test func menuRowUsage_loggedIn_keepsTheUsage() {
+    let usage = ProfileLoginPresentation.menuRowUsage(
+        MenuUsage.none, kind: .oauth, loginIdentity: "dev@acme.example")
+    #expect(usage == MenuUsage.none)
+}
+
+@Test func menuRowUsage_nonOAuthKinds_keepTheUsage() {
+    for kind in [CredentialKind.oauthToken, .apiKey, .bedrock] {
+        let usage = ProfileLoginPresentation.menuRowUsage(MenuUsage.none, kind: kind, loginIdentity: nil)
+        #expect(usage == MenuUsage.none, "\(kind)")
+    }
 }
 
 // MARK: - settingsCaption

@@ -37,6 +37,9 @@ enum TabContextMenu {
         let profileID: UUID
         let name: String
         let usage: ProfileUsagePresentation.MenuUsage
+        /// The login email the row's tooltip leads with
+        /// (`ProfileLoginPresentation.menuIdentity`); nil shows none.
+        let identity: String?
     }
 
     /// What the menu shows for one tab. Every field defaults to absent, so a
@@ -199,7 +202,8 @@ enum TabContextMenu {
         for account in model.accounts {
             let row = item(account.name, action: action(account.profileID), target: target)
             AccountMenuRow.apply(
-                to: row, name: account.name, usage: account.usage, nameColumnWidth: nameColumnWidth)
+                to: row, name: account.name, usage: account.usage, identity: account.identity,
+                nameColumnWidth: nameColumnWidth)
             row.state = account.profileID == model.currentProfileID ? .on : .off
             items.append(row)
         }

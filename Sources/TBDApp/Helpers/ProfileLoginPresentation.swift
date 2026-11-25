@@ -48,6 +48,31 @@ enum ProfileLoginPresentation {
             + menuTitleSuffix(kind: entry.profile.kind, loginIdentity: entry.loginIdentity)
     }
 
+    /// The login email an account row of the swap, fork and new-tab menus
+    /// puts on its tooltip's first line. nil for every kind but `.oauth`, and
+    /// for an oauth profile with no detected login: the same rule
+    /// `menuTitleSuffix` shows the email by.
+    static func menuIdentity(kind: CredentialKind, loginIdentity: String?) -> String? {
+        guard kind == .oauth else { return nil }
+        return normalizedIdentity(loginIdentity)
+    }
+
+    /// The note a "+" new-tab menu row shows for an oauth profile with no
+    /// detected login, in the column where the usage bars go.
+    static let menuNeedsLoginNote = "needs /login"
+
+    /// What a "+" new-tab menu row shows after the name. The row shows the
+    /// name alone, so a profile that needs `/login` says so in the usage
+    /// column, and only when its usage has nothing to show there: bars or a
+    /// note it already has stay as they are.
+    static func menuRowUsage(_ usage: ProfileUsagePresentation.MenuUsage,
+                             kind: CredentialKind,
+                             loginIdentity: String?) -> ProfileUsagePresentation.MenuUsage {
+        guard case .none = usage,
+              needsLogin(kind: kind, loginIdentity: loginIdentity) else { return usage }
+        return .note(menuNeedsLoginNote)
+    }
+
     /// Identity fragment for the Settings row caption. nil for non-oauth kinds.
     static func identityCaption(kind: CredentialKind, loginIdentity: String?) -> String? {
         guard kind == .oauth else { return nil }

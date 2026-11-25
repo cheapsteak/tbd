@@ -82,16 +82,31 @@ struct ProfileUsageMenuUsageTests {
         #expect(ageNote == nil)
     }
 
-    @Test func healthyStaleSnapshotShowsBarsWithAgeNote() throws {
+    @Test func healthyStaleSnapshotShowsBarsWithAgeNote() {
         // Ten minutes old: past the five-minute threshold for a signed-in profile.
         let snapshot = Fix.snapshot([Fix.session40, Fix.weekly16],
                                     fetchedAt: Fix.now.addingTimeInterval(-600))
-        let note = try #require(
-            ProfileUsagePresentation.stalenessNote(for: snapshot, kind: .oauth, now: Fix.now))
         let usage = Fix.usage(Fix.entry(snapshot: snapshot))
         #expect(usage == .bars(session: Fix.presentation(Fix.session40),
                                weekly: Fix.presentation(Fix.weekly16),
-                               ageNote: note))
+                               ageNote: "10m ago"))
+    }
+
+    /// Beside the bars the age stands alone: "1d ago", never the longer
+    /// "updated 1d ago" that `stalenessNote` gives other surfaces.
+    @Test func ageNoteIsTheAgeAloneWithoutUpdated() throws {
+        let snapshot = Fix.snapshot([Fix.session40], fetchedAt: Fix.now.addingTimeInterval(-26 * 3600))
+        let staleness = try #require(
+            ProfileUsagePresentation.stalenessNote(for: snapshot, kind: .oauth, now: Fix.now))
+        #expect(staleness == "updated 1d ago")
+
+        let usage = Fix.usage(Fix.entry(snapshot: snapshot))
+        guard case let .bars(_, _, ageNote) = usage else {
+            Issue.record("expected bars, got \(usage)")
+            return
+        }
+        #expect(ageNote == "1d ago")
+        #expect(ageNote?.contains("updated") == false)
     }
 
     /// With no fetch time, `stalenessNote` says "no usage data yet", which

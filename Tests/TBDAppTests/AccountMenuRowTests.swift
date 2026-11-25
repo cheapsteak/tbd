@@ -125,9 +125,9 @@ struct AccountMenuRowTests {
 
     @Test func ageNoteFollowsBars() throws {
         let title = try #require(Row.attributedTitle(name: "Work",
-                                                     usage: Fix.bars(ageNote: "updated 10m ago"),
+                                                     usage: Fix.bars(ageNote: "10m ago"),
                                                      nameColumnWidth: 80))
-        #expect(title.string.hasSuffix("updated 10m ago"))
+        #expect(title.string.hasSuffix("10m ago"))
         let found = attachments(title)
         #expect(found.count == 2)
         #expect(found.last?.image?.size == UsageBarsMenuImage.size)
@@ -149,12 +149,12 @@ struct AccountMenuRowTests {
     }
 
     @Test func noneHasNoAttributedTitle() {
-        let name = "Personal — needs /login"
+        let name = "Personal"
         let title = Row.attributedTitle(name: name, usage: MenuUsage.none, nameColumnWidth: 80)
         #expect(title == nil)
 
         let item = NSMenuItem(title: "placeholder", action: nil, keyEquivalent: "")
-        Row.apply(to: item, name: name, usage: MenuUsage.none, nameColumnWidth: 80)
+        Row.apply(to: item, name: name, usage: MenuUsage.none, identity: nil, nameColumnWidth: 80)
         #expect(item.attributedTitle == nil)
         #expect(item.title == name)
         #expect(item.toolTip == nil)
@@ -169,6 +169,7 @@ struct AccountMenuRowTests {
         let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         Row.apply(to: item, name: "Work",
                   usage: .bars(session: session, weekly: weekly, ageNote: nil),
+                  identity: nil,
                   nameColumnWidth: Row.nameWidth("Work"))
         #expect(item.title == "Work")
         #expect(item.attributedTitle != nil)
@@ -179,8 +180,52 @@ struct AccountMenuRowTests {
         let weekly = Fix.weekly16()
         let weeklyReset = try #require(weekly.resetPhrase)
         let weeklyOnly = MenuUsage.bars(session: nil, weekly: weekly, ageNote: nil)
-        #expect(Row.toolTip(for: weeklyOnly) == "Weekly: 16% used · \(weeklyReset)")
-        #expect(Row.toolTip(for: .note("needs re-login")) == nil)
-        #expect(Row.toolTip(for: MenuUsage.none) == nil)
+        #expect(Row.toolTip(for: weeklyOnly, identity: nil) == "Weekly: 16% used · \(weeklyReset)")
+        #expect(Row.toolTip(for: .note("needs re-login"), identity: nil) == nil)
+        #expect(Row.toolTip(for: MenuUsage.none, identity: nil) == nil)
+    }
+
+    /// The login email leads, on a line of its own above the reset times.
+    @Test func toolTipLeadsWithTheIdentityAboveTheResetTimes() throws {
+        let session = Fix.session40()
+        let weekly = Fix.weekly16()
+        let sessionReset = try #require(session.resetPhrase)
+        let weeklyReset = try #require(weekly.resetPhrase)
+        let usage = MenuUsage.bars(session: session, weekly: weekly, ageNote: nil)
+
+        let resetTimes = "5-hour: 40% used · \(sessionReset) — Weekly: 16% used · \(weeklyReset)"
+        let toolTip = Row.toolTip(for: usage, identity: "dev@acme.example")
+        #expect(toolTip == "dev@acme.example\n\(resetTimes)")
+    }
+
+    /// With no bars there are no reset times, so the email stands alone.
+    @Test func toolTipIsTheIdentityAloneWithoutBars() {
+        let identity = "dev@acme.example"
+        #expect(Row.toolTip(for: MenuUsage.none, identity: identity) == identity)
+        #expect(Row.toolTip(for: .note("needs re-login"), identity: identity) == identity)
+    }
+
+    /// An empty identity counts as none.
+    @Test func toolTipIgnoresAnEmptyIdentity() {
+        #expect(Row.toolTip(for: MenuUsage.none, identity: "") == nil)
+    }
+
+    @Test func applySetsTheIdentityOnTheToolTip() throws {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        Row.apply(to: item, name: "Work", usage: Fix.bars(), identity: "dev@acme.example",
+                  nameColumnWidth: Row.nameWidth("Work"))
+        #expect(item.title == "Work")
+        let toolTip = try #require(item.toolTip)
+        let lines = toolTip.components(separatedBy: "\n")
+        #expect(lines.count == 2)
+        #expect(lines.first == "dev@acme.example")
+        #expect(lines.last?.hasPrefix("5-hour: 40% used") == true)
+
+        // A row with no usage still carries the email.
+        let bare = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        Row.apply(to: bare, name: "Personal", usage: MenuUsage.none, identity: "me@acme.example",
+                  nameColumnWidth: 0)
+        #expect(bare.attributedTitle == nil)
+        #expect(bare.toolTip == "me@acme.example")
     }
 }

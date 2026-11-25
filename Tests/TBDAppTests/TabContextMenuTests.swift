@@ -60,8 +60,8 @@ struct TabContextMenuTests {
             offersInPlaceSwap: true,
             currentProfileID: workID,
             accounts: [
-                TabContextMenu.Account(profileID: workID, name: "Work", usage: .none),
-                TabContextMenu.Account(profileID: personalID, name: "Personal", usage: .none),
+                TabContextMenu.Account(profileID: workID, name: "Work", usage: .none, identity: nil),
+                TabContextMenu.Account(profileID: personalID, name: "Personal", usage: .none, identity: nil),
             ],
             showsContinueInCodex: true,
             parkAction: .hibernate,
@@ -334,8 +334,8 @@ struct TabContextMenuTests {
         let note = "rate-limited · 3h old"
         var model = liveClaudeModel()
         model.accounts = [
-            TabContextMenu.Account(profileID: workID, name: "Work", usage: .note(note)),
-            TabContextMenu.Account(profileID: personalID, name: "Personal", usage: .none),
+            TabContextMenu.Account(profileID: workID, name: "Work", usage: .note(note), identity: nil),
+            TabContextMenu.Account(profileID: personalID, name: "Personal", usage: .none, identity: nil),
         ]
         let menu = build(model, ActionRecorder())
         let swap = try submenu("Swap profile", in: menu)
@@ -348,6 +348,27 @@ struct TabContextMenuTests {
         #expect(personal.attributedTitle == nil)
     }
 
+    /// An account's login email reaches its row's tooltip in both submenus,
+    /// and never its title.
+    @Test func accountIdentityLeadsTheRowToolTip() throws {
+        var model = liveClaudeModel()
+        model.accounts = [
+            TabContextMenu.Account(profileID: workID, name: "Work", usage: .none,
+                                   identity: "dev@acme.example"),
+            TabContextMenu.Account(profileID: personalID, name: "Personal", usage: .none, identity: nil),
+        ]
+        let menu = build(model, ActionRecorder())
+
+        for submenuTitle in ["Swap profile", "Fork Session"] {
+            let accounts = try submenu(submenuTitle, in: menu)
+            let work = try item("Work", in: accounts)
+            #expect(work.toolTip == "dev@acme.example", "\(submenuTitle)")
+            #expect(work.title == "Work", "\(submenuTitle)")
+            let personal = try item("Personal", in: accounts)
+            #expect(personal.toolTip == nil, "\(submenuTitle)")
+        }
+    }
+
     /// Every row of a submenu shares one name column, so the bars start at the
     /// same x: each row is spaced as `AccountMenuRow` spaces it for the widest
     /// name among all the rows, not for its own name.
@@ -357,8 +378,8 @@ struct TabContextMenuTests {
         let longName = "A much longer account name"
         var model = liveClaudeModel()
         model.accounts = [
-            TabContextMenu.Account(profileID: workID, name: shortName, usage: .note(note)),
-            TabContextMenu.Account(profileID: personalID, name: longName, usage: .note(note)),
+            TabContextMenu.Account(profileID: workID, name: shortName, usage: .note(note), identity: nil),
+            TabContextMenu.Account(profileID: personalID, name: longName, usage: .note(note), identity: nil),
         ]
         let rows: [(name: String, usage: ProfileUsagePresentation.MenuUsage)] = [
             (name: shortName, usage: .note(note)),
@@ -371,7 +392,8 @@ struct TabContextMenuTests {
             let accounts = try submenu(submenuTitle, in: menu)
             for row in rows {
                 let expected = NSMenuItem(title: row.name, action: nil, keyEquivalent: "")
-                AccountMenuRow.apply(to: expected, name: row.name, usage: row.usage, nameColumnWidth: sharedWidth)
+                AccountMenuRow.apply(
+                    to: expected, name: row.name, usage: row.usage, identity: nil, nameColumnWidth: sharedWidth)
                 let built = try item(row.name, in: accounts)
                 #expect(spacing(built.attributedTitle) == spacing(expected.attributedTitle),
                         "\(submenuTitle): \(row.name)")
@@ -382,10 +404,11 @@ struct TabContextMenuTests {
         // be spaced differently.
         let ownColumn = NSMenuItem(title: shortName, action: nil, keyEquivalent: "")
         AccountMenuRow.apply(
-            to: ownColumn, name: shortName, usage: .note(note),
+            to: ownColumn, name: shortName, usage: .note(note), identity: nil,
             nameColumnWidth: AccountMenuRow.nameColumnWidth([(name: shortName, usage: .note(note))]))
         let shared = NSMenuItem(title: shortName, action: nil, keyEquivalent: "")
-        AccountMenuRow.apply(to: shared, name: shortName, usage: .note(note), nameColumnWidth: sharedWidth)
+        AccountMenuRow.apply(
+            to: shared, name: shortName, usage: .note(note), identity: nil, nameColumnWidth: sharedWidth)
         #expect(spacing(ownColumn.attributedTitle) != spacing(shared.attributedTitle))
     }
 
