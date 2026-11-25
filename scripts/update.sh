@@ -778,10 +778,10 @@ bundle_build_key() {
 # update kept is left where it is: it is still a route back for the operator,
 # but it is not this run's to restore (see BUNDLE_STASHED).
 #
-# The same goes for the one installed bundle that a run cut short after its
-# swap leaves: the build this run installs, installed in front of a daemon
-# still on another build. A copy of it is no way back. Kept in place of the
-# earlier bundle, it would erase the route back to the build the daemon
+# The same goes for the installed bundle a run cut short after its swap
+# leaves: the build this run installs, installed in front of a daemon still
+# on another build. A copy of it is no way back. Kept in place of the earlier
+# bundle, it would erase what may be the route back to the build the daemon
 # runs, and a failed handover would "restore" the new app in front of the
 # old daemon and relaunch it. So the keep is skipped only when both hold:
 # the installed bundle is the build in <new_bundle> (bundle_build_key: same
@@ -892,17 +892,23 @@ BUNDLE_RESTORED=false
 
 # True when keep_installed_bundle kept nothing because the installed bundle
 # was already the build this run installs, in front of a daemon on another
-# commit: what a run cut short after its swap leaves. The bundle at
-# $PREVIOUS_BUNDLE is then the one that cut-short run replaced, most likely
-# the build the daemon still runs, and so the way back, though this run did
-# not keep it and does not restore it (cut_short_kept_bundle_note).
+# commit: what a run cut short after its swap leaves, though not only that
+# (a daemon started from a build that was never installed leaves it too).
+# The bundle at $PREVIOUS_BUNDLE is then an earlier update's, which may be
+# the build the daemon runs, and so the way back, or may be older still: a
+# cut-short run that kept nothing leaves an older update's there. This run
+# did not keep it and does not restore it (earlier_kept_bundle_note).
 KEEP_SKIPPED_FOR_OWN_BUILD=false
 
 # One wording, for the rollback (roll_back_bundle) and the recovery steps
 # (leave_app_stopped_for_recovery) alike, for what $PREVIOUS_BUNDLE holds
-# when the keep was skipped (KEEP_SKIPPED_FOR_OWN_BUILD).
-cut_short_kept_bundle_note() {
-    printf '%s\n' "this run kept no copy of $INSTALLED_BUNDLE, which was already the new build; $PREVIOUS_BUNDLE holds the bundle the update cut short before this run replaced, most likely the build the daemon is still running (${RUNNING_COMMIT:-unknown}), and the way back to it"
+# when the keep was skipped (KEEP_SKIPPED_FOR_OWN_BUILD). It names the kept
+# bundle's commit and the daemon's, so the operator can compare them before
+# putting it back.
+earlier_kept_bundle_note() {
+    local kept_commit
+    kept_commit="$(json_field "$(cat "$PREVIOUS_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
+    printf '%s\n' "this run kept no copy of $INSTALLED_BUNDLE, which was already the new build; $PREVIOUS_BUNDLE holds a bundle an earlier update kept (build ${kept_commit:-unknown}), which may be the build the daemon runs (${RUNNING_COMMIT:-unknown}): compare the commit in its Contents/TBDBuildIdentity.json with the daemon's ('tbd version') before putting it back"
 }
 
 # Put the kept bundle back in place of the new one, by the same staged swap an
@@ -982,7 +988,7 @@ roll_back_bundle() {
     BUNDLE_RESTORE_FAILED=true
     log_error "no previous app bundle to restore — this run kept none of its own, so what it installed at $installed_bundle stays"
     if [ -d "$PREVIOUS_BUNDLE" ] && [ "$KEEP_SKIPPED_FOR_OWN_BUILD" = true ]; then
-        log "$(cut_short_kept_bundle_note); not restoring it, since this run did not keep it — put it back yourself once 'tbd version' shows the daemon is that build"
+        log "$(earlier_kept_bundle_note); this run did not keep it, so it is not restoring it"
     elif [ -d "$PREVIOUS_BUNDLE" ]; then
         log "not restoring $PREVIOUS_BUNDLE: an earlier update kept it, and it is not the build this run replaced"
     fi
@@ -1550,7 +1556,7 @@ leave_app_stopped_for_recovery() {
     if [ "$BUNDLE_RESTORED" = true ]; then
         log "the bundle this run replaced is installed at $INSTALLED_BUNDLE again: the rollback put it back"
     elif [ "$KEEP_SKIPPED_FOR_OWN_BUILD" = true ] && [ -d "$PREVIOUS_BUNDLE" ]; then
-        log "$(cut_short_kept_bundle_note) — see 'Going back to the previous build' in docs/updating.md"
+        log "$(earlier_kept_bundle_note); see 'Going back to the previous build' in docs/updating.md"
     elif [ "$BUNDLE_STASHED" = true ] && [ ! -d "$PREVIOUS_BUNDLE" ]; then
         log "the bundle this run replaced was kept at $PREVIOUS_BUNDLE, and nothing is there now, so there is no kept bundle to go back to — see 'Going back to the previous build' in docs/updating.md for the other routes"
     else

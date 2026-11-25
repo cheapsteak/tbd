@@ -481,10 +481,14 @@ whichever daemon is left, so a run that kept nothing leaves it where it is
 and logs that it did not restore it. When the run kept nothing because it
 found nothing installed, that bundle is not the build the run replaced, and
 the log says so. When it kept nothing because it found its own build
-installed in front of a daemon on another commit, that bundle is the one the
-cut-short update before it replaced: most likely the build the daemon is
-still running, and so the way back. The rollback line and the recovery steps
-both say that, and to put it back by hand once `tbd version` confirms it.
+installed in front of a daemon on another commit, that bundle may be the
+build the daemon is still running — the bundle a cut-short update replaced,
+and so the way back — or an older one: a daemon started from a build that
+was never installed leaves the same state, and so does a cut-short update
+that kept nothing. The rollback line and the recovery steps both say it may
+be, and name the kept bundle's commit and the daemon's, so you can compare
+them (`tbd version`, and the commit in the kept bundle's
+`Contents/TBDBuildIdentity.json`) before putting it back by hand.
 The new build stays in `/Applications`, as on the first update, so that it
 is there to open once it and the daemon are the same build.
 

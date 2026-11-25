@@ -3525,16 +3525,19 @@ test_an_update_over_its_own_build_leaves_the_kept_bundle_alone() {
         "ERROR: no previous app bundle to restore — this run kept none of its own" "$out"
     assert_contains "the incomplete rollback is logged as an error" \
         "ERROR: the rollback of the failed install did not complete" "$out"
-    # The earlier kept bundle is the one the cut-short run replaced, so most
-    # likely the daemon's build and the way back. The rollback and the
-    # recovery steps both say so, in the same words, where they used to call
-    # it another build and the bundle this run replaced in turn.
+    # The earlier kept bundle may be the daemon's build and the way back, or
+    # an older one: nothing in the skip tells which. The rollback and the
+    # recovery steps both say it may be, in the same words, with its commit
+    # (0000…) and the daemon's (1111…) to compare, where they used to call it
+    # another build and the bundle this run replaced in turn, and then the
+    # daemon's build outright.
     assert_not_contains "the rollback does not call the earlier kept bundle another build" \
         "is not the build this run replaced" "$out"
     assert_not_contains "nor do the recovery steps call it the bundle this run replaced" \
         "the bundle this run replaced, if there was one, is kept at" "$out"
-    assert_eq "both say it is most likely the daemon's build, and the way back" "2" \
-        "$(printf '%s\n' "$out" | grep -c -F "$kept holds the bundle the update cut short before this run replaced, most likely the build the daemon is still running (1111111111111111111111111111111111111111), and the way back to it")"
+    assert_not_contains "nor does either call it the daemon's build outright" "most likely" "$out"
+    assert_eq "both say it may be the daemon's build, naming both commits" "2" \
+        "$(printf '%s\n' "$out" | grep -c -F "$kept holds a bundle an earlier update kept (build 0000000000000000000000000000000000000000), which may be the build the daemon runs (1111111111111111111111111111111111111111): compare the commit in its Contents/TBDBuildIdentity.json with the daemon's")"
     assert_not_contains "no app is launched, by main or by the exit trap" "^open" "$(cat "$events")"
     if [ -f "$case_dir/app" ]; then
         fail "the app stays stopped when the run kept no bundle to restore"
