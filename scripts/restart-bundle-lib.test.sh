@@ -1139,6 +1139,33 @@ end old" "$(cat "$log" 2>/dev/null)"
     unset FAKE_LSREGISTER_LOG
 }
 
+# The TBD_BUNDLE_CP seam is for a test to set once the library is sourced, as
+# the cases above do. One a real install inherits from its environment is
+# ignored: sourcing sets it to /bin/cp. Here the library is sourced the way
+# restart.sh and update.sh source it, with the seam in the environment naming
+# a copy stub that records each copy and then fails. The install must succeed
+# and the stub must never run; honouring the inherited value fails the install
+# and records the copy.
+test_install_ignores_an_inherited_copy_command() {
+    local root installed log rc=0
+    root="$TEST_TMP/install-inherited-cp"
+    installed="$root/Applications/TBD.app"
+    log="$root/copies.log"
+    mkdir -p "$root/Applications"
+    mkfakebundle "$installed" old >/dev/null
+    mkfakebundle "$root/new/TBD.app" new >/dev/null
+    mkcopystub "$root/copy" "$installed" "$log"
+
+    # shellcheck disable=SC2016 # the script's own arguments, expanded by it
+    env TBD_BUNDLE_CP="$root/copy" STUB_COPY_FAILS=1 \
+        bash -c 'source "$1"; install_app_bundle "$2" "$3"' \
+        _ "$HELPER" "$root/new/TBD.app" "$installed" >/dev/null 2>&1 || rc=$?
+    assert_eq "an install with a copy command in its environment succeeds" "0" "$rc"
+    assert_eq "the inherited copy command never runs" "" "$(cat "$log" 2>/dev/null)"
+    assert_eq "the new bundle is installed with /bin/cp" "new" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+}
+
 # An install that stops part-way leaves its siblings behind, and the next one
 # clears them before it starts: they are created by nothing else. An outgoing
 # bundle with nothing installed is a run stopped between its two renames, and
@@ -2664,6 +2691,7 @@ test_install_ignores_a_gnu_cp_first_on_path
 test_install_siblings_sit_beside_the_installed_bundle
 test_install_keeps_a_whole_bundle_installed_while_it_copies
 test_install_whose_copy_fails_leaves_the_installed_bundle
+test_install_ignores_an_inherited_copy_command
 test_install_clears_what_an_interrupted_install_left
 test_install_renames_a_sibling_away_before_deleting_it
 test_put_back_refuses_an_outgoing_tree_that_is_not_whole

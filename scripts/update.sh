@@ -800,8 +800,15 @@ BUNDLE_STASHED=false
 # It waits for the app's exit to settle before anything moves
 # (wait_for_app_exit_to_settle): a handover can fail within milliseconds of
 # the app stop, and macOS reads the installed bundle just after an app quits.
+#
+# The spent copy is removed as keep_installed_bundle removes the one it
+# replaces: renamed to the discard sibling first and deleted there, so a
+# delete cut short leaves nothing partial at $PREVIOUS_BUNDLE, where the
+# recovery steps send the operator. The next keep clears the discard sibling.
+# A rename that fails leaves the copy whole where it is.
 restore_previous_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
+    local discard
     if [ ! -d "$PREVIOUS_BUNDLE" ]; then
         log_error "no previous app bundle to restore — $installed_bundle is the new build"
         return 1
@@ -811,7 +818,12 @@ restore_previous_bundle() {
         log_error "could not put the previous app bundle back from $PREVIOUS_BUNDLE"
         return 1
     fi
-    rm -rf "$PREVIOUS_BUNDLE"
+    discard="$(dirname "$PREVIOUS_BUNDLE")/.TBD.app.discard"
+    rm -rf "$discard"
+    # A discard the rm could not remove would make mv move the copy into it.
+    if [ ! -e "$discard" ] && mv "$PREVIOUS_BUNDLE" "$discard"; then
+        rm -rf "$discard"
+    fi
     log "restored previous app bundle"
 }
 
@@ -1136,6 +1148,12 @@ stop_handover_successor() {
 # did not complete.
 APP_RELAUNCH_PENDING=false
 
+# True from just before the stop before the handover signals the app, and
+# cleared again when that stop finds no app running. APP_RELAUNCH_PENDING
+# goes up only once the stop has returned, which can take seconds, so an exit
+# in between reads this to know the app may already have exited.
+APP_STOP_BEGUN=false
+
 # True while main is moving the installation — install_new_bundle, the app
 # stop, hand_over_to_new_daemon: from just before the install begins until
 # main knows where the run stands again. Read by on_update_exit, which must
@@ -1214,8 +1232,11 @@ stop_app_before_handover() {
     fi
     log "stopping the app before the handover"
     local status=0
+    APP_STOP_BEGUN=true
     APP_STOP_OUTCOME="$(stop_installed_app)" || status=$?
-    if [ "$APP_STOP_OUTCOME" != none ]; then
+    if [ "$APP_STOP_OUTCOME" = none ]; then
+        APP_STOP_BEGUN=false
+    else
         APP_STOPPED_AT="$SECONDS"
     fi
     log_app_stop "$APP_STOP_OUTCOME"
@@ -1299,7 +1320,9 @@ relaunch_stopped_app() {
 # (report_interrupted_install), and a failed install or handover whose
 # rollback did not complete (main). Each logs its own error before calling
 # this. An app this run never stopped — the install failed, or the exit came
-# before the stop — is still running, and is left that way.
+# before the stop — is still running, and is left that way. An exit while the
+# stop was under way (APP_STOP_BEGUN, with no relaunch pending yet) may have
+# stopped it, and the line says so.
 #
 # APP_RELAUNCH_PENDING comes down before INSTALL_IN_FLIGHT, so an exit between
 # the two still finds nothing to relaunch.
@@ -1309,6 +1332,8 @@ leave_app_stopped_for_recovery() {
     INSTALL_IN_FLIGHT=false
     if [ "$was_stopped" = true ]; then
         log "the app was stopped for the handover and is not running; it is not relaunched, because which build it would start and which daemon it would reach are unknown"
+    elif [ "$APP_STOP_BEGUN" = true ]; then
+        log "the run ended while stopping the app for the handover, so the app may have been stopped and may not be running; it is not relaunched, because which build it would start and which daemon it would reach are unknown"
     fi
     log "to recover: run 'tbd version' to see which build the daemon is running, then run 'tbd update' again"
     log "or open $INSTALLED_BUNDLE yourself once it and the daemon are the same build ($INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json names the bundle's commit)"
@@ -1334,12 +1359,13 @@ leave_app_stopped_for_recovery() {
 # says what happened and how to recover, and the operator chooses.
 #
 # One case the run can name outright: the new build is installed, but the run
-# ended before it stopped the app or began the handover. TBD is then still
-# running the previous build in front of the new bundle, which is accepted
-# rather than undone here: in a source build the update clone's .build/release
-# already holds the new binaries from the build step, so a daemon respawned
-# from it is the new build whether or not the bundle was swapped. Running
-# `tbd update` again completes the move, and the report says so.
+# ended before it began stopping the app (APP_STOP_BEGUN) or began the
+# handover. TBD is then still running the previous build in front of the new
+# bundle, which is accepted rather than undone here: in a source build the
+# update clone's .build/release already holds the new binaries from the build
+# step, so a daemon respawned from it is the new build whether or not the
+# bundle was swapped. Running `tbd update` again completes the move, and the
+# report says so.
 report_interrupted_install() {
     local note installed_commit
     log_error "the run was interrupted while installing and handing over; the installed app and the daemon may be different builds"
@@ -1347,7 +1373,7 @@ report_interrupted_install() {
     [ -z "$note" ] || log "$note"
     log "$(describe_installed_bundle)"
     installed_commit="$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
-    if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_RELAUNCH_PENDING" != true ] &&
+    if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_STOP_BEGUN" != true ] &&
         [ -n "$INSTALLING_COMMIT" ] && [ "$installed_commit" = "$INSTALLING_COMMIT" ]; then
         log "nothing was handed over and the app was not stopped: TBD is still running the previous build, in front of the newly installed bundle — run 'tbd update' again, which completes the move"
     fi

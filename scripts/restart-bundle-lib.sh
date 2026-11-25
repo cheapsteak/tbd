@@ -574,13 +574,14 @@ provision_signing_identity() (
     exit 0
 )
 
-# The cp that copy_app_bundle runs, `/bin/cp` unless a test points it at a
-# copy that records what the installed path holds while the copy runs (both
-# scripts/update.test.sh and scripts/restart-bundle-lib.test.sh do). A
-# variable rather than a function a test defines in place of
-# copy_app_bundle, because update.sh sources this file again at run time and
-# would replace that function.
-TBD_BUNDLE_CP="${TBD_BUNDLE_CP:-/bin/cp}"
+# The cp that copy_app_bundle runs. Sourcing this file always sets it to
+# `/bin/cp`, whatever the environment holds, so nothing a real install
+# inherits decides what it runs. A test points it at a copy that records what
+# the installed path holds while the copy runs by setting it once the file is
+# sourced: scripts/restart-bundle-lib.test.sh for one call, and
+# scripts/update.test.sh as the install begins, since update.sh's main
+# sources this file again as it starts.
+TBD_BUNDLE_CP=/bin/cp
 
 # Copy a bundle, as an APFS clone where the volume allows.
 #

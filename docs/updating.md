@@ -371,21 +371,43 @@ the order you would reach for them.
   nothing installed keeps nothing, and leaves a bundle an earlier update kept
   where it is. Put it back the way an install does, so that
   `/Applications/TBD.app` is never missing if the app quits meanwhile (see
-  "Stops the app" above):
+  "Stops the app" above).
+
+  First look for `/Applications/.TBD-install-outgoing` (`ls -a /Applications`
+  lists it). If it is there with nothing at `/Applications/TBD.app`, an
+  install stopped between its two renames, and it is the bundle that was
+  installed, whole. Rename it back before anything else:
+  `mv /Applications/.TBD-install-outgoing /Applications/TBD.app`. If it is
+  there beside an installed bundle, it is left over from an earlier install:
+  rename it to `/Applications/.TBD-install-discard` and delete it there. The
+  command below does nothing while that name is taken. Then:
 
   ```bash
-  rm -rf /Applications/.TBD-install-incoming /Applications/.TBD-install-outgoing \
-    /Applications/.TBD-install-discard &&
-  /bin/cp -cR ~/tbd/updates/previous/TBD.app /Applications/.TBD-install-incoming &&
-  mv /Applications/TBD.app /Applications/.TBD-install-outgoing &&
-  mv /Applications/.TBD-install-incoming /Applications/TBD.app &&
-  mv /Applications/.TBD-install-outgoing /Applications/.TBD-install-discard &&
-  rm -rf /Applications/.TBD-install-discard
+  ( cd /Applications &&
+    [ ! -e .TBD-install-outgoing ] &&
+    rm -rf .TBD-install-incoming .TBD-install-discard &&
+    /bin/cp -cR ~/tbd/updates/previous/TBD.app .TBD-install-incoming &&
+    { [ ! -e TBD.app ] || mv TBD.app .TBD-install-outgoing; } &&
+    mv .TBD-install-incoming TBD.app &&
+    if [ -e .TBD-install-outgoing ]; then
+      mv .TBD-install-outgoing .TBD-install-discard && rm -rf .TBD-install-discard
+    fi )
   ```
 
-  Then relaunch. That bundle's `Contents/SourceWorktreePath.txt` names the
-  tree the previous daemon came from, so `scripts/restart.sh --release` run
-  from inside that tree completes the rollback for the daemon as well.
+  - **The `rm`** – clears what an interrupted install may have left at the
+    incoming and discard names, neither of which holds a bundle anything puts
+    back.
+  - **The copy** – puts the kept bundle beside the installed one; a copy that
+    fails stops the command before the installed bundle moves.
+  - **The two `mv`s** – swap it in back to back, so the installed path is
+    empty only between them. With nothing installed, only the second runs.
+  - **The last step** – removes the bundle it replaced by way of the discard
+    name.
+
+  Then relaunch. The restored bundle's `Contents/SourceWorktreePath.txt`
+  names the tree the previous daemon came from, so `scripts/restart.sh
+  --release` run from inside that tree completes the rollback for the daemon
+  as well.
 - **From the update clone.** `~/tbd/updates/src` keeps its full history. Check
   out the commit you want (`git -C ~/tbd/updates/src checkout --detach
   <commit>`) and run `scripts/restart.sh --release` from inside it. That
@@ -453,10 +475,12 @@ because the new daemon may already be up. So it leaves the app as it is — not
 running if the run had stopped it, still running if the interruption came
 before the stop — and logs an error saying the run was interrupted while
 installing and handing over, with a line saying the app is not running when
-the run had stopped it. When the new build is installed but the run had not
-yet stopped the app or begun the handover, the run says so: TBD is still
-running the previous build in front of the newly installed bundle, nothing
-was handed over, and `tbd update` run again completes the move.
+the run had stopped it, or may not be running when the interruption came
+while the run was still stopping it. When the new build is installed but the
+run had not yet begun stopping the app or begun the handover, the run says
+so: TBD is still running the previous build in front of the newly installed
+bundle, nothing was handed over, and `tbd update` run again completes the
+move.
 
 To recover from either:
 
