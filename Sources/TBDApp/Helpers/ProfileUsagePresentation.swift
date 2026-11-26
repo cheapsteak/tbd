@@ -66,7 +66,7 @@ enum ProfileUsagePresentation {
                                  now: Date,
                                  timeZone: TimeZone = .current) -> String {
         if now.timeIntervalSince(resetsAt) > endedClockTimeLimit {
-            return "reset \(agoText(since: resetsAt, now: now))"
+            return "reset \(UsageAge.agoText(since: resetsAt, now: now))"
         }
         switch display {
         case .clock:
@@ -74,7 +74,7 @@ enum ProfileUsagePresentation {
         case .weekdayClock:
             return "reset at \(weekdayResetTimeText(resetsAt, timeZone: timeZone))"
         case .countdown, .tooltipOnly:
-            return "reset \(agoText(since: resetsAt, now: now))"
+            return "reset \(UsageAge.agoText(since: resetsAt, now: now))"
         }
     }
 
@@ -502,22 +502,11 @@ enum ProfileUsagePresentation {
     }
 
     /// Compact "how long ago" for a fetch timestamp: "just now", "3m", "2h",
-    /// "1d". Used to age both fresh-but-old and stale-with-old-data rows.
+    /// "1d". Used to age both fresh-but-old and stale-with-old-data rows. The
+    /// wording is `UsageAge.text(since:now:)` in `TBDShared`, which
+    /// `tbd profile list` uses too.
     static func ageText(since date: Date, now: Date = Date()) -> String {
-        let seconds = max(0, now.timeIntervalSince(date))
-        if seconds < 60 { return "just now" }
-        let minutes = Int(seconds / 60)
-        if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h" }
-        return "\(hours / 24)d"
-    }
-
-    /// `ageText` as a phrase: "just now" under a minute, otherwise the age
-    /// with "ago": "5m ago", "2h ago", "1d ago".
-    private static func agoText(since date: Date, now: Date) -> String {
-        let age = ageText(since: date, now: now)
-        return now.timeIntervalSince(date) < 60 ? age : "\(age) ago"
+        UsageAge.text(since: date, now: now)
     }
 
     /// Staleness / health note for a picker or menu row. Every logged-in

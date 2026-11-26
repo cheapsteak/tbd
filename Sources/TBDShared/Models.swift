@@ -1445,6 +1445,31 @@ public enum UsageLimitWindow {
     }
 }
 
+/// How long ago an instant was, in the compact words the app's usage
+/// surfaces and `tbd profile list` share: a reading's age ("updated 3m ago")
+/// and how long ago a window reset ("reset 2h ago").
+public enum UsageAge {
+    /// The age of `date` at `now`: "just now" under a minute, otherwise whole
+    /// minutes, hours or days, rounded down: "3m", "2h", "1d". A `date` after
+    /// `now` reads "just now".
+    public static func text(since date: Date, now: Date) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "just now" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        return "\(hours / 24)d"
+    }
+
+    /// `text` as a phrase: "just now" under a minute, otherwise the age with
+    /// "ago": "5m ago", "2h ago", "1d ago".
+    public static func agoText(since date: Date, now: Date) -> String {
+        let age = text(since: date, now: now)
+        return now.timeIntervalSince(date) < 60 ? age : "\(age) ago"
+    }
+}
+
 /// Machine-readable classification of a profile's last usage-fetch outcome,
 /// so the UI can render honest, distinct states instead of parsing the
 /// free-form `status` string. Separates auth failures from rate limits from
