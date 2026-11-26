@@ -11,7 +11,10 @@ struct LimitBannerModel {
     /// The profile name the limit hit on (for display).
     let limitedProfileName: String
 
-    /// "resets <ResumeTimeFormatter or the app's existing time formatting>"
+    /// When the limit resets, as a clock time while that is ahead, "resets
+    /// 7am". Once it has passed it says when the limit reset, in the phrase
+    /// every usage surface uses (`ProfileUsagePresentation.endedResetPhrase`):
+    /// "reset at 7am", or "reset 1d ago" for an older reset.
     let resetsText: String
 
     /// When `suggestedProfileID` is non-nil and present in the app's profiles,
@@ -63,8 +66,15 @@ struct LimitBannerModel {
         // Limited profile name: lookup or fallback to generic copy
         let limitedProfileName = limitedProfile?.profile.name ?? "this account"
 
-        // Reset time: use the limit's resetsAt, formatted as clock time
-        let resetsText = "resets \(ProfileUsagePresentation.resetTimeText(limitHit.resetsAt))"
+        // Reset time: the limit's resetsAt as a clock time, in the past tense
+        // once it is at or before `now`.
+        let resetsText: String
+        if UsageLimitWindow.hasEnded(resetsAt: limitHit.resetsAt, at: now) {
+            resetsText = ProfileUsagePresentation.endedResetPhrase(
+                limitHit.resetsAt, display: .clock, now: now)
+        } else {
+            resetsText = "resets \(ProfileUsagePresentation.resetTimeText(limitHit.resetsAt))"
+        }
 
         // Suggested profile name and usage
         let suggestedProfileName = suggestedProfile?.profile.name

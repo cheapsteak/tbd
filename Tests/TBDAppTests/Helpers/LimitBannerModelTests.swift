@@ -158,6 +158,35 @@ struct LimitBannerModelTests {
         #expect(model.switchButtonTitle == "Switch to Spare — 3 live")
     }
 
+    /// Before the limit's reset the banner says when it resets; once that
+    /// time has passed it says the limit reset, in the phrase the usage
+    /// surfaces use, which turns to how long ago past `endedClockTimeLimit`.
+    @Test func resetsTextTakesThePastTenseOnceTheResetPasses() {
+        let resetAt = Date(timeIntervalSince1970: 1_800_000_000)
+        func resetsText(at now: Date) -> String {
+            LimitBannerModel.build(
+                limitHit: TerminalLimitHit(
+                    profileID: UUID(),
+                    resetsAt: resetAt,
+                    limitType: "session",
+                    suggestedProfileID: nil,
+                    receivedAt: resetAt.addingTimeInterval(-3600)
+                ),
+                limitedProfile: nil,
+                suggestedProfile: nil,
+                suggestedLiveCount: nil,
+                now: now
+            ).resetsText
+        }
+
+        // The banner formats in the local time zone.
+        let clock = ProfileUsagePresentation.resetTimeText(resetAt)
+        #expect(resetsText(at: resetAt.addingTimeInterval(-60)) == "resets \(clock)")
+        #expect(resetsText(at: resetAt) == "reset at \(clock)")
+        #expect(resetsText(at: resetAt.addingTimeInterval(3600)) == "reset at \(clock)")
+        #expect(resetsText(at: resetAt.addingTimeInterval(2 * 86_400)) == "reset 2d ago")
+    }
+
     /// The summary is read at the banner's `now`: a suggested profile whose
     /// 5h window has reset since its reading says so, not its old 97%.
     @Test
