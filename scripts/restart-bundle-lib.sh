@@ -795,18 +795,11 @@ swap_in_staged_app_bundle() {
     return 2
 }
 
-# How far the latest install_app_bundle got, for a caller that has to say
-# what an install it never saw return left behind: update.sh, when a run is
-# cut short while it installs. Empty until an install starts.
-#
-#   staging    clearing what an earlier install left beside the installed
-#              bundle, then copying the new bundle beside it. The new bundle
-#              has not reached the installed path.
-#   swapping   the two renames have begun. A swap that fails stays here.
-#   installed  the new bundle is installed, but not registered with
-#              LaunchServices: the registration is still to come, or failed.
-#   registered the new bundle is installed and registered.
-APP_BUNDLE_INSTALL_STEP=""
+# True once the latest install_app_bundle has installed its bundle and
+# registered it with LaunchServices; false from the moment an install starts
+# until then. update.sh reads it to say whether a bundle its rollback put
+# back is registered.
+APP_BUNDLE_REGISTERED=false
 
 # Install a signed bundle in place of the installed one and re-register it.
 #
@@ -838,9 +831,9 @@ APP_BUNDLE_INSTALL_STEP=""
 #
 # Returns 0 once the new bundle is installed, and otherwise what
 # swap_in_staged_app_bundle says about the installed path: 1 when it is as it
-# was, 2 when nothing is installed. Records how far it got in
-# APP_BUNDLE_INSTALL_STEP as it goes.
-# shellcheck disable=SC2034 # APP_BUNDLE_INSTALL_STEP is read by scripts/update.sh
+# was, 2 when nothing is installed. Records a registration that worked in
+# APP_BUNDLE_REGISTERED.
+# shellcheck disable=SC2034 # APP_BUNDLE_REGISTERED is read by scripts/update.sh
 install_app_bundle() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
@@ -851,10 +844,9 @@ install_app_bundle() {
         return 1
     fi
 
-    APP_BUNDLE_INSTALL_STEP=staging
+    APP_BUNDLE_REGISTERED=false
     reclaim_app_bundle_siblings "$installed_bundle" || return 1
     stage_app_bundle "$bundle_dir" "$installed_bundle" || return 1
-    APP_BUNDLE_INSTALL_STEP=swapping
     swap_in_staged_app_bundle "$installed_bundle" || status=$?
     case "$status" in
         0) ;;
@@ -864,10 +856,9 @@ install_app_bundle() {
             return 1
             ;;
     esac
-    APP_BUNDLE_INSTALL_STEP=installed
     discard_app_bundle_sibling "$installed_bundle" outgoing || true
     if register_app_bundle "$installed_bundle"; then
-        APP_BUNDLE_INSTALL_STEP=registered
+        APP_BUNDLE_REGISTERED=true
     else
         echo "warning: installed $installed_bundle but could not register it with LaunchServices" >&2
     fi
@@ -880,7 +871,7 @@ install_app_bundle() {
 # touch below fails. That changes nothing about what is installed, so
 # install_app_bundle only warns and still returns 0 (so restart.sh, which
 # calls it under `set -e`, carries on), and records it
-# (APP_BUNDLE_INSTALL_STEP) for a caller that reports the install.
+# (APP_BUNDLE_REGISTERED) for a caller that reports the install.
 register_app_bundle() {
     local installed_bundle="${1-}"
     local status=0

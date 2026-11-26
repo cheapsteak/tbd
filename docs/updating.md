@@ -69,7 +69,11 @@ these steps in order.
   every update reuses: a build that failed here left old binaries in place,
   and had the sidecar been written first, it would have named the commit that
   never actually built, with nothing to correct it until the clone's next
-  successful build.
+  successful build. The sidecar the previous build left is removed just
+  before the stamp, and a stamp that fails stops the run with an error and
+  nothing installed, the app untouched: the install tells one build from
+  another by this identity, so it never goes ahead with none, or with the
+  previous build's. A downloaded build is stamped the same way.
 - **Assembles and signs** the new `TBD.app`, using the same code
   `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
   carries the sidecar and a `SourceWorktreePath.txt` naming the update clone.
@@ -392,11 +396,19 @@ the order you would reach for them.
   `mv /Applications/.TBD-install-outgoing /Applications/TBD.app`. If it is
   there beside an installed bundle, it is left over from an earlier install:
   rename it to `/Applications/.TBD-install-discard` and delete it there. The
-  command below does nothing while that name is taken. Then:
+  command below does nothing while that name is taken. With nothing installed
+  and nothing at the outgoing name, look at
+  `/Applications/.TBD-install-incoming` too: a whole bundle there is the one
+  a failed swap staged, and
+  `mv /Applications/.TBD-install-incoming /Applications/TBD.app` puts it in
+  place at once. The command below does nothing in that state either, so it
+  never deletes that bundle. Then:
 
   ```bash
   ( cd /Applications &&
     [ ! -e .TBD-install-outgoing ] &&
+    { [ -e TBD.app ] || [ ! -f .TBD-install-incoming/Contents/Info.plist ] ||
+      [ ! -x .TBD-install-incoming/Contents/MacOS/TBDApp ]; } &&
     rm -rf .TBD-install-incoming .TBD-install-discard &&
     /bin/cp -cR ~/tbd/updates/previous/TBD.app .TBD-install-incoming &&
     { [ ! -e TBD.app ] || mv TBD.app .TBD-install-outgoing; } &&
@@ -407,8 +419,9 @@ the order you would reach for them.
   ```
 
   - **The `rm`** – clears what an interrupted install may have left at the
-    incoming and discard names, neither of which holds a bundle anything puts
-    back.
+    incoming and discard names. The test before it keeps it from deleting
+    the one bundle there is when nothing is installed: a whole one at the
+    incoming name.
   - **The copy** – puts the kept bundle beside the installed one; a copy that
     fails stops the command before the installed bundle moves.
   - **The two `mv`s** – swap it in back to back, so the installed path is
@@ -446,12 +459,15 @@ bundle back in the same way an install does — copied in beside the new one,
 then two renames — and tells LaunchServices about it. It logs `restored
 previous app bundle` (with a note when LaunchServices could not register it,
 which fails nothing but can leave `tbd://` links and the icon stale). The
-kept copy is spent: it is the bundle now installed. A kept bundle that the
-run copied from `/Applications` itself goes back too when the daemon
-reported no build, or when the bundle's identity names none, since it is the
-bundle that was installed when the run began. Either way the run then puts
-the update clone's `.build/release` link back
-the way the run found it, relaunches the app it stopped before the handover,
+kept copy is spent: it is the bundle now installed. When neither bundle is
+the daemon's build but the run kept a bundle itself, that bundle goes back
+all the same, with a line naming the daemon's build and the kept bundle's,
+since it is the bundle that was installed when the run began. That covers a
+daemon that reported no build, a kept bundle whose identity names none, and
+a daemon whose build was read from its worktree rather than its stamp, which
+can disagree with the bundle's on the dirty flag. Either way the run then
+puts the update clone's `.build/release` link back the way the run found
+it, relaunches the app it stopped before the handover,
 and exits non-zero. That is the case the kept bundle exists for — a new app
 driving the old daemon is a state nobody should be left in. The relaunch
 also covers a handover that failed after the old daemon had already exited:
@@ -475,20 +491,25 @@ the command that puts it back:
 install does that itself before it starts. Only a tree there that looks like
 a whole bundle — `Contents/Info.plist` present and `Contents/MacOS/TBDApp`
 executable, the test the put-back makes — gets that command. For any other,
-the warning points at the kept bundle instead, and says to rename the tree
-out of the way to `/Applications/.TBD-install-discard` first, since the way
-back under "Going back to the previous build" runs only once that name is
-free. A rollback whose swap leaves nothing installed gets the same second
-try and the same warning.
+the warning names the bundle the swap staged at
+`/Applications/.TBD-install-incoming` when that one is whole, with the
+command that renames it into place. When neither is, it points at the kept
+bundle, naming its build and saying whether this run kept it or an earlier
+update did, and says to rename the tree at the outgoing name out of the way
+to `/Applications/.TBD-install-discard` first, since the way back under
+"Going back to the previous build" runs only once that name is free. With no
+bundle kept either, it points at `scripts/restart.sh` from a TBD checkout. A
+rollback whose swap leaves nothing installed gets the same second try and
+the same warning.
 
-The relaunch waits on both halves of that rollback. When either fails — no
-bundle of the daemon's build is at hand, as on a first update, or the bundle
-or the `.build/release` link cannot be put back — the new build may still be
-what an app would launch, or what it would start a daemon from, so the run
-leaves the app it stopped not running. It logs which half failed, then an
-error saying the rollback of the failed install did not complete, and the
-report and recovery steps below. A kept bundle of another build than the
-daemon's, such as an older one an earlier update kept, stays where it is,
+The relaunch waits on both halves of that rollback. When either fails — the
+run kept no bundle and none is the daemon's build, as on a first update, or
+the bundle or the `.build/release` link cannot be put back — the new build
+may still be what an app would launch, or what it would start a daemon
+from, so the run leaves the app it stopped not running. It logs which half
+failed, then an error saying the rollback of the failed install did not
+complete, and the report and recovery steps below. A kept bundle that an
+earlier update kept, and that is not the daemon's build, stays where it is,
 and the new build stays in `/Applications`, as on the first update, so that
 it is there to open once it and the daemon are the same build.
 
