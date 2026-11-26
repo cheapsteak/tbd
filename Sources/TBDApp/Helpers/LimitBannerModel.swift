@@ -74,7 +74,8 @@ struct LimitBannerModel {
         if let suggestedProfile {
             // Build usage summary for the suggested profile
             var parts: [String] = []
-            if let usage = ProfileUsagePresentation.usageSummary(for: suggestedProfile.usageSnapshot),
+            if let usage = ProfileUsagePresentation.usageSummary(for: suggestedProfile.usageSnapshot,
+                                                                 now: now),
                !usage.isEmpty {
                 parts.append(usage)
             }

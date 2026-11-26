@@ -157,4 +157,47 @@ struct LimitBannerModelTests {
         #expect(model.suggestedUsageSummary == "3 live")
         #expect(model.switchButtonTitle == "Switch to Spare — 3 live")
     }
+
+    /// The summary is read at the banner's `now`: a suggested profile whose
+    /// 5h window has reset since its reading says so, not its old 97%.
+    @Test
+    func summarySaysTheSuggestedProfilesWindowReset() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let passedReset = now.addingTimeInterval(-3600)
+        let limitHit = TerminalLimitHit(
+            profileID: UUID(),
+            resetsAt: now.addingTimeInterval(3600),
+            limitType: "session",
+            suggestedProfileID: UUID(),
+            receivedAt: now
+        )
+        let suggestedProfile = ModelProfileWithUsage(
+            profile: ModelProfile(id: limitHit.suggestedProfileID!, name: "Spare", kind: .oauth),
+            loginIdentity: "spare@acme.example",
+            usageSnapshot: ProfileUsageSnapshot(
+                buckets: [
+                    ClaudeUsageLimitBucket(kind: "session", percent: 97, severity: "critical",
+                                           resetsAt: passedReset)
+                ],
+                fetchedAt: now.addingTimeInterval(-2 * 3600),
+                lastAttemptAt: now,
+                status: "ok",
+                statusKind: .ok,
+                organizationID: nil
+            )
+        )
+
+        let model = LimitBannerModel.build(
+            limitHit: limitHit,
+            limitedProfile: nil,
+            suggestedProfile: suggestedProfile,
+            suggestedLiveCount: 0,
+            now: now
+        )
+
+        // The banner formats in the local time zone.
+        let summary = "5h reset \(ProfileUsagePresentation.resetTimeText(passedReset))"
+        #expect(model.suggestedUsageSummary == summary)
+        #expect(model.forkButtonTitle == "Fork to Spare — \(summary)")
+    }
 }

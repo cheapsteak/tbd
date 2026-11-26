@@ -1413,6 +1413,23 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
         self.modelDisplayName = modelDisplayName
         self.isActive = isActive
     }
+
+    /// Whether this bucket's window has ended: its reset instant is at or
+    /// before `now`. The limit went back to zero at that instant, so a percent
+    /// read before it no longer describes the account, however recent the
+    /// reading. When the next window resets is unknown, because the 5-hour
+    /// window starts at the first message after the reset. A bucket with no
+    /// reset instant never counts as ended.
+    ///
+    /// The app's usage surfaces show such a bucket as a fresh window at 0%.
+    /// The account picker sheet's own row order counts it as 0% only in a
+    /// snapshot whose last fetch succeeded
+    /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`). Account balancing does
+    /// not apply this rule: it ranks an account by its last recorded percent.
+    public func windowHasEnded(at now: Date) -> Bool {
+        guard let resetsAt else { return false }
+        return resetsAt <= now
+    }
 }
 
 /// Machine-readable classification of a profile's last usage-fetch outcome,
@@ -1502,6 +1519,17 @@ public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
     }
 
     public var isOK: Bool { status == "ok" }
+
+    /// Whether `bucket`, one of this snapshot's buckets, counts as a fresh
+    /// window at 0% when the app's account picker sheet orders its rows at
+    /// `now`: its window has ended (`ClaudeUsageLimitBucket.windowHasEnded(at:)`)
+    /// and the last fetch succeeded (`isOK`). A reading whose fetch is failing
+    /// keeps its recorded percent for ordering, however long ago its windows
+    /// reset, so a broken account, such as one with a rejected token, never
+    /// sorts as the emptiest.
+    public func countsAsReset(_ bucket: ClaudeUsageLimitBucket, at now: Date) -> Bool {
+        isOK && bucket.windowHasEnded(at: now)
+    }
 }
 
 public struct ModelProfileWithUsage: Codable, Sendable, Equatable {

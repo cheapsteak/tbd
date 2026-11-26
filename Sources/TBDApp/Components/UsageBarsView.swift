@@ -159,13 +159,10 @@ private struct UsageBarRow: View {
     // MARK: Tooltip
 
     /// The spelled-out reset info the compact form omits, kept as a `.help`
-    /// tooltip so nothing is lost: "5-hour window: 12% used · resets 23:10".
+    /// tooltip so nothing is lost: "5-hour window: 12% used · resets at
+    /// 11:10pm", or "5-hour window: reset at 7am" once the window has ended.
     private var helpText: String {
-        var text = "\(windowLabel): \(presentation.percentText) used"
-        if let resetPhrase = presentation.resetPhrase {
-            text += " · \(resetPhrase)"
-        }
-        return text
+        "\(windowLabel): \(presentation.usageText())"
     }
 }
 
@@ -212,6 +209,12 @@ private struct UsageBarRow: View {
         UsageBarsView(snapshot: snap([
             bucket("session", 40, severity: "normal"),
             bucket("weekly_all", 30, severity: "normal"),
+        ]), now: now)
+
+        // Weekly reset already passed → a fresh window: empty bar, 0%, no marker.
+        UsageBarsView(snapshot: snap([
+            bucket("session", 40, severity: "normal", resetsIn: 3 * 3600),
+            bucket("weekly_all", 86, severity: "warning", resetsIn: -24 * 3600),
         ]), now: now)
     }
     .frame(width: 260)

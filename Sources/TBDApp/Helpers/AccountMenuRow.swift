@@ -74,6 +74,8 @@ enum AccountMenuRow {
     /// What the row leaves out: the account's login email on the first line,
     /// then the reset times, for example
     /// "5-hour: 40% used · resets at 8pm — Weekly: 16% used · resets at Fri 7pm".
+    /// A window that has ended says when it reset instead of its old percent:
+    /// "Weekly: reset at Mon 7am".
     /// The reset times show only when the row shows bars. Either line stands
     /// alone when the other is missing; nil when both are.
     static func toolTip(for usage: MenuUsage, identity: String?) -> String? {
@@ -129,10 +131,6 @@ enum AccountMenuRow {
 
     private static func toolTipPart(_ window: String,
                                     _ presentation: ProfileUsagePresentation.BucketPresentation) -> String {
-        var text = "\(window): \(presentation.percentText) used"
-        if let resetPhrase = presentation.resetPhrase {
-            text += " · \(resetPhrase)"
-        }
-        return text
+        "\(window): \(presentation.usageText())"
     }
 }

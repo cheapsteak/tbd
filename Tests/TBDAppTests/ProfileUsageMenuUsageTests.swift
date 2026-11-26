@@ -155,6 +155,62 @@ struct ProfileUsageMenuUsageTests {
         #expect(Fix.usage(Fix.entry(snapshot: old)) == .note(note))
     }
 
+    /// The 5h window reset an hour ago, after the reading two hours ago; the
+    /// weekly one has not. Only the 5h bar shows a fresh window, and the age
+    /// note is the one the same reading gets with both windows open.
+    @Test func endedWindowShowsFreshBesideAnOpenOne() {
+        let fetchedAt = Fix.now.addingTimeInterval(-2 * 3600)
+        let endedSession = ClaudeUsageLimitBucket(
+            kind: "session", percent: 40, severity: "normal",
+            resetsAt: Fix.now.addingTimeInterval(-3600))
+        let usage = Fix.usage(Fix.entry(snapshot: Fix.snapshot([endedSession, Fix.weekly16],
+                                                               fetchedAt: fetchedAt)))
+        #expect(usage == .bars(
+            session: ProfileUsagePresentation.BucketPresentation(
+                kind: "session", percent: 0, percentText: "0%", fill: .normal,
+                resetDisplay: .clock, resetInline: nil, resetPhrase: "reset at 7am",
+                elapsedFraction: nil, windowEnded: true),
+            weekly: Fix.presentation(Fix.weekly16),
+            ageNote: "2h ago"))
+        #expect(Fix.presentation(Fix.weekly16).percentText == "16%")
+
+        let openSession = ClaudeUsageLimitBucket(
+            kind: "session", percent: 40, severity: "normal",
+            resetsAt: Fix.now.addingTimeInterval(3600))
+        let open = Fix.usage(Fix.entry(snapshot: Fix.snapshot([openSession, Fix.weekly16],
+                                                              fetchedAt: fetchedAt)))
+        #expect(open == .bars(session: Fix.presentation(openSession),
+                              weekly: Fix.presentation(Fix.weekly16),
+                              ageNote: "2h ago"))
+        #expect(Fix.presentation(openSession).percentText == "40%")
+    }
+
+    /// A token profile refreshes only when a session on it finishes a turn,
+    /// so its reading can be days old. Both windows reset since this one, so
+    /// both bars show fresh windows beside the age.
+    @Test func daysOldTokenReadingShowsBothEndedWindowsFresh() {
+        let session = ClaudeUsageLimitBucket(
+            kind: "session", percent: 12, severity: "normal",
+            resetsAt: Fix.now.addingTimeInterval(-45 * 3600))
+        let weekly = ClaudeUsageLimitBucket(
+            kind: "weekly_all", percent: 86, severity: "warning",
+            resetsAt: Fix.now.addingTimeInterval(-24 * 3600))
+        let snapshot = Fix.snapshot([session, weekly], fetchedAt: Fix.now.addingTimeInterval(-2 * 24 * 3600))
+        let usage = Fix.usage(Fix.entry(kind: .oauthToken, snapshot: snapshot))
+        guard case let .bars(sessionBar, weeklyBar, ageNote) = usage else {
+            Issue.record("expected bars, got \(usage)")
+            return
+        }
+        #expect(sessionBar?.percentText == "0%")
+        #expect(sessionBar?.fill == .normal)
+        #expect(sessionBar?.elapsedFraction == nil)
+        #expect(weeklyBar?.percentText == "0%")
+        #expect(weeklyBar?.fill == .normal)
+        #expect(weeklyBar?.elapsedFraction == nil)
+        #expect(weeklyBar?.resetPhrase == "reset at Thu 8am")
+        #expect(ageNote == "2d ago")
+    }
+
     @Test func bucketPresentationsMatchBucketPresentation() {
         // A non-default style must reach the presentations too.
         let usage = Fix.usage(Fix.entry(snapshot: Fix.snapshot([Fix.session40, Fix.weekly16])),
