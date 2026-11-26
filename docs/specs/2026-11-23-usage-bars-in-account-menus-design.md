@@ -67,17 +67,36 @@ not widen the menu.
   however recent the reading. Its bar shows a fresh window: empty, "0%", the normal green, and no
   tick, because the next reset is unknown (the 5-hour window starts at the first message after the
   reset). Its part of the tooltip says when the limit reset instead of giving the old percent, for
-  example "Weekly: reset at Mon 7am", or "Weekly: reset 1d ago" with relative reset times. The age
+  example "Weekly: reset at Mon 7am", or "Weekly: reset 2h ago" with relative reset times. The age
   note is unchanged, and a window with no reset time or one still ahead shows as read. The rule is
-  `ClaudeUsageLimitBucket.windowHasEnded(at:)` in `TBDShared`, and it reaches beyond these menus:
+  `UsageLimitWindow.hasEnded(resetsAt:at:)` in `TBDShared`, which
+  `ClaudeUsageLimitBucket.windowHasEnded(at:)` and `CodexRateLimitWindow.windowHasEnded(at:)` both
+  call, and it reaches beyond these menus:
+  - **One phrase for the reset.** Every surface words an ended window through
+    `ProfileUsagePresentation.endedResetPhrase`. Up to 20 hours after the reset
+    (`endedClockTimeLimit`) the phrase takes the surface's form: "reset at 7am", "reset at Mon 7am"
+    or "reset 2h ago". An older reset says how long ago in every form, "reset 2d ago", because a
+    clock time names no day: two days on, "reset at 7am" would read as this morning, and a weekday
+    clock is ambiguous after six days. Compact surfaces put their window's name before the phrase:
+    "5h reset at 7am · wk 16%".
   - **Every app surface that draws a bucket** shows an ended window as reset: these menus, the
-    worktree picker's bars, the hover card, the "Choose account…" sheet, the profile rows in
-    Settings and the limit banner's usage text.
-  - **The "Choose account…" sheet's own order** counts an ended window as 0% when the reading is
-    healthy (`ProfileUsageSnapshot.countsAsReset(_:at:)`). That order places every row with
-    balancing off, and with it on the rows that balancing turns away. A reading whose fetch is
-    failing keeps its recorded percent, so a broken account, whose row shows its note, never sorts
-    as the emptiest.
+    worktree picker's bars and its Codex rows, the hover card, the "Choose account…" sheet, the
+    profile rows in Settings, and the limit banner's usage text. VoiceOver hears the same words in
+    place of the "0%": "5-hour 40%, weekly reset at Thu 8am" for a menu row, and each picker bar's
+    tooltip text for the worktree picker. The worktree picker's Codex rows put the reset in the bar's
+    reset column, always as how long ago, "reset 2h ago", because the clock form can overflow that
+    column.
+  - **The limit banner's reset** says "resets 7am" while that is ahead and "reset at 7am" once it has
+    passed.
+  - **`tbd profile list`** prints an ended window as "0%" in its table, with the RESET column saying
+    how long ago, "2h ago". `--json` stays raw data: the recorded percent and the reset time.
+  - **The "Choose account…" sheet** shows a reading whose fetch is failing as its note in place of
+    the bars and the usage caption, as these menus do. Its own order counts an ended window as 0%
+    when the reading is healthy (`ProfileUsageSnapshot.countsAsReset(_:at:)`). That order places
+    every row with balancing off, and with it on the rows that balancing turns away. A reading whose
+    fetch is failing keeps its recorded percent, so a broken account never sorts as the emptiest.
+    The sheet reads the time once per draw, so its order, its balanced pick and each row's bars
+    agree on which windows have ended.
   - **Account balancing and the daemon's notifications** go by each account's last recorded
     percent. The balanced pick, eligibility and the fallbacks rank accounts by it, and the
     limit-hit suggestion and the balancing alerts quote it.
