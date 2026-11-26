@@ -169,12 +169,15 @@ why a profile was passed over:
 **Headroom** is `1 − max(percent)/100` over the snapshot's `session`,
 `weekly_all`, and active `weekly_scoped` buckets. The binding window is the
 one that will refuse the next request, whichever it is, so the most-used
-window decides. A profile at or above the usage ceiling — 85% by default — in
-any window is treated as full rather than ranked last. The margin is wide on
-purpose: a reading trails the work that moves it, because it is minutes old
-when it is read and every session already on the account keeps spending while
-a new one starts. A session placed at 90% of a 5-hour window can be out of room
-before its first long turn finishes.
+window decides. A bucket whose reset time is at or before the pick's `now`
+counts as 0%, however recent the reading: its limit went back to zero at the
+reset, and the app's usage bars show it as a fresh window by the same rule,
+`ClaudeUsageLimitBucket.windowHasEnded(at:)`. A profile at or above the usage
+ceiling — 85% by default — in any window is treated as full rather than ranked
+last. The margin is wide on purpose: a reading trails the work that moves it,
+because it is minutes old when it is read and every session already on the
+account keeps spending while a new one starts. A session placed at 90% of a
+5-hour window can be out of room before its first long turn finishes.
 
 ### 5.1 The thresholds
 

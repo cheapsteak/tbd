@@ -492,16 +492,13 @@ struct EndedWindowTests {
     /// A day and an hour after `resetDate`.
     private let dayAfterReset = resetDate.addingTimeInterval(25 * 3600)
 
-    @Test func windowHasEndedOnlyOnceTheResetIsAtOrBeforeNow() {
+    @Test func endedAtOnlyOnceTheResetIsAtOrBeforeNow() {
         let session = bucket(kind: "session", percent: 40, resetsAt: resetDate)
-        #expect(ProfileUsagePresentation.windowHasEnded(session, now: beforeReset) == false)
-        #expect(ProfileUsagePresentation.windowHasEnded(session, now: resetDate))
-        #expect(ProfileUsagePresentation.windowHasEnded(session, now: dayAfterReset))
         #expect(ProfileUsagePresentation.endedAt(session, now: beforeReset) == nil)
+        #expect(ProfileUsagePresentation.endedAt(session, now: resetDate) == resetDate)
         #expect(ProfileUsagePresentation.endedAt(session, now: dayAfterReset) == resetDate)
 
         let noReset = bucket(kind: "session", percent: 40)
-        #expect(ProfileUsagePresentation.windowHasEnded(noReset, now: dayAfterReset) == false)
         #expect(ProfileUsagePresentation.endedAt(noReset, now: dayAfterReset) == nil)
     }
 

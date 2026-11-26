@@ -28,14 +28,19 @@ private func makeSnapshot(
 private func makeBucket(
     kind: String,
     percent: Double,
+    resetsAt: Date? = nil,
     isActive: Bool? = nil
 ) -> ClaudeUsageLimitBucket {
     ClaudeUsageLimitBucket(
         kind: kind,
         percent: percent,
+        resetsAt: resetsAt,
         isActive: isActive
     )
 }
+
+/// A fixed instant for tests that compare a reading's times against `now`.
+private let fixedNow = Date(timeIntervalSince1970: 1_800_000_000)
 
 /// Helper to create a candidate with sensible defaults.
 private func makeCandidate(
@@ -503,7 +508,7 @@ struct ProfilePoolPickerTests {
         let snapshot = makeSnapshot(buckets: [
             makeBucket(kind: "unknown", percent: 50)
         ])
-        let hr = ProfilePoolPicker.headroom(of: snapshot)
+        let hr = ProfilePoolPicker.headroom(of: snapshot, now: fixedNow)
 
         #expect(hr == 1.0)
     }
@@ -513,7 +518,7 @@ struct ProfilePoolPickerTests {
         let snapshot = makeSnapshot(buckets: [
             makeBucket(kind: "session", percent: 150)
         ])
-        let hr = ProfilePoolPicker.headroom(of: snapshot)
+        let hr = ProfilePoolPicker.headroom(of: snapshot, now: fixedNow)
 
         #expect(hr == 0.0)
     }
@@ -525,7 +530,7 @@ struct ProfilePoolPickerTests {
             makeBucket(kind: "weekly_all", percent: 80),
             makeBucket(kind: "weekly_scoped", percent: 60)
         ])
-        let hr = ProfilePoolPicker.headroom(of: snapshot)
+        let hr = ProfilePoolPicker.headroom(of: snapshot, now: fixedNow)
 
         #expect(hr == 0.2)  // 1 - 80/100
     }
@@ -536,9 +541,108 @@ struct ProfilePoolPickerTests {
             makeBucket(kind: "session", percent: 40),
             makeBucket(kind: "weekly_scoped", percent: 99, isActive: false)
         ])
-        let hr = ProfilePoolPicker.headroom(of: snapshot)
+        let hr = ProfilePoolPicker.headroom(of: snapshot, now: fixedNow)
 
         #expect(hr == 0.6)  // 1 - 40/100, ignoring the 99% inactive bucket
+    }
+
+    // MARK: Ended Windows
+
+    @Test("headroom: a binding bucket whose reset is still ahead counts its percent")
+    func headroomCountsAnOpenWindow() {
+        let now = fixedNow
+        let snapshot = makeSnapshot(
+            buckets: [makeBucket(kind: "session", percent: 95, resetsAt: now.addingTimeInterval(60))],
+            fetchedAt: now)
+        #expect(ProfilePoolPicker.headroom(of: snapshot, now: now) == 0.05)
+
+        let candidate = makeCandidate(snapshot: snapshot)
+        let decision = ProfilePoolPicker.pick(candidates: [candidate], now: now)
+        #expect(decision.verdicts[candidate.profileID] == .exhausted)
+    }
+
+    @Test("headroom: a binding bucket with no reset time counts its percent")
+    func headroomCountsABucketWithNoReset() {
+        let now = fixedNow
+        let snapshot = makeSnapshot(
+            buckets: [makeBucket(kind: "session", percent: 95, resetsAt: nil)],
+            fetchedAt: now)
+        #expect(ProfilePoolPicker.headroom(of: snapshot, now: now) == 0.05)
+
+        let candidate = makeCandidate(snapshot: snapshot)
+        let decision = ProfilePoolPicker.pick(candidates: [candidate], now: now)
+        #expect(decision.verdicts[candidate.profileID] == .exhausted)
+    }
+
+    @Test("headroom: a bucket whose reset is at or before now counts as 0%, so a full profile is eligible")
+    func headroomCountsAnEndedWindowAsZero() {
+        let now = fixedNow
+        // Read two minutes ago, at 95%: over the ceiling until the reset.
+        for resetsAt in [now, now.addingTimeInterval(-60)] {
+            let snapshot = makeSnapshot(
+                buckets: [makeBucket(kind: "session", percent: 95, resetsAt: resetsAt)],
+                fetchedAt: now.addingTimeInterval(-120))
+            #expect(ProfilePoolPicker.headroom(of: snapshot, now: now) == 1.0)
+
+            let candidate = makeCandidate(snapshot: snapshot)
+            let decision = ProfilePoolPicker.pick(candidates: [candidate], now: now)
+            #expect(decision.chosen == candidate.profileID)
+            #expect(decision.verdicts[candidate.profileID]
+                == .eligible(score: 1.0, headroom: 1.0, accountLiveSessions: 0))
+            #expect(ProfilePoolPicker.ranked(candidates: [candidate], now: now) == [candidate.profileID])
+        }
+    }
+
+    @Test("headroom: an ended window drops out, and a window still open binds")
+    func headroomEndedWindowLeavesTheOpenOneBinding() {
+        let now = fixedNow
+        let snapshot = makeSnapshot(buckets: [
+            makeBucket(kind: "session", percent: 95, resetsAt: now.addingTimeInterval(-60)),
+            makeBucket(kind: "weekly_all", percent: 40, resetsAt: now.addingTimeInterval(3 * 86_400))
+        ], fetchedAt: now)
+
+        #expect(ProfilePoolPicker.headroom(of: snapshot, now: now) == 0.6)  // 1 - 40/100
+    }
+
+    @Test("fallback: a window at 100% that has reset no longer makes a profile full")
+    func fallbackEndedFullWindowIsNotFull() {
+        let now = fixedNow
+        let candidate = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: makeSnapshot(buckets: [
+                makeBucket(kind: "session", percent: 100, resetsAt: now.addingTimeInterval(-60)),
+                makeBucket(kind: "weekly_all", percent: 90, resetsAt: now.addingTimeInterval(86_400))
+            ], fetchedAt: now))
+        let decision = ProfilePoolPicker.pick(candidates: [candidate], now: now)
+
+        #expect(decision.verdicts[candidate.profileID] == .exhausted)
+        #expect(decision.fallback == ProfilePoolFallback(profileID: candidate.profileID, reason: .aboveCeiling))
+    }
+
+    @Test("fallback: a stale reading whose window has since reset ranks at 0%")
+    func fallbackRanksAStaleEndedWindowAsFresh() {
+        let now = fixedNow
+        let hourAgo = now.addingTimeInterval(-3600)
+        // Read an hour ago at 95%; its 5-hour window reset a minute ago.
+        let reset = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: makeSnapshot(
+                buckets: [makeBucket(kind: "session", percent: 95, resetsAt: now.addingTimeInterval(-60))],
+                fetchedAt: hourAgo))
+        let stale30 = makeCandidate(
+            profileID: id(2), accountKey: "b",
+            snapshot: makeSnapshot(
+                buckets: [makeBucket(kind: "session", percent: 30, resetsAt: now.addingTimeInterval(3600))],
+                fetchedAt: hourAgo))
+
+        let afterReset = ProfilePoolPicker.pick(candidates: [stale30, reset], now: now)
+        #expect(afterReset.chosen == nil)
+        #expect(afterReset.verdicts[reset.profileID] == .noFreshReading)
+        #expect(afterReset.fallback == ProfilePoolFallback(profileID: reset.profileID, reason: .staleReading))
+
+        // Before that reset the same readings rank the other way.
+        let beforeReset = ProfilePoolPicker.pick(candidates: [stale30, reset], now: now.addingTimeInterval(-120))
+        #expect(beforeReset.fallback == ProfilePoolFallback(profileID: stale30.profileID, reason: .staleReading))
     }
 
     // MARK: Scoring and Sorting

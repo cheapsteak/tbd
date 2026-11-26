@@ -1413,6 +1413,21 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
         self.modelDisplayName = modelDisplayName
         self.isActive = isActive
     }
+
+    /// Whether this bucket's window has ended: its reset instant is at or
+    /// before `now`. The limit went back to zero at that instant, so a percent
+    /// read before it no longer describes the account, however recent the
+    /// reading. When the next window resets is unknown, because the 5-hour
+    /// window starts at the first message after the reset. A bucket with no
+    /// reset instant never counts as ended.
+    ///
+    /// The one rule for an ended window: the app's usage surfaces show such a
+    /// bucket as a fresh window at 0%, and `ProfilePoolPicker` counts it as 0%
+    /// when it weighs headroom.
+    public func windowHasEnded(at now: Date) -> Bool {
+        guard let resetsAt else { return false }
+        return resetsAt <= now
+    }
 }
 
 /// Machine-readable classification of a profile's last usage-fetch outcome,

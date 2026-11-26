@@ -27,27 +27,19 @@ enum ProfileUsagePresentation {
 
     // MARK: - Ended windows
 
-    /// Whether a bucket's window has ended: its reset instant is at or before
-    /// `now`. The limit went back to zero at that instant, so a percent read
-    /// before it no longer describes the account, however recent the snapshot.
-    /// When the next window resets is unknown, because the 5-hour window
-    /// starts at the first message after the reset. A bucket with no reset
-    /// instant never counts as ended.
+    /// When an ended window reset: the bucket's `resetsAt` once its window has
+    /// ended (`ClaudeUsageLimitBucket.windowHasEnded(at:)`, the shared rule
+    /// account balancing follows too), nil while the window is open or has no
+    /// reset instant.
     ///
     /// Every surface shows an ended bucket as a fresh window: 0%, the normal
     /// fill, no time marker, and words saying the limit reset in place of the
     /// old percent. `bucketPresentation` applies that for the bars, tooltips
     /// and hover card; the flat-string forms (`usageSummary`,
-    /// `usageDetailLine`) and the picker order (`sortedForPicker`) ask here.
-    static func windowHasEnded(_ bucket: ClaudeUsageLimitBucket, now: Date) -> Bool {
-        guard let resetsAt = bucket.resetsAt else { return false }
-        return resetsAt <= now
-    }
-
-    /// When an ended window reset: the bucket's `resetsAt` once
-    /// `windowHasEnded`, nil while the window is open or has no reset instant.
+    /// `usageDetailLine`) ask here, and the picker order (`sortedForPicker`)
+    /// asks the bucket.
     static func endedAt(_ bucket: ClaudeUsageLimitBucket, now: Date) -> Date? {
-        windowHasEnded(bucket, now: now) ? bucket.resetsAt : nil
+        bucket.windowHasEnded(at: now) ? bucket.resetsAt : nil
     }
 
     // MARK: - Severity
@@ -150,7 +142,7 @@ enum ProfileUsagePresentation {
     ///
     /// Returns nil (draw no marker) when there is no reset date, the duration
     /// is non-positive, or the reset is already at/behind `now` — the latter
-    /// means the window has ended (`windowHasEnded`) and the next one's reset
+    /// means the window has ended (`windowHasEnded(at:)`) and the next one's reset
     /// is unknown, so there is no meaningful "now" position to draw. `now` is
     /// injectable for deterministic tests/previews.
     static func elapsedFraction(resetsAt: Date?,
@@ -235,7 +227,7 @@ enum ProfileUsagePresentation {
     /// "5h 0% ↺11:10pm · wk 76%". nil when the snapshot carries neither a
     /// session nor a weekly bucket (never logged in / poller hasn't fetched
     /// yet); any other bucket kind contributes no segment. A window that has
-    /// ended (`windowHasEnded`) gives when it reset in place of its old
+    /// ended (`windowHasEnded(at:)`) gives when it reset in place of its old
     /// percent: "5h reset 7am · wk reset Mon 7am".
     /// This legacy flat-string form keeps a FIXED format (clock for 5h,
     /// nothing for weekly) regardless of the `ResetTimeStyle` preference —
@@ -285,7 +277,7 @@ enum ProfileUsagePresentation {
     /// resets 11:09pm · week 79% · resets in 2d 5h". Unlike `usageSummary`
     /// this drops the ↺ glyph in favor of "resets " — the second line has the
     /// width. nil when the snapshot carries neither a session nor a weekly
-    /// bucket. A window that has ended (`windowHasEnded`) gives when it reset
+    /// bucket. A window that has ended (`windowHasEnded(at:)`) gives when it reset
     /// in place of its old percent: "5h reset 7am · week reset 1d ago".
     /// Like `usageSummary`, this legacy flat-string form keeps a
     /// FIXED format (clock for 5h, countdown for weekly) regardless of the
@@ -419,7 +411,7 @@ enum ProfileUsagePresentation {
     /// data first — healthiest (lowest 5h percent) first, ties broken by the
     /// window that resets soonest — then selectable profiles without usage
     /// data, then not-logged-in rows last. A session window that has ended
-    /// (`windowHasEnded`) ranks as the fresh window it is: 0%, with its next
+    /// (`windowHasEnded(at:)`) ranks as the fresh window it is: 0%, with its next
     /// reset unknown. Display-only heuristic: the picker never auto-selects.
     static func sortedForPicker(_ entries: [ModelProfileWithUsage],
                                 now: Date = Date()) -> [ModelProfileWithUsage] {
@@ -430,7 +422,7 @@ enum ProfileUsagePresentation {
             guard let session = sessionBucket(entry.usageSnapshot) else {
                 return (1, 0, .greatestFiniteMagnitude)
             }
-            if windowHasEnded(session, now: now) {
+            if session.windowHasEnded(at: now) {
                 return (0, 0, .greatestFiniteMagnitude)
             }
             let reset = session.resetsAt?.timeIntervalSinceReferenceDate
@@ -632,7 +624,7 @@ enum ProfileUsagePresentation {
         /// Elapsed fraction through the window (0...1), for time marker positioning on bars.
         /// nil when there is no reset date, duration is non-positive, or the window has ended.
         let elapsedFraction: Double?
-        /// Whether the bucket's window has ended (`windowHasEnded`). The
+        /// Whether the bucket's window has ended (`windowHasEnded(at:)`). The
         /// presentation then shows a fresh window: 0%, normal fill, no time
         /// marker and no inline reset, with `resetPhrase` saying when the
         /// limit reset.
@@ -661,7 +653,7 @@ enum ProfileUsagePresentation {
     /// one place. `style` is the user's reset-time display preference — the
     /// caller reads it (via `@AppStorage(AppState.usageResetTimeStyleKey)`)
     /// and injects it here. A bucket whose window has ended
-    /// (`windowHasEnded`) presents as a fresh window; see `BucketPresentation`.
+    /// (`windowHasEnded(at:)`) presents as a fresh window; see `BucketPresentation`.
     static func bucketPresentation(_ bucket: ClaudeUsageLimitBucket,
                                    style: ResetTimeStyle = .timeOfReset,
                                    now: Date = Date(),

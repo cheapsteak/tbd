@@ -69,7 +69,10 @@ not widen the menu.
   reset). Its part of the tooltip says when the limit reset instead of giving the old percent, for
   example "Weekly: reset at Mon 7am", or "Weekly: reset 1d ago" with relative reset times. The age
   note is unchanged, and a window with no reset time or one still ahead shows as read. The rule is
-  `ProfileUsagePresentation.windowHasEnded`, and every surface that draws a bucket follows it.
+  `ClaudeUsageLimitBucket.windowHasEnded(at:)` in `TBDShared`. Every surface that draws a bucket
+  follows it, and so does account balancing: the picker counts an ended window as 0% when it weighs
+  headroom, so a profile whose bar shows a fresh window can be the balanced pick or the suggestion
+  at a limit, as the bar implies.
 - **Current account.** A standard macOS checkmark marks it.
 - **Default (logged in).** The row shows no bars. TBD keeps no usage data for the default login.
 - **Highlight.** When the pointer is on a row, the name turns white as usual. The bars keep their
