@@ -196,7 +196,7 @@ struct LimitBannerModelTests {
         )
 
         // The banner formats in the local time zone.
-        let summary = "5h reset \(ProfileUsagePresentation.resetTimeText(passedReset))"
+        let summary = "5h reset at \(ProfileUsagePresentation.resetTimeText(passedReset))"
         #expect(model.suggestedUsageSummary == summary)
         #expect(model.forkButtonTitle == "Fork to Spare — \(summary)")
     }

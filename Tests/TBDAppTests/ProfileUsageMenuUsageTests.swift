@@ -207,7 +207,8 @@ struct ProfileUsageMenuUsageTests {
         #expect(weeklyBar?.percentText == "0%")
         #expect(weeklyBar?.fill == .normal)
         #expect(weeklyBar?.elapsedFraction == nil)
-        #expect(weeklyBar?.resetPhrase == "reset at Thu 8am")
+        // A day old, past `endedClockTimeLimit`: how long ago, not a weekday clock.
+        #expect(weeklyBar?.resetPhrase == "reset 1d ago")
         #expect(ageNote == "2d ago")
     }
 
