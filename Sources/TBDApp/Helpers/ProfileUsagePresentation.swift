@@ -832,9 +832,18 @@ enum ProfileUsagePresentation {
         /// in place of the bars and summary, or a healthy reading's age,
         /// "updated 6m ago", beside them.
         let note: String?
+        /// Whether the reading's last fetch failed, so its note stands in
+        /// place of the bars.
+        let fetchFailing: Bool
 
         /// Whether the row draws bars.
         var showsBars: Bool { session != nil || weekly != nil }
+
+        /// Whether the row says "No usage data": it draws no bars, and no
+        /// failing fetch's note stands in their place. That is a profile with
+        /// no reading yet, or a healthy reading with neither a 5-hour nor a
+        /// weekly bucket, whose age note, if it has one, shows as well.
+        var showsNoUsageData: Bool { !showsBars && !fetchFailing }
     }
 
     /// Picks a sheet row's usage by the rule `menuUsage` follows: bars and the
@@ -849,8 +858,13 @@ enum ProfileUsagePresentation {
                                timeZone: TimeZone = .current) -> PickerRowUsage {
         let snapshot = entry.usageSnapshot
         let note = stalenessNote(for: snapshot, kind: entry.profile.kind, now: now)
-        guard let snapshot, snapshot.isOK else {
-            return PickerRowUsage(summary: nil, session: nil, weekly: nil, note: note)
+        guard let snapshot else {
+            return PickerRowUsage(summary: nil, session: nil, weekly: nil, note: note,
+                                  fetchFailing: false)
+        }
+        guard snapshot.isOK else {
+            return PickerRowUsage(summary: nil, session: nil, weekly: nil, note: note,
+                                  fetchFailing: true)
         }
         return PickerRowUsage(
             summary: usageSummary(for: snapshot, timeZone: timeZone, now: now),
@@ -860,7 +874,8 @@ enum ProfileUsagePresentation {
             weekly: weeklyAllBucket(snapshot).map {
                 bucketPresentation($0, style: style, now: now, timeZone: timeZone)
             },
-            note: note)
+            note: note,
+            fetchFailing: false)
     }
 
     /// Map a `FillLevel` to the corresponding `HoverCardTint`, preserving the

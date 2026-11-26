@@ -268,18 +268,23 @@ struct ProfileUsagePickerRowUsageTests {
             summary: "5h 40% ↺11am · wk 16%",
             session: Fix.presentation(Fix.session40),
             weekly: Fix.presentation(Fix.weekly16),
-            note: nil))
+            note: nil,
+            fetchFailing: false))
         #expect(usage.showsBars)
+        #expect(!usage.showsNoUsageData)
     }
 
     /// An old but healthy reading keeps its bars, with its age beside them.
     @Test func oldHealthySnapshotShowsBarsWithItsAge() {
         let old = Fix.snapshot([Fix.session40, Fix.weekly16], fetchedAt: Fix.now.addingTimeInterval(-600))
-        #expect(rowUsage(Fix.entry(snapshot: old)) == RowUsage(
+        let usage = rowUsage(Fix.entry(snapshot: old))
+        #expect(usage == RowUsage(
             summary: "5h 40% ↺11am · wk 16%",
             session: Fix.presentation(Fix.session40),
             weekly: Fix.presentation(Fix.weekly16),
-            note: "updated 10m ago"))
+            note: "updated 10m ago",
+            fetchFailing: false))
+        #expect(!usage.showsNoUsageData)
     }
 
     /// A healthy reading whose 5h window has reset shows that bar as a fresh
@@ -293,13 +298,30 @@ struct ProfileUsagePickerRowUsageTests {
             summary: "5h reset at 7am · wk 16%",
             session: Fix.presentation(endedSession),
             weekly: Fix.presentation(Fix.weekly16),
-            note: nil))
+            note: nil,
+            fetchFailing: false))
         #expect(Fix.presentation(endedSession).windowEnded)
+    }
+
+    /// A healthy reading with no bars to draw says "No usage data", and an
+    /// old one gives its age as well, so the row never shows the age alone.
+    @Test func healthySnapshotWithoutBarsSaysNoUsageData() {
+        let oldEmpty = Fix.snapshot([], fetchedAt: Fix.now.addingTimeInterval(-600))
+        let usage = rowUsage(Fix.entry(snapshot: oldEmpty))
+        #expect(usage == RowUsage(summary: nil, session: nil, weekly: nil,
+                                  note: "updated 10m ago", fetchFailing: false))
+        #expect(!usage.showsBars)
+        #expect(usage.showsNoUsageData)
+
+        let freshOtherKindOnly = rowUsage(Fix.entry(snapshot: Fix.snapshot([Fix.otherKind])))
+        #expect(freshOtherKindOnly.note == nil)
+        #expect(freshOtherKindOnly.showsNoUsageData)
     }
 
     /// A failing fetch shows its note in place of the bars and summary, even
     /// with buckets on hand: its 5h window reset an hour ago, and its row
-    /// sorts by the 95% it last read, so an empty bar would contradict it.
+    /// sorts by the 95% it last read, so an empty bar would contradict it. It
+    /// does not also say "No usage data": the note says why there are no bars.
     @Test func failingSnapshotShowsItsNoteInPlaceOfTheBars() {
         let endedSession = ClaudeUsageLimitBucket(
             kind: "session", percent: 95, severity: "critical",
@@ -310,18 +332,30 @@ struct ProfileUsagePickerRowUsageTests {
         let usage = rowUsage(Fix.entry(snapshot: failing))
         #expect(usage == RowUsage(
             summary: nil, session: nil, weekly: nil,
-            note: "usage unavailable — retrying · last data 2h ago"))
+            note: "usage unavailable — retrying · last data 2h ago",
+            fetchFailing: true))
         #expect(!usage.showsBars)
+        #expect(!usage.showsNoUsageData)
 
         let rejected = Fix.snapshot([Fix.session40], status: "fetch failed: HTTP 401",
                                     statusKind: .needsLogin)
-        #expect(rowUsage(Fix.entry(snapshot: rejected)) == RowUsage(
-            summary: nil, session: nil, weekly: nil, note: "needs re-login"))
+        let rejectedUsage = rowUsage(Fix.entry(snapshot: rejected))
+        #expect(rejectedUsage == RowUsage(
+            summary: nil, session: nil, weekly: nil, note: "needs re-login",
+            fetchFailing: true))
+        #expect(!rejectedUsage.showsNoUsageData)
+
+        let emptyFailing = Fix.snapshot([], status: "fetch failed: timed out",
+                                        statusKind: .networkError)
+        #expect(!rowUsage(Fix.entry(snapshot: emptyFailing)).showsNoUsageData)
     }
 
-    @Test func noSnapshotShowsNothing() {
+    /// A profile with no reading yet says "No usage data" and nothing else.
+    @Test func noSnapshotSaysNoUsageData() {
         let usage = rowUsage(Fix.entry(snapshot: nil))
-        #expect(usage == RowUsage(summary: nil, session: nil, weekly: nil, note: nil))
+        #expect(usage == RowUsage(summary: nil, session: nil, weekly: nil, note: nil,
+                                  fetchFailing: false))
         #expect(!usage.showsBars)
+        #expect(usage.showsNoUsageData)
     }
 }

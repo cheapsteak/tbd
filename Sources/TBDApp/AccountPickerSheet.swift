@@ -194,13 +194,14 @@ private struct AccountPickerRow: View {
 
                 if usage.showsBars {
                     bucketRows(usage)
-                } else if usage.note == nil, isSelectable {
+                } else if usage.showsNoUsageData, isSelectable {
                     Text("No usage data")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
 
-                // A failing fetch's note stands in place of the bars.
+                // A failing fetch's note stands in place of the bars; a
+                // healthy reading's age shows beside them.
                 if let note = usage.note {
                     Text(note)
                         .font(.caption2)
