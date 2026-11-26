@@ -6,7 +6,8 @@ import TBDShared
 
 /// The usage reading the daemon's notifications quote (`ProfileUsageSummary`):
 /// an open window gives its percent, and one whose reset is at or before `now`
-/// says it reset, because the pool picker counts it as 0%.
+/// says it reset when the last fetch succeeded, because the pool picker then
+/// counts it as 0%. A failing fetch's windows keep their percents.
 @Suite("ProfileUsageSummary")
 struct ProfileUsageSummaryTests {
     private static let now = Date(timeIntervalSince1970: 1_700_000_000)
@@ -46,6 +47,23 @@ struct ProfileUsageSummaryTests {
             Self.weekly(88, resetsAt: Self.now.addingTimeInterval(-8 * 86_400)),
         ])
         #expect(ProfileUsageSummary.text(of: endedBeforeNow, now: Self.now) == "5h reset · week reset")
+    }
+
+    /// A failing fetch's windows quote the percent they last read, however
+    /// long ago they reset: the pool picker ranks a failing snapshot by those
+    /// percents, so the text must not say "reset". The healthy counterparts
+    /// are `windowsWhoseResetIsNowSayTheyReset` and
+    /// `windowsWhoseResetHasPassedSayTheyReset`.
+    @Test(arguments: [ProfileUsageStatusKind.needsLogin, .rateLimited, .networkError, .unknown])
+    func aFailingSnapshotQuotesItsEndedWindowsAtTheirLastPercents(statusKind: ProfileUsageStatusKind) {
+        let failing = ProfileUsageSnapshot(
+            buckets: [
+                Self.session(95, resetsAt: Self.now.addingTimeInterval(-3 * 86_400)),
+                Self.weekly(88, resetsAt: Self.now),
+            ],
+            fetchedAt: Self.now.addingTimeInterval(-3 * 86_400 - 3_600), lastAttemptAt: Self.now,
+            status: "fetch failed: HTTP 401", statusKind: statusKind)
+        #expect(ProfileUsageSummary.text(of: failing, now: Self.now) == "5h 95% · week 88%")
     }
 
     @Test func bucketsWithNoResetInstantGiveTheirPercents() {

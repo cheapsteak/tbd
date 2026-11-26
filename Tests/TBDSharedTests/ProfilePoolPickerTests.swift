@@ -645,6 +645,114 @@ struct ProfilePoolPickerTests {
         #expect(beforeReset.fallback == ProfilePoolFallback(profileID: stale30.profileID, reason: .staleReading))
     }
 
+    // MARK: Ended Windows of a Failing Fetch
+
+    /// A snapshot whose last fetch failed: it still carries the buckets and
+    /// `fetchedAt` of its last successful reading, as the poller keeps them.
+    private func failingSnapshot(
+        buckets: [ClaudeUsageLimitBucket],
+        fetchedAt: Date,
+        lastAttemptAt: Date,
+        statusKind: ProfileUsageStatusKind
+    ) -> ProfileUsageSnapshot {
+        makeSnapshot(
+            buckets: buckets, fetchedAt: fetchedAt, lastAttemptAt: lastAttemptAt,
+            status: "fetch failed: HTTP 401", statusKind: statusKind)
+    }
+
+    @Test("headroom: a failing snapshot's ended window keeps the percent it last read",
+          arguments: [ProfileUsageStatusKind.needsLogin, .noCredentials, .rateLimited,
+                      .networkError, .decodeError, .unknown])
+    func headroomKeepsAFailingSnapshotsEndedWindow(statusKind: ProfileUsageStatusKind) {
+        let now = fixedNow
+        let snapshot = failingSnapshot(
+            buckets: [makeBucket(kind: "session", percent: 95, resetsAt: now.addingTimeInterval(-60))],
+            fetchedAt: now.addingTimeInterval(-120), lastAttemptAt: now, statusKind: statusKind)
+        #expect(ProfilePoolPicker.headroom(of: snapshot, now: now) == 0.05)
+    }
+
+    /// The healthy counterpart is `headroomCountsAnEndedWindowAsZero`: the same
+    /// reading from a fetch that succeeded is eligible at full headroom.
+    @Test("eligibility: a fresh reading whose fetch has since failed weighs its ended window at its percent")
+    func eligibilityWeighsAFailingReadingsEndedWindowAtItsPercent() {
+        let now = fixedNow
+        // Read two minutes ago at 95%, so the reading is fresh; the window
+        // reset a minute ago, and the fetch after it failed.
+        let candidate = makeCandidate(
+            snapshot: failingSnapshot(
+                buckets: [makeBucket(kind: "session", percent: 95, resetsAt: now.addingTimeInterval(-60))],
+                fetchedAt: now.addingTimeInterval(-120), lastAttemptAt: now, statusKind: .networkError))
+
+        let decision = ProfilePoolPicker.pick(candidates: [candidate], now: now)
+        #expect(decision.chosen == nil)
+        #expect(decision.verdicts[candidate.profileID] == .exhausted)
+        #expect(ProfilePoolPicker.ranked(candidates: [candidate], now: now).isEmpty)
+    }
+
+    /// The healthy counterpart is `fallbackEndedFullWindowIsNotFull`: there the
+    /// reset window drops out and the profile falls back as `.aboveCeiling`.
+    @Test("fallback: a fresh failing reading at 100% in a window that has reset is still full")
+    func fallbackFailingEndedFullWindowStaysFull() {
+        let now = fixedNow
+        let candidate = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: failingSnapshot(buckets: [
+                makeBucket(kind: "session", percent: 100, resetsAt: now.addingTimeInterval(-60)),
+                makeBucket(kind: "weekly_all", percent: 90, resetsAt: now.addingTimeInterval(86_400))
+            ], fetchedAt: now.addingTimeInterval(-120), lastAttemptAt: now, statusKind: .rateLimited))
+        let decision = ProfilePoolPicker.pick(candidates: [candidate], now: now)
+
+        #expect(decision.verdicts[candidate.profileID] == .exhausted)
+        #expect(decision.fallback == ProfilePoolFallback(profileID: candidate.profileID, reason: .full))
+    }
+
+    /// Two stale readings at `fixedNow`. `old` was read three days ago at 95%
+    /// (5h) and 80% (week), and both windows have reset since; its snapshot
+    /// carries `status`/`statusKind`. `recent` was read six minutes ago, stale
+    /// for an oauth profile, at 40% in a window still open.
+    private func oldEndedReadingAndRecentStaleOne(
+        status: String, statusKind: ProfileUsageStatusKind
+    ) -> (old: ProfilePoolCandidate, recent: ProfilePoolCandidate) {
+        let now = fixedNow
+        let threeDaysAgo = now.addingTimeInterval(-3 * 86_400)
+        let old = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: makeSnapshot(
+                buckets: [
+                    makeBucket(kind: "session", percent: 95, resetsAt: threeDaysAgo.addingTimeInterval(3600)),
+                    makeBucket(kind: "weekly_all", percent: 80, resetsAt: now.addingTimeInterval(-86_400))
+                ],
+                fetchedAt: threeDaysAgo, lastAttemptAt: now, status: status, statusKind: statusKind))
+        let recent = makeCandidate(
+            profileID: id(2), accountKey: "b",
+            snapshot: makeSnapshot(
+                buckets: [makeBucket(kind: "session", percent: 40, resetsAt: now.addingTimeInterval(3600))],
+                fetchedAt: now.addingTimeInterval(-360), lastAttemptAt: now))
+        return (old, recent)
+    }
+
+    @Test("fallback: a failing stale reading whose windows have reset ranks by its last percent, behind a healthier one")
+    func fallbackRanksAFailingStaleReadingByItsLastPercent() {
+        // A rejected token: every fetch for three days has failed.
+        let (old, recent) = oldEndedReadingAndRecentStaleOne(
+            status: "fetch failed: HTTP 401", statusKind: .needsLogin)
+        let decision = ProfilePoolPicker.pick(candidates: [old, recent], now: fixedNow)
+
+        #expect(decision.chosen == nil)
+        #expect(decision.verdicts[old.profileID] == .noFreshReading)
+        #expect(decision.verdicts[recent.profileID] == .noFreshReading)
+        #expect(decision.fallback == ProfilePoolFallback(profileID: recent.profileID, reason: .staleReading))
+    }
+
+    @Test("fallback: a healthy stale reading whose windows have reset still ranks at 0%")
+    func fallbackRanksAHealthyStaleEndedReadingAtZero() {
+        let (old, recent) = oldEndedReadingAndRecentStaleOne(status: "ok", statusKind: .ok)
+        let decision = ProfilePoolPicker.pick(candidates: [old, recent], now: fixedNow)
+
+        #expect(decision.chosen == nil)
+        #expect(decision.fallback == ProfilePoolFallback(profileID: old.profileID, reason: .staleReading))
+    }
+
     // MARK: Scoring and Sorting
 
     @Test("scoring: empty profile beats loaded one at equal usage")

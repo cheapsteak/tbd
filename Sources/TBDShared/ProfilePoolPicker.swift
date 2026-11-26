@@ -104,7 +104,8 @@ public enum ProfilePoolVerdict: Sendable, Equatable {
     /// Profile is eligible and its score for ranking.
     /// - `score`: `(accountLiveSessions + 1) / headroom`, lower is better.
     /// - `headroom`: `1 - max(percent)/100` over binding window buckets, clamped to [0, 1],
-    ///   with a bucket whose window has ended counted at 0% (`headroom(of:now:)`).
+    ///   with a bucket whose window has ended counted at 0% when the last fetch
+    ///   succeeded (`headroom(of:now:)`).
     /// - `accountLiveSessions`: sum of liveSessions across all candidates sharing this
     ///   profile's accountKey (eligible or not), reflecting the load being balanced.
     case eligible(score: Double, headroom: Double, accountLiveSessions: Int)
@@ -347,9 +348,13 @@ public enum ProfilePoolPicker {
     /// An inactive bucket (isActive == false) is ignored. A snapshot with no such
     /// buckets returns 1.0 (unlimited headroom). Percent values > 100 are clamped
     /// to 100 before subtraction. A bucket whose window has ended by `now`
-    /// (`ClaudeUsageLimitBucket.windowHasEnded(at:)`) counts as 0%: its limit
-    /// went back to zero at the reset, however recent the reading, which is
-    /// how the app's usage bars show it too.
+    /// counts as 0% when the snapshot's last fetch succeeded
+    /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`): its limit went back to
+    /// zero at the reset, however recent the reading, which is how the app's
+    /// usage bars show it too. A failing snapshot's buckets keep the percent
+    /// they last read, so a profile whose fetch keeps failing never looks
+    /// emptier the longer it fails. The eligibility pass and the fallback
+    /// weigh readings only through this function.
     ///
     /// - Parameters:
     ///   - snapshot: The usage snapshot to assess.
@@ -366,7 +371,7 @@ public enum ProfilePoolPicker {
         guard !bindingBuckets.isEmpty else { return 1.0 }
 
         let maxPercent = bindingBuckets.map { bucket in
-            bucket.windowHasEnded(at: now) ? 0.0 : min(bucket.percent, 100.0)
+            snapshot.countsAsReset(bucket, at: now) ? 0.0 : min(bucket.percent, 100.0)
         }.max() ?? 0.0
         // Round to a millionth so a reading of exactly 95% lands on the 0.05
         // floor rather than a hair above it (1 - 0.95 is 0.050000000000000044
@@ -518,8 +523,9 @@ public enum ProfilePoolPicker {
 
     /// The fallback when nothing is eligible (see `ProfilePoolFallback`), or nil
     /// when no candidate was turned away for its reading alone. Readings rank
-    /// by `headroom(of:now:)` at the pick's `now`, so a window that has ended
-    /// since a reading, stale or fresh, ranks at 0%.
+    /// by `headroom(of:now:)` at the pick's `now`: a window that has ended
+    /// ranks at 0% when the snapshot's last fetch succeeded, however old the
+    /// reading, and a failing snapshot ranks by the percent it last read.
     private static func selectFallback(
         from candidates: [ProfilePoolCandidate],
         with verdicts: [UUID: ProfilePoolVerdict],

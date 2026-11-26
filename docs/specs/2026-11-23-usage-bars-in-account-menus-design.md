@@ -72,7 +72,9 @@ not widen the menu.
   `ClaudeUsageLimitBucket.windowHasEnded(at:)` in `TBDShared`. Every surface that draws a bucket
   follows it, and so does account balancing: the picker counts an ended window as 0% when it weighs
   headroom, so a profile whose bar shows a fresh window can be the balanced pick or the suggestion
-  at a limit, as the bar implies.
+  at a limit, as the bar implies. Rankings, the account picker's row order among them, apply the
+  rule only when the last fetch succeeded: a failing profile, whose row shows its note, ranks by
+  the percent it last read.
 - **Current account.** A standard macOS checkmark marks it.
 - **Default (logged in).** The row shows no bars. TBD keeps no usage data for the default login.
 - **Highlight.** When the pointer is on a row, the name turns white as usual. The bars keep their

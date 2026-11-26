@@ -1422,8 +1422,9 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
     /// reset instant never counts as ended.
     ///
     /// The one rule for an ended window: the app's usage surfaces show such a
-    /// bucket as a fresh window at 0%, and `ProfilePoolPicker` counts it as 0%
-    /// when it weighs headroom.
+    /// bucket as a fresh window at 0%. Rankings count it as 0% only in a
+    /// snapshot whose last fetch succeeded
+    /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`).
     public func windowHasEnded(at now: Date) -> Bool {
         guard let resetsAt else { return false }
         return resetsAt <= now
@@ -1517,6 +1518,21 @@ public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
     }
 
     public var isOK: Bool { status == "ok" }
+
+    /// Whether `bucket`, one of this snapshot's buckets, counts as a fresh
+    /// window at 0% when profiles are ranked at `now`: its window has ended
+    /// (`ClaudeUsageLimitBucket.windowHasEnded(at:)`) and the last fetch
+    /// succeeded (`isOK`). A failing snapshot's buckets keep the percent they
+    /// last read, however long ago their windows reset; otherwise a profile
+    /// whose fetch keeps failing, such as one with a rejected token, would
+    /// look emptier the longer it failed.
+    ///
+    /// `ProfilePoolPicker` weighs headroom by this rule, the app's account
+    /// picker orders its rows by it, and the daemon's notifications quote a
+    /// reading by it, so a ranking and the text that explains it agree.
+    public func countsAsReset(_ bucket: ClaudeUsageLimitBucket, at now: Date) -> Bool {
+        isOK && bucket.windowHasEnded(at: now)
+    }
 }
 
 public struct ModelProfileWithUsage: Codable, Sendable, Equatable {

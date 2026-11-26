@@ -647,6 +647,37 @@ struct EndedWindowTests {
             [busy, spent], now: resetDate.addingTimeInterval(3600))
         #expect(after.map(\.profile.name) == ["Spent", "Busy"])
     }
+
+    /// An hour after `resetDate`: "Old" was read before it at 95% in the
+    /// session window that reset then, with the given status; "Current" was
+    /// read just now at 40% in a window still open.
+    private func oldEndedAndCurrent(status: String, statusKind: ProfileUsageStatusKind)
+        -> (old: ModelProfileWithUsage, current: ModelProfileWithUsage, now: Date) {
+        let now = resetDate.addingTimeInterval(3600)
+        let old = entry(name: "Old", loginIdentity: "o@x.co", usageSnapshot: snapshot(
+            buckets: [bucket(kind: "session", percent: 95, severity: "critical", resetsAt: resetDate)],
+            fetchedAt: beforeReset, status: status, statusKind: statusKind))
+        let current = entry(name: "Current", loginIdentity: "c@x.co", usageSnapshot: snapshot(
+            buckets: [bucket(kind: "session", percent: 40, resetsAt: resetDate.addingTimeInterval(4 * 3600))],
+            fetchedAt: now))
+        return (old, current, now)
+    }
+
+    /// A failing fetch ranks by the percent it last read, however long ago its
+    /// window reset, so it does not sort ahead of a current reading.
+    @Test func pickerRanksAFailingProfilesEndedSessionWindowByItsOldPercent() {
+        let (old, current, now) = oldEndedAndCurrent(
+            status: "fetch failed: HTTP 401", statusKind: .needsLogin)
+        let sorted = ProfileUsagePresentation.sortedForPicker([old, current], now: now)
+        #expect(sorted.map(\.profile.name) == ["Current", "Old"])
+    }
+
+    /// The same reading from a fetch that succeeded is a fresh 0% window.
+    @Test func pickerRanksAHealthyProfilesEndedSessionWindowAsFresh() {
+        let (old, current, now) = oldEndedAndCurrent(status: "ok", statusKind: .ok)
+        let sorted = ProfileUsagePresentation.sortedForPicker([current, old], now: now)
+        #expect(sorted.map(\.profile.name) == ["Old", "Current"])
+    }
 }
 
 @Suite("ProfileUsagePresentation — hoverCardTint mapping")

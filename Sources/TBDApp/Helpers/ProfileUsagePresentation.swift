@@ -36,8 +36,9 @@ enum ProfileUsagePresentation {
     /// fill, no time marker, and words saying the limit reset in place of the
     /// old percent. `bucketPresentation` applies that for the bars, tooltips
     /// and hover card; the flat-string forms (`usageSummary`,
-    /// `usageDetailLine`) ask here, and the picker order (`sortedForPicker`)
-    /// asks the bucket.
+    /// `usageDetailLine`) ask here. The picker order (`sortedForPicker`) asks
+    /// the snapshot (`ProfileUsageSnapshot.countsAsReset(_:at:)`), which
+    /// counts an ended window as 0% only when the last fetch succeeded.
     static func endedAt(_ bucket: ClaudeUsageLimitBucket, now: Date) -> Date? {
         bucket.windowHasEnded(at: now) ? bucket.resetsAt : nil
     }
@@ -411,18 +412,23 @@ enum ProfileUsagePresentation {
     /// data first — healthiest (lowest 5h percent) first, ties broken by the
     /// window that resets soonest — then selectable profiles without usage
     /// data, then not-logged-in rows last. A session window that has ended
-    /// (`windowHasEnded(at:)`) ranks as the fresh window it is: 0%, with its next
-    /// reset unknown. Display-only heuristic: the picker never auto-selects.
+    /// ranks as the fresh window it is, 0% with its next reset unknown, when
+    /// the snapshot's last fetch succeeded
+    /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`); a failing snapshot ranks
+    /// by the percent it last read, so a profile whose fetch keeps failing
+    /// does not rise to the top as its old windows pass their resets.
+    /// Display-only heuristic: the picker never auto-selects.
     static func sortedForPicker(_ entries: [ModelProfileWithUsage],
                                 now: Date = Date()) -> [ModelProfileWithUsage] {
         func rank(_ entry: ModelProfileWithUsage) -> (Int, Double, TimeInterval) {
             guard isSelectable(entry) else {
                 return (2, 0, .greatestFiniteMagnitude)
             }
-            guard let session = sessionBucket(entry.usageSnapshot) else {
+            guard let snapshot = entry.usageSnapshot,
+                  let session = sessionBucket(snapshot) else {
                 return (1, 0, .greatestFiniteMagnitude)
             }
-            if session.windowHasEnded(at: now) {
+            if snapshot.countsAsReset(session, at: now) {
                 return (0, 0, .greatestFiniteMagnitude)
             }
             let reset = session.resetsAt?.timeIntervalSinceReferenceDate
