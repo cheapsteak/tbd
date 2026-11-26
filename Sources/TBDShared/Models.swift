@@ -1422,8 +1422,8 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
     /// reset instant never counts as ended.
     ///
     /// The app's usage surfaces show such a bucket as a fresh window at 0%.
-    /// The account picker sheet's own row order counts it as 0% only in a
-    /// snapshot whose last fetch succeeded
+    /// The account picker sheet's own row order, and `tbd profile list`'s
+    /// table, count it as 0% only in a snapshot whose last fetch succeeded
     /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`). Account balancing does
     /// not apply this rule: it ranks an account by its last recorded percent.
     /// The rule itself is `UsageLimitWindow.hasEnded(resetsAt:at:)`, which
@@ -1560,11 +1560,12 @@ public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
 
     /// Whether `bucket`, one of this snapshot's buckets, counts as a fresh
     /// window at 0% when the app's account picker sheet orders its rows at
-    /// `now`: its window has ended (`ClaudeUsageLimitBucket.windowHasEnded(at:)`)
-    /// and the last fetch succeeded (`isOK`). A reading whose fetch is failing
-    /// keeps its recorded percent for ordering, however long ago its windows
-    /// reset, so a broken account, such as one with a rejected token, never
-    /// sorts as the emptiest.
+    /// `now`, and in `tbd profile list`'s table: its window has ended
+    /// (`ClaudeUsageLimitBucket.windowHasEnded(at:)`) and the last fetch
+    /// succeeded (`isOK`). A reading whose fetch is failing keeps its
+    /// recorded percent, however long ago its windows reset, so a broken
+    /// account, such as one with a rejected token, never sorts or reads as
+    /// the emptiest.
     public func countsAsReset(_ bucket: ClaudeUsageLimitBucket, at now: Date) -> Bool {
         isOK && bucket.windowHasEnded(at: now)
     }

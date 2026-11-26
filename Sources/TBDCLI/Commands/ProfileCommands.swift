@@ -221,12 +221,18 @@ func usageBucket(
 }
 
 /// Render a percent cell like "96%", or an em dash when the bucket is absent.
-/// A window that has ended by `now` (`ClaudeUsageLimitBucket.windowHasEnded(at:)`)
-/// went back to zero at its reset, so it shows "0%" whatever it last read.
-/// Only the human table applies this; `--json` carries the reading as it is.
-func usagePercentCell(_ bucket: ClaudeUsageLimitBucket?, now: Date = Date()) -> String {
+/// `bucket` is one of `snapshot`'s buckets. A window that has ended by `now`
+/// in a reading whose last fetch succeeded
+/// (`ProfileUsageSnapshot.countsAsReset(_:at:)`) went back to zero at its
+/// reset, so it shows "0%" whatever it last read. A failing reading keeps
+/// the percent it recorded, as the app's account picker sheet orders it, and
+/// its row carries the "[stale*]" marker. Only the human table applies this;
+/// `--json` carries the reading as it is.
+func usagePercentCell(_ bucket: ClaudeUsageLimitBucket?,
+                      in snapshot: ProfileUsageSnapshot?,
+                      now: Date = Date()) -> String {
     guard let bucket else { return "—" }
-    if bucket.windowHasEnded(at: now) { return "0%" }
+    if snapshot?.countsAsReset(bucket, at: now) == true { return "0%" }
     return "\(Int(bucket.percent.rounded()))%"
 }
 
@@ -234,8 +240,9 @@ func usagePercentCell(_ bucket: ClaudeUsageLimitBucket?, now: Date = Date()) -> 
 /// next 24 h, otherwise "7/7 18:00", in fixed 24-hour digits whatever the
 /// machine's locale. Once the window has ended by `now` the reset is past,
 /// and the cell says how long ago (`UsageAge.agoText(since:now:)`): "just
-/// now", "40m ago", "2h ago", "1d ago". Em dash when the bucket or its reset
-/// time is absent.
+/// now", "40m ago", "2h ago", "1d ago". It does so for a failing reading too,
+/// beside the percent that reading recorded: a past clock time would read as
+/// the next reset. Em dash when the bucket or its reset time is absent.
 func usageResetCell(_ bucket: ClaudeUsageLimitBucket?, now: Date = Date(),
                     timeZone: TimeZone = .current) -> String {
     guard let bucket, let date = bucket.resetsAt else { return "—" }
@@ -617,9 +624,9 @@ struct ProfileList: AsyncParsableCommand {
                 (entry.profile.kind.rawValue, 6),
                 (identity, 26),
                 (String(entry.liveSessions ?? 0), 4),
-                (usagePercentCell(session, now: now), 4),
+                (usagePercentCell(session, in: snapshot, now: now), 4),
                 (usageResetCell(session, now: now), 10),
-                (usagePercentCell(weeklyAll, now: now), 4),
+                (usagePercentCell(weeklyAll, in: snapshot, now: now), 4),
                 (fableCell(entry.fable, now: now), 8),
             ]
 

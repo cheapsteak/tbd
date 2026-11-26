@@ -173,18 +173,39 @@ struct ProfileCommandsTests {
                                resetsAt: resetsIn.map { cellNow.addingTimeInterval($0) })
     }
 
-    /// A window that has ended went back to zero at its reset, whatever it read.
-    @Test func usagePercentCell_endedWindowShowsZero() {
-        let now = Self.cellNow
-        #expect(usagePercentCell(Self.bucket(resetsIn: -3600), now: now) == "0%")
-        #expect(usagePercentCell(Self.bucket(resetsIn: 0), now: now) == "0%")
+    /// A reading of `bucket`, fetched three hours before `cellNow`: healthy,
+    /// or failing on a rejected token.
+    private static func reading(_ bucket: ClaudeUsageLimitBucket, failing: Bool = false) -> ProfileUsageSnapshot {
+        ProfileUsageSnapshot(
+            buckets: [bucket], fetchedAt: cellNow.addingTimeInterval(-3 * 3600),
+            lastAttemptAt: cellNow,
+            status: failing ? "fetch failed: HTTP 401" : "ok",
+            statusKind: failing ? .needsLogin : .ok)
+    }
+
+    private static func percentCell(_ bucket: ClaudeUsageLimitBucket, failing: Bool = false) -> String {
+        usagePercentCell(bucket, in: reading(bucket, failing: failing), now: cellNow)
+    }
+
+    /// In a healthy reading, a window that has ended went back to zero at its
+    /// reset, whatever it read.
+    @Test func usagePercentCell_endedWindowOfAHealthyReadingShowsZero() {
+        #expect(Self.percentCell(Self.bucket(resetsIn: -3600)) == "0%")
+        #expect(Self.percentCell(Self.bucket(resetsIn: 0)) == "0%")
+    }
+
+    /// A failing reading keeps the percent it recorded, however long ago its
+    /// window reset, as the app's picker sheet orders it.
+    @Test func usagePercentCell_endedWindowOfAFailingReadingShowsItsReading() {
+        #expect(Self.percentCell(Self.bucket(resetsIn: -3600), failing: true) == "96%")
+        #expect(Self.percentCell(Self.bucket(resetsIn: -3 * 86_400), failing: true) == "96%")
     }
 
     @Test func usagePercentCell_openOrUndatedWindowShowsItsReading() {
-        let now = Self.cellNow
-        #expect(usagePercentCell(Self.bucket(resetsIn: 3600), now: now) == "96%")
-        #expect(usagePercentCell(Self.bucket(percent: 16.6, resetsIn: nil), now: now) == "17%")
-        #expect(usagePercentCell(nil, now: now) == "—")
+        #expect(Self.percentCell(Self.bucket(resetsIn: 3600)) == "96%")
+        #expect(Self.percentCell(Self.bucket(resetsIn: 3600), failing: true) == "96%")
+        #expect(Self.percentCell(Self.bucket(percent: 16.6, resetsIn: nil)) == "17%")
+        #expect(usagePercentCell(nil, in: nil, now: Self.cellNow) == "—")
     }
 
     /// A reset at or before `now` is past: the cell says how long ago.
@@ -196,6 +217,17 @@ struct ProfileCommandsTests {
         #expect(cell(-40 * 60) == "40m ago")
         #expect(cell(-2 * 3600 - 59) == "2h ago")
         #expect(cell(-49 * 3600) == "2d ago")
+    }
+
+    /// The two cells of a row whose window reset two hours ago: a healthy
+    /// reading reads "0%", a failing one keeps its "96%", and the RESET cell
+    /// says "2h ago" for both, because a past clock time would read as the
+    /// next reset.
+    @Test func endedWindowRow_percentFollowsHealthAndResetSaysHowLongAgo() {
+        let ended = Self.bucket(resetsIn: -2 * 3600)
+        let reset = usageResetCell(ended, now: Self.cellNow, timeZone: Self.utc)
+        #expect([Self.percentCell(ended), reset] == ["0%", "2h ago"])
+        #expect([Self.percentCell(ended, failing: true), reset] == ["96%", "2h ago"])
     }
 
     @Test func usageResetCell_openWindowGivesTheResetTime() {
@@ -649,7 +681,7 @@ struct ProfileCommandsTests {
                 lastAttemptAt: resetAt.addingTimeInterval(-3600),
                 status: "ok", statusKind: .ok))
         let dayLater = resetAt.addingTimeInterval(86_400)
-        #expect(usagePercentCell(bucket, now: dayLater) == "0%")
+        #expect(usagePercentCell(bucket, in: entry.usageSnapshot, now: dayLater) == "0%")
 
         let output = try #require(profileListJSONOutput(ModelProfileListResult(profiles: [entry])))
         let root = try #require(try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
