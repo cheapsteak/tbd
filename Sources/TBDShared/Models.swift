@@ -1445,9 +1445,11 @@ public enum UsageLimitWindow {
     }
 }
 
-/// How long ago an instant was, in the compact words the app's usage
-/// surfaces and `tbd profile list` share: a reading's age ("updated 3m ago")
-/// and how long ago a window reset ("reset 2h ago").
+/// How long ago an instant was, in compact words: a reading's age ("updated
+/// 3m ago") and how long ago a window reset ("reset 2h ago"). Its callers are
+/// the app's `ProfileUsagePresentation.ageText` and ended-reset phrase, and
+/// the RESET cell of `tbd profile list` (`agoText`); the CLI's usage-age
+/// marker and Fable cell round on their own.
 public enum UsageAge {
     /// The age of `date` at `now`: "just now" under a minute, otherwise whole
     /// minutes, hours or days, rounded down: "3m", "2h", "1d". A `date` after

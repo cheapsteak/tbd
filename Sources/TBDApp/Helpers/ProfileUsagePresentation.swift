@@ -503,8 +503,8 @@ enum ProfileUsagePresentation {
 
     /// Compact "how long ago" for a fetch timestamp: "just now", "3m", "2h",
     /// "1d". Used to age both fresh-but-old and stale-with-old-data rows. The
-    /// wording is `UsageAge.text(since:now:)` in `TBDShared`, which
-    /// `tbd profile list` uses too.
+    /// wording is `UsageAge.text(since:now:)` in `TBDShared`. The RESET cell
+    /// of `tbd profile list` uses `UsageAge.agoText` from the same enum.
     static func ageText(since date: Date, now: Date = Date()) -> String {
         UsageAge.text(since: date, now: now)
     }
