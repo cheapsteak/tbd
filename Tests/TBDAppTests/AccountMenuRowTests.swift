@@ -19,6 +19,11 @@ private enum AccountRowFixture {
         return ProfileUsagePresentation.bucketPresentation(bucket, now: now, timeZone: utc)
     }
 
+    static func presentation(_ bucket: ClaudeUsageLimitBucket,
+                             style: ProfileUsagePresentation.ResetTimeStyle) -> Presentation {
+        ProfileUsagePresentation.bucketPresentation(bucket, style: style, now: now, timeZone: utc)
+    }
+
     static func session40() -> Presentation {
         presentation(kind: "session", percent: 40, resetsIn: 2 * 3600)
     }
@@ -196,6 +201,47 @@ struct AccountMenuRowTests {
         let resetTimes = "5-hour: 40% used · \(sessionReset) — Weekly: 16% used · \(weeklyReset)"
         let toolTip = Row.toolTip(for: usage, identity: "dev@acme.example")
         #expect(toolTip == "dev@acme.example\n\(resetTimes)")
+    }
+
+    /// A weekly reading of 86% whose reset passed a day ago says the limit
+    /// reset instead of giving the old percent; the open 5-hour window keeps
+    /// its percent and reset time, and the age note still follows the bars.
+    @Test func toolTipSaysAnEndedWindowReset() throws {
+        let session = ClaudeUsageLimitBucket(kind: "session", percent: 40, severity: "normal",
+                                             resetsAt: Fix.now.addingTimeInterval(2 * 3600))
+        let weekly = ClaudeUsageLimitBucket(kind: "weekly_all", percent: 86, severity: "warning",
+                                            resetsAt: Fix.now.addingTimeInterval(-24 * 3600))
+
+        let timeOfReset = MenuUsage.bars(session: Fix.presentation(session, style: .timeOfReset),
+                                         weekly: Fix.presentation(weekly, style: .timeOfReset),
+                                         ageNote: "1d ago")
+        #expect(Row.toolTip(for: timeOfReset, identity: nil)
+                == "5-hour: 40% used · resets at 10am — Weekly: reset at Thu 8am")
+
+        let timeUntilReset = MenuUsage.bars(session: Fix.presentation(session, style: .timeUntilReset),
+                                            weekly: Fix.presentation(weekly, style: .timeUntilReset),
+                                            ageNote: "1d ago")
+        #expect(Row.toolTip(for: timeUntilReset, identity: "dev@acme.example")
+                == "dev@acme.example\n5-hour: 40% used · resets in 2h — Weekly: reset 1d ago")
+
+        let title = try #require(Row.attributedTitle(name: "Work", usage: timeOfReset,
+                                                     nameColumnWidth: 80))
+        #expect(title.string.hasSuffix("  1d ago"))
+    }
+
+    /// A reset exactly at `now` has passed.
+    @Test func toolTipCountsAResetAtNowAsPassed() {
+        let weekly = ClaudeUsageLimitBucket(kind: "weekly_all", percent: 86, severity: "warning",
+                                            resetsAt: Fix.now)
+        let timeOfReset = MenuUsage.bars(session: nil,
+                                         weekly: Fix.presentation(weekly, style: .timeOfReset),
+                                         ageNote: nil)
+        #expect(Row.toolTip(for: timeOfReset, identity: nil) == "Weekly: reset at Fri 8am")
+
+        let timeUntilReset = MenuUsage.bars(session: nil,
+                                            weekly: Fix.presentation(weekly, style: .timeUntilReset),
+                                            ageNote: nil)
+        #expect(Row.toolTip(for: timeUntilReset, identity: nil) == "Weekly: reset just now")
     }
 
     /// With no bars there are no reset times, so the email stands alone.

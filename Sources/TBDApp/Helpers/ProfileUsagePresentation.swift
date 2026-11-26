@@ -25,6 +25,31 @@ enum ProfileUsagePresentation {
         snapshot?.buckets.first { $0.kind == weeklyAllKind }
     }
 
+    // MARK: - Ended windows
+
+    /// Whether a bucket's window has ended: its reset instant is at or before
+    /// `now`. The limit went back to zero at that instant, so a percent read
+    /// before it no longer describes the account, however recent the snapshot.
+    /// When the next window resets is unknown, because the 5-hour window
+    /// starts at the first message after the reset. A bucket with no reset
+    /// instant never counts as ended.
+    ///
+    /// Every surface shows an ended bucket as a fresh window: 0%, the normal
+    /// fill, no time marker, and words saying the limit reset in place of the
+    /// old percent. `bucketPresentation` applies that for the bars, tooltips
+    /// and hover card; the flat-string forms (`usageSummary`,
+    /// `usageDetailLine`) and the picker order (`sortedForPicker`) ask here.
+    static func windowHasEnded(_ bucket: ClaudeUsageLimitBucket, now: Date) -> Bool {
+        guard let resetsAt = bucket.resetsAt else { return false }
+        return resetsAt <= now
+    }
+
+    /// When an ended window reset: the bucket's `resetsAt` once
+    /// `windowHasEnded`, nil while the window is open or has no reset instant.
+    static func endedAt(_ bucket: ClaudeUsageLimitBucket, now: Date) -> Date? {
+        windowHasEnded(bucket, now: now) ? bucket.resetsAt : nil
+    }
+
     // MARK: - Severity
 
     /// Severity tiers for coloring usage bars/percentages.
@@ -125,8 +150,8 @@ enum ProfileUsagePresentation {
     ///
     /// Returns nil (draw no marker) when there is no reset date, the duration
     /// is non-positive, or the reset is already at/behind `now` — the latter
-    /// means the period is over and the daemon simply hasn't refreshed a new
-    /// window yet, so there is no meaningful "now" position to draw. `now` is
+    /// means the window has ended (`windowHasEnded`) and the next one's reset
+    /// is unknown, so there is no meaningful "now" position to draw. `now` is
     /// injectable for deterministic tests/previews.
     static func elapsedFraction(resetsAt: Date?,
                                 windowDuration: TimeInterval,
@@ -209,23 +234,34 @@ enum ProfileUsagePresentation {
     /// Compact usage summary without a leading separator:
     /// "5h 0% ↺11:10pm · wk 76%". nil when the snapshot carries neither a
     /// session nor a weekly bucket (never logged in / poller hasn't fetched
-    /// yet); any other bucket kind contributes no segment.
+    /// yet); any other bucket kind contributes no segment. A window that has
+    /// ended (`windowHasEnded`) gives when it reset in place of its old
+    /// percent: "5h reset 7am · wk reset Mon 7am".
     /// This legacy flat-string form keeps a FIXED format (clock for 5h,
     /// nothing for weekly) regardless of the `ResetTimeStyle` preference —
     /// the preference flows through `BucketPresentation` surfaces.
     static func usageSummary(for snapshot: ProfileUsageSnapshot?,
-                             timeZone: TimeZone = .current) -> String? {
+                             timeZone: TimeZone = .current,
+                             now: Date = Date()) -> String? {
         guard let snapshot, !snapshot.buckets.isEmpty else { return nil }
         var parts: [String] = []
         if let session = sessionBucket(snapshot) {
-            var part = "5h \(percentText(session.percent))"
-            if let resets = session.resetsAt {
-                part += " ↺\(resetTimeText(resets, timeZone: timeZone))"
+            if let ended = endedAt(session, now: now) {
+                parts.append("5h reset \(resetTimeText(ended, timeZone: timeZone))")
+            } else {
+                var part = "5h \(percentText(session.percent))"
+                if let resets = session.resetsAt {
+                    part += " ↺\(resetTimeText(resets, timeZone: timeZone))"
+                }
+                parts.append(part)
             }
-            parts.append(part)
         }
         if let weekly = weeklyAllBucket(snapshot) {
-            parts.append("wk \(percentText(weekly.percent))")
+            if let ended = endedAt(weekly, now: now) {
+                parts.append("wk reset \(weekdayResetTimeText(ended, timeZone: timeZone))")
+            } else {
+                parts.append("wk \(percentText(weekly.percent))")
+            }
         }
         guard !parts.isEmpty else { return nil }
         return parts.joined(separator: " · ")
@@ -249,7 +285,9 @@ enum ProfileUsagePresentation {
     /// resets 11:09pm · week 79% · resets in 2d 5h". Unlike `usageSummary`
     /// this drops the ↺ glyph in favor of "resets " — the second line has the
     /// width. nil when the snapshot carries neither a session nor a weekly
-    /// bucket. Like `usageSummary`, this legacy flat-string form keeps a
+    /// bucket. A window that has ended (`windowHasEnded`) gives when it reset
+    /// in place of its old percent: "5h reset 7am · week reset 1d ago".
+    /// Like `usageSummary`, this legacy flat-string form keeps a
     /// FIXED format (clock for 5h, countdown for weekly) regardless of the
     /// `ResetTimeStyle` preference.
     static func usageDetailLine(for snapshot: ProfileUsageSnapshot?,
@@ -267,19 +305,27 @@ enum ProfileUsagePresentation {
             return "\(prefix) \(percentText(percent))\(label)"
         }
         if let session = sessionBucket(snapshot) {
-            var part = percentPart("5h", session.percent)
-            if let resets = session.resetsAt {
-                part += " · resets \(resetTimeText(resets, timeZone: timeZone))"
+            if let ended = endedAt(session, now: now) {
+                parts.append("5h reset \(resetTimeText(ended, timeZone: timeZone))")
+            } else {
+                var part = percentPart("5h", session.percent)
+                if let resets = session.resetsAt {
+                    part += " · resets \(resetTimeText(resets, timeZone: timeZone))"
+                }
+                parts.append(part)
             }
-            parts.append(part)
         }
         if let weekly = weeklyAllBucket(snapshot) {
-            var part = percentPart("week", weekly.percent)
-            if let resets = weekly.resetsAt,
-               let relative = compactResetCountdown(resets, now: now) {
-                part += " · resets in \(relative)"
+            if let ended = endedAt(weekly, now: now) {
+                parts.append("week reset \(agoText(since: ended, now: now))")
+            } else {
+                var part = percentPart("week", weekly.percent)
+                if let resets = weekly.resetsAt,
+                   let relative = compactResetCountdown(resets, now: now) {
+                    part += " · resets in \(relative)"
+                }
+                parts.append(part)
             }
-            parts.append(part)
         }
         guard !parts.isEmpty else { return nil }
         return parts.joined(separator: " · ")
@@ -372,15 +418,20 @@ enum ProfileUsagePresentation {
     /// Display order for the account picker: selectable profiles with session
     /// data first — healthiest (lowest 5h percent) first, ties broken by the
     /// window that resets soonest — then selectable profiles without usage
-    /// data, then not-logged-in rows last. Display-only heuristic: the picker
-    /// never auto-selects.
-    static func sortedForPicker(_ entries: [ModelProfileWithUsage]) -> [ModelProfileWithUsage] {
+    /// data, then not-logged-in rows last. A session window that has ended
+    /// (`windowHasEnded`) ranks as the fresh window it is: 0%, with its next
+    /// reset unknown. Display-only heuristic: the picker never auto-selects.
+    static func sortedForPicker(_ entries: [ModelProfileWithUsage],
+                                now: Date = Date()) -> [ModelProfileWithUsage] {
         func rank(_ entry: ModelProfileWithUsage) -> (Int, Double, TimeInterval) {
             guard isSelectable(entry) else {
                 return (2, 0, .greatestFiniteMagnitude)
             }
             guard let session = sessionBucket(entry.usageSnapshot) else {
                 return (1, 0, .greatestFiniteMagnitude)
+            }
+            if windowHasEnded(session, now: now) {
+                return (0, 0, .greatestFiniteMagnitude)
             }
             let reset = session.resetsAt?.timeIntervalSinceReferenceDate
                 ?? .greatestFiniteMagnitude
@@ -425,6 +476,13 @@ enum ProfileUsagePresentation {
         let hours = minutes / 60
         if hours < 24 { return "\(hours)h" }
         return "\(hours / 24)d"
+    }
+
+    /// `ageText` as a phrase: "just now" under a minute, otherwise the age
+    /// with "ago": "5m ago", "2h ago", "1d ago".
+    private static func agoText(since date: Date, now: Date) -> String {
+        let age = ageText(since: date, now: now)
+        return now.timeIntervalSince(date) < 60 ? age : "\(age) ago"
     }
 
     /// Staleness / health note for a picker or menu row. Every logged-in
@@ -550,36 +608,80 @@ enum ProfileUsagePresentation {
     /// fragments). A single source of truth consumed by all five rendering surfaces.
     struct BucketPresentation: Equatable {
         let kind: String
+        /// Percent used: the bucket's own while its window is open, 0 once it has ended.
         let percent: Double
         let percentText: String
         /// Pace-aware fill tier (green/orange/orange/red — caution shares warning's hue).
+        /// `.normal` once the window has ended.
         let fill: FillLevel
         /// How the reset should be displayed (clock, weekday clock, countdown, or tooltip-only).
         let resetDisplay: ResetDisplay
         /// Inline reset column text, prefix included: "at 7:59pm" (clock),
         /// "at Fri 7pm" (weekday clock), or "in 4d 2h" (countdown).
-        /// nil when resetDisplay == .tooltipOnly, or there is no reset date, or a countdown is past.
+        /// nil when resetDisplay == .tooltipOnly, when there is no reset date,
+        /// or when the window has ended, since the next reset is unknown.
         let resetInline: String?
-        /// Full reset phrase with "resets" prefix: "resets at 7:59pm" (clock),
-        /// "resets at Fri 7pm" (weekday clock), or "resets in 2d 5h" (countdown/tooltipOnly).
-        /// Present whenever a reset date exists (any kind) — for tooltips, help text, and roomy rows.
-        /// nil when there is no reset date.
+        /// Full reset phrase. While the window is open it says when the limit
+        /// resets: "resets at 7:59pm" (clock), "resets at Fri 7pm" (weekday
+        /// clock), or "resets in 2d 5h" (countdown/tooltipOnly). Once it has
+        /// ended it says when the limit reset: "reset at 7:59pm", "reset at
+        /// Fri 7pm", or "reset 1d ago". Present whenever a reset date exists
+        /// (any kind) — for tooltips, help text, and roomy rows. nil when
+        /// there is no reset date.
         let resetPhrase: String?
         /// Elapsed fraction through the window (0...1), for time marker positioning on bars.
-        /// nil when there is no reset date, duration is non-positive, or the reset is already past.
+        /// nil when there is no reset date, duration is non-positive, or the window has ended.
         let elapsedFraction: Double?
+        /// Whether the bucket's window has ended (`windowHasEnded`). The
+        /// presentation then shows a fresh window: 0%, normal fill, no time
+        /// marker and no inline reset, with `resetPhrase` saying when the
+        /// limit reset.
+        let windowEnded: Bool
+
+        /// The bucket in words, after its window's name: "40% used · resets
+        /// at 8pm", or "40% used" with no reset date. Once the window has
+        /// ended it is the reset alone, "reset at Fri 7pm", because the old
+        /// percent no longer holds. `usedLabel: false` drops " used" for a
+        /// surface whose label already says what the number is: "40% ·
+        /// resets at 8pm".
+        func usageText(usedLabel: Bool = true) -> String {
+            if windowEnded, let resetPhrase {
+                return resetPhrase
+            }
+            var text = usedLabel ? "\(percentText) used" : percentText
+            if let resetPhrase {
+                text += " · \(resetPhrase)"
+            }
+            return text
+        }
     }
 
     /// Compute the unified presentation model for a bucket. Routes through
     /// all policy decisions (reset display, pace-aware fill, reset text) in
     /// one place. `style` is the user's reset-time display preference — the
     /// caller reads it (via `@AppStorage(AppState.usageResetTimeStyleKey)`)
-    /// and injects it here.
+    /// and injects it here. A bucket whose window has ended
+    /// (`windowHasEnded`) presents as a fresh window; see `BucketPresentation`.
     static func bucketPresentation(_ bucket: ClaudeUsageLimitBucket,
                                    style: ResetTimeStyle = .timeOfReset,
                                    now: Date = Date(),
                                    timeZone: TimeZone = .current) -> BucketPresentation {
         let display = resetDisplay(forKind: bucket.kind, style: style)
+        if let ended = endedAt(bucket, now: now) {
+            // Nothing of the old reading carries over, not even the API
+            // severity: it described the window that ended.
+            return BucketPresentation(
+                kind: bucket.kind,
+                percent: 0,
+                percentText: self.percentText(0),
+                fill: .normal,
+                resetDisplay: display,
+                resetInline: nil,
+                resetPhrase: endedResetPhrase(ended, display: display, now: now, timeZone: timeZone),
+                elapsedFraction: nil,
+                windowEnded: true
+            )
+        }
         let windowDuration = self.windowDuration(forKind: bucket.kind)
         let elapsed = elapsedFraction(resetsAt: bucket.resetsAt,
                                      windowDuration: windowDuration,
@@ -605,18 +707,18 @@ enum ProfileUsagePresentation {
             case .countdown:
                 // Session countdowns keep minute precision ("in 2h 10m") —
                 // on a 5h window a bare "2h" loses too much; weekly stays "4d 2h".
+                // The reset is in the future here, so the countdown is never nil.
                 if let compact = compactResetCountdown(
                     resetsAt, now: now,
                     minutesAtHourScale: bucket.kind == sessionKind) {
                     resetInline = "in \(compact)"
                 }
-                // When countdown is past (nil), both remain nil.
 
             case .tooltipOnly:
                 if let compact = compactResetCountdown(resetsAt, now: now) {
                     resetPhrase = "resets in \(compact)"
                 }
-                // resetInline stays nil; resetPhrase shows only when countdown is valid.
+                // resetInline stays nil.
             }
             if let inline = resetInline {
                 // "resets at 7:59pm" / "resets at Fri 7pm" / "resets in 4d 2h".
@@ -632,8 +734,27 @@ enum ProfileUsagePresentation {
             resetDisplay: display,
             resetInline: resetInline,
             resetPhrase: resetPhrase,
-            elapsedFraction: elapsed
+            elapsedFraction: elapsed,
+            windowEnded: false
         )
+    }
+
+    /// What an ended window's text says in place of its old percent, in the
+    /// bucket's reset form: "reset at 7am" (clock), "reset at Mon 7am"
+    /// (weekday clock), or "reset 1d ago" / "reset just now" (countdown and
+    /// tooltip-only).
+    private static func endedResetPhrase(_ resetsAt: Date,
+                                         display: ResetDisplay,
+                                         now: Date,
+                                         timeZone: TimeZone) -> String {
+        switch display {
+        case .clock:
+            return "reset at \(resetTimeText(resetsAt, timeZone: timeZone))"
+        case .weekdayClock:
+            return "reset at \(weekdayResetTimeText(resetsAt, timeZone: timeZone))"
+        case .countdown, .tooltipOnly:
+            return "reset \(agoText(since: resetsAt, now: now))"
+        }
     }
 
     // MARK: - Account menu rows

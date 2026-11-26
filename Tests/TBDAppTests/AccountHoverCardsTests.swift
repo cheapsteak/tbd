@@ -72,8 +72,10 @@ struct ClaudeTabCardTests {
                           usageSnapshot: gmailSnapshot)
         let terminal = claudeTerminal(profileID: gmail.profile.id,
                                       createdAt: resetDate)
+        // Two hours before the 5h reset, so the window is still open.
         let card = AccountHoverCards.claudeTabCard(terminal: terminal,
-                                                   profiles: [gmail], timeZone: utc, now: resetDate)
+                                                   profiles: [gmail], timeZone: utc,
+                                                   now: resetDate.addingTimeInterval(-2 * 3600))
         #expect(card?.title == "g@gmail.com")
         #expect(card?.titleStyle == .plain)
         let rows = card?.rows ?? []
@@ -203,6 +205,37 @@ struct UsageRowsTests {
         let criticalNoSeverity = ProfileUsagePresentation.bucketPresentation(
             bucket(kind: "session", percent: 92), timeZone: utc)
         #expect(AccountHoverCards.tint(for: criticalNoSeverity) == .critical)
+    }
+
+    /// A window whose reset has passed says when the limit reset, with no old
+    /// percent and the calm tint; a window still open keeps its reading.
+    @Test func endedWindowRowSaysTheLimitReset() {
+        let snap = snapshot(buckets: [
+            bucket(kind: "session", percent: 95, severity: "critical", resetsAt: resetDate),
+            // Early in its week, so the tint is the API's warning, not a pace projection.
+            bucket(kind: "weekly_all", percent: 76, severity: "warning",
+                   resetsAt: resetDate.addingTimeInterval((6 * 24 + 12) * 3600)),
+        ])
+        let afterSessionReset = resetDate.addingTimeInterval(3600)
+
+        let timeOfReset = AccountHoverCards.usageRows(for: snap, timeZone: utc, now: afterSessionReset)
+        #expect(timeOfReset == [
+            HoverCardRow(label: "5h window", value: "reset at 11:10pm",
+                         monospacedDigits: true, tint: .normal),
+            HoverCardRow(label: "Week", value: "76% · resets at Fri 11:10am",
+                         monospacedDigits: true, tint: .warning),
+        ])
+
+        let timeUntilReset = AccountHoverCards.usageRows(for: snap, resetStyle: .timeUntilReset,
+                                                         timeZone: utc, now: afterSessionReset)
+        #expect(timeUntilReset.first == HoverCardRow(label: "5h window", value: "reset 1h ago",
+                                                     monospacedDigits: true, tint: .normal))
+
+        // Before the reset the 5h row keeps its percent and red tint.
+        let beforeReset = AccountHoverCards.usageRows(for: snap, timeZone: utc,
+                                                      now: resetDate.addingTimeInterval(-3600))
+        #expect(beforeReset.first == HoverCardRow(label: "5h window", value: "95% · resets at 11:10pm",
+                                                  monospacedDigits: true, tint: .critical))
     }
 
     @Test func scopedAndUnknownBucketsRenderNoRow() {

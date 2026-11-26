@@ -22,6 +22,12 @@ private let resetDate: Date = {
     return calendar.date(from: components)!
 }()
 
+/// Two hours before `resetDate`, so every reset in the fixtures below is still
+/// ahead. Tests that render a reset pass it as `now`: a reset at or before
+/// `now` means the window has ended, and the wall clock is long past
+/// `resetDate`.
+private let beforeReset = resetDate.addingTimeInterval(-2 * 3600)
+
 private func bucket(kind: String, percent: Double, severity: String? = nil,
                     resetsAt: Date? = nil, family: String? = nil) -> ClaudeUsageLimitBucket {
     ClaudeUsageLimitBucket(kind: kind, percent: percent, severity: severity,
@@ -67,7 +73,8 @@ private let legacyScopedSnapshot = snapshot(buckets: gmailSnapshot.buckets + [
 @Suite("ProfileUsagePresentation — usage summary")
 struct UsageSummaryTests {
     @Test func fullSnapshotComposesCompactSummary() {
-        let summary = ProfileUsagePresentation.usageSummary(for: gmailSnapshot, timeZone: utc)
+        let summary = ProfileUsagePresentation.usageSummary(for: gmailSnapshot, timeZone: utc,
+                                                             now: beforeReset)
         #expect(summary == "5h 0% ↺11:10pm · wk 76%")
     }
 
@@ -80,7 +87,8 @@ struct UsageSummaryTests {
     }
 
     @Test func legacyScopedBucketRendersNoFamilySegment() {
-        #expect(ProfileUsagePresentation.usageSummary(for: legacyScopedSnapshot, timeZone: utc)
+        #expect(ProfileUsagePresentation.usageSummary(for: legacyScopedSnapshot, timeZone: utc,
+                                                    now: beforeReset)
                 == "5h 0% ↺11:10pm · wk 76%")
     }
 
@@ -108,12 +116,14 @@ struct UsageSummaryTests {
 @Suite("ProfileUsagePresentation — two-line menu")
 struct TwoLineMenuTests {
     @Test func fullSnapshotSpellsOutUsageWithUsedLabelOnce() {
-        let line = ProfileUsagePresentation.usageDetailLine(for: gmailSnapshot, timeZone: utc)
+        let line = ProfileUsagePresentation.usageDetailLine(for: gmailSnapshot, timeZone: utc,
+                                                            now: beforeReset)
         #expect(line == "5h 0% used · resets 11:10pm · week 76%")
     }
 
     @Test func usedLabelAppearsExactlyOnceOnTheFirstPercentage() {
-        let line = ProfileUsagePresentation.usageDetailLine(for: gmailSnapshot, timeZone: utc) ?? ""
+        let line = ProfileUsagePresentation.usageDetailLine(for: gmailSnapshot, timeZone: utc,
+                                                            now: beforeReset) ?? ""
         #expect(line.components(separatedBy: "used").count - 1 == 1)
         // It rides the first (5h) segment, not the weekly one.
         #expect(line.hasPrefix("5h 0% used"))
@@ -128,7 +138,8 @@ struct TwoLineMenuTests {
     }
 
     @Test func legacyScopedBucketRendersNoFamilySegment() {
-        #expect(ProfileUsagePresentation.usageDetailLine(for: legacyScopedSnapshot, timeZone: utc)
+        #expect(ProfileUsagePresentation.usageDetailLine(for: legacyScopedSnapshot, timeZone: utc,
+                                                       now: beforeReset)
                 == "5h 0% used · resets 11:10pm · week 76%")
     }
 
@@ -138,9 +149,9 @@ struct TwoLineMenuTests {
             bucket(kind: "weekly_all", percent: 79),
             bucket(kind: "future_kind", percent: 100, severity: "critical"),
         ])
-        #expect(ProfileUsagePresentation.usageDetailLine(for: withFuture, timeZone: utc)
+        #expect(ProfileUsagePresentation.usageDetailLine(for: withFuture, timeZone: utc, now: beforeReset)
                 == "5h 16% used · resets 11:10pm · week 79%")
-        #expect(ProfileUsagePresentation.usageSummary(for: withFuture, timeZone: utc)
+        #expect(ProfileUsagePresentation.usageSummary(for: withFuture, timeZone: utc, now: beforeReset)
                 == "5h 16% ↺11:10pm · wk 79%")
     }
 
@@ -160,7 +171,7 @@ struct TwoLineMenuTests {
 
     @Test func menuLineSplitsIdentityAndUsage() {
         let gmail = entry(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: gmailSnapshot)
-        let line = ProfileUsagePresentation.menuLine(for: gmail, timeZone: utc)
+        let line = ProfileUsagePresentation.menuLine(for: gmail, timeZone: utc, now: beforeReset)
         #expect(line.primary == "Gmail — g@x.co")
         #expect(line.secondary == "5h 0% used · resets 11:10pm · week 76%")
     }
@@ -469,6 +480,178 @@ struct BucketPresentationTests {
     }
 }
 
+// MARK: - Ended windows
+
+/// A bucket whose reset is at or before `now` shows a fresh window: 0%, normal
+/// fill, no time marker, and text saying when the limit reset. A reset still
+/// ahead, or no reset at all, leaves the reading as it is.
+@Suite("ProfileUsagePresentation — ended windows")
+struct EndedWindowTests {
+    private typealias Presentation = ProfileUsagePresentation.BucketPresentation
+
+    /// A day and an hour after `resetDate`.
+    private let dayAfterReset = resetDate.addingTimeInterval(25 * 3600)
+
+    @Test func windowHasEndedOnlyOnceTheResetIsAtOrBeforeNow() {
+        let session = bucket(kind: "session", percent: 40, resetsAt: resetDate)
+        #expect(ProfileUsagePresentation.windowHasEnded(session, now: beforeReset) == false)
+        #expect(ProfileUsagePresentation.windowHasEnded(session, now: resetDate))
+        #expect(ProfileUsagePresentation.windowHasEnded(session, now: dayAfterReset))
+        #expect(ProfileUsagePresentation.endedAt(session, now: beforeReset) == nil)
+        #expect(ProfileUsagePresentation.endedAt(session, now: dayAfterReset) == resetDate)
+
+        let noReset = bucket(kind: "session", percent: 40)
+        #expect(ProfileUsagePresentation.windowHasEnded(noReset, now: dayAfterReset) == false)
+        #expect(ProfileUsagePresentation.endedAt(noReset, now: dayAfterReset) == nil)
+    }
+
+    @Test func openWindowKeepsItsReading() throws {
+        // 86% with 3h of the 5h window gone projects past the limit: critical.
+        let session = bucket(kind: "session", percent: 86, severity: "warning", resetsAt: resetDate)
+        let presentation = ProfileUsagePresentation.bucketPresentation(
+            session, now: beforeReset, timeZone: utc)
+        #expect(presentation.windowEnded == false)
+        #expect(presentation.percent == 86)
+        #expect(presentation.percentText == "86%")
+        #expect(presentation.fill == .critical)
+        let elapsed = try #require(presentation.elapsedFraction)
+        #expect(abs(elapsed - 0.6) < 1e-9)
+        #expect(presentation.resetInline == "at 11:10pm")
+        #expect(presentation.resetPhrase == "resets at 11:10pm")
+        #expect(presentation.usageText() == "86% used · resets at 11:10pm")
+        #expect(presentation.usageText(usedLabel: false) == "86% · resets at 11:10pm")
+    }
+
+    /// A weekly reading of 86% whose reset passed a day ago.
+    @Test func endedWindowShowsAFreshEmptyWindow() {
+        let weekly = bucket(kind: "weekly_all", percent: 86, severity: "warning", resetsAt: resetDate)
+        let presentation = ProfileUsagePresentation.bucketPresentation(
+            weekly, now: dayAfterReset, timeZone: utc)
+        #expect(presentation == Presentation(
+            kind: "weekly_all", percent: 0, percentText: "0%", fill: .normal,
+            resetDisplay: .weekdayClock, resetInline: nil,
+            resetPhrase: "reset at Fri 11:10pm", elapsedFraction: nil, windowEnded: true))
+        #expect(presentation.usageText() == "reset at Fri 11:10pm")
+        #expect(presentation.usageText(usedLabel: false) == "reset at Fri 11:10pm")
+    }
+
+    @Test func resetExactlyAtNowHasEnded() {
+        let session = bucket(kind: "session", percent: 95, severity: "critical", resetsAt: resetDate)
+        let clock = ProfileUsagePresentation.bucketPresentation(
+            session, style: .timeOfReset, now: resetDate, timeZone: utc)
+        #expect(clock == Presentation(
+            kind: "session", percent: 0, percentText: "0%", fill: .normal,
+            resetDisplay: .clock, resetInline: nil,
+            resetPhrase: "reset at 11:10pm", elapsedFraction: nil, windowEnded: true))
+
+        let relative = ProfileUsagePresentation.bucketPresentation(
+            session, style: .timeUntilReset, now: resetDate, timeZone: utc)
+        #expect(relative == Presentation(
+            kind: "session", percent: 0, percentText: "0%", fill: .normal,
+            resetDisplay: .countdown, resetInline: nil,
+            resetPhrase: "reset just now", elapsedFraction: nil, windowEnded: true))
+    }
+
+    @Test func relativeStyleSaysHowLongAgoTheLimitReset() {
+        let weekly = bucket(kind: "weekly_all", percent: 86, severity: "warning", resetsAt: resetDate)
+        let weeklyPresentation = ProfileUsagePresentation.bucketPresentation(
+            weekly, style: .timeUntilReset, now: dayAfterReset, timeZone: utc)
+        #expect(weeklyPresentation.resetInline == nil)
+        #expect(weeklyPresentation.resetPhrase == "reset 1d ago")
+        #expect(weeklyPresentation.usageText() == "reset 1d ago")
+
+        let session = bucket(kind: "session", percent: 70, resetsAt: resetDate)
+        let sessionPresentation = ProfileUsagePresentation.bucketPresentation(
+            session, style: .timeUntilReset, now: resetDate.addingTimeInterval(2.5 * 3600), timeZone: utc)
+        #expect(sessionPresentation.resetInline == nil)
+        #expect(sessionPresentation.resetPhrase == "reset 2h ago")
+    }
+
+    @Test func tooltipOnlyKindSaysHowLongAgoInBothStyles() {
+        let other = bucket(kind: "future_kind", percent: 100, severity: "critical", resetsAt: resetDate)
+        for style in ProfileUsagePresentation.ResetTimeStyle.allCases {
+            let presentation = ProfileUsagePresentation.bucketPresentation(
+                other, style: style, now: dayAfterReset, timeZone: utc)
+            #expect(presentation == Presentation(
+                kind: "future_kind", percent: 0, percentText: "0%", fill: .normal,
+                resetDisplay: .tooltipOnly, resetInline: nil,
+                resetPhrase: "reset 1d ago", elapsedFraction: nil, windowEnded: true))
+        }
+    }
+
+    @Test func bucketWithoutResetKeepsItsReading() {
+        let weekly = bucket(kind: "weekly_all", percent: 86, severity: "warning")
+        let presentation = ProfileUsagePresentation.bucketPresentation(
+            weekly, now: dayAfterReset, timeZone: utc)
+        #expect(presentation == Presentation(
+            kind: "weekly_all", percent: 86, percentText: "86%", fill: .warning,
+            resetDisplay: .weekdayClock, resetInline: nil,
+            resetPhrase: nil, elapsedFraction: nil, windowEnded: false))
+        #expect(presentation.usageText() == "86% used")
+    }
+
+    // MARK: Flat-string forms
+
+    /// Read at `beforeReset`. The 5h window resets at `resetDate`; the weekly
+    /// one three days later, on Monday.
+    private func mixedSnapshot() -> ProfileUsageSnapshot {
+        snapshot(buckets: [
+            bucket(kind: "session", percent: 95, severity: "critical", resetsAt: resetDate),
+            bucket(kind: "weekly_all", percent: 76, severity: "warning",
+                   resetsAt: resetDate.addingTimeInterval(3 * 24 * 3600)),
+        ], fetchedAt: beforeReset)
+    }
+
+    @Test func usageSummarySaysAnEndedWindowReset() {
+        let snap = mixedSnapshot()
+        #expect(ProfileUsagePresentation.usageSummary(for: snap, timeZone: utc, now: beforeReset)
+                == "5h 95% ↺11:10pm · wk 76%")
+        #expect(ProfileUsagePresentation.usageSummary(
+            for: snap, timeZone: utc, now: resetDate.addingTimeInterval(2.5 * 3600))
+                == "5h reset 11:10pm · wk 76%")
+        #expect(ProfileUsagePresentation.usageSummary(
+            for: snap, timeZone: utc, now: resetDate.addingTimeInterval(4 * 24 * 3600))
+                == "5h reset 11:10pm · wk reset Mon 11:10pm")
+    }
+
+    /// "used" rides the first percent still shown, here the weekly one.
+    @Test func usageDetailLineSaysAnEndedWindowReset() {
+        let snap = mixedSnapshot()
+        #expect(ProfileUsagePresentation.usageDetailLine(
+            for: snap, timeZone: utc, now: resetDate.addingTimeInterval(2.5 * 3600))
+                == "5h reset 11:10pm · week 76% used · resets in 2d 21h")
+        #expect(ProfileUsagePresentation.usageDetailLine(
+            for: snap, timeZone: utc, now: resetDate.addingTimeInterval(4 * 24 * 3600))
+                == "5h reset 11:10pm · week reset 1d ago")
+    }
+
+    /// The age note after the usage is the same as for any old reading.
+    @Test func secondaryLineKeepsTheAgeNote() {
+        let line = ProfileUsagePresentation.secondaryLine(
+            for: mixedSnapshot(), kind: .oauth, timeZone: utc,
+            now: resetDate.addingTimeInterval(2.5 * 3600))
+        #expect(line == "5h reset 11:10pm · week 76% used · resets in 2d 21h · updated 4h ago")
+    }
+
+    // MARK: Picker order
+
+    @Test func pickerRanksAnEndedSessionWindowAsFresh() {
+        let spent = entry(name: "Spent", loginIdentity: "s@x.co", usageSnapshot: snapshot(
+            buckets: [bucket(kind: "session", percent: 95, severity: "critical", resetsAt: resetDate)]))
+        let busy = entry(name: "Busy", loginIdentity: "b@x.co", usageSnapshot: snapshot(
+            buckets: [bucket(kind: "session", percent: 20, resetsAt: resetDate.addingTimeInterval(4 * 3600))]))
+
+        // Before Spent's reset its 95% counts.
+        let before = ProfileUsagePresentation.sortedForPicker([spent, busy], now: beforeReset)
+        #expect(before.map(\.profile.name) == ["Busy", "Spent"])
+
+        // After it Spent's window is fresh, 0%, ahead of Busy's 20%.
+        let after = ProfileUsagePresentation.sortedForPicker(
+            [busy, spent], now: resetDate.addingTimeInterval(3600))
+        #expect(after.map(\.profile.name) == ["Spent", "Busy"])
+    }
+}
+
 @Suite("ProfileUsagePresentation — hoverCardTint mapping")
 struct HoverCardTintMappingTests {
     @Test func normalFillMapsToNormalTint() {
@@ -572,7 +755,7 @@ struct PickerSortTests {
         let sooner = entry(name: "Sooner", loginIdentity: "s@x.co", usageSnapshot: snapshot(
             buckets: [bucket(kind: "session", percent: 20, resetsAt: resetDate)]))
 
-        let sorted = ProfileUsagePresentation.sortedForPicker([later, sooner])
+        let sorted = ProfileUsagePresentation.sortedForPicker([later, sooner], now: beforeReset)
         #expect(sorted.map(\.profile.name) == ["Sooner", "Later"])
     }
 
@@ -697,7 +880,8 @@ struct StalenessNoteTests {
 @Suite("ProfileUsagePresentation — secondary line honesty")
 struct SecondaryLineHonestyTests {
     @Test func healthyFreshShowsUsageNumbers() {
-        let line = ProfileUsagePresentation.secondaryLine(for: gmailSnapshot, kind: .oauth, timeZone: utc)
+        let line = ProfileUsagePresentation.secondaryLine(for: gmailSnapshot, kind: .oauth, timeZone: utc,
+                                                          now: beforeReset)
         #expect(line == "5h 0% used · resets 11:10pm · week 76%")
     }
 
@@ -901,7 +1085,8 @@ struct CompactResetCountdownTests {
     }
 
     @Test func weeklyResetAppearsOnceInDetailLine() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        // Before the session's reset, so its window is still open.
+        let now = beforeReset
         let weeklyReset = now.addingTimeInterval(((2 * 24 + 5) * 60 + 10) * 60)
         let snap = snapshot(buckets: [
             bucket(kind: "session", percent: 16, severity: "normal", resetsAt: resetDate),

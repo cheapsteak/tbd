@@ -17,6 +17,41 @@ struct AccountPickerOrderingTests {
                 organizationID: nil))
     }
 
+    private func sessionEntry(name: String, percent: Double, resetsAt: Date,
+                              now: Date) -> ModelProfileWithUsage {
+        ModelProfileWithUsage(
+            profile: ModelProfile(id: UUID(), name: name, kind: .oauth),
+            loginIdentity: "\(name)@example.com",
+            usageSnapshot: ProfileUsageSnapshot(
+                buckets: [ClaudeUsageLimitBucket(kind: "session", percent: percent, resetsAt: resetsAt)],
+                fetchedAt: now,
+                lastAttemptAt: now,
+                status: "ok",
+                statusKind: .ok,
+                organizationID: nil))
+    }
+
+    /// With balancing off the rows follow `sortedForPicker` at the time the
+    /// sheet passes: a 5h window that has reset ranks as a fresh 0% one.
+    @Test
+    func orderingOffRanksAnEndedSessionWindowAsFresh() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let spent = sessionEntry(name: "Spent", percent: 95,
+                                 resetsAt: now.addingTimeInterval(-60), now: now)
+        let busy = sessionEntry(name: "Busy", percent: 20,
+                                resetsAt: now.addingTimeInterval(3600), now: now)
+
+        let afterReset = AccountPickerOrdering.order(
+            entries: [busy, spent], balancingOn: false, liveCount: { _ in 0 },
+            defaultProfileID: nil, now: now)
+        #expect(afterReset.ordered.map(\.profile.name) == ["Spent", "Busy"])
+
+        let beforeReset = AccountPickerOrdering.order(
+            entries: [spent, busy], balancingOn: false, liveCount: { _ in 0 },
+            defaultProfileID: nil, now: now.addingTimeInterval(-3600))
+        #expect(beforeReset.ordered.map(\.profile.name) == ["Busy", "Spent"])
+    }
+
     /// The sheet marks the daemon's pick under the daemon's thresholds: a
     /// profile at 90% is no balanced pick under the shipped 85% ceiling, and is
     /// one under a 95% ceiling.

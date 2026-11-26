@@ -154,6 +154,41 @@ struct UsageBarsMenuImageTests {
         #expect(ticks.isEmpty)
     }
 
+    /// A window whose reset has passed, or is exactly now, draws as a fresh
+    /// one: an empty bar, "0%" in the normal color, and no time marker. The
+    /// same reading with its reset ahead draws as read.
+    @Test func endedWindowDrawsEmpty() throws {
+        let endedOffsets: [TimeInterval] = [-24 * 3600, 0]
+        for resetsIn in endedOffsets {
+            let marks = Bars.marks(session: nil,
+                                   weekly: Fix.weekly(86, severity: "warning", resetsIn: resetsIn))
+            let foundFill = marks.first { $0.fillLevel != nil }
+            let fill = try #require(foundFill)
+            #expect(fill.rect.width == 0)
+            #expect(fill.fillLevel == .normal)
+            let percentTexts = marks.compactMap { $0.percentText }
+            let percentLevels = marks.compactMap { $0.percentLevel }
+            #expect(percentTexts == ["0%"])
+            #expect(percentLevels == [.normal])
+            let ticks = marks.filter { $0.isTick }
+            #expect(ticks.isEmpty)
+        }
+
+        // Four days left of the week: 3 of 7 days gone at 86% is on pace to run out.
+        let openMarks = Bars.marks(session: nil, weekly: Fix.weekly(86, severity: "warning"))
+        let foundOpenFill = openMarks.first { $0.fillLevel != nil }
+        let openFill = try #require(foundOpenFill)
+        #expect(openFill.rect.width == 44 * 0.86)
+        #expect(openFill.fillLevel == .critical)
+        let openPercentTexts = openMarks.compactMap { $0.percentText }
+        #expect(openPercentTexts == ["86%"])
+        let openTicks = openMarks.filter { $0.isTick }
+        #expect(openTicks.count == 1)
+
+        let ended = Fix.weekly(86, severity: "warning", resetsIn: -3600)
+        #expect(Bars.accessibilityText(session: Fix.session(40), weekly: ended) == "5-hour 40%, weekly 0%")
+    }
+
     @Test func accessibilityTextNamesPresentBuckets() {
         let session = Fix.session(40)
         let weekly = Fix.weekly(16)

@@ -23,7 +23,7 @@ enum AccountPickerOrdering {
         guard balancingOn else {
             // Balancing off: return display order, no balanced pick
             return Result(
-                ordered: ProfileUsagePresentation.sortedForPicker(entries),
+                ordered: ProfileUsagePresentation.sortedForPicker(entries, now: now),
                 balancedPickID: nil
             )
         }
@@ -55,7 +55,8 @@ enum AccountPickerOrdering {
 
         // Add remaining (ineligible) rows in sortedForPicker order
         let remaining = ProfileUsagePresentation.sortedForPicker(
-            entries.filter { !seen.contains($0.profile.id) }
+            entries.filter { !seen.contains($0.profile.id) },
+            now: now
         )
         ordered.append(contentsOf: remaining)
 

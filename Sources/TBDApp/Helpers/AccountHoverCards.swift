@@ -66,11 +66,11 @@ enum AccountHoverCards {
         return model
     }
 
-    /// Usage rows for a snapshot: 5h window (with reset time) and weekly.
+    /// Usage rows for a snapshot: 5h window and weekly, each with its reset
+    /// time when there is one: "40% · resets at 8pm". A window that has ended
+    /// gives when it reset instead of its old percent: "reset at 7am".
     /// Any other bucket kind renders no row. Numbers are monospaced digits; tinted per
     /// pace-aware fill level. Empty when the profile has no usage data.
-    /// The weekly row now shows its reset countdown when available (closing
-    /// a gap where it silently omitted the weekly reset).
     static func usageRows(for snapshot: ProfileUsageSnapshot?,
                           resetStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset,
                           timeZone: TimeZone = .current,
@@ -79,21 +79,14 @@ enum AccountHoverCards {
         var rows: [HoverCardRow] = []
         if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
             let presentation = ProfileUsagePresentation.bucketPresentation(session, style: resetStyle, now: now, timeZone: timeZone)
-            var value = presentation.percentText
-            if let resetPhrase = presentation.resetPhrase {
-                value += " · \(resetPhrase)"
-            }
-            rows.append(HoverCardRow(label: "5h window", value: value,
+            rows.append(HoverCardRow(label: "5h window",
+                                     value: presentation.usageText(usedLabel: false),
                                      monospacedDigits: true, tint: tint(for: presentation)))
         }
         if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
             let presentation = ProfileUsagePresentation.bucketPresentation(weekly, style: resetStyle, now: now, timeZone: timeZone)
-            var value = presentation.percentText
-            if let resetPhrase = presentation.resetPhrase {
-                value += " · \(resetPhrase)"
-            }
             rows.append(HoverCardRow(label: "Week",
-                                     value: value,
+                                     value: presentation.usageText(usedLabel: false),
                                      monospacedDigits: true, tint: tint(for: presentation)))
         }
         return rows
