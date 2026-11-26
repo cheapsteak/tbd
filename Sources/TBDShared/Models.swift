@@ -1421,10 +1421,11 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
     /// window starts at the first message after the reset. A bucket with no
     /// reset instant never counts as ended.
     ///
-    /// The one rule for an ended window: the app's usage surfaces show such a
-    /// bucket as a fresh window at 0%. Rankings count it as 0% only in a
+    /// The app's usage surfaces show such a bucket as a fresh window at 0%.
+    /// The account picker sheet's own row order counts it as 0% only in a
     /// snapshot whose last fetch succeeded
-    /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`).
+    /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`). Account balancing does
+    /// not apply this rule: it ranks an account by its last recorded percent.
     public func windowHasEnded(at now: Date) -> Bool {
         guard let resetsAt else { return false }
         return resetsAt <= now
@@ -1520,16 +1521,12 @@ public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
     public var isOK: Bool { status == "ok" }
 
     /// Whether `bucket`, one of this snapshot's buckets, counts as a fresh
-    /// window at 0% when profiles are ranked at `now`: its window has ended
-    /// (`ClaudeUsageLimitBucket.windowHasEnded(at:)`) and the last fetch
-    /// succeeded (`isOK`). A failing snapshot's buckets keep the percent they
-    /// last read, however long ago their windows reset; otherwise a profile
-    /// whose fetch keeps failing, such as one with a rejected token, would
-    /// look emptier the longer it failed.
-    ///
-    /// `ProfilePoolPicker` weighs headroom by this rule, the app's account
-    /// picker orders its rows by it, and the daemon's notifications quote a
-    /// reading by it, so a ranking and the text that explains it agree.
+    /// window at 0% when the app's account picker sheet orders its rows at
+    /// `now`: its window has ended (`ClaudeUsageLimitBucket.windowHasEnded(at:)`)
+    /// and the last fetch succeeded (`isOK`). A reading whose fetch is failing
+    /// keeps its recorded percent for ordering, however long ago its windows
+    /// reset, so a broken account, such as one with a rejected token, never
+    /// sorts as the emptiest.
     public func countsAsReset(_ bucket: ClaudeUsageLimitBucket, at now: Date) -> Bool {
         isOK && bucket.windowHasEnded(at: now)
     }

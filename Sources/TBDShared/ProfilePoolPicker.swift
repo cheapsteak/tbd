@@ -103,9 +103,7 @@ public struct ProfilePoolCandidate: Sendable, Equatable {
 public enum ProfilePoolVerdict: Sendable, Equatable {
     /// Profile is eligible and its score for ranking.
     /// - `score`: `(accountLiveSessions + 1) / headroom`, lower is better.
-    /// - `headroom`: `1 - max(percent)/100` over binding window buckets, clamped to [0, 1],
-    ///   with a bucket whose window has ended counted at 0% when the last fetch
-    ///   succeeded (`headroom(of:now:)`).
+    /// - `headroom`: `1 - max(percent)/100` over binding window buckets, clamped to [0, 1].
     /// - `accountLiveSessions`: sum of liveSessions across all candidates sharing this
     ///   profile's accountKey (eligible or not), reflecting the load being balanced.
     case eligible(score: Double, headroom: Double, accountLiveSessions: Int)
@@ -200,7 +198,7 @@ public struct ProfilePoolPolicy: Sendable, Equatable {
     }
 
     /// Headroom at or below this is full: `1 − ceiling/100`, rounded to a
-    /// millionth like `ProfilePoolPicker.headroom(of:now:)` so a reading exactly at
+    /// millionth like `ProfilePoolPicker.headroom(of:)` so a reading exactly at
     /// the ceiling lands on the floor rather than a hair above it.
     public var headroomFloor: Double {
         let raw = 1.0 - Double(usageCeilingPercent) / 100.0
@@ -301,8 +299,7 @@ public enum ProfilePoolPicker {
             candidates, excludingAccountKeys: excludingAccountKeys, now: now, policy: policy,
             requiresFable: requiresFable)
         let chosen = selectBest(from: candidates, with: verdicts)
-        let fallback = chosen == nil
-            ? selectFallback(from: candidates, with: verdicts, now: now) : nil
+        let fallback = chosen == nil ? selectFallback(from: candidates, with: verdicts) : nil
         return ProfilePoolDecision(chosen: chosen, verdicts: verdicts, fallback: fallback)
     }
 
@@ -347,21 +344,11 @@ public enum ProfilePoolPicker {
     /// with kind "session", "weekly_all", and active "weekly_scoped" (isActive == true).
     /// An inactive bucket (isActive == false) is ignored. A snapshot with no such
     /// buckets returns 1.0 (unlimited headroom). Percent values > 100 are clamped
-    /// to 100 before subtraction. A bucket whose window has ended by `now`
-    /// counts as 0% when the snapshot's last fetch succeeded
-    /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`): its limit went back to
-    /// zero at the reset, however recent the reading, which is how the app's
-    /// usage bars show it too. A failing snapshot's buckets keep the percent
-    /// they last read, so a profile whose fetch keeps failing never looks
-    /// emptier the longer it fails. The eligibility pass and the fallback
-    /// weigh readings only through this function.
+    /// to 100 before subtraction.
     ///
-    /// - Parameters:
-    ///   - snapshot: The usage snapshot to assess.
-    ///   - now: The time the pick is made, the same instant its staleness
-    ///     check reads.
+    /// - Parameter snapshot: The usage snapshot to assess.
     /// - Returns: Headroom in [0.0, 1.0], where 1.0 means unlimited and 0.0 means exhausted.
-    public static func headroom(of snapshot: ProfileUsageSnapshot, now: Date) -> Double {
+    public static func headroom(of snapshot: ProfileUsageSnapshot) -> Double {
         let bindingBuckets = snapshot.buckets.filter { bucket in
             let isBindingKind = ["session", "weekly_all", "weekly_scoped"].contains(bucket.kind)
             let isActive = bucket.isActive != false  // nil and true both count
@@ -370,9 +357,7 @@ public enum ProfilePoolPicker {
 
         guard !bindingBuckets.isEmpty else { return 1.0 }
 
-        let maxPercent = bindingBuckets.map { bucket in
-            snapshot.countsAsReset(bucket, at: now) ? 0.0 : min(bucket.percent, 100.0)
-        }.max() ?? 0.0
+        let maxPercent = bindingBuckets.map { min($0.percent, 100.0) }.max() ?? 0.0
         // Round to a millionth so a reading of exactly 95% lands on the 0.05
         // floor rather than a hair above it (1 - 0.95 is 0.050000000000000044
         // in binary floating point), and equal readings compare equal.
@@ -482,7 +467,7 @@ public enum ProfilePoolPicker {
 
             // Rule 6: Headroom must be above the floor, i.e. usage below the
             // ceiling.
-            let hr = headroom(of: snapshot, now: now)
+            let hr = headroom(of: snapshot)
             if hr <= policy.headroomFloor {
                 verdicts[candidate.profileID] = .exhausted
                 continue
@@ -522,14 +507,10 @@ public enum ProfilePoolPicker {
     }
 
     /// The fallback when nothing is eligible (see `ProfilePoolFallback`), or nil
-    /// when no candidate was turned away for its reading alone. Readings rank
-    /// by `headroom(of:now:)` at the pick's `now`: a window that has ended
-    /// ranks at 0% when the snapshot's last fetch succeeded, however old the
-    /// reading, and a failing snapshot ranks by the percent it last read.
+    /// when no candidate was turned away for its reading alone.
     private static func selectFallback(
         from candidates: [ProfilePoolCandidate],
-        with verdicts: [UUID: ProfilePoolVerdict],
-        now: Date
+        with verdicts: [UUID: ProfilePoolVerdict]
     ) -> ProfilePoolFallback? {
         let accountLoads = Dictionary(grouping: candidates, by: \.accountKey)
             .mapValues { $0.reduce(0) { $0 + $1.liveSessions } }
@@ -549,7 +530,7 @@ public enum ProfilePoolPicker {
             case .exhausted:
                 // `.exhausted` is only reached past the freshness rule, so the
                 // snapshot is present and current.
-                let hr = candidate.snapshot.map { headroom(of: $0, now: now) } ?? 0
+                let hr = candidate.snapshot.map(headroom(of:)) ?? 0
                 if hr > 0 {
                     return Ranked(candidate: candidate, reason: .aboveCeiling, tier: 0,
                                   unread: 0, score: load / hr)
@@ -564,7 +545,7 @@ public enum ProfilePoolPicker {
                 }
                 // A last reading at 100% still ranks, just last: a floor keeps
                 // the score finite so load can break the tie.
-                let hr = max(headroom(of: snapshot, now: now), 0.001)
+                let hr = max(headroom(of: snapshot), 0.001)
                 return Ranked(candidate: candidate, reason: .staleReading, tier: 1,
                               unread: 0, score: load / hr)
             default:

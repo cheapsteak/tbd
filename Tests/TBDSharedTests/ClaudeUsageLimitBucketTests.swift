@@ -3,8 +3,9 @@ import Testing
 
 import TBDShared
 
-/// The one rule for an ended usage window, which the app's usage bars follow,
-/// and rankings too for a snapshot whose last fetch succeeded.
+/// The rule for an ended usage window, which the app's usage surfaces follow,
+/// and the account picker sheet's order too for a snapshot whose last fetch
+/// succeeded.
 @Suite("ClaudeUsageLimitBucket.windowHasEnded")
 struct ClaudeUsageLimitBucketWindowTests {
     private let resetAt = Date(timeIntervalSince1970: 1_800_000_000)
@@ -32,8 +33,9 @@ struct ClaudeUsageLimitBucketWindowTests {
     }
 }
 
-/// When a ranking counts an ended window as 0%: only in a snapshot whose last
-/// fetch succeeded. A failing snapshot keeps the percent it last read.
+/// When the account picker sheet's order counts an ended window as 0%: only in
+/// a snapshot whose last fetch succeeded. A failing snapshot keeps the percent
+/// it last read.
 @Suite("ProfileUsageSnapshot.countsAsReset")
 struct ProfileUsageSnapshotCountsAsResetTests {
     private let resetAt = Date(timeIntervalSince1970: 1_800_000_000)

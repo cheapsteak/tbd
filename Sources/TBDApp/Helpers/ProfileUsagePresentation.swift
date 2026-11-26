@@ -28,17 +28,18 @@ enum ProfileUsagePresentation {
     // MARK: - Ended windows
 
     /// When an ended window reset: the bucket's `resetsAt` once its window has
-    /// ended (`ClaudeUsageLimitBucket.windowHasEnded(at:)`, the shared rule
-    /// account balancing follows too), nil while the window is open or has no
-    /// reset instant.
+    /// ended (`ClaudeUsageLimitBucket.windowHasEnded(at:)`), nil while the
+    /// window is open or has no reset instant.
     ///
-    /// Every surface shows an ended bucket as a fresh window: 0%, the normal
-    /// fill, no time marker, and words saying the limit reset in place of the
-    /// old percent. `bucketPresentation` applies that for the bars, tooltips
-    /// and hover card; the flat-string forms (`usageSummary`,
-    /// `usageDetailLine`) ask here. The picker order (`sortedForPicker`) asks
-    /// the snapshot (`ProfileUsageSnapshot.countsAsReset(_:at:)`), which
-    /// counts an ended window as 0% only when the last fetch succeeded.
+    /// Every app surface that draws a bucket shows an ended one as a fresh
+    /// window: 0%, the normal fill, no time marker, and words saying the limit
+    /// reset in place of the old percent. `bucketPresentation` applies that
+    /// for the bars, tooltips and hover card; the flat-string forms
+    /// (`usageSummary`, `usageDetailLine`) ask here. The picker sheet's order
+    /// (`sortedForPicker`) asks the snapshot
+    /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`), which counts an ended
+    /// window as 0% only when the last fetch succeeded. Account balancing and
+    /// the daemon's notifications keep the last recorded percent.
     static func endedAt(_ bucket: ClaudeUsageLimitBucket, now: Date) -> Date? {
         bucket.windowHasEnded(at: now) ? bucket.resetsAt : nil
     }

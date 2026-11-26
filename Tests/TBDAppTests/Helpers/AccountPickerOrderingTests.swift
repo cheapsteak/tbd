@@ -52,32 +52,36 @@ struct AccountPickerOrderingTests {
         #expect(beforeReset.ordered.map(\.profile.name) == ["Busy", "Spent"])
     }
 
-    /// With balancing on, the picker reads an ended window as 0% just as the
-    /// bars do: a profile whose 5h window reset after a 95% reading is eligible
-    /// and is the balanced pick, where before the reset it sat among the
-    /// ineligible rows.
+    /// With balancing on, the sheet marks the daemon's pick, and the daemon
+    /// ranks an account by the percent it last recorded: a profile whose 5h
+    /// window reset after a 95% reading stays over the ceiling until its next
+    /// reading, though its bar already shows a fresh window. The rows the
+    /// balancer turns away follow the sheet's own order (`sortedForPicker`),
+    /// which counts that ended window as 0%.
     @Test
-    func balancedPickCountsAnEndedSessionWindowAsFresh() {
+    func balancedPickKeepsTheRecordedPercentOfAnEndedSessionWindow() {
         let resetAt = Date(timeIntervalSince1970: 1_800_000_000)
-        // Both read a minute before the 5h reset, inside the staleness window
-        // at every instant below.
+        // All read a minute before Spent's 5h reset, inside the staleness
+        // window at every instant below.
         let readAt = resetAt.addingTimeInterval(-60)
         let spent = sessionEntry(name: "Spent", percent: 95, resetsAt: resetAt, now: readAt)
+        let full = sessionEntry(name: "Full", percent: 90,
+                                resetsAt: resetAt.addingTimeInterval(4 * 3600), now: readAt)
         let busy = sessionEntry(name: "Busy", percent: 20,
                                 resetsAt: resetAt.addingTimeInterval(4 * 3600), now: readAt)
 
         let beforeReset = AccountPickerOrdering.order(
-            entries: [spent, busy], balancingOn: true, liveCount: { _ in 0 },
+            entries: [spent, full, busy], balancingOn: true, liveCount: { _ in 0 },
             defaultProfileID: nil, now: resetAt.addingTimeInterval(-30))
         #expect(beforeReset.balancedPickID == busy.profile.id)
-        #expect(beforeReset.ordered.map(\.profile.name) == ["Busy", "Spent"])
+        #expect(beforeReset.ordered.map(\.profile.name) == ["Busy", "Full", "Spent"])
 
         for now in [resetAt, resetAt.addingTimeInterval(60)] {
             let afterReset = AccountPickerOrdering.order(
-                entries: [busy, spent], balancingOn: true, liveCount: { _ in 0 },
+                entries: [full, spent, busy], balancingOn: true, liveCount: { _ in 0 },
                 defaultProfileID: nil, now: now)
-            #expect(afterReset.balancedPickID == spent.profile.id)
-            #expect(afterReset.ordered.map(\.profile.name) == ["Spent", "Busy"])
+            #expect(afterReset.balancedPickID == busy.profile.id)
+            #expect(afterReset.ordered.map(\.profile.name) == ["Busy", "Spent", "Full"])
         }
     }
 
