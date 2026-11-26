@@ -162,6 +162,52 @@ struct ProfileCommandsTests {
         #expect(usageAgeMarker(fetchedAt: now.addingTimeInterval(-49 * 3600), now: now) == "(updated 2d ago)")
     }
 
+    // MARK: - Usage cells
+
+    /// 2027-01-15 08:00 UTC.
+    private static let cellNow = Date(timeIntervalSince1970: 1_800_000_000)
+    private static let utc = TimeZone(identifier: "UTC")!
+
+    private static func bucket(percent: Double = 96, resetsIn: TimeInterval?) -> ClaudeUsageLimitBucket {
+        ClaudeUsageLimitBucket(kind: "session", percent: percent,
+                               resetsAt: resetsIn.map { cellNow.addingTimeInterval($0) })
+    }
+
+    /// A window that has ended went back to zero at its reset, whatever it read.
+    @Test func usagePercentCell_endedWindowShowsZero() {
+        let now = Self.cellNow
+        #expect(usagePercentCell(Self.bucket(resetsIn: -3600), now: now) == "0%")
+        #expect(usagePercentCell(Self.bucket(resetsIn: 0), now: now) == "0%")
+    }
+
+    @Test func usagePercentCell_openOrUndatedWindowShowsItsReading() {
+        let now = Self.cellNow
+        #expect(usagePercentCell(Self.bucket(resetsIn: 3600), now: now) == "96%")
+        #expect(usagePercentCell(Self.bucket(percent: 16.6, resetsIn: nil), now: now) == "17%")
+        #expect(usagePercentCell(nil, now: now) == "—")
+    }
+
+    /// A reset at or before `now` is past: the cell says how long ago.
+    @Test func usageResetCell_endedWindowSaysHowLongAgo() {
+        func cell(_ resetsIn: TimeInterval) -> String {
+            usageResetCell(Self.bucket(resetsIn: resetsIn), now: Self.cellNow, timeZone: Self.utc)
+        }
+        #expect(cell(0) == "just now")
+        #expect(cell(-40 * 60) == "40m ago")
+        #expect(cell(-2 * 3600 - 59) == "2h ago")
+        #expect(cell(-49 * 3600) == "2d ago")
+    }
+
+    @Test func usageResetCell_openWindowGivesTheResetTime() {
+        func cell(_ resetsIn: TimeInterval?) -> String {
+            usageResetCell(Self.bucket(resetsIn: resetsIn), now: Self.cellNow, timeZone: Self.utc)
+        }
+        #expect(cell(3 * 3600) == "11:00")
+        #expect(cell(3 * 86_400) == "1/18 08:00")
+        #expect(cell(nil) == "—")
+        #expect(usageResetCell(nil, now: Self.cellNow, timeZone: Self.utc) == "—")
+    }
+
     // MARK: - Name resolution
 
     @Test func resolveProfile_exactName() throws {
@@ -586,5 +632,32 @@ struct ProfileCommandsTests {
         #expect(fable["source"] as? String == "session")
         #expect(fable["checkedAt"] != nil)
         #expect(profiles[1]["fable"] == nil)
+    }
+
+    /// `--json` is raw data: a window whose reset has passed keeps the
+    /// percent it read and its reset time. Only the human table shows it as
+    /// reset.
+    @Test func profileListJSON_keepsAnEndedWindowsReading() throws {
+        let resetAt = Date(timeIntervalSince1970: 1_750_000_000)
+        let bucket = ClaudeUsageLimitBucket(kind: "session", percent: 96, resetsAt: resetAt)
+        let entry = ModelProfileWithUsage(
+            profile: ModelProfile(name: "a", kind: .oauth),
+            loginIdentity: "a@acme.example",
+            usageSnapshot: ProfileUsageSnapshot(
+                buckets: [bucket],
+                fetchedAt: resetAt.addingTimeInterval(-3600),
+                lastAttemptAt: resetAt.addingTimeInterval(-3600),
+                status: "ok", statusKind: .ok))
+        let dayLater = resetAt.addingTimeInterval(86_400)
+        #expect(usagePercentCell(bucket, now: dayLater) == "0%")
+
+        let output = try #require(profileListJSONOutput(ModelProfileListResult(profiles: [entry])))
+        let root = try #require(try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        let profiles = try #require(root["profiles"] as? [[String: Any]])
+        let snapshot = try #require(profiles[0]["usageSnapshot"] as? [String: Any])
+        let buckets = try #require(snapshot["buckets"] as? [[String: Any]])
+        #expect(buckets.count == 1)
+        #expect(buckets[0]["percent"] as? Double == 96)
+        #expect(buckets[0]["resetsAt"] as? String == "2025-06-15T15:06:40Z")
     }
 }
