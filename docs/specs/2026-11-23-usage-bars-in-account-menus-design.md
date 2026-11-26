@@ -63,6 +63,13 @@ not widen the menu.
   3h ago". If the data is good but old, the row shows the bars, then a small grey age note, for
   example "1d ago". On a + menu row with no detected login, "needs /login" replaces a failing note
   and comes before the age beside old bars, as "Not logged in" describes.
+- **Reset since the reading.** A window whose reset time is at or before now has gone back to zero,
+  however recent the reading. Its bar shows a fresh window: empty, "0%", the normal green, and no
+  tick, because the next reset is unknown (the 5-hour window starts at the first message after the
+  reset). Its part of the tooltip says when the limit reset instead of giving the old percent, for
+  example "Weekly: reset at Mon 7am", or "Weekly: reset 1d ago" with relative reset times. The age
+  note is unchanged, and a window with no reset time or one still ahead shows as read. The rule is
+  `ProfileUsagePresentation.windowHasEnded`, and every surface that draws a bucket follows it.
 - **Current account.** A standard macOS checkmark marks it.
 - **Default (logged in).** The row shows no bars. TBD keeps no usage data for the default login.
 - **Highlight.** When the pointer is on a row, the name turns white as usual. The bars keep their
