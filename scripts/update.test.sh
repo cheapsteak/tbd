@@ -3980,7 +3980,7 @@ EOF
                 "no previous app bundle to restore — the daemon's build is unknown, and this run kept none" \
                 "$out"
             assert_not_contains "and puts nothing back" "restored previous app bundle" "$out"
-            assert_eq "this run's build stays installed" "left-by-the-cut-short-run" \
+            assert_eq "this run's build stays installed" "$case_dir/home/tbd/updates/src" \
                 "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
             assert_contains "so the rollback is not complete" \
                 "ERROR: the rollback of the failed install did not complete" "$out"
