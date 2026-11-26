@@ -7,18 +7,40 @@ import TestSupport
 struct LoadBalancingTests {
     // MARK: - Ordering Tests
 
+    /// The instant the ordering tests below read and order at. Their 5h
+    /// windows reset an hour after it, still open: a window whose reset has
+    /// passed counts as a fresh 0% in the sheet's order, which would hide the
+    /// ordering by percent they check.
+    private static let now = Date(timeIntervalSince1970: 1_800_000_000)
+    private static let openReset = now.addingTimeInterval(3600)
+
     @Test
     func orderingWithBalancingOffEqualsDisplayOrder() {
+        let now = Self.now
         let profiles = [
             ModelProfileWithUsage(
                 profile: ModelProfile(id: UUID(), name: "Profile A", kind: .oauth),
                 loginIdentity: "a@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
                 buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 50, severity: nil, resetsAt: Date(), modelDisplayName: nil)
+                        ClaudeUsageLimitBucket(kind: "session", percent: 50, severity: nil, resetsAt: Self.openReset, modelDisplayName: nil)
                     ],
-                fetchedAt: Date(),
-                lastAttemptAt: Date(),
+                fetchedAt: now,
+                lastAttemptAt: now,
+                status: "ok",
+                statusKind: .ok,
+                organizationID: nil
+                )
+            ),
+            ModelProfileWithUsage(
+                profile: ModelProfile(id: UUID(), name: "Profile C", kind: .oauth),
+                loginIdentity: "c@example.com",
+                usageSnapshot: ProfileUsageSnapshot(
+                buckets: [
+                        ClaudeUsageLimitBucket(kind: "session", percent: 30, severity: nil, resetsAt: Self.openReset, modelDisplayName: nil)
+                    ],
+                fetchedAt: now,
+                lastAttemptAt: now,
                 status: "ok",
                 statusKind: .ok,
                 organizationID: nil
@@ -34,11 +56,13 @@ struct LoadBalancingTests {
             balancingOn: false,
             liveCount: { _ in 0 },
             defaultProfileID: nil,
-            now: Date()
+            now: now
         )
 
-        let displayOrder = ProfileUsagePresentation.sortedForPicker(profiles)
+        let displayOrder = ProfileUsagePresentation.sortedForPicker(profiles, now: now)
         #expect(result.ordered == displayOrder)
+        // Lowest 5h percent first, then the profile with no usage data.
+        #expect(result.ordered.map(\.profile.name) == ["Profile C", "Profile A", "Profile B"])
         #expect(result.balancedPickID == nil)
     }
 
@@ -54,10 +78,10 @@ struct LoadBalancingTests {
                 loginIdentity: "user@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
                 buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 20, severity: nil, resetsAt: Date(), modelDisplayName: nil)
+                        ClaudeUsageLimitBucket(kind: "session", percent: 20, severity: nil, resetsAt: Self.openReset, modelDisplayName: nil)
                     ],
-                fetchedAt: Date(),
-                lastAttemptAt: Date(),
+                fetchedAt: Self.now,
+                lastAttemptAt: Self.now,
                 status: "ok",
                 statusKind: .ok,
                 organizationID: nil
@@ -76,7 +100,7 @@ struct LoadBalancingTests {
             balancingOn: true,
             liveCount: { _ in 0 },
             defaultProfileID: nil,
-            now: Date()
+            now: Self.now
         )
 
         // OAuth should be first (eligible), then the rest in display order
@@ -97,10 +121,10 @@ struct LoadBalancingTests {
                 loginIdentity: "user@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
                 buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 30, severity: nil, resetsAt: Date(), modelDisplayName: nil)
+                        ClaudeUsageLimitBucket(kind: "session", percent: 30, severity: nil, resetsAt: Self.openReset, modelDisplayName: nil)
                     ],
-                fetchedAt: Date(),
-                lastAttemptAt: Date(),
+                fetchedAt: Self.now,
+                lastAttemptAt: Self.now,
                 status: "ok",
                 statusKind: .ok,
                 organizationID: nil
@@ -119,7 +143,7 @@ struct LoadBalancingTests {
             balancingOn: true,
             liveCount: { _ in 0 },
             defaultProfileID: nil,
-            now: Date()
+            now: Self.now
         )
 
         // All profiles should be present
