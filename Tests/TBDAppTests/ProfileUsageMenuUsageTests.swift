@@ -247,3 +247,81 @@ struct UsageFillNSColorTests {
         }
     }
 }
+
+// MARK: - pickerRowUsage
+
+/// The "Choose account…" sheet's rows follow the menus' rule: bars and the
+/// summary for a reading whose fetch succeeded, the note alone for a failing
+/// one.
+@Suite("ProfileUsagePresentation — picker sheet rows")
+struct ProfileUsagePickerRowUsageTests {
+    private typealias Fix = MenuUsageFixture
+    private typealias RowUsage = ProfileUsagePresentation.PickerRowUsage
+
+    private func rowUsage(_ entry: ModelProfileWithUsage) -> RowUsage {
+        ProfileUsagePresentation.pickerRowUsage(for: entry, now: Fix.now, timeZone: Fix.utc)
+    }
+
+    @Test func healthySnapshotShowsBarsAndSummary() {
+        let usage = rowUsage(Fix.entry(snapshot: Fix.snapshot([Fix.session40, Fix.weekly16])))
+        #expect(usage == RowUsage(
+            summary: "5h 40% ↺11am · wk 16%",
+            session: Fix.presentation(Fix.session40),
+            weekly: Fix.presentation(Fix.weekly16),
+            note: nil))
+        #expect(usage.showsBars)
+    }
+
+    /// An old but healthy reading keeps its bars, with its age beside them.
+    @Test func oldHealthySnapshotShowsBarsWithItsAge() {
+        let old = Fix.snapshot([Fix.session40, Fix.weekly16], fetchedAt: Fix.now.addingTimeInterval(-600))
+        #expect(rowUsage(Fix.entry(snapshot: old)) == RowUsage(
+            summary: "5h 40% ↺11am · wk 16%",
+            session: Fix.presentation(Fix.session40),
+            weekly: Fix.presentation(Fix.weekly16),
+            note: "updated 10m ago"))
+    }
+
+    /// A healthy reading whose 5h window has reset shows that bar as a fresh
+    /// window, and the summary says when it reset.
+    @Test func healthySnapshotShowsAnEndedWindowAsReset() {
+        let endedSession = ClaudeUsageLimitBucket(
+            kind: "session", percent: 95, severity: "critical",
+            resetsAt: Fix.now.addingTimeInterval(-3600))
+        let snapshot = Fix.snapshot([endedSession, Fix.weekly16], fetchedAt: Fix.now.addingTimeInterval(-60))
+        #expect(rowUsage(Fix.entry(snapshot: snapshot)) == RowUsage(
+            summary: "5h reset at 7am · wk 16%",
+            session: Fix.presentation(endedSession),
+            weekly: Fix.presentation(Fix.weekly16),
+            note: nil))
+        #expect(Fix.presentation(endedSession).windowEnded)
+    }
+
+    /// A failing fetch shows its note in place of the bars and summary, even
+    /// with buckets on hand: its 5h window reset an hour ago, and its row
+    /// sorts by the 95% it last read, so an empty bar would contradict it.
+    @Test func failingSnapshotShowsItsNoteInPlaceOfTheBars() {
+        let endedSession = ClaudeUsageLimitBucket(
+            kind: "session", percent: 95, severity: "critical",
+            resetsAt: Fix.now.addingTimeInterval(-3600))
+        let failing = Fix.snapshot([endedSession, Fix.weekly16],
+                                   fetchedAt: Fix.now.addingTimeInterval(-2 * 3600),
+                                   status: "fetch failed: timed out", statusKind: .networkError)
+        let usage = rowUsage(Fix.entry(snapshot: failing))
+        #expect(usage == RowUsage(
+            summary: nil, session: nil, weekly: nil,
+            note: "usage unavailable — retrying · last data 2h ago"))
+        #expect(!usage.showsBars)
+
+        let rejected = Fix.snapshot([Fix.session40], status: "fetch failed: HTTP 401",
+                                    statusKind: .needsLogin)
+        #expect(rowUsage(Fix.entry(snapshot: rejected)) == RowUsage(
+            summary: nil, session: nil, weekly: nil, note: "needs re-login"))
+    }
+
+    @Test func noSnapshotShowsNothing() {
+        let usage = rowUsage(Fix.entry(snapshot: nil))
+        #expect(usage == RowUsage(summary: nil, session: nil, weekly: nil, note: nil))
+        #expect(!usage.showsBars)
+    }
+}

@@ -830,6 +830,52 @@ enum ProfileUsagePresentation {
         return .none
     }
 
+    // MARK: - Account picker sheet rows
+
+    /// What a row of the "Choose account…" sheet shows about usage.
+    struct PickerRowUsage: Equatable {
+        /// The caption's usage summary (`usageSummary`), "5h 40% ↺8pm · wk
+        /// 16%"; nil when the row shows no bars.
+        let summary: String?
+        /// The 5-hour bar; nil when the row shows no bars or has no such bucket.
+        let session: BucketPresentation?
+        /// The weekly bar; nil when the row shows no bars or has no such bucket.
+        let weekly: BucketPresentation?
+        /// The note under the row (`stalenessNote`): a failing fetch's note
+        /// in place of the bars and summary, or a healthy reading's age,
+        /// "updated 6m ago", beside them.
+        let note: String?
+
+        /// Whether the row draws bars.
+        var showsBars: Bool { session != nil || weekly != nil }
+    }
+
+    /// Picks a sheet row's usage by the rule `menuUsage` follows: bars and the
+    /// summary only for a reading whose fetch succeeded, and the note alone
+    /// for a failing one. A failing reading's windows may have reset since,
+    /// and its row sorts by the percent it last read
+    /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`), so the sheet draws no
+    /// bars that disagree with where the row sits.
+    static func pickerRowUsage(for entry: ModelProfileWithUsage,
+                               style: ResetTimeStyle = .timeOfReset,
+                               now: Date = Date(),
+                               timeZone: TimeZone = .current) -> PickerRowUsage {
+        let snapshot = entry.usageSnapshot
+        let note = stalenessNote(for: snapshot, kind: entry.profile.kind, now: now)
+        guard let snapshot, snapshot.isOK else {
+            return PickerRowUsage(summary: nil, session: nil, weekly: nil, note: note)
+        }
+        return PickerRowUsage(
+            summary: usageSummary(for: snapshot, timeZone: timeZone, now: now),
+            session: sessionBucket(snapshot).map {
+                bucketPresentation($0, style: style, now: now, timeZone: timeZone)
+            },
+            weekly: weeklyAllBucket(snapshot).map {
+                bucketPresentation($0, style: style, now: now, timeZone: timeZone)
+            },
+            note: note)
+    }
+
     /// Map a `FillLevel` to the corresponding `HoverCardTint`, preserving the
     /// four-tier hierarchy. Used so the hover card and picker both render
     /// pace-aware colors consistently.

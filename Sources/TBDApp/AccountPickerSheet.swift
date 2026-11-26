@@ -8,7 +8,9 @@ import TBDShared
 /// Lists every model profile with full usage data — identity, 5h window bar +
 /// reset time, weekly-all bar — sorted
 /// healthiest-session-window first (display order only; nothing is
-/// auto-picked). Cached snapshots render immediately; a forced daemon-side
+/// auto-picked). A profile whose usage fetch is failing shows its note in
+/// place of the bars (`ProfileUsagePresentation.pickerRowUsage`). Cached
+/// snapshots render immediately; a forced daemon-side
 /// usage sweep runs on open and updates rows in place ("refreshing…", never a
 /// blocking spinner). Selecting a row spawns a Claude session pinned to that
 /// profile for life.
@@ -21,23 +23,18 @@ struct AccountPickerSheet: View {
 
     @State private var isRefreshing = false
 
-    private var orderingResult: AccountPickerOrdering.Result {
+    /// The rows in order, and the balanced pick, at `now`. The body reads
+    /// `now` once and passes the same instant to this and to every row, so
+    /// across a reset the order and a row's bars cannot disagree.
+    private func orderingResult(now: Date) -> AccountPickerOrdering.Result {
         AccountPickerOrdering.order(
             entries: appState.modelProfiles,
             balancingOn: appState.daemonCapabilities?.profileBalancingEnabled ?? false,
             liveCount: { profileID in appState.liveSessionCount(forProfile: profileID) },
             defaultProfileID: appState.defaultProfileID,
-            now: Date(),
+            now: now,
             policy: appState.daemonCapabilities?.profileBalancingPolicy ?? .standard
         )
-    }
-
-    private var sortedEntries: [ModelProfileWithUsage] {
-        orderingResult.ordered
-    }
-
-    private var balancedPickID: UUID? {
-        orderingResult.balancedPickID
     }
 
     private var isBalancingOn: Bool {
@@ -46,6 +43,9 @@ struct AccountPickerSheet: View {
 
     var body: some View {
         @Bindable var appState = appState
+        let now = Date()
+        let ordering = orderingResult(now: now)
+        let sortedEntries = ordering.ordered
         VStack(alignment: .leading, spacing: 12) {
             header
 
@@ -61,7 +61,8 @@ struct AccountPickerSheet: View {
                             AccountPickerRow(
                                 entry: entry,
                                 isDefault: entry.profile.id == appState.defaultProfileID,
-                                isBalancedPick: entry.profile.id == balancedPickID,
+                                isBalancedPick: entry.profile.id == ordering.balancedPickID,
+                                now: now,
                                 onPick: {
                                     onPick(entry.profile.id)
                                     dismiss()
@@ -119,6 +120,9 @@ private struct AccountPickerRow: View {
     let entry: ModelProfileWithUsage
     let isDefault: Bool
     let isBalancedPick: Bool
+    /// The instant the sheet ordered its rows at, so the row's bars say what
+    /// its place in the order says.
+    let now: Date
     let onPick: () -> Void
 
     @State private var isHovering = false
@@ -139,23 +143,22 @@ private struct AccountPickerRow: View {
         return ProfileLoginPresentation.normalizedIdentity(entry.loginIdentity)
     }
 
-    private var usageCaption: String? {
-        if let snapshot = entry.usageSnapshot, !snapshot.buckets.isEmpty {
-            var parts: [String] = []
-            if let summary = ProfileUsagePresentation.usageSummary(for: snapshot) {
-                parts.append(summary)
-            }
-            let liveCount = appState.liveSessionCount(forProfile: entry.profile.id)
-            if liveCount > 0 {
-                parts.append("\(liveCount) live")
-            }
-            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    /// The usage summary, when the row shows bars, then the live count.
+    private func usageCaption(_ usage: ProfileUsagePresentation.PickerRowUsage) -> String? {
+        var parts: [String] = []
+        if let summary = usage.summary {
+            parts.append(summary)
         }
         let liveCount = appState.liveSessionCount(forProfile: entry.profile.id)
-        return liveCount > 0 ? "\(liveCount) live" : nil
+        if liveCount > 0 {
+            parts.append("\(liveCount) live")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     var body: some View {
+        let usage = ProfileUsagePresentation.pickerRowUsage(
+            for: entry, style: usageResetTimeStyle, now: now)
         Button(action: onPick) {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
@@ -184,22 +187,22 @@ private struct AccountPickerRow: View {
                     Spacer()
                 }
 
-                if let caption = usageCaption {
+                if let caption = usageCaption(usage) {
                     Text(caption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                if let snapshot = entry.usageSnapshot, !snapshot.buckets.isEmpty {
-                    bucketRows(snapshot)
-                } else if isSelectable {
+                if usage.showsBars {
+                    bucketRows(usage)
+                } else if usage.note == nil, isSelectable {
                     Text("No usage data")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
 
-                if let note = ProfileUsagePresentation.stalenessNote(for: entry.usageSnapshot,
-                                                                    kind: entry.profile.kind) {
+                // A failing fetch's note stands in place of the bars.
+                if let note = usage.note {
                     Text(note)
                         .font(.caption2)
                         .foregroundStyle(.orange)
@@ -222,13 +225,13 @@ private struct AccountPickerRow: View {
     }
 
     @ViewBuilder
-    private func bucketRows(_ snapshot: ProfileUsageSnapshot) -> some View {
+    private func bucketRows(_ usage: ProfileUsagePresentation.PickerRowUsage) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            if let session = ProfileUsagePresentation.sessionBucket(snapshot) {
-                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(session, style: usageResetTimeStyle), label: "5h")
+            if let session = usage.session {
+                bucketRow(presentation: session, label: "5h")
             }
-            if let weekly = ProfileUsagePresentation.weeklyAllBucket(snapshot) {
-                bucketRow(presentation: ProfileUsagePresentation.bucketPresentation(weekly, style: usageResetTimeStyle), label: "week")
+            if let weekly = usage.weekly {
+                bucketRow(presentation: weekly, label: "week")
             }
         }
     }
