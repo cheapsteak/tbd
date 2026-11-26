@@ -747,11 +747,12 @@ private struct CodexUsageBarsView: View {
     let snapshot: CodexRateLimitSnapshot
 
     var body: some View {
-        // One instant for both bars, so each window counts as ended or open
-        // against the same clock.
+        // One instant for both bars and the label, so each window counts as
+        // ended or open against the same clock, and a limit whose windows
+        // have all reset is not reported over their empty bars.
         let now = Date()
         VStack(spacing: 2) {
-            if snapshot.rateLimitReachedType != nil || snapshot.spendControlReached == true {
+            if CodexUsagePresentation.showsLimitReached(snapshot, now: now) {
                 Text("Limit reached")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.red)
