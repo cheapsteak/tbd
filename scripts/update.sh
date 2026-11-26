@@ -751,15 +751,20 @@ put_back_discarded_kept_bundle() {
 
 # The fields of a build identity that tell one build from another, as
 # `<commit>|<sourceWorktree>|<dirty>`, read from <json>, or from the object at
-# <field> in it. builtAt differs between two builds of one tree, and the rest
-# follow from these. Non-zero, with nothing printed, when it names no commit.
+# <field> in it. A clean tree builds the same thing every time, so builtAt is
+# left out for one. A dirty tree's changes are not in the identity, so two
+# builds of it can differ in anything: <dirty> is then `true@<builtAt>`, and
+# `true@` when the identity names no build time, which matches no build
+# (same_build, is_daemons_build). Non-zero, with nothing printed, when it
+# names no commit.
 #
 #   build_key_of <json> [<field>]
 build_key_of() {
-    local json="${1-}" at="${2:+$2.}" commit
+    local json="${1-}" at="${2:+$2.}" commit dirty
     commit="$(json_field "$json" "${at}commit")" && [ -n "$commit" ] || return 1
-    printf '%s|%s|%s\n' "$commit" \
-        "$(json_field "$json" "${at}sourceWorktree")" "$(json_field "$json" "${at}dirty")"
+    dirty="$(json_field "$json" "${at}dirty")"
+    [ "$dirty" != true ] || dirty="true@$(json_field "$json" "${at}builtAt")"
+    printf '%s|%s|%s\n' "$commit" "$(json_field "$json" "${at}sourceWorktree")" "$dirty"
 }
 
 # The build key (build_key_of) of a bundle's Contents/TBDBuildIdentity.json,
@@ -783,39 +788,48 @@ bundle_configuration() {
 
 # True when two bundles are the same build (bundle_build_key) in the same
 # build configuration (bundle_configuration): same commit, source worktree,
-# dirty flag and configuration, so a restart.sh build of the same commit, a
-# dirty one, or a debug build of a release one, is another build. False when
-# either names no commit or no configuration, so a bundle stamped before the
-# configuration was recorded is kept rather than taken for this run's build.
+# dirty flag and configuration, and for a dirty build the same build time,
+# so a restart.sh build of the same commit, another build of a dirty tree,
+# or a debug build of a release one, is another build. False when either
+# names no commit or no configuration, so a bundle stamped before the
+# configuration was recorded is kept rather than taken for this run's build,
+# and false for a dirty build that names no build time.
 same_build() {
     local key configuration
-    key="$(bundle_build_key "${1-}")" && configuration="$(bundle_configuration "${1-}")" &&
+    key="$(bundle_build_key "${1-}")" && [ "${key%|true@}" = "$key" ] &&
+        configuration="$(bundle_configuration "${1-}")" &&
         [ "$key" = "$(bundle_build_key "${2-}")" ] &&
         [ "$configuration" = "$(bundle_configuration "${2-}")" ]
 }
 
 # True when <dir> holds the build the daemon reported when the run began
-# (RUNNING_BUILD): the same commit, source worktree and dirty flag, or the
-# same commit when the daemon did not report the other two. False when it
-# reported no build.
+# (RUNNING_BUILD): the same commit, source worktree and dirty flag, and for
+# a dirty build the same build time, or the same commit when the daemon did
+# not report the worktree or the dirty flag. False when its build is unknown
+# (RUNNING_BUILD empty), or is a dirty one with no build time.
 #
 #   is_daemons_build <dir> [<sidecar>]
 is_daemons_build() {
     local key
     key="$(bundle_build_key "$@")" || return 1
     case "$RUNNING_BUILD" in
-        "") return 1 ;;
+        "" | *"|true@") return 1 ;;
         *"||"* | *"|") [ "${key%%|*}" = "${RUNNING_BUILD%%|*}" ] ;;
         *) [ "$key" = "$RUNNING_BUILD" ] ;;
     esac
 }
 
 # A build key as the report prints it: the commit, then the worktree it was
-# built from and whether that was dirty, when the key says.
+# built from and whether that was dirty, with the build time of a dirty
+# build, when the key says.
 build_text() {
-    local commit="${1%%|*}" rest="${1#*|}" worktree dirty=""
+    local commit="${1%%|*}" rest="${1#*|}" worktree dirty="" built
     worktree="${rest%|*}"
-    [ "${rest##*|}" != true ] || dirty=", dirty"
+    built="${rest##*|}"
+    case "$built" in
+        true@?*) dirty=", dirty, built ${built#true@}" ;;
+        true*) dirty=", dirty" ;;
+    esac
     printf '%s%s%s\n' "$commit" "${worktree:+ from $worktree}" "$dirty"
 }
 
@@ -1047,15 +1061,16 @@ roll_back_bundle() {
 # BUNDLE_RESTORE_FAILED and warns not to quit TBD until a bundle is back,
 # naming the quickest whole bundle to put there (app_bundle_looks_whole, the
 # test the put-back makes): the one that was installed, renamed back; else
-# the one the swap staged, renamed into place; else the kept bundle, by the
-# documented way, which runs only once the outgoing name is free, with its
-# build and whether this run kept it; else, with none kept, a build of a TBD
-# checkout.
+# the one the swap staged, renamed into place, with its build and whether
+# the daemon runs it, since during an install it is the new build; else the
+# kept bundle, by the documented way, which runs only once the outgoing name
+# is free, with its build and whether this run kept it; else, with no whole
+# one kept, a build of a TBD checkout.
 #
 #   put_back_after_failed_swap <installed_bundle>
 put_back_after_failed_swap() {
     local installed_bundle="${1-}"
-    local outgoing incoming note warning kept_by="this run"
+    local outgoing incoming note warning staged kept_by="this run"
     outgoing="$(app_bundle_sibling "$installed_bundle" outgoing)"
     incoming="$(app_bundle_sibling "$installed_bundle" incoming)"
     note="$(put_back_outgoing_app_bundle "$installed_bundle" 2>&1)" || true
@@ -1071,9 +1086,17 @@ put_back_after_failed_swap() {
     if app_bundle_looks_whole "$outgoing"; then
         log "$warning Put back the bundle that was installed with: mv \"$outgoing\" \"$installed_bundle\""
     elif app_bundle_looks_whole "$incoming"; then
-        log "$warning The bundle that was installed, at $outgoing, is not whole, but the one this run staged is: put it in place with: mv \"$incoming\" \"$installed_bundle\""
-    elif [ ! -d "$PREVIOUS_BUNDLE" ]; then
-        log "$warning Neither the bundle that was installed, at $outgoing, nor the one this run staged, at $incoming, is whole, and no bundle is kept at $PREVIOUS_BUNDLE: install one from a TBD checkout with scripts/restart.sh"
+        staged="build $(describe_build "$incoming")"
+        [ -z "$INSTALLING_BUILD" ] || [ "$(bundle_build_key "$incoming")" != "$INSTALLING_BUILD" ] ||
+            staged="the new build, $(build_text "$INSTALLING_BUILD")"
+        if is_daemons_build "$incoming"; then
+            staged="$staged, which the daemon runs"
+        elif [ -n "$RUNNING_BUILD" ]; then
+            staged="$staged, not build $(build_text "$RUNNING_BUILD"), which the daemon runs"
+        fi
+        log "$warning The bundle that was installed, at $outgoing, is not whole, but the one this run staged is ($staged): put it in place with: mv \"$incoming\" \"$installed_bundle\""
+    elif ! app_bundle_looks_whole "$PREVIOUS_BUNDLE"; then
+        log "$warning Neither the bundle that was installed, at $outgoing, nor the one this run staged, at $incoming, is whole, and no whole bundle is kept at $PREVIOUS_BUNDLE: install one from a TBD checkout with scripts/restart.sh"
     else
         [ "$BUNDLE_STASHED" = true ] || kept_by="an earlier update, not this run"
         log "$warning Neither the bundle that was installed, at $outgoing, nor the one this run staged, at $incoming, is whole, so put back the bundle kept at $PREVIOUS_BUNDLE (build $(describe_build "$PREVIOUS_BUNDLE"), kept by $kept_by) instead: rename the tree at $outgoing away (mv \"$outgoing\" \"$(app_bundle_sibling "$installed_bundle" discard)\"), then follow 'Going back to the previous build' in docs/updating.md"
@@ -1377,17 +1400,22 @@ APP_STOP_BEGUN=false
 # different builds.
 INSTALL_IN_FLIGHT=false
 
-# The new bundle's build key (bundle_build_key), set by main as the
-# installation starts to move, for the report of an interruption
-# (report_interrupted_install, report_installation_facts). main installs
-# nothing from a bundle that names no build, so it is never empty once the
-# installation moves.
+# The new bundle's build key (bundle_build_key), set by main once the bundle
+# is signed, before anything outside the update clone moves, for the report
+# of an interruption (report_interrupted_install, report_installation_facts)
+# and the warning of a swap that leaves nothing installed
+# (put_back_after_failed_swap). main installs nothing from a bundle that names
+# no build, so it is never empty once the installation moves.
 INSTALLING_BUILD=""
 
 # The build key (build_key_of) of the daemon that was running when the run
-# started, from its status, or empty when none answered or it named no
-# commit. Set by main beside INSTALLING_BUILD; the rollback (roll_back_bundle)
-# and the recovery report go by it (is_daemons_build).
+# started, from the status main read then, or empty when none answered, it
+# named no commit, or its identity was read from its worktree's HEAD
+# (origin worktreeHead) rather than a stamp: that HEAD can have moved since
+# the daemon started, so it says nothing sure of the build. Empty is a
+# daemon whose build is unknown. main sets it just before the install; the
+# rollback (roll_back_bundle), the recovery report and the warning of a swap
+# that leaves nothing installed go by it (is_daemons_build).
 RUNNING_BUILD=""
 
 # The update clone's .build/release as main finds and moves it: the link
@@ -1429,7 +1457,8 @@ put_release_link_back() {
 # unless they name different builds where it matters: the installed bundle
 # was built in the update clone, so an app launched from it starts a daemon
 # from the clone's .build/release, and that link names a downloaded tree of
-# another build than the bundle's. Logs both builds when they differ. Only a
+# another build than the bundle's, a dirty build that names no build time
+# being no build's match (same_build). Logs both builds when they differ. Only a
 # release run is checked, as the report reads its own configuration's
 # directory: a --debug app starts from .build/debug, which names no download.
 installed_bundle_matches_release_link() {
@@ -1442,7 +1471,7 @@ installed_bundle_matches_release_link() {
     esac
     [ "$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" sourceWorktree)" = "$UPDATE_SRC" ] ||
         return 0
-    key="$(bundle_build_key "$INSTALLED_BUNDLE")" &&
+    key="$(bundle_build_key "$INSTALLED_BUNDLE")" && [ "${key%|true@}" = "$key" ] &&
         [ "$key" = "$(bundle_build_key "$target" "$target/TBDBuildIdentity.json")" ] && return 0
     log_error "$INSTALLED_BUNDLE holds build $(describe_build "$INSTALLED_BUNDLE"), but $RELEASE_LINK, from which an app launched from it starts a daemon, names $target, build $(describe_build "$target" "$target/TBDBuildIdentity.json")"
     return 1
@@ -2398,7 +2427,9 @@ main() {
     # stopped, if it was stopped, rather than relaunching into it. It goes up
     # before the first thing moves and comes down once the run knows where it
     # stands again.
-    RUNNING_BUILD="$(build_key_of "$status_json" buildIdentity || true)"
+    RUNNING_BUILD=""
+    [ "$(json_field "$status_json" buildIdentity.origin)" = worktreeHead ] ||
+        RUNNING_BUILD="$(build_key_of "$status_json" buildIdentity || true)"
     local handed_over=false kept_key tree
     INSTALL_IN_FLIGHT=true
     if install_new_bundle "$bundle_dir" "$INSTALLED_BUNDLE"; then
