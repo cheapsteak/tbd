@@ -36,8 +36,7 @@ enum ProfileUsagePresentation {
     /// reset in place of the old percent, from `endedResetPhrase`.
     /// `bucketPresentation` applies that for the bars, tooltips and hover
     /// card; the flat-string forms (`usageSummary`, `usageDetailLine`) ask
-    /// here. The picker sheet's order
-    /// (`sortedForPicker`) asks the snapshot
+    /// here. The picker sheet's order (`sortedForPicker`) asks the snapshot
     /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`), which counts an ended
     /// window as 0% only when the last fetch succeeded. Account balancing and
     /// the daemon's notifications keep the last recorded percent.
@@ -662,10 +661,9 @@ enum ProfileUsagePresentation {
         /// clock), or "resets in 2d 5h" (countdown/tooltipOnly). Once it has
         /// ended it says when the limit reset (`endedResetPhrase`): "reset at
         /// 7:59pm", "reset at Fri 7pm", or "reset 2h ago", and "reset 1d ago"
-        /// in every form once the reset is `endedClockTimeLimit` old.
-        /// Present whenever a reset date exists
-        /// (any kind) — for tooltips, help text, and roomy rows. nil when
-        /// there is no reset date.
+        /// in every form once the reset is `endedClockTimeLimit` old. Present
+        /// whenever a reset date exists (any kind) — for tooltips, help text,
+        /// and roomy rows. nil when there is no reset date.
         let resetPhrase: String?
         /// Elapsed fraction through the window (0...1), for time marker positioning on bars.
         /// nil when there is no reset date, duration is non-positive, or the window has ended.

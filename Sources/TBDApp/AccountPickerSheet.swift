@@ -10,10 +10,9 @@ import TBDShared
 /// healthiest-session-window first (display order only; nothing is
 /// auto-picked). A profile whose usage fetch is failing shows its note in
 /// place of the bars (`ProfileUsagePresentation.pickerRowUsage`). Cached
-/// snapshots render immediately; a forced daemon-side
-/// usage sweep runs on open and updates rows in place ("refreshing…", never a
-/// blocking spinner). Selecting a row spawns a Claude session pinned to that
-/// profile for life.
+/// snapshots render immediately; a forced daemon-side usage sweep runs on
+/// open and updates rows in place ("refreshing…", never a blocking spinner).
+/// Selecting a row spawns a Claude session pinned to that profile for life.
 struct AccountPickerSheet: View {
     @Environment(AppState.self) var appState
     @Environment(\.dismiss) private var dismiss
