@@ -394,20 +394,30 @@ the order you would reach for them.
   `/Applications/TBD.app` is never missing if the app quits meanwhile (see
   "Stops the app" above).
 
-  First look for `/Applications/.TBD-install-outgoing` (`ls -a /Applications`
-  lists it). If it is there with nothing at `/Applications/TBD.app`, an
-  install stopped between its two renames, and it is the bundle that was
-  installed, whole. Rename it back before anything else:
-  `mv /Applications/.TBD-install-outgoing /Applications/TBD.app`. If it is
-  there beside an installed bundle, it is left over from an earlier install:
-  rename it to `/Applications/.TBD-install-discard` and delete it there. The
-  command below does nothing while that name is taken. With nothing installed
-  and nothing at the outgoing name, look at
-  `/Applications/.TBD-install-incoming` too: a whole bundle there is the one
-  a failed swap staged, and
-  `mv /Applications/.TBD-install-incoming /Applications/TBD.app` puts it in
-  place at once. The command below does nothing in that state either, so it
-  never deletes that bundle. Then:
+  First look at what `ls -a /Applications` lists. With nothing at
+  `/Applications/TBD.app`, a swap stopped or failed between its renames, and
+  a whole bundle beside the empty path, one with `Contents/Info.plist` and an
+  executable `Contents/MacOS/TBDApp`, goes back before anything else. Take
+  the first of these that applies, which is the order the update's own
+  warning gives:
+
+  - **A whole `.TBD-install-outgoing`** – the bundle that was installed.
+    Rename it back:
+    `mv /Applications/.TBD-install-outgoing /Applications/TBD.app`.
+  - **A whole `.TBD-install-incoming`** – the bundle the swap staged: the new
+    build during an install, a copy of the kept one during a rollback, so it
+    may not be the build the daemon runs. Rename it into place:
+    `mv /Applications/.TBD-install-incoming /Applications/TBD.app`, then
+    update again or carry on below.
+  - **Neither** – the kept bundle, by the command below.
+
+  Never move a tree that is not whole into place. A tree at the outgoing name
+  that you are not renaming back, whether not whole or left beside an
+  installed bundle by an earlier install, goes to
+  `/Applications/.TBD-install-discard` and is deleted there; the command
+  below does nothing while the outgoing name is taken. It also does nothing
+  while nothing is installed and the incoming name holds a whole bundle, so
+  it never deletes that one. Then:
 
   ```bash
   ( cd /Applications &&
@@ -415,7 +425,8 @@ the order you would reach for them.
     { [ -e TBD.app ] || [ ! -f .TBD-install-incoming/Contents/Info.plist ] ||
       [ ! -x .TBD-install-incoming/Contents/MacOS/TBDApp ]; } &&
     rm -rf .TBD-install-incoming .TBD-install-discard &&
-    /bin/cp -cR ~/tbd/updates/previous/TBD.app .TBD-install-incoming &&
+    /bin/cp -cR ~/tbd/updates/previous/TBD.app .TBD-install-discard &&
+    mv .TBD-install-discard .TBD-install-incoming &&
     { [ ! -e TBD.app ] || mv TBD.app .TBD-install-outgoing; } &&
     mv .TBD-install-incoming TBD.app &&
     if [ -e .TBD-install-outgoing ]; then
@@ -423,14 +434,19 @@ the order you would reach for them.
     fi )
   ```
 
-  - **The `rm`** – clears what an interrupted install may have left at the
-    incoming and discard names. The test before it keeps it from deleting
-    the one bundle there is when nothing is installed: a whole one at the
-    incoming name.
-  - **The copy** – puts the kept bundle beside the installed one; a copy that
-    fails stops the command before the installed bundle moves.
-  - **The two `mv`s** – swap it in back to back, so the installed path is
-    empty only between them. With nothing installed, only the second runs.
+  - **The `rm`** – clears what an interrupted install, or an interrupted run
+    of this command, may have left at the incoming and discard names. The
+    test before it keeps it from deleting the one bundle there is when
+    nothing is installed: a whole one at the incoming name.
+  - **The copy** – copies the kept bundle to the discard name, which nothing
+    takes for a bundle, and renames it to the incoming name only once the
+    copy is complete, so a copy cut short never sits under a name the test
+    above trusts; the next run of the command, or the next install, clears
+    it. A copy that fails stops the command before the installed bundle
+    moves.
+  - **The next two `mv`s** – swap it in back to back, so the installed path
+    is empty only between them. With nothing installed, only the second
+    runs.
   - **The last step** – removes the bundle it replaced by way of the discard
     name.
 
@@ -499,11 +515,13 @@ a whole bundle — `Contents/Info.plist` present and `Contents/MacOS/TBDApp`
 executable, the test the put-back makes — gets that command. For any other,
 the warning names the bundle the swap staged at
 `/Applications/.TBD-install-incoming` when that one is whole, with the
-command that renames it into place. When neither is, it points at the kept
-bundle, naming its build and saying whether this run kept it or an earlier
-update did, and says to rename the tree at the outgoing name out of the way
-to `/Applications/.TBD-install-discard` first, since the way back under
-"Going back to the previous build" runs only once that name is free. With no
+command that renames it into place, its build, and whether the daemon runs
+that build: during an install it is the new build, which it does not yet.
+When neither is whole, it points at the kept bundle, if that one is,
+naming its build and saying whether this run kept it or an earlier update
+did, and says to rename the tree at the outgoing name out of the way to
+`/Applications/.TBD-install-discard` first, since the way back under "Going
+back to the previous build" runs only once that name is free. With no whole
 bundle kept either, it points at `scripts/restart.sh` from a TBD checkout. A
 rollback whose swap leaves nothing installed gets the same second try and
 the same warning.

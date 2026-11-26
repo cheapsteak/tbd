@@ -1047,15 +1047,16 @@ roll_back_bundle() {
 # BUNDLE_RESTORE_FAILED and warns not to quit TBD until a bundle is back,
 # naming the quickest whole bundle to put there (app_bundle_looks_whole, the
 # test the put-back makes): the one that was installed, renamed back; else
-# the one the swap staged, renamed into place; else the kept bundle, by the
-# documented way, which runs only once the outgoing name is free, with its
-# build and whether this run kept it; else, with none kept, a build of a TBD
-# checkout.
+# the one the swap staged, renamed into place, with its build and whether
+# the daemon runs it, since during an install it is the new build; else the
+# kept bundle, by the documented way, which runs only once the outgoing name
+# is free, with its build and whether this run kept it; else, with no whole
+# one kept, a build of a TBD checkout.
 #
 #   put_back_after_failed_swap <installed_bundle>
 put_back_after_failed_swap() {
     local installed_bundle="${1-}"
-    local outgoing incoming note warning kept_by="this run"
+    local outgoing incoming note warning staged kept_by="this run"
     outgoing="$(app_bundle_sibling "$installed_bundle" outgoing)"
     incoming="$(app_bundle_sibling "$installed_bundle" incoming)"
     note="$(put_back_outgoing_app_bundle "$installed_bundle" 2>&1)" || true
@@ -1071,9 +1072,17 @@ put_back_after_failed_swap() {
     if app_bundle_looks_whole "$outgoing"; then
         log "$warning Put back the bundle that was installed with: mv \"$outgoing\" \"$installed_bundle\""
     elif app_bundle_looks_whole "$incoming"; then
-        log "$warning The bundle that was installed, at $outgoing, is not whole, but the one this run staged is: put it in place with: mv \"$incoming\" \"$installed_bundle\""
-    elif [ ! -d "$PREVIOUS_BUNDLE" ]; then
-        log "$warning Neither the bundle that was installed, at $outgoing, nor the one this run staged, at $incoming, is whole, and no bundle is kept at $PREVIOUS_BUNDLE: install one from a TBD checkout with scripts/restart.sh"
+        staged="build $(describe_build "$incoming")"
+        [ -z "$INSTALLING_BUILD" ] || [ "$(bundle_build_key "$incoming")" != "$INSTALLING_BUILD" ] ||
+            staged="the new build, $(build_text "$INSTALLING_BUILD")"
+        if is_daemons_build "$incoming"; then
+            staged="$staged, which the daemon runs"
+        elif [ -n "$RUNNING_BUILD" ]; then
+            staged="$staged, not build $(build_text "$RUNNING_BUILD"), which the daemon runs"
+        fi
+        log "$warning The bundle that was installed, at $outgoing, is not whole, but the one this run staged is ($staged): put it in place with: mv \"$incoming\" \"$installed_bundle\""
+    elif ! app_bundle_looks_whole "$PREVIOUS_BUNDLE"; then
+        log "$warning Neither the bundle that was installed, at $outgoing, nor the one this run staged, at $incoming, is whole, and no whole bundle is kept at $PREVIOUS_BUNDLE: install one from a TBD checkout with scripts/restart.sh"
     else
         [ "$BUNDLE_STASHED" = true ] || kept_by="an earlier update, not this run"
         log "$warning Neither the bundle that was installed, at $outgoing, nor the one this run staged, at $incoming, is whole, so put back the bundle kept at $PREVIOUS_BUNDLE (build $(describe_build "$PREVIOUS_BUNDLE"), kept by $kept_by) instead: rename the tree at $outgoing away (mv \"$outgoing\" \"$(app_bundle_sibling "$installed_bundle" discard)\"), then follow 'Going back to the previous build' in docs/updating.md"
@@ -1377,17 +1386,19 @@ APP_STOP_BEGUN=false
 # different builds.
 INSTALL_IN_FLIGHT=false
 
-# The new bundle's build key (bundle_build_key), set by main as the
-# installation starts to move, for the report of an interruption
-# (report_interrupted_install, report_installation_facts). main installs
-# nothing from a bundle that names no build, so it is never empty once the
-# installation moves.
+# The new bundle's build key (bundle_build_key), set by main once the bundle
+# is signed, before anything outside the update clone moves, for the report
+# of an interruption (report_interrupted_install, report_installation_facts)
+# and the warning of a swap that leaves nothing installed
+# (put_back_after_failed_swap). main installs nothing from a bundle that names
+# no build, so it is never empty once the installation moves.
 INSTALLING_BUILD=""
 
 # The build key (build_key_of) of the daemon that was running when the run
-# started, from its status, or empty when none answered or it named no
-# commit. Set by main beside INSTALLING_BUILD; the rollback (roll_back_bundle)
-# and the recovery report go by it (is_daemons_build).
+# started, from the status main read then, or empty when none answered or it
+# named no commit. main sets it just before the install; the rollback
+# (roll_back_bundle), the recovery report and the warning of a swap that
+# leaves nothing installed go by it (is_daemons_build).
 RUNNING_BUILD=""
 
 # The update clone's .build/release as main finds and moves it: the link
