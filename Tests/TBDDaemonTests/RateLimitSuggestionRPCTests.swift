@@ -211,6 +211,35 @@ import TestSupport
         #expect(recorder.deltas.first?.suggestedProfileID == differentAccountProfileID)
     }
 
+    /// The pick counts a window whose reset has passed as 0%, which is why it
+    /// can suggest this account; the notification must then say the window
+    /// reset rather than quote its old, nearly full percent. The open weekly
+    /// window keeps its percent.
+    @Test func aSuggestionWhoseWindowHasResetSaysSoInsteadOfItsOldPercent() async throws {
+        let limited = try await makeProfile(name: "Limited", kind: .oauth)
+        let roomy = try await makeProfile(name: "Roomy", kind: .oauth)
+        try await makeSnapshot(for: limited, percent: 90, organizationID: "org-limited")
+        let readAt = Date()
+        try await db.oauthUsageSnapshots.upsert(profileID: roomy, snapshot: ProfileUsageSnapshot(
+            buckets: [
+                .init(kind: "session", percent: 95, resetsAt: readAt.addingTimeInterval(-60)),
+                .init(kind: "weekly_all", percent: 30, resetsAt: readAt.addingTimeInterval(86_400 * 7)),
+            ],
+            fetchedAt: readAt, lastAttemptAt: readAt, status: "ok", statusKind: .ok,
+            organizationID: "org-roomy"))
+        try await setTerminalProfile(limited)
+        try await setTerminalSessionID(UUID())
+        let limitResetsAt = readAt.addingTimeInterval(3600)
+
+        let response = await detect(resetsAt: limitResetsAt)
+        #expect(response.success)
+
+        let notifs = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(notifs.count == 1)
+        #expect(notifs.first?.message
+            == "Session limit hit on Limited — resets \(ResumeTimeFormatter.string(from: limitResetsAt)). Roomy has room (5h reset · week 30%)")
+    }
+
     @Test func deltaCarriesResetsAtAndLimitType() async throws {
         _ = try await seedLimitedAndEligible()
         let recorder = LimitHitRecorder(router: router)

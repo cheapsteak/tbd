@@ -102,6 +102,10 @@ extension RPCRouter {
     /// with the limited profile's account excluded. An ambient terminal has
     /// no profile, so nothing is excluded. A suggestion only — it places
     /// nothing, so it takes no spawn reservation.
+    ///
+    /// The usage text is quoted at the pick's own time
+    /// (`ProfileUsageSummary`), so a window the pick counted as reset says
+    /// "reset" rather than its old percent.
     private func limitSuggestion(
         for terminal: Terminal, defaultProfileID: UUID?, policy: ProfilePoolPolicy
     ) async -> (profileID: UUID, profileName: String?, usageSummary: String?)? {
@@ -113,34 +117,23 @@ extension RPCRouter {
                 excluded.insert(key)
             }
             let candidates = try await source.candidates(defaultProfileID: defaultProfileID)
+            let pickTime = Date()
             // `chosen` only: the fallback is a spawn's last resort, never an
             // account to recommend as having room.
             let decision = ProfilePoolPicker.pick(
-                candidates: candidates, excludingAccountKeys: excluded, now: Date(),
+                candidates: candidates, excludingAccountKeys: excluded, now: pickTime,
                 policy: policy)
             guard let chosen = decision.chosen else { return nil }
             // The winning candidate carries the very snapshot the picker
             // judged; re-reading the store here could race a poller write.
             let usage = candidates.first(where: { $0.profileID == chosen })?.snapshot
-                .flatMap { formatUsageForNotification(snapshot: $0) }
+                .flatMap { ProfileUsageSummary.text(of: $0, now: pickTime) }
             let name = (try? await db.modelProfiles.get(id: chosen))?.name
             return (chosen, name, usage)
         } catch {
             logger.debug("handleRateLimitDetected: picker failed: \(String(describing: error), privacy: .public)")
             return nil
         }
-    }
-
-    /// Format a ProfileUsageSnapshot's 5h and weekly percents for notification.
-    private func formatUsageForNotification(snapshot: ProfileUsageSnapshot) -> String? {
-        var parts: [String] = []
-        if let sessionBucket = snapshot.buckets.first(where: { $0.kind == "session" }) {
-            parts.append("5h \(Int(sessionBucket.percent))%")
-        }
-        if let weeklyBucket = snapshot.buckets.first(where: { $0.kind == "weekly_all" }) {
-            parts.append("week \(Int(weeklyBucket.percent))%")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// A transient API error killed a turn (spec 2026-07-08). Gate OFF → not

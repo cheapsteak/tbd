@@ -181,6 +181,34 @@ struct BalancingFallbackAlertsTests {
         #expect(await f.recorder.posts.count == 2)
     }
 
+    /// The message quotes the reading at the resolver's pick time, the same
+    /// instant the pick judged it at. Spare's weekly window resets exactly
+    /// then, years after the wall clock, so only the pick's `now` reads it as
+    /// reset; its 5-hour window is still open and over the ceiling, so the
+    /// pick falls back to it.
+    @Test func aFallbackQuotesAnEndedWindowAsResetAtThePickTime() async throws {
+        let f = try await makeFixture()
+        let pickTime = Date(timeIntervalSince1970: 2_000_000_000)
+        f.dates.now = pickTime
+        try await setReading(f, f.defaultID, percent: 99)
+        try await f.db.oauthUsageSnapshots.upsert(
+            profileID: f.spareID,
+            snapshot: ProfileUsageSnapshot(
+                buckets: [
+                    ClaudeUsageLimitBucket(kind: "session", group: "session", percent: 88,
+                                           resetsAt: pickTime.addingTimeInterval(3_600)),
+                    ClaudeUsageLimitBucket(kind: "weekly_all", group: "weekly", percent: 97,
+                                           resetsAt: pickTime),
+                ],
+                fetchedAt: pickTime, lastAttemptAt: pickTime, status: "ok", statusKind: .ok))
+
+        let resolved = try await spawn(f)
+
+        #expect(resolved?.profileID == f.spareID)
+        #expect(await f.recorder.messages
+            == ["No account is under the 85% balancing limit with a fresh reading — this session started on Spare, the least used (5h 88% · week reset)"])
+    }
+
     @Test func aNilWorktreeNotifiesNobodyAndLatchesNothing() async throws {
         let f = try await makeFixture()
 
@@ -216,5 +244,48 @@ struct BalancingFallbackAlertsTests {
         #expect(BalancingFallbackAlerts.message(
             profileName: "P", reason: .full, snapshot: full, policy: policy, now: now)
             == "Every account is at its usage limit — this session started on P (5h 100%) and may stop on its first turn")
+    }
+
+    /// A window whose reset is at or before `now` says it reset instead of
+    /// quoting its old percent; an open window keeps its percent.
+    @Test func messagesSayAnEndedWindowResetAndKeepAnOpenWindowsPercent() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let policy = ProfilePoolPolicy(usageCeilingPercent: 80)
+
+        let open = ProfileUsageSnapshot(
+            buckets: [
+                ClaudeUsageLimitBucket(kind: "session", group: "session", percent: 100,
+                                       resetsAt: now.addingTimeInterval(3_600)),
+                ClaudeUsageLimitBucket(kind: "weekly_all", group: "weekly", percent: 64,
+                                       resetsAt: now.addingTimeInterval(86_400)),
+            ],
+            fetchedAt: now, lastAttemptAt: now, status: "ok", statusKind: .ok)
+        #expect(BalancingFallbackAlerts.message(
+            profileName: "P", reason: .full, snapshot: open, policy: policy, now: now)
+            == "Every account is at its usage limit — this session started on P (5h 100% · week 64%) and may stop on its first turn")
+
+        let sessionEndedAtNow = ProfileUsageSnapshot(
+            buckets: [
+                ClaudeUsageLimitBucket(kind: "session", group: "session", percent: 95, resetsAt: now),
+                ClaudeUsageLimitBucket(kind: "weekly_all", group: "weekly", percent: 88,
+                                       resetsAt: now.addingTimeInterval(86_400)),
+            ],
+            fetchedAt: now, lastAttemptAt: now, status: "ok", statusKind: .ok)
+        #expect(BalancingFallbackAlerts.message(
+            profileName: "P", reason: .aboveCeiling, snapshot: sessionEndedAtNow, policy: policy, now: now)
+            == "No account is under the 80% balancing limit with a fresh reading — this session started on P, the least used (5h reset · week 88%)")
+
+        let weeklyEndedBeforeNow = ProfileUsageSnapshot(
+            buckets: [
+                ClaudeUsageLimitBucket(kind: "session", group: "session", percent: 20,
+                                       resetsAt: now.addingTimeInterval(3_600)),
+                ClaudeUsageLimitBucket(kind: "weekly_all", group: "weekly", percent: 97,
+                                       resetsAt: now.addingTimeInterval(-60)),
+            ],
+            fetchedAt: now.addingTimeInterval(-(42 * 60)), lastAttemptAt: now,
+            status: "ok", statusKind: .ok)
+        #expect(BalancingFallbackAlerts.message(
+            profileName: "P", reason: .staleReading, snapshot: weeklyEndedBeforeNow, policy: policy, now: now)
+            == "No account has a fresh usage reading under the 80% balancing limit — this session started on P by its last reading (5h 20% · week reset, 42 min old)")
     }
 }

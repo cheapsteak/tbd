@@ -345,11 +345,15 @@ A fallback is never silent. The resolver logs every one at `.warning`, and the
 daemon posts one `.attentionNeeded` notification on the spawning worktree
 naming why, where, and the reading — "No account is under the 85% balancing
 limit with a fresh reading — this session started on Spare, the least used (5h
-88%)". An in-memory latch keyed by profile holds that to once per account per
-episode: a burst that all falls back to one account tells the person once, a
-fallback to a different account tells them again, and the latch clears whole
-when a balanced pick next finds an eligible account. Like the stale-account
-latch it lives only in memory, and a restart costs at most one repeat.
+88%)". The reading is quoted at the pick's own `now`, so a window the pick
+counted as 0% because its reset has passed reads "reset" in place of its old
+percent, as in "(5h reset · week 88%)"; the limit suggestion (§7) quotes its
+reading the same way. An in-memory latch keyed by profile holds that to once
+per account per episode: a burst that all falls back to one account tells the
+person once, a fallback to a different account tells them again, and the latch
+clears whole when a balanced pick next finds an eligible account. Like the
+stale-account latch it lives only in memory, and a restart costs at most one
+repeat.
 
 ## 7. The switch offer on a hard limit
 

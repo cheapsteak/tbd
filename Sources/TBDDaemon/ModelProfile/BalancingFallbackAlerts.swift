@@ -85,7 +85,9 @@ public actor BalancingFallbackAlerts {
     }
 
     /// The notification text: why nothing was eligible, where the session
-    /// went, and the reading that put it there.
+    /// went, and the reading that put it there, quoted at `now`
+    /// (`ProfileUsageSummary`), so a window the pick counted as reset says
+    /// "reset" rather than its old percent.
     public static func message(
         profileName: String,
         reason: ProfilePoolFallback.Reason,
@@ -93,7 +95,7 @@ public actor BalancingFallbackAlerts {
         policy: ProfilePoolPolicy,
         now: Date
     ) -> String {
-        let usage = snapshot.flatMap(usageSummary(of:))
+        let usage = snapshot.flatMap { ProfileUsageSummary.text(of: $0, now: now) }
         switch reason {
         case .aboveCeiling:
             let reading = usage.map { " (\($0))" } ?? ""
@@ -109,18 +111,5 @@ public actor BalancingFallbackAlerts {
             let reading = usage.map { " (\($0))" } ?? ""
             return "Every account is at its usage limit — this session started on \(profileName)\(reading) and may stop on its first turn"
         }
-    }
-
-    /// "5h 61% · week 38%" from the session and weekly-all buckets, or nil
-    /// when the snapshot carries neither.
-    static func usageSummary(of snapshot: ProfileUsageSnapshot) -> String? {
-        var parts: [String] = []
-        if let session = snapshot.buckets.first(where: { $0.kind == "session" }) {
-            parts.append("5h \(Int(session.percent))%")
-        }
-        if let weekly = snapshot.buckets.first(where: { $0.kind == "weekly_all" }) {
-            parts.append("week \(Int(weekly.percent))%")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
