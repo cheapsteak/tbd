@@ -1426,7 +1426,20 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
     /// snapshot whose last fetch succeeded
     /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`). Account balancing does
     /// not apply this rule: it ranks an account by its last recorded percent.
+    /// The rule itself is `UsageLimitWindow.hasEnded(resetsAt:at:)`, which
+    /// Codex's windows follow too.
     public func windowHasEnded(at now: Date) -> Bool {
+        UsageLimitWindow.hasEnded(resetsAt: resetsAt, at: now)
+    }
+}
+
+/// When a usage limit's window has ended, for every provider's window type
+/// (`ClaudeUsageLimitBucket`, `CodexRateLimitWindow`).
+public enum UsageLimitWindow {
+    /// Whether a window that resets at `resetsAt` has ended at `now`: the
+    /// reset is at or before `now`. A window with no reset instant never
+    /// counts as ended.
+    public static func hasEnded(resetsAt: Date?, at now: Date) -> Bool {
         guard let resetsAt else { return false }
         return resetsAt <= now
     }

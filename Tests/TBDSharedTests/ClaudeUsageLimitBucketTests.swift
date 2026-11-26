@@ -70,3 +70,42 @@ struct ProfileUsageSnapshotCountsAsResetTests {
         #expect(ok.countsAsReset(bucket, at: resetAt.addingTimeInterval(8 * 86_400)) == false)
     }
 }
+
+/// Codex's windows follow the same rule, through the same function, from the
+/// Unix-seconds reset time Codex reports.
+@Suite("CodexRateLimitWindow.windowHasEnded")
+struct CodexRateLimitWindowEndedTests {
+    private let resetAt = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func window(resetsAt: Int?) -> CodexRateLimitWindow {
+        CodexRateLimitWindow(usedPercent: 87, windowDurationMins: 300, resetsAt: resetsAt)
+    }
+
+    @Test func resetDateReadsTheUnixSeconds() {
+        #expect(window(resetsAt: 1_800_000_000).resetDate == resetAt)
+        #expect(window(resetsAt: nil).resetDate == nil)
+    }
+
+    @Test func endsAtTheResetAndNotBefore() {
+        let codex = window(resetsAt: 1_800_000_000)
+        #expect(codex.windowHasEnded(at: resetAt.addingTimeInterval(-1)) == false)
+        #expect(codex.windowHasEnded(at: resetAt))
+        #expect(codex.windowHasEnded(at: resetAt.addingTimeInterval(8 * 86_400)))
+    }
+
+    @Test func noResetTimeNeverEnds() {
+        #expect(window(resetsAt: nil).windowHasEnded(at: resetAt.addingTimeInterval(8 * 86_400)) == false)
+    }
+
+    @Test func sharedRuleMatchesBothWindowTypes() {
+        for offset: TimeInterval in [-1, 0, 60] {
+            let now = resetAt.addingTimeInterval(offset)
+            let expected = UsageLimitWindow.hasEnded(resetsAt: resetAt, at: now)
+            #expect(expected == (offset >= 0))
+            #expect(window(resetsAt: 1_800_000_000).windowHasEnded(at: now) == expected)
+            let bucket = ClaudeUsageLimitBucket(kind: "session", percent: 87, resetsAt: resetAt)
+            #expect(bucket.windowHasEnded(at: now) == expected)
+        }
+        #expect(UsageLimitWindow.hasEnded(resetsAt: nil, at: resetAt) == false)
+    }
+}
