@@ -279,6 +279,29 @@ test_build_identity_describes_the_tree() {
     fi
 }
 
+# The build configuration is part of the identity when the caller names it,
+# since a release and a debug build of one tree are two builds that the
+# other fields cannot tell apart. Without one, the stamp records none.
+test_build_identity_records_the_configuration() {
+    local repo build
+    repo="$(mkrepo)"
+    build="$repo/.build/debug"
+    mkbuild "$build"
+
+    write_build_identity "$repo" "$build" debug >/dev/null 2>&1
+    assert_ok "a sidecar with a configuration is valid JSON" \
+        python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$build/TBDBuildIdentity.json"
+    assert_eq "it records the configuration it is given" \
+        "debug" "$(sidecar_field "$build/TBDBuildIdentity.json" configuration)"
+
+    write_build_identity "$repo" "$build" >/dev/null 2>&1
+    assert_ok "a sidecar without one is valid JSON" \
+        python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$build/TBDBuildIdentity.json"
+    assert_eq "and records none when given none" "None" \
+        "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("configuration"))' \
+            "$build/TBDBuildIdentity.json")"
+}
+
 test_build_identity_marks_a_dirty_tree() {
     local repo build
     repo="$(mkrepo)"
@@ -2788,6 +2811,7 @@ test_is_default_tbd_home_follows_the_directory() {
 }
 
 test_build_identity_describes_the_tree
+test_build_identity_records_the_configuration
 test_build_identity_marks_a_dirty_tree
 test_build_identity_ignores_dirt_outside_the_build
 test_build_identity_records_a_detached_head
