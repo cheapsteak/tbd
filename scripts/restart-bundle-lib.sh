@@ -120,9 +120,11 @@ read_schema_epoch() {
 }
 
 # Write TBDBuildIdentity.json into a build directory, describing the tree
-# <repo_root> is at when this is called.
+# <repo_root> is at when this is called, and, when given, the build
+# configuration (release or debug) as `configuration`: two configurations of
+# one tree are two builds, and nothing else in the identity tells them apart.
 #
-#   write_build_identity <repo_root> <build_dir>
+#   write_build_identity <repo_root> <build_dir> [<configuration>]
 #
 # scripts/restart.sh calls this BEFORE the compiler runs, so a binary and the
 # sidecar beside it always name the same commit. A failed build leaves the
@@ -152,6 +154,7 @@ read_schema_epoch() {
 write_build_identity() {
     local repo_root="${1-}"
     local build_dir="${2-}"
+    local configuration="${3-}" configuration_line=""
     local commit short_commit branch dirty_output dirty built_at sidecar schema_epoch
 
     if [ -z "$repo_root" ] || [ -z "$build_dir" ]; then
@@ -185,6 +188,8 @@ write_build_identity() {
     fi
 
     built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    [ -z "$configuration" ] ||
+        configuration_line="  \"configuration\": \"$(json_escape_string "$configuration")\","
 
     sidecar="$build_dir/TBDBuildIdentity.json"
     cat > "$sidecar" << EOF
@@ -195,6 +200,7 @@ write_build_identity() {
   "builtAt": "$(json_escape_string "$built_at")",
   "sourceWorktree": "$(json_escape_string "$repo_root")",
   "dirty": $dirty,
+$configuration_line
   "schemaEpoch": $schema_epoch
 }
 EOF

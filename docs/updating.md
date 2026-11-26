@@ -62,7 +62,8 @@ these steps in order.
 - **Stamps the build identity**, once the build above actually succeeded.
   `TBDBuildIdentity.json` lands in the build directory recording the commit,
   the branch, the build time, the clone's path, whether the tree was dirty,
-  and the tree's schema epoch. Every binary reads the sidecar beside it, which
+  the build configuration (release or debug), and the tree's schema epoch.
+  Every binary reads the sidecar beside it, which
   is how `tbd version` knows what is running, and a later daemon reads the
   epoch from the kept bundle before it drops a retired column. Stamping only
   after success matters because `~/tbd/updates/src` is one long-lived clone
@@ -282,10 +283,12 @@ A release install does this:
   this is the same as after a local build. The build identity records
   `provenance: release` and the CI run it came from.
 - **Keeps two trees**: the one now running and the one it replaced, which is
-  what `~/tbd/updates/previous/TBD.app` pairs with. A run that found its own
-  build already installed kept no bundle, so the second tree it keeps is one
-  of the same build as the bundle at `~/tbd/updates/previous/TBD.app`, if
-  one is still there, and otherwise the same second tree as before. Every
+  what `~/tbd/updates/previous/TBD.app` pairs with. A run whose keep kept no
+  bundle — it found its own build already installed, nothing installed, or
+  put back a bundle an interrupted install had left beside the installed
+  path and found it its own build — keeps as its second tree one of the same
+  build as the bundle at `~/tbd/updates/previous/TBD.app`, if one is still
+  there, and otherwise the same second tree as before. Every
   run reconciles `~/tbd/updates/prebuilt/` at its start and on every exit, so
   a dry run or a failed run keeps nothing it downloaded and older trees are
   deleted.
@@ -380,12 +383,14 @@ the order you would reach for them.
   `~/tbd/updates/previous/TBD.app` and leaves it there. An update that finds
   nothing installed keeps nothing, and leaves a bundle an earlier update kept
   where it is. So does one that finds installed the very build it is
-  installing — the same commit, update clone and dirty flag in the bundle's
-  `Contents/TBDBuildIdentity.json` — as a run cut short after its swap leaves
-  it, or a re-run over a completed update: a copy of that build is no way
-  back, and would replace the kept bundle, which may be. Any other bundle is
-  kept, even one of the same commit built from another worktree or from a
-  dirty tree. Put it back the way an install does, so that
+  installing — the same commit, update clone, dirty flag and build
+  configuration in the bundle's `Contents/TBDBuildIdentity.json` — as a run
+  cut short after its swap leaves it, or a re-run over a completed update: a
+  copy of that build is no way back, and would replace the kept bundle,
+  which may be. Any other bundle is kept, even one of the same commit built
+  from another worktree, from a dirty tree, or in the other configuration (a
+  `--debug` run over a release build), and so is one whose identity records
+  no configuration. Put it back the way an install does, so that
   `/Applications/TBD.app` is never missing if the app quits meanwhile (see
   "Stops the app" above).
 
@@ -450,7 +455,8 @@ daemon reported when the run began, which is still the daemon running
 unless the handover failed after the old daemon had exited. A bundle is that
 build when its `Contents/TBDBuildIdentity.json` names the same commit,
 source worktree and dirty flag as the daemon's, or the same commit when the
-daemon reported only that. When the installed bundle already is that build —
+daemon reported only that. The daemon reports no build configuration, so the
+rollback does not compare one. When the installed bundle already is that build —
 a re-run over the build the daemon runs — there is nothing to put back. When
 the kept bundle is, the run waits until
 three seconds have passed since the app it stopped exited, so that nothing
@@ -512,6 +518,17 @@ complete, and the report and recovery steps below. A kept bundle that an
 earlier update kept, and that is not the daemon's build, stays where it is,
 and the new build stays in `/Applications`, as on the first update, so that
 it is there to open once it and the daemon are the same build.
+
+The two halves can each work and still disagree. An earlier run interrupted
+after its swap leaves the new build installed and `.build/release` on its
+downloaded tree; a re-run whose handover fails then puts back the kept
+bundle of the daemon's build, and the link back on the new build's tree,
+since each half puts back what the run found. An app launched from that
+bundle would start its next daemon from that tree. So, on a run that is not
+`--debug`, when the bundle in `/Applications` was built in the update clone
+and `.build/release` names a downloaded tree of another build, the run logs
+both builds and leaves the app stopped, with the same report and recovery
+steps.
 
 A run interrupted while it installs the bundle and hands the daemon over —
 Ctrl-C, a signal, or a step that exits — does not launch the app again

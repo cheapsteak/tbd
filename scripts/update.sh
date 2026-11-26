@@ -770,12 +770,28 @@ bundle_build_key() {
     build_key_of "$(cat "${2:-${1-}/Contents/TBDBuildIdentity.json}" 2>/dev/null)"
 }
 
-# True when two bundles are the same build (bundle_build_key): same commit,
-# source worktree and dirty flag, so a restart.sh build of the same commit,
-# or a dirty one, is another build. False when either names no commit.
+# The build configuration (release or debug) a bundle's identity records.
+# Non-zero, with nothing printed, when it records none, as a stamp written
+# before the configuration was recorded does.
+#
+#   bundle_configuration <dir>
+bundle_configuration() {
+    local configuration
+    configuration="$(json_field "$(cat "${1-}/Contents/TBDBuildIdentity.json" 2>/dev/null)" configuration)" &&
+        [ -n "$configuration" ] && printf '%s\n' "$configuration"
+}
+
+# True when two bundles are the same build (bundle_build_key) in the same
+# build configuration (bundle_configuration): same commit, source worktree,
+# dirty flag and configuration, so a restart.sh build of the same commit, a
+# dirty one, or a debug build of a release one, is another build. False when
+# either names no commit or no configuration, so a bundle stamped before the
+# configuration was recorded is kept rather than taken for this run's build.
 same_build() {
-    local key
-    key="$(bundle_build_key "${1-}")" && [ "$key" = "$(bundle_build_key "${2-}")" ]
+    local key configuration
+    key="$(bundle_build_key "${1-}")" && configuration="$(bundle_configuration "${1-}")" &&
+        [ "$key" = "$(bundle_build_key "${2-}")" ] &&
+        [ "$configuration" = "$(bundle_configuration "${2-}")" ]
 }
 
 # True when <dir> holds the build the daemon reported when the run began
@@ -1407,6 +1423,29 @@ put_release_link_back() {
         log_error "could not point $RELEASE_LINK back at $PREVIOUS_RELEASE_TARGET"
         return 1
     fi
+}
+
+# After a rollback has put back both the bundle and .build/release, true
+# unless they name different builds where it matters: the installed bundle
+# was built in the update clone, so an app launched from it starts a daemon
+# from the clone's .build/release, and that link names a downloaded tree of
+# another build than the bundle's. Logs both builds when they differ. Only a
+# release run is checked, as the report reads its own configuration's
+# directory: a --debug app starts from .build/debug, which names no download.
+installed_bundle_matches_release_link() {
+    local target key
+    [ "$BUILD_CONFIG" = release ] || return 0
+    target="$(link_target "$RELEASE_LINK")" || return 0
+    case "$target" in
+        "$PREBUILT_HOME"/*) ;;
+        *) return 0 ;;
+    esac
+    [ "$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" sourceWorktree)" = "$UPDATE_SRC" ] ||
+        return 0
+    key="$(bundle_build_key "$INSTALLED_BUNDLE")" &&
+        [ "$key" = "$(bundle_build_key "$target" "$target/TBDBuildIdentity.json")" ] && return 0
+    log_error "$INSTALLED_BUNDLE holds build $(describe_build "$INSTALLED_BUNDLE"), but $RELEASE_LINK, from which an app launched from it starts a daemon, names $target, build $(describe_build "$target" "$target/TBDBuildIdentity.json")"
+    return 1
 }
 
 # How the stop before the handover ended: none, stopped, killed, survived or
@@ -2212,7 +2251,7 @@ main() {
         # then record where it came from. The install goes by that identity
         # (the keep, the rollback and the report compare builds by it), so a
         # stamp that fails installs nothing.
-        if ! write_build_identity "$UPDATE_SRC" "$RELEASE_TREE"; then
+        if ! write_build_identity "$UPDATE_SRC" "$RELEASE_TREE" "$BUILD_CONFIG"; then
             log_error "could not stamp the build identity of $RELEASE_TREE — installing nothing"
             return 1
         fi
@@ -2288,7 +2327,7 @@ main() {
         # install goes by that identity, so a stamp that fails installs
         # nothing.
         rm -f "$build_dir/TBDBuildIdentity.json"
-        if ! write_build_identity "$UPDATE_SRC" "$build_dir"; then
+        if ! write_build_identity "$UPDATE_SRC" "$build_dir" "$BUILD_CONFIG"; then
             put_release_link_back
             log_error "could not stamp the build identity of $build_dir — installing nothing"
             return 1
@@ -2360,8 +2399,7 @@ main() {
     # before the first thing moves and comes down once the run knows where it
     # stands again.
     RUNNING_BUILD="$(build_key_of "$status_json" buildIdentity || true)"
-    local handed_over=false already_installed=false kept_key tree
-    ! same_build "$INSTALLED_BUNDLE" "$bundle_dir" || already_installed=true
+    local handed_over=false kept_key tree
     INSTALL_IN_FLIGHT=true
     if install_new_bundle "$bundle_dir" "$INSTALLED_BUNDLE"; then
         stop_app_before_handover
@@ -2379,16 +2417,25 @@ main() {
         # The flag stays up until both halves are known to have worked, so an
         # exit before then still leaves the app stopped rather than launching
         # it against a bundle or a path that may name the new build.
+        #
+        # Each half puts back what the run found, and the two can still
+        # disagree: an earlier run interrupted after its swap leaves the new
+        # build installed and linked, and the rollback then puts back the
+        # kept bundle of the daemon's build while the link goes back to the
+        # new build's tree. installed_bundle_matches_release_link checks the
+        # pair before the app is launched from it.
         local link_restored=true
         put_release_link_back || link_restored=false
-        if [ "$BUNDLE_RESTORE_FAILED" = false ] && [ "$link_restored" = true ]; then
+        if [ "$BUNDLE_RESTORE_FAILED" = false ] && [ "$link_restored" = true ] &&
+            installed_bundle_matches_release_link; then
             INSTALL_IN_FLIGHT=false
             relaunch_stopped_app
         else
             # Half a rollback leaves what an interruption does: an app
             # launched now could drive, or start, a daemon from another
-            # build. install_new_bundle or roll_back_bundle, and
-            # put_release_link_back, have each logged which half failed.
+            # build. install_new_bundle or roll_back_bundle,
+            # put_release_link_back and installed_bundle_matches_release_link
+            # have each logged what failed.
             log_error "the rollback of the failed install did not complete"
             leave_app_stopped_for_recovery
         fi
@@ -2396,15 +2443,20 @@ main() {
     fi
     INSTALL_IN_FLIGHT=false
 
-    # The install completed. The tree that was live when this run started is
-    # now the rollback, paired with ~/tbd/updates/previous/TBD.app, which
-    # holds the bundle the install replaced; the exit reconcile keeps it and
-    # the new live tree and removes everything older. Not so when the build
-    # was installed already: the keep kept nothing (keep_installed_bundle),
-    # so the bundle there is an earlier update's. The record then names a
-    # prebuilt tree of that bundle's build if one is still here, and
-    # otherwise stays as it was.
-    if [ "$already_installed" = false ]; then
+    # The install completed. When the keep kept the bundle the install
+    # replaced (BUNDLE_STASHED), the tree that was live when this run started
+    # is now the rollback, paired with ~/tbd/updates/previous/TBD.app, which
+    # holds that bundle; the exit reconcile keeps it and the new live tree and
+    # removes everything older. Not so when the keep kept nothing
+    # (keep_installed_bundle): the build was installed already, nothing was,
+    # or the install first put back a bundle an interrupted install had left
+    # beside the installed path and found it this build. Whatever is at
+    # ~/tbd/updates/previous/TBD.app is then an earlier update's, so the
+    # record names a prebuilt tree of that bundle's build if one is still
+    # here, and otherwise stays as it was. It is decided by what the keep did,
+    # not by what was installed before the install began, which the put-back
+    # can change.
+    if [ "$BUNDLE_STASHED" = true ]; then
         record_prebuilt_rollback "$PREBUILT_HOME" "$PREBUILT_START_LIVE"
     elif kept_key="$(bundle_build_key "$PREVIOUS_BUNDLE")"; then
         for tree in "$PREBUILT_HOME"/*; do
