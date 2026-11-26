@@ -452,6 +452,16 @@ the order you would reach for them.
   - **The last step** – removes the bundle it replaced by way of the discard
     name.
 
+  When the update's report names the kept bundle at
+  `~/tbd/updates/previous/.TBD.app.discard` instead, a keep was cut short
+  between its two renames and that is where the only kept copy is. Use it as
+  the source: in the `/bin/cp` line, replace
+  `~/tbd/updates/previous/TBD.app` with
+  `~/tbd/updates/previous/.TBD.app.discard`, and run the command otherwise
+  as written. It copies, so the kept copy stays where it is, and the next
+  update puts it back at `~/tbd/updates/previous/TBD.app` before it keeps
+  anything.
+
   Then relaunch. The restored bundle's `Contents/SourceWorktreePath.txt`
   names the tree the previous daemon came from, so `scripts/restart.sh
   --release` run from inside that tree completes the rollback for the daemon
@@ -476,13 +486,15 @@ source worktree and dirty flag as the daemon's, and for a dirty build the
 same `builtAt`, or the same commit when the daemon reported only that. A
 dirty build is compared by its build time because the identity does not
 record a dirty tree's changes: two builds of one dirty tree can differ in
-anything. A daemon that reports a dirty build with no build time, as one
-whose identity was read from its worktree's HEAD rather than its stamp
-does, is no bundle's build. The daemon reports no build configuration, so
-the rollback does not compare one. When the installed bundle already is that build —
-a re-run over the build the daemon runs — there is nothing to put back. When
-the kept bundle is, the run waits until
-three seconds have passed since the app it stopped exited, so that nothing
+anything. A daemon that reports a dirty build with no build time is no
+bundle's build. A daemon whose identity was read from its worktree's HEAD
+rather than a stamp (`origin: worktreeHead` in `tbd daemon status --json`)
+counts as one whose build is unknown, as does one that does not answer:
+that HEAD can have moved since the daemon started. The daemon reports no
+build configuration, so the rollback does not compare one. When the
+installed bundle already is that build — a re-run over the build the daemon
+runs — there is nothing to put back. When the kept bundle is, the run waits
+until three seconds have passed since the app it stopped exited, so that nothing
 moves the bundle while macOS may still be checking it, then swaps the kept
 bundle back in the same way an install does — copied in beside the new one,
 then two renames — and tells LaunchServices about it. It logs `restored

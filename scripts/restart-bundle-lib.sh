@@ -873,11 +873,13 @@ install_app_bundle() {
 # Tell LaunchServices about a bundle that appeared or moved at <path>, as
 # install_app_bundle does after every install, an update's rollback included —
 # a bundle LaunchServices does not know about takes no tbd:// URL and shows a
-# stale icon. Non-zero when $TBD_LSREGISTER is not executable, when it or the
-# touch below fails. That changes nothing about what is installed, so
-# install_app_bundle only warns and still returns 0 (so restart.sh, which
-# calls it under `set -e`, carries on), and records it
-# (APP_BUNDLE_REGISTERED) for a caller that reports the install.
+# stale icon. Non-zero when $TBD_LSREGISTER is not executable or fails,
+# which is the registration failing. That changes nothing about what is
+# installed, so install_app_bundle only warns and still returns 0 (so
+# restart.sh, which calls it under `set -e`, carries on), and records it
+# (APP_BUNDLE_REGISTERED) for a caller that reports the install. The touch
+# below is no part of the registration: one that fails gets its own warning
+# and changes neither the status nor the install.
 register_app_bundle() {
     local installed_bundle="${1-}"
     local status=0
@@ -895,8 +897,10 @@ register_app_bundle() {
     # Bump the installed bundle's mtime so Notification Center and System
     # Settings pick up an updated AppIcon.icns instead of serving a stale
     # icon-cache entry. `lsregister -f` alone does not always invalidate those
-    # caches; `touch` does.
-    touch "$installed_bundle" || status=1
+    # caches; `touch` does. A touch that fails leaves only those caches as
+    # they were.
+    touch "$installed_bundle" 2>/dev/null ||
+        echo "warning: could not update the modification time of $installed_bundle, so Notification Center and System Settings may show an old icon for it" >&2
     return "$status"
 }
 

@@ -805,9 +805,8 @@ same_build() {
 # True when <dir> holds the build the daemon reported when the run began
 # (RUNNING_BUILD): the same commit, source worktree and dirty flag, and for
 # a dirty build the same build time, or the same commit when the daemon did
-# not report the worktree or the dirty flag. False when it reported no build,
-# or a dirty one with no build time (a build identity read from its
-# worktree's HEAD rather than its stamp carries none).
+# not report the worktree or the dirty flag. False when its build is unknown
+# (RUNNING_BUILD empty), or is a dirty one with no build time.
 #
 #   is_daemons_build <dir> [<sidecar>]
 is_daemons_build() {
@@ -1410,10 +1409,13 @@ INSTALL_IN_FLIGHT=false
 INSTALLING_BUILD=""
 
 # The build key (build_key_of) of the daemon that was running when the run
-# started, from the status main read then, or empty when none answered or it
-# named no commit. main sets it just before the install; the rollback
-# (roll_back_bundle), the recovery report and the warning of a swap that
-# leaves nothing installed go by it (is_daemons_build).
+# started, from the status main read then, or empty when none answered, it
+# named no commit, or its identity was read from its worktree's HEAD
+# (origin worktreeHead) rather than a stamp: that HEAD can have moved since
+# the daemon started, so it says nothing sure of the build. Empty is a
+# daemon whose build is unknown. main sets it just before the install; the
+# rollback (roll_back_bundle), the recovery report and the warning of a swap
+# that leaves nothing installed go by it (is_daemons_build).
 RUNNING_BUILD=""
 
 # The update clone's .build/release as main finds and moves it: the link
@@ -2425,7 +2427,9 @@ main() {
     # stopped, if it was stopped, rather than relaunching into it. It goes up
     # before the first thing moves and comes down once the run knows where it
     # stands again.
-    RUNNING_BUILD="$(build_key_of "$status_json" buildIdentity || true)"
+    RUNNING_BUILD=""
+    [ "$(json_field "$status_json" buildIdentity.origin)" = worktreeHead ] ||
+        RUNNING_BUILD="$(build_key_of "$status_json" buildIdentity || true)"
     local handed_over=false kept_key tree
     INSTALL_IN_FLIGHT=true
     if install_new_bundle "$bundle_dir" "$INSTALLED_BUNDLE"; then
