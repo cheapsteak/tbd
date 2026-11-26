@@ -162,6 +162,84 @@ struct ProfileCommandsTests {
         #expect(usageAgeMarker(fetchedAt: now.addingTimeInterval(-49 * 3600), now: now) == "(updated 2d ago)")
     }
 
+    // MARK: - Usage cells
+
+    /// 2027-01-15 08:00 UTC.
+    private static let cellNow = Date(timeIntervalSince1970: 1_800_000_000)
+    private static let utc = TimeZone(identifier: "UTC")!
+
+    private static func bucket(percent: Double = 96, resetsIn: TimeInterval?) -> ClaudeUsageLimitBucket {
+        ClaudeUsageLimitBucket(kind: "session", percent: percent,
+                               resetsAt: resetsIn.map { cellNow.addingTimeInterval($0) })
+    }
+
+    /// A reading of `bucket`, fetched three hours before `cellNow`: healthy,
+    /// or failing on a rejected token.
+    private static func reading(_ bucket: ClaudeUsageLimitBucket, failing: Bool = false) -> ProfileUsageSnapshot {
+        ProfileUsageSnapshot(
+            buckets: [bucket], fetchedAt: cellNow.addingTimeInterval(-3 * 3600),
+            lastAttemptAt: cellNow,
+            status: failing ? "fetch failed: HTTP 401" : "ok",
+            statusKind: failing ? .needsLogin : .ok)
+    }
+
+    private static func percentCell(_ bucket: ClaudeUsageLimitBucket, failing: Bool = false) -> String {
+        usagePercentCell(bucket, in: reading(bucket, failing: failing), now: cellNow)
+    }
+
+    /// In a healthy reading, a window that has ended went back to zero at its
+    /// reset, whatever it read.
+    @Test func usagePercentCell_endedWindowOfAHealthyReadingShowsZero() {
+        #expect(Self.percentCell(Self.bucket(resetsIn: -3600)) == "0%")
+        #expect(Self.percentCell(Self.bucket(resetsIn: 0)) == "0%")
+    }
+
+    /// A failing reading keeps the percent it recorded, however long ago its
+    /// window reset, as the app's picker sheet orders it.
+    @Test func usagePercentCell_endedWindowOfAFailingReadingShowsItsReading() {
+        #expect(Self.percentCell(Self.bucket(resetsIn: -3600), failing: true) == "96%")
+        #expect(Self.percentCell(Self.bucket(resetsIn: -3 * 86_400), failing: true) == "96%")
+    }
+
+    @Test func usagePercentCell_openOrUndatedWindowShowsItsReading() {
+        #expect(Self.percentCell(Self.bucket(resetsIn: 3600)) == "96%")
+        #expect(Self.percentCell(Self.bucket(resetsIn: 3600), failing: true) == "96%")
+        #expect(Self.percentCell(Self.bucket(percent: 16.6, resetsIn: nil)) == "17%")
+        #expect(usagePercentCell(nil, in: nil, now: Self.cellNow) == "—")
+    }
+
+    /// A reset at or before `now` is past: the cell says how long ago.
+    @Test func usageResetCell_endedWindowSaysHowLongAgo() {
+        func cell(_ resetsIn: TimeInterval) -> String {
+            usageResetCell(Self.bucket(resetsIn: resetsIn), now: Self.cellNow, timeZone: Self.utc)
+        }
+        #expect(cell(0) == "just now")
+        #expect(cell(-40 * 60) == "40m ago")
+        #expect(cell(-2 * 3600 - 59) == "2h ago")
+        #expect(cell(-49 * 3600) == "2d ago")
+    }
+
+    /// The two cells of a row whose window reset two hours ago: a healthy
+    /// reading reads "0%", a failing one keeps its "96%", and the RESET cell
+    /// says "2h ago" for both, because a past clock time would read as the
+    /// next reset.
+    @Test func endedWindowRow_percentFollowsHealthAndResetSaysHowLongAgo() {
+        let ended = Self.bucket(resetsIn: -2 * 3600)
+        let reset = usageResetCell(ended, now: Self.cellNow, timeZone: Self.utc)
+        #expect([Self.percentCell(ended), reset] == ["0%", "2h ago"])
+        #expect([Self.percentCell(ended, failing: true), reset] == ["96%", "2h ago"])
+    }
+
+    @Test func usageResetCell_openWindowGivesTheResetTime() {
+        func cell(_ resetsIn: TimeInterval?) -> String {
+            usageResetCell(Self.bucket(resetsIn: resetsIn), now: Self.cellNow, timeZone: Self.utc)
+        }
+        #expect(cell(3 * 3600) == "11:00")
+        #expect(cell(3 * 86_400) == "1/18 08:00")
+        #expect(cell(nil) == "—")
+        #expect(usageResetCell(nil, now: Self.cellNow, timeZone: Self.utc) == "—")
+    }
+
     // MARK: - Name resolution
 
     @Test func resolveProfile_exactName() throws {
@@ -586,5 +664,32 @@ struct ProfileCommandsTests {
         #expect(fable["source"] as? String == "session")
         #expect(fable["checkedAt"] != nil)
         #expect(profiles[1]["fable"] == nil)
+    }
+
+    /// `--json` is raw data: a window whose reset has passed keeps the
+    /// percent it read and its reset time. Only the human table shows it as
+    /// reset.
+    @Test func profileListJSON_keepsAnEndedWindowsReading() throws {
+        let resetAt = Date(timeIntervalSince1970: 1_750_000_000)
+        let bucket = ClaudeUsageLimitBucket(kind: "session", percent: 96, resetsAt: resetAt)
+        let entry = ModelProfileWithUsage(
+            profile: ModelProfile(name: "a", kind: .oauth),
+            loginIdentity: "a@acme.example",
+            usageSnapshot: ProfileUsageSnapshot(
+                buckets: [bucket],
+                fetchedAt: resetAt.addingTimeInterval(-3600),
+                lastAttemptAt: resetAt.addingTimeInterval(-3600),
+                status: "ok", statusKind: .ok))
+        let dayLater = resetAt.addingTimeInterval(86_400)
+        #expect(usagePercentCell(bucket, in: entry.usageSnapshot, now: dayLater) == "0%")
+
+        let output = try #require(profileListJSONOutput(ModelProfileListResult(profiles: [entry])))
+        let root = try #require(try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        let profiles = try #require(root["profiles"] as? [[String: Any]])
+        let snapshot = try #require(profiles[0]["usageSnapshot"] as? [String: Any])
+        let buckets = try #require(snapshot["buckets"] as? [[String: Any]])
+        #expect(buckets.count == 1)
+        #expect(buckets[0]["percent"] as? Double == 96)
+        #expect(buckets[0]["resetsAt"] as? String == "2025-06-15T15:06:40Z")
     }
 }

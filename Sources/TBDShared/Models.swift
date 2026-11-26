@@ -1422,13 +1422,53 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
     /// reset instant never counts as ended.
     ///
     /// The app's usage surfaces show such a bucket as a fresh window at 0%.
-    /// The account picker sheet's own row order counts it as 0% only in a
-    /// snapshot whose last fetch succeeded
+    /// The account picker sheet's own row order, and `tbd profile list`'s
+    /// table, count it as 0% only in a snapshot whose last fetch succeeded
     /// (`ProfileUsageSnapshot.countsAsReset(_:at:)`). Account balancing does
     /// not apply this rule: it ranks an account by its last recorded percent.
+    /// The rule itself is `UsageLimitWindow.hasEnded(resetsAt:at:)`, which
+    /// Codex's windows follow too.
     public func windowHasEnded(at now: Date) -> Bool {
+        UsageLimitWindow.hasEnded(resetsAt: resetsAt, at: now)
+    }
+}
+
+/// When a usage limit's window has ended, for every provider's window type
+/// (`ClaudeUsageLimitBucket`, `CodexRateLimitWindow`).
+public enum UsageLimitWindow {
+    /// Whether a window that resets at `resetsAt` has ended at `now`: the
+    /// reset is at or before `now`. A window with no reset instant never
+    /// counts as ended.
+    public static func hasEnded(resetsAt: Date?, at now: Date) -> Bool {
         guard let resetsAt else { return false }
         return resetsAt <= now
+    }
+}
+
+/// How long ago an instant was, in compact words: a reading's age ("updated
+/// 3m ago") and how long ago a window reset ("reset 2h ago"). Its callers are
+/// the app's `ProfileUsagePresentation.ageText` and ended-reset phrase, and
+/// the RESET cell of `tbd profile list` (`agoText`); the CLI's usage-age
+/// marker and Fable cell round on their own.
+public enum UsageAge {
+    /// The age of `date` at `now`: "just now" under a minute, otherwise whole
+    /// minutes, hours or days, rounded down: "3m", "2h", "1d". A `date` after
+    /// `now` reads "just now".
+    public static func text(since date: Date, now: Date) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "just now" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        return "\(hours / 24)d"
+    }
+
+    /// `text` as a phrase: "just now" under a minute, otherwise the age with
+    /// "ago": "5m ago", "2h ago", "1d ago".
+    public static func agoText(since date: Date, now: Date) -> String {
+        let age = text(since: date, now: now)
+        return now.timeIntervalSince(date) < 60 ? age : "\(age) ago"
     }
 }
 
@@ -1522,11 +1562,12 @@ public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
 
     /// Whether `bucket`, one of this snapshot's buckets, counts as a fresh
     /// window at 0% when the app's account picker sheet orders its rows at
-    /// `now`: its window has ended (`ClaudeUsageLimitBucket.windowHasEnded(at:)`)
-    /// and the last fetch succeeded (`isOK`). A reading whose fetch is failing
-    /// keeps its recorded percent for ordering, however long ago its windows
-    /// reset, so a broken account, such as one with a rejected token, never
-    /// sorts as the emptiest.
+    /// `now`, and in `tbd profile list`'s table: its window has ended
+    /// (`ClaudeUsageLimitBucket.windowHasEnded(at:)`) and the last fetch
+    /// succeeded (`isOK`). A reading whose fetch is failing keeps its
+    /// recorded percent, however long ago its windows reset, so a broken
+    /// account, such as one with a rejected token, never sorts or reads as
+    /// the emptiest.
     public func countsAsReset(_ bucket: ClaudeUsageLimitBucket, at now: Date) -> Bool {
         isOK && bucket.windowHasEnded(at: now)
     }

@@ -492,6 +492,9 @@ struct EndedWindowTests {
     /// A day and an hour after `resetDate`.
     private let dayAfterReset = resetDate.addingTimeInterval(25 * 3600)
 
+    /// Two and a half hours after `resetDate`, inside `endedClockTimeLimit`.
+    private let shortlyAfterReset = resetDate.addingTimeInterval(2.5 * 3600)
+
     @Test func endedAtOnlyOnceTheResetIsAtOrBeforeNow() {
         let session = bucket(kind: "session", percent: 40, resetsAt: resetDate)
         #expect(ProfileUsagePresentation.endedAt(session, now: beforeReset) == nil)
@@ -519,11 +522,11 @@ struct EndedWindowTests {
         #expect(presentation.usageText(usedLabel: false) == "86% · resets at 11:10pm")
     }
 
-    /// A weekly reading of 86% whose reset passed a day ago.
+    /// A weekly reading of 86% whose reset passed two and a half hours ago.
     @Test func endedWindowShowsAFreshEmptyWindow() {
         let weekly = bucket(kind: "weekly_all", percent: 86, severity: "warning", resetsAt: resetDate)
         let presentation = ProfileUsagePresentation.bucketPresentation(
-            weekly, now: dayAfterReset, timeZone: utc)
+            weekly, now: shortlyAfterReset, timeZone: utc)
         #expect(presentation == Presentation(
             kind: "weekly_all", percent: 0, percentText: "0%", fill: .normal,
             resetDisplay: .weekdayClock, resetInline: nil,
@@ -576,6 +579,63 @@ struct EndedWindowTests {
         }
     }
 
+    // MARK: Day threshold
+
+    /// Up to `endedClockTimeLimit` after the reset the time-of-reset style
+    /// gives the reset's clock time; past it, a clock time could name the
+    /// wrong day, so both styles say how long ago the limit reset.
+    @Test func clockFormsGiveWayToHowLongAgoPastTheLimit() {
+        let limit = ProfileUsagePresentation.endedClockTimeLimit
+        #expect(limit == 20 * 3600)
+        let justUnder = resetDate.addingTimeInterval(limit - 60)
+        let atLimit = resetDate.addingTimeInterval(limit)
+        let justOver = resetDate.addingTimeInterval(limit + 60)
+        let session = bucket(kind: "session", percent: 95, severity: "critical", resetsAt: resetDate)
+        let weekly = bucket(kind: "weekly_all", percent: 86, severity: "warning", resetsAt: resetDate)
+        func phrase(_ bucket: ClaudeUsageLimitBucket,
+                    _ style: ProfileUsagePresentation.ResetTimeStyle, at now: Date) -> String? {
+            ProfileUsagePresentation.bucketPresentation(
+                bucket, style: style, now: now, timeZone: utc).resetPhrase
+        }
+
+        #expect(phrase(session, .timeOfReset, at: justUnder) == "reset at 11:10pm")
+        #expect(phrase(weekly, .timeOfReset, at: justUnder) == "reset at Fri 11:10pm")
+        #expect(phrase(session, .timeUntilReset, at: justUnder) == "reset 19h ago")
+        #expect(phrase(weekly, .timeUntilReset, at: justUnder) == "reset 19h ago")
+
+        #expect(phrase(session, .timeOfReset, at: atLimit) == "reset at 11:10pm")
+        #expect(phrase(weekly, .timeOfReset, at: atLimit) == "reset at Fri 11:10pm")
+
+        #expect(phrase(session, .timeOfReset, at: justOver) == "reset 20h ago")
+        #expect(phrase(weekly, .timeOfReset, at: justOver) == "reset 20h ago")
+        #expect(phrase(session, .timeUntilReset, at: justOver) == "reset 20h ago")
+        #expect(phrase(weekly, .timeUntilReset, at: justOver) == "reset 20h ago")
+    }
+
+    /// A weekday clock would name the right day for six days, but the one
+    /// limit covers it too: a reset days ago says how long ago.
+    @Test func weekdayClockSaysHowLongAgoDaysLater() {
+        let weekly = bucket(kind: "weekly_all", percent: 86, severity: "warning", resetsAt: resetDate)
+        let presentation = ProfileUsagePresentation.bucketPresentation(
+            weekly, style: .timeOfReset, now: resetDate.addingTimeInterval(3 * 24 * 3600), timeZone: utc)
+        #expect(presentation.usageText() == "reset 3d ago")
+    }
+
+    /// The builder every surface takes its phrase from, in each form.
+    @Test func endedResetPhraseTakesTheDisplaysForm() {
+        func phrase(_ display: ProfileUsagePresentation.ResetDisplay, at now: Date) -> String {
+            ProfileUsagePresentation.endedResetPhrase(resetDate, display: display, now: now, timeZone: utc)
+        }
+        #expect(phrase(.clock, at: shortlyAfterReset) == "reset at 11:10pm")
+        #expect(phrase(.weekdayClock, at: shortlyAfterReset) == "reset at Fri 11:10pm")
+        #expect(phrase(.countdown, at: shortlyAfterReset) == "reset 2h ago")
+        #expect(phrase(.tooltipOnly, at: shortlyAfterReset) == "reset 2h ago")
+        #expect(phrase(.clock, at: resetDate) == "reset at 11:10pm")
+        #expect(phrase(.countdown, at: resetDate) == "reset just now")
+        #expect(phrase(.clock, at: dayAfterReset) == "reset 1d ago")
+        #expect(phrase(.weekdayClock, at: dayAfterReset) == "reset 1d ago")
+    }
+
     @Test func bucketWithoutResetKeepsItsReading() {
         let weekly = bucket(kind: "weekly_all", percent: 86, severity: "warning")
         let presentation = ProfileUsagePresentation.bucketPresentation(
@@ -599,35 +659,45 @@ struct EndedWindowTests {
         ], fetchedAt: beforeReset)
     }
 
+    /// The reset phrase after "5h" and "wk" is the one the tooltips give for
+    /// the same window: a clock time shortly after the reset, how long ago
+    /// once it is older than `endedClockTimeLimit`.
     @Test func usageSummarySaysAnEndedWindowReset() {
         let snap = mixedSnapshot()
         #expect(ProfileUsagePresentation.usageSummary(for: snap, timeZone: utc, now: beforeReset)
                 == "5h 95% ↺11:10pm · wk 76%")
         #expect(ProfileUsagePresentation.usageSummary(
-            for: snap, timeZone: utc, now: resetDate.addingTimeInterval(2.5 * 3600))
-                == "5h reset 11:10pm · wk 76%")
+            for: snap, timeZone: utc, now: shortlyAfterReset)
+                == "5h reset at 11:10pm · wk 76%")
+        // Two and a half hours after the weekly reset on Monday.
+        #expect(ProfileUsagePresentation.usageSummary(
+            for: snap, timeZone: utc, now: resetDate.addingTimeInterval((3 * 24 + 2.5) * 3600))
+                == "5h reset 3d ago · wk reset at Mon 11:10pm")
         #expect(ProfileUsagePresentation.usageSummary(
             for: snap, timeZone: utc, now: resetDate.addingTimeInterval(4 * 24 * 3600))
-                == "5h reset 11:10pm · wk reset Mon 11:10pm")
+                == "5h reset 4d ago · wk reset 1d ago")
     }
 
     /// "used" rides the first percent still shown, here the weekly one.
     @Test func usageDetailLineSaysAnEndedWindowReset() {
         let snap = mixedSnapshot()
         #expect(ProfileUsagePresentation.usageDetailLine(
-            for: snap, timeZone: utc, now: resetDate.addingTimeInterval(2.5 * 3600))
-                == "5h reset 11:10pm · week 76% used · resets in 2d 21h")
+            for: snap, timeZone: utc, now: shortlyAfterReset)
+                == "5h reset at 11:10pm · week 76% used · resets in 2d 21h")
+        #expect(ProfileUsagePresentation.usageDetailLine(
+            for: snap, timeZone: utc, now: resetDate.addingTimeInterval((3 * 24 + 2.5) * 3600))
+                == "5h reset 3d ago · week reset 2h ago")
         #expect(ProfileUsagePresentation.usageDetailLine(
             for: snap, timeZone: utc, now: resetDate.addingTimeInterval(4 * 24 * 3600))
-                == "5h reset 11:10pm · week reset 1d ago")
+                == "5h reset 4d ago · week reset 1d ago")
     }
 
     /// The age note after the usage is the same as for any old reading.
     @Test func secondaryLineKeepsTheAgeNote() {
         let line = ProfileUsagePresentation.secondaryLine(
             for: mixedSnapshot(), kind: .oauth, timeZone: utc,
-            now: resetDate.addingTimeInterval(2.5 * 3600))
-        #expect(line == "5h reset 11:10pm · week 76% used · resets in 2d 21h · updated 4h ago")
+            now: shortlyAfterReset)
+        #expect(line == "5h reset at 11:10pm · week 76% used · resets in 2d 21h · updated 4h ago")
     }
 
     // MARK: Picker order

@@ -67,12 +67,22 @@ enum UsageBarsMenuImage {
         return image
     }
 
-    /// "5-hour 40%, weekly 16%". A missing bucket is left out.
+    /// "5-hour 40%, weekly 16%". A window that has ended gives when it reset
+    /// in place of the 0% the bar draws: "5-hour 40%, weekly reset at Thu
+    /// 8am". A missing bucket is left out.
     static func accessibilityText(session: BucketPresentation?, weekly: BucketPresentation?) -> String {
         var parts: [String] = []
-        if let session { parts.append("5-hour \(session.percentText)") }
-        if let weekly { parts.append("weekly \(weekly.percentText)") }
+        if let session { parts.append("5-hour \(spokenUsage(session))") }
+        if let weekly { parts.append("weekly \(spokenUsage(weekly))") }
         return parts.joined(separator: ", ")
+    }
+
+    /// The percent while the window is open, the reset phrase once it has ended.
+    private static func spokenUsage(_ presentation: BucketPresentation) -> String {
+        if presentation.windowEnded, let resetPhrase = presentation.resetPhrase {
+            return resetPhrase
+        }
+        return presentation.percentText
     }
 
     // MARK: - Layout

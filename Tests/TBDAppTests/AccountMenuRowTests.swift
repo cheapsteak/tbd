@@ -204,8 +204,10 @@ struct AccountMenuRowTests {
     }
 
     /// A weekly reading of 86% whose reset passed a day ago says the limit
-    /// reset instead of giving the old percent; the open 5-hour window keeps
-    /// its percent and reset time, and the age note still follows the bars.
+    /// reset instead of giving the old percent, as "1d ago" in both styles,
+    /// because a day-old reset is past `endedClockTimeLimit`; the open 5-hour
+    /// window keeps its percent and reset time, and the age note still
+    /// follows the bars.
     @Test func toolTipSaysAnEndedWindowReset() throws {
         let session = ClaudeUsageLimitBucket(kind: "session", percent: 40, severity: "normal",
                                              resetsAt: Fix.now.addingTimeInterval(2 * 3600))
@@ -216,7 +218,7 @@ struct AccountMenuRowTests {
                                          weekly: Fix.presentation(weekly, style: .timeOfReset),
                                          ageNote: "1d ago")
         #expect(Row.toolTip(for: timeOfReset, identity: nil)
-                == "5-hour: 40% used · resets at 10am — Weekly: reset at Thu 8am")
+                == "5-hour: 40% used · resets at 10am — Weekly: reset 1d ago")
 
         let timeUntilReset = MenuUsage.bars(session: Fix.presentation(session, style: .timeUntilReset),
                                             weekly: Fix.presentation(weekly, style: .timeUntilReset),

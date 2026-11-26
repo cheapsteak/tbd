@@ -221,16 +221,37 @@ func usageBucket(
 }
 
 /// Render a percent cell like "96%", or an em dash when the bucket is absent.
-func usagePercentCell(_ bucket: ClaudeUsageLimitBucket?) -> String {
+/// `bucket` is one of `snapshot`'s buckets. A window that has ended by `now`
+/// in a reading whose last fetch succeeded
+/// (`ProfileUsageSnapshot.countsAsReset(_:at:)`) went back to zero at its
+/// reset, so it shows "0%" whatever it last read. A failing reading keeps
+/// the percent it recorded, as the app's account picker sheet orders it, and
+/// its row carries the "[stale*]" marker. Only the human table applies this;
+/// `--json` carries the reading as it is.
+func usagePercentCell(_ bucket: ClaudeUsageLimitBucket?,
+                      in snapshot: ProfileUsageSnapshot?,
+                      now: Date = Date()) -> String {
     guard let bucket else { return "—" }
+    if snapshot?.countsAsReset(bucket, at: now) == true { return "0%" }
     return "\(Int(bucket.percent.rounded()))%"
 }
 
-/// Render a reset timestamp in compact local time: "18:10" when it lands
-/// within the next 24 h, otherwise "7/7 18:00". Em dash when absent.
-func usageResetCell(_ date: Date?, now: Date = Date()) -> String {
-    guard let date else { return "—" }
+/// Render a bucket's reset in compact time: "18:10" when it lands within the
+/// next 24 h, otherwise "7/7 18:00", in fixed 24-hour digits whatever the
+/// machine's locale. Once the window has ended by `now` the reset is past,
+/// and the cell says how long ago (`UsageAge.agoText(since:now:)`): "just
+/// now", "40m ago", "2h ago", "1d ago". It does so for a failing reading too,
+/// beside the percent that reading recorded: a past clock time would read as
+/// the next reset. Em dash when the bucket or its reset time is absent.
+func usageResetCell(_ bucket: ClaudeUsageLimitBucket?, now: Date = Date(),
+                    timeZone: TimeZone = .current) -> String {
+    guard let bucket, let date = bucket.resetsAt else { return "—" }
+    if bucket.windowHasEnded(at: now) {
+        return UsageAge.agoText(since: date, now: now)
+    }
     let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = timeZone
     formatter.dateFormat = date.timeIntervalSince(now) < 24 * 3600 ? "HH:mm" : "M/d HH:mm"
     return formatter.string(from: date)
 }
@@ -584,6 +605,9 @@ struct ProfileList: AsyncParsableCommand {
         let width = header.reduce(0) { $0 + max($1.1, $1.0.count) + 2 }
         print(String(repeating: "-", count: max(width, 78)))
 
+        // One instant for every row, so each window counts as ended or open
+        // against the same clock.
+        let now = Date()
         var staleNotes: [String] = []
         for entry in result.profiles {
             let identity = profileIdentityCell(
@@ -600,10 +624,10 @@ struct ProfileList: AsyncParsableCommand {
                 (entry.profile.kind.rawValue, 6),
                 (identity, 26),
                 (String(entry.liveSessions ?? 0), 4),
-                (usagePercentCell(session), 4),
-                (usageResetCell(session?.resetsAt), 10),
-                (usagePercentCell(weeklyAll), 4),
-                (fableCell(entry.fable), 8),
+                (usagePercentCell(session, in: snapshot, now: now), 4),
+                (usageResetCell(session, now: now), 10),
+                (usagePercentCell(weeklyAll, in: snapshot, now: now), 4),
+                (fableCell(entry.fable, now: now), 8),
             ]
 
             var trailing: [String] = []
@@ -612,7 +636,7 @@ struct ProfileList: AsyncParsableCommand {
                 trailing.append("[stale*]")
                 staleNotes.append("  * \(entry.profile.name): \(snapshot.status)")
             }
-            if let marker = usageAgeMarker(fetchedAt: snapshot?.fetchedAt) {
+            if let marker = usageAgeMarker(fetchedAt: snapshot?.fetchedAt, now: now) {
                 trailing.append(marker)
             }
             cells.append((trailing.joined(separator: " "), 0))

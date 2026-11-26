@@ -747,24 +747,31 @@ private struct CodexUsageBarsView: View {
     let snapshot: CodexRateLimitSnapshot
 
     var body: some View {
+        // One instant for both bars and the label, so each window counts as
+        // ended or open against the same clock, and a limit whose windows
+        // have all reset is not reported over their empty bars.
+        let now = Date()
         VStack(spacing: 2) {
-            if snapshot.rateLimitReachedType != nil || snapshot.spendControlReached == true {
+            if CodexUsagePresentation.showsLimitReached(snapshot, now: now) {
                 Text("Limit reached")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let window = snapshot.primary {
-                bar(window)
+                bar(window, now: now)
             }
             if let window = snapshot.secondary {
-                bar(window)
+                bar(window, now: now)
             }
         }
     }
 
-    private func bar(_ window: CodexRateLimitWindow) -> some View {
-        HStack(spacing: 5) {
+    /// One window's bar. A window whose reset has passed draws as a fresh one
+    /// (`CodexUsagePresentation.window`): an empty bar, "0%", and when it reset.
+    private func bar(_ window: CodexRateLimitWindow, now: Date) -> some View {
+        let presentation = CodexUsagePresentation.window(window, now: now)
+        return HStack(spacing: 5) {
             Text(Self.durationLabel(window.windowDurationMins))
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
@@ -774,20 +781,21 @@ private struct CodexUsageBarsView: View {
                     RoundedRectangle(cornerRadius: 2.5)
                         .fill(Color.primary.opacity(0.08))
                     RoundedRectangle(cornerRadius: 2.5)
-                        .fill(Self.color(window.usedPercent))
-                        .frame(width: geometry.size.width * min(Double(window.usedPercent) / 100, 1))
+                        .fill(Self.color(presentation.percent))
+                        .frame(width: geometry.size.width * min(Double(presentation.percent) / 100, 1))
                 }
             }
             .frame(height: 7)
-            Text("\(window.usedPercent)%")
+            Text("\(presentation.percent)%")
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(Self.color(window.usedPercent))
+                .foregroundStyle(Self.color(presentation.percent))
                 .frame(width: 34, alignment: .trailing)
-            Text(Self.resetLabel(window.resetsAt))
+            Text(presentation.resetLabel)
                 .font(.system(size: 9, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
                 .frame(width: 74, alignment: .leading)
         }
     }
@@ -798,12 +806,6 @@ private struct CodexUsageBarsView: View {
         if minutes % (24 * 60) == 0 { return "\(minutes / (24 * 60))d:" }
         if minutes % 60 == 0 { return "\(minutes / 60)h:" }
         return "\(minutes)m:"
-    }
-
-    private static func resetLabel(_ timestamp: Int?) -> String {
-        guard let timestamp else { return "" }
-        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
-        return "at " + date.formatted(date: .omitted, time: .shortened)
     }
 
     private static func color(_ percent: Int) -> Color {

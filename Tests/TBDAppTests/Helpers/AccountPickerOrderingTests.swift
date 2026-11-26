@@ -4,6 +4,13 @@ import TBDShared
 @testable import TBDApp
 
 struct AccountPickerOrderingTests {
+    /// The instant the tests that pick no time of their own read and order
+    /// at. Their 5h windows reset an hour after it, still open: a window whose
+    /// reset has passed counts as a fresh 0% in the sheet's order, which would
+    /// hide the ordering by percent they check.
+    private static let now = Date(timeIntervalSince1970: 1_800_000_000)
+    private static let openReset = now.addingTimeInterval(3600)
+
     private func entry(id: UUID, name: String, percent: Double, now: Date) -> ModelProfileWithUsage {
         ModelProfileWithUsage(
             profile: ModelProfile(id: id, name: name, kind: .oauth),
@@ -90,7 +97,7 @@ struct AccountPickerOrderingTests {
     /// one under a 95% ceiling.
     @Test
     func balancedPickFollowsTheDaemonsUsageCeiling() {
-        let now = Date()
+        let now = Self.now
         let busyID = UUID()
         let entries = [entry(id: busyID, name: "Busy", percent: 90, now: now)]
 
@@ -114,10 +121,10 @@ struct AccountPickerOrderingTests {
                 loginIdentity: "a@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
                 buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 50, severity: nil, resetsAt: Date(), modelDisplayName: nil)
+                        ClaudeUsageLimitBucket(kind: "session", percent: 50, severity: nil, resetsAt: Self.openReset, modelDisplayName: nil)
                     ],
-                fetchedAt: Date(),
-                lastAttemptAt: Date(),
+                fetchedAt: Self.now,
+                lastAttemptAt: Self.now,
                 status: "ok",
                 statusKind: .ok,
                 organizationID: nil
@@ -128,10 +135,10 @@ struct AccountPickerOrderingTests {
                 loginIdentity: "b@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
                 buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 30, severity: nil, resetsAt: Date(), modelDisplayName: nil)
+                        ClaudeUsageLimitBucket(kind: "session", percent: 30, severity: nil, resetsAt: Self.openReset, modelDisplayName: nil)
                     ],
-                fetchedAt: Date(),
-                lastAttemptAt: Date(),
+                fetchedAt: Self.now,
+                lastAttemptAt: Self.now,
                 status: "ok",
                 statusKind: .ok,
                 organizationID: nil
@@ -144,11 +151,13 @@ struct AccountPickerOrderingTests {
             balancingOn: false,
             liveCount: { _ in 0 },
             defaultProfileID: nil,
-            now: Date()
+            now: Self.now
         )
 
-        let displayOrder = ProfileUsagePresentation.sortedForPicker(profiles)
+        let displayOrder = ProfileUsagePresentation.sortedForPicker(profiles, now: Self.now)
         #expect(result.ordered == displayOrder)
+        // Lowest 5h percent first.
+        #expect(result.ordered.map(\.profile.name) == ["Profile B", "Profile A"])
         #expect(result.balancedPickID == nil)
     }
 
@@ -163,10 +172,10 @@ struct AccountPickerOrderingTests {
                 loginIdentity: "user@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
                 buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 40, severity: nil, resetsAt: Date(), modelDisplayName: nil)
+                        ClaudeUsageLimitBucket(kind: "session", percent: 40, severity: nil, resetsAt: Self.openReset, modelDisplayName: nil)
                     ],
-                fetchedAt: Date(),
-                lastAttemptAt: Date(),
+                fetchedAt: Self.now,
+                lastAttemptAt: Self.now,
                 status: "ok",
                 statusKind: .ok,
                 organizationID: nil
@@ -182,7 +191,7 @@ struct AccountPickerOrderingTests {
             balancingOn: true,
             liveCount: { _ in 0 },
             defaultProfileID: nil,
-            now: Date()
+            now: Self.now
         )
 
         // OAuth (eligible) should be first
@@ -205,10 +214,10 @@ struct AccountPickerOrderingTests {
                 loginIdentity: "user@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
                 buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 30, severity: nil, resetsAt: Date(), modelDisplayName: nil)
+                        ClaudeUsageLimitBucket(kind: "session", percent: 30, severity: nil, resetsAt: Self.openReset, modelDisplayName: nil)
                     ],
-                fetchedAt: Date(),
-                lastAttemptAt: Date(),
+                fetchedAt: Self.now,
+                lastAttemptAt: Self.now,
                 status: "ok",
                 statusKind: .ok,
                 organizationID: nil
@@ -227,7 +236,7 @@ struct AccountPickerOrderingTests {
             balancingOn: true,
             liveCount: { _ in 0 },
             defaultProfileID: nil,
-            now: Date()
+            now: Self.now
         )
 
         // All three profiles must be present
@@ -252,7 +261,7 @@ struct AccountPickerOrderingTests {
             balancingOn: false,
             liveCount: { _ in 0 },
             defaultProfileID: nil,
-            now: Date()
+            now: Self.now
         )
 
         #expect(result.balancedPickID == nil)
@@ -274,7 +283,7 @@ struct AccountPickerOrderingTests {
             balancingOn: true,
             liveCount: { _ in 0 },
             defaultProfileID: nil,
-            now: Date()
+            now: Self.now
         )
 
         // No eligible profiles, so balancedPickID should be nil

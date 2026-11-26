@@ -184,9 +184,22 @@ struct UsageBarsMenuImageTests {
         #expect(openPercentTexts == ["86%"])
         let openTicks = openMarks.filter { $0.isTick }
         #expect(openTicks.count == 1)
+    }
 
-        let ended = Fix.weekly(86, severity: "warning", resetsIn: -3600)
-        #expect(Bars.accessibilityText(session: Fix.session(40), weekly: ended) == "5-hour 40%, weekly 0%")
+    /// VoiceOver hears when an ended window reset, not the 0% the bar draws;
+    /// an open window keeps its percent. `Fix.now` is Friday 8am UTC.
+    @Test func accessibilityTextSaysWhenAnEndedWindowReset() {
+        let endedWeekly = Fix.weekly(86, severity: "warning", resetsIn: -24 * 3600)
+        let endedSession = Fix.session(95, severity: "critical", resetsIn: -3600)
+        #expect(endedWeekly.resetPhrase == "reset 1d ago")
+        #expect(Bars.accessibilityText(session: Fix.session(40), weekly: endedWeekly)
+                == "5-hour 40%, weekly reset 1d ago")
+        #expect(Bars.accessibilityText(session: endedSession, weekly: Fix.weekly(16))
+                == "5-hour reset at 7am, weekly 16%")
+        #expect(Bars.accessibilityText(session: endedSession, weekly: nil) == "5-hour reset at 7am")
+
+        let image = Bars.image(session: endedSession, weekly: endedWeekly)
+        #expect(image.accessibilityDescription == "5-hour reset at 7am, weekly reset 1d ago")
     }
 
     @Test func accessibilityTextNamesPresentBuckets() {
@@ -199,5 +212,27 @@ struct UsageBarsMenuImageTests {
         let image = Bars.image(session: session, weekly: weekly)
         #expect(image.accessibilityDescription == "5-hour 40%, weekly 16%")
         #expect(image.isTemplate == false)
+    }
+}
+
+// MARK: - UsageBarsView row text
+
+/// The worktree picker's bars give each row one VoiceOver label, the same
+/// words as its tooltip.
+@Suite("UsageBarsView row text")
+struct UsageBarsViewRowTextTests {
+    private typealias Fix = BarsImageFixture
+
+    /// An ended window says when it reset, not the "0%" its bar draws.
+    @Test func endedWindowSaysWhenItReset() {
+        let ended = Fix.session(95, severity: "critical", resetsIn: -3600)
+        #expect(UsageBarsView.rowText(windowLabel: "5-hour window", presentation: ended)
+                == "5-hour window: reset at 7am")
+    }
+
+    /// An open window keeps its percent and when it resets.
+    @Test func openWindowGivesItsPercentAndReset() {
+        #expect(UsageBarsView.rowText(windowLabel: "Weekly window", presentation: Fix.weekly(16))
+                == "Weekly window: 16% used · resets at Tue 8am")
     }
 }

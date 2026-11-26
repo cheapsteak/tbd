@@ -73,4 +73,17 @@ public struct CodexRateLimitWindow: Codable, Sendable, Equatable {
         self.windowDurationMins = windowDurationMins
         self.resetsAt = resetsAt
     }
+
+    /// When this window resets, from `resetsAt`'s Unix seconds; nil when
+    /// Codex gives no reset time.
+    public var resetDate: Date? {
+        resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+    }
+
+    /// Whether this window has ended at `now`, by the rule every usage window
+    /// follows (`UsageLimitWindow.hasEnded(resetsAt:at:)`): its reset is at or
+    /// before `now`, so `usedPercent` describes a window that is over.
+    public func windowHasEnded(at now: Date) -> Bool {
+        UsageLimitWindow.hasEnded(resetsAt: resetDate, at: now)
+    }
 }
