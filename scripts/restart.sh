@@ -171,7 +171,7 @@ source "$REPO_ROOT/scripts/restart-build-lib.sh"
 # binary always names the tree that binary came from. A build that skips this
 # (a tree with no git HEAD) leaves no sidecar, and the loader falls back to the
 # worktree's own HEAD — see docs/updating.md.
-if ! write_build_identity "$REPO_ROOT" "$BUILD_DIR"; then
+if ! write_build_identity "$REPO_ROOT" "$BUILD_DIR" "$build_config"; then
     echo "warning: build identity not stamped — binaries will report a fallback identity" >&2
 fi
 
@@ -244,7 +244,7 @@ fi
 # The build may have created .build/<config> for the first time, in which case
 # the stamp above deferred. Stamp now, before the bundle copies the sidecar in.
 if [ ! -f "$BUILD_DIR/TBDBuildIdentity.json" ]; then
-    write_build_identity "$REPO_ROOT" "$BUILD_DIR" || true
+    write_build_identity "$REPO_ROOT" "$BUILD_DIR" "$build_config" || true
 fi
 
 BUNDLE_DIR="$(bundle_dir_for_build "$BUILD_DIR")"

@@ -723,6 +723,113 @@ build_products() {
 
 # MARK: - Keeping the previous app bundle
 
+# Put the bundle an earlier update kept back at $PREVIOUS_BUNDLE from the
+# discard sibling, where a keep cut short between its two renames leaves it:
+# it renames the earlier kept bundle to the discard sibling, then the whole
+# new copy from the partial sibling into its place. Only that state is put
+# back — nothing at $PREVIOUS_BUNDLE, the partial sibling still there, and a
+# discard tree that looks whole (app_bundle_looks_whole, the check
+# put_back_outgoing_app_bundle makes) — because a discard tree with no
+# partial beside it is one a delete was
+# working through. Called at the start of every keep, before the siblings
+# are cleared, and by the report of an interrupted run. Non-zero, with a
+# warning naming where the bundle is, when the rename back fails.
+put_back_discarded_kept_bundle() {
+    local keep_dir discard
+    keep_dir="$(dirname "$PREVIOUS_BUNDLE")"
+    discard="$keep_dir/.TBD.app.discard"
+    if [ -e "$PREVIOUS_BUNDLE" ] || [ ! -d "$keep_dir/.TBD.app.partial" ] ||
+        ! app_bundle_looks_whole "$discard"; then
+        return 0
+    fi
+    if ! mv "$discard" "$PREVIOUS_BUNDLE"; then
+        log "WARNING: the bundle an earlier update kept is at $discard, and could not be moved back to $PREVIOUS_BUNDLE"
+        return 1
+    fi
+    log "put back $PREVIOUS_BUNDLE from $discard, where an interrupted keep had left it"
+}
+
+# The fields of a build identity that tell one build from another, as
+# `<commit>|<sourceWorktree>|<dirty>`, read from <json>, or from the object at
+# <field> in it. builtAt differs between two builds of one tree, and the rest
+# follow from these. Non-zero, with nothing printed, when it names no commit.
+#
+#   build_key_of <json> [<field>]
+build_key_of() {
+    local json="${1-}" at="${2:+$2.}" commit
+    commit="$(json_field "$json" "${at}commit")" && [ -n "$commit" ] || return 1
+    printf '%s|%s|%s\n' "$commit" \
+        "$(json_field "$json" "${at}sourceWorktree")" "$(json_field "$json" "${at}dirty")"
+}
+
+# The build key (build_key_of) of a bundle's Contents/TBDBuildIdentity.json,
+# or of <sidecar>.
+#
+#   bundle_build_key <dir> [<sidecar>]
+bundle_build_key() {
+    build_key_of "$(cat "${2:-${1-}/Contents/TBDBuildIdentity.json}" 2>/dev/null)"
+}
+
+# The build configuration (release or debug) a bundle's identity records.
+# Non-zero, with nothing printed, when it records none, as a stamp written
+# before the configuration was recorded does.
+#
+#   bundle_configuration <dir>
+bundle_configuration() {
+    local configuration
+    configuration="$(json_field "$(cat "${1-}/Contents/TBDBuildIdentity.json" 2>/dev/null)" configuration)" &&
+        [ -n "$configuration" ] && printf '%s\n' "$configuration"
+}
+
+# True when two bundles are the same build (bundle_build_key) in the same
+# build configuration (bundle_configuration): same commit, source worktree,
+# dirty flag and configuration, so a restart.sh build of the same commit, a
+# dirty one, or a debug build of a release one, is another build. False when
+# either names no commit or no configuration, so a bundle stamped before the
+# configuration was recorded is kept rather than taken for this run's build.
+same_build() {
+    local key configuration
+    key="$(bundle_build_key "${1-}")" && configuration="$(bundle_configuration "${1-}")" &&
+        [ "$key" = "$(bundle_build_key "${2-}")" ] &&
+        [ "$configuration" = "$(bundle_configuration "${2-}")" ]
+}
+
+# True when <dir> holds the build the daemon reported when the run began
+# (RUNNING_BUILD): the same commit, source worktree and dirty flag, or the
+# same commit when the daemon did not report the other two. False when it
+# reported no build.
+#
+#   is_daemons_build <dir> [<sidecar>]
+is_daemons_build() {
+    local key
+    key="$(bundle_build_key "$@")" || return 1
+    case "$RUNNING_BUILD" in
+        "") return 1 ;;
+        *"||"* | *"|") [ "${key%%|*}" = "${RUNNING_BUILD%%|*}" ] ;;
+        *) [ "$key" = "$RUNNING_BUILD" ] ;;
+    esac
+}
+
+# A build key as the report prints it: the commit, then the worktree it was
+# built from and whether that was dirty, when the key says.
+build_text() {
+    local commit="${1%%|*}" rest="${1#*|}" worktree dirty=""
+    worktree="${rest%|*}"
+    [ "${rest##*|}" != true ] || dirty=", dirty"
+    printf '%s%s%s\n' "$commit" "${worktree:+ from $worktree}" "$dirty"
+}
+
+# The build at <dir> as the report prints it (build_text): `none` when
+# nothing is there, `unreadable` when its identity names no commit.
+#
+#   describe_build <dir> [<sidecar>]
+describe_build() {
+    local key
+    [ -e "${1-}" ] || { echo none; return 0; }
+    key="$(bundle_build_key "$@")" || { echo unreadable; return 0; }
+    build_text "$key"
+}
+
 # Keep a copy of the installed bundle at $UPDATE_HOME/previous/TBD.app. Two
 # jobs: it is what a failed handover puts back, and it is the fastest route to
 # the previous build afterwards — a reinstall with no rebuild (see
@@ -735,18 +842,36 @@ build_products() {
 # APFS clone and costs nothing. main runs it while the app is still running,
 # and the app is unaffected.
 #
-# With nothing installed there is nothing to keep, and a bundle an earlier
-# update kept is left where it is: it is still a route back for the operator,
-# but it is not this run's to restore (see BUNDLE_STASHED).
+# Nothing is kept, and a bundle an earlier update kept is left where it is,
+# when nothing is installed, and when the installed bundle already is the
+# build in <new_bundle> (same_build): a copy of the build being installed is
+# no way back, and kept in place of the earlier bundle it would erase what
+# may be the way back to the build the daemon runs. A run cut short after its
+# swap leaves that, and so does a re-run over a completed update. Whether a
+# failed handover then puts anything back is roll_back_bundle's to decide,
+# by which bundle matches the daemon.
+#
+#   keep_installed_bundle [<installed_bundle>] [<new_bundle>]
 keep_installed_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
-    local keep_dir partial discard
+    local new_bundle="${2-}"
+    local keep_dir partial discard moved_aside=false
     BUNDLE_STASHED=false
+    # First, whatever happens next, the earlier kept bundle a keep cut short
+    # between its two renames left at the discard sibling goes back to its
+    # name, before anything below clears that sibling. When it cannot, that
+    # sibling holds the only copy, which the clearing below would delete, so
+    # the run installs nothing.
+    if ! put_back_discarded_kept_bundle; then
+        log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE without deleting the bundle an earlier update kept — installing nothing"
+        return 1
+    fi
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
-        if [ -d "$PREVIOUS_BUNDLE" ]; then
-            log "leaving $PREVIOUS_BUNDLE, which an earlier update kept, where it is"
-        fi
+        return 0
+    fi
+    if same_build "$installed_bundle" "$new_bundle"; then
+        log "$installed_bundle is already the build this run installs — keeping no copy of it"
         return 0
     fi
     keep_dir="$(dirname "$PREVIOUS_BUNDLE")"
@@ -759,8 +884,11 @@ keep_installed_bundle() {
     # and is renamed into place only once whole, and the bundle it replaces
     # is renamed away before it is deleted, so that a run cut short anywhere
     # here leaves at $PREVIOUS_BUNDLE the earlier kept bundle, whole, or
-    # nothing. The next keep clears whatever either sibling still holds,
-    # which makes it their reclaimer.
+    # nothing. Nothing only between the two renames, with the earlier kept
+    # bundle whole at the discard sibling, which the report of the
+    # interruption or the next keep puts back first
+    # (put_back_discarded_kept_bundle). The next keep then clears whatever
+    # either sibling still holds, which makes it their reclaimer.
     partial="$keep_dir/.TBD.app.partial"
     discard="$keep_dir/.TBD.app.discard"
     rm -rf "$partial" "$discard"
@@ -772,9 +900,27 @@ keep_installed_bundle() {
         log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
         return 1
     fi
-    if { [ -e "$PREVIOUS_BUNDLE" ] && ! mv "$PREVIOUS_BUNDLE" "$discard"; } ||
-        ! mv "$partial" "$PREVIOUS_BUNDLE"; then
-        rm -rf "$partial"
+    if [ -e "$PREVIOUS_BUNDLE" ]; then
+        if ! mv "$PREVIOUS_BUNDLE" "$discard"; then
+            rm -rf "$partial"
+            log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
+            return 1
+        fi
+        moved_aside=true
+    fi
+    if ! mv "$partial" "$PREVIOUS_BUNDLE"; then
+        # The earlier kept bundle goes back to its own name. The run installs
+        # nothing, so it is still the operator's route back, and left at the
+        # discard name the next keep would delete it. The partial goes only
+        # after: until then an exit here leaves the state
+        # put_back_discarded_kept_bundle recognises, and a rename back that
+        # fails leaves it for the next keep to try again.
+        if [ "$moved_aside" = true ] && [ ! -e "$PREVIOUS_BUNDLE" ] &&
+            ! mv "$discard" "$PREVIOUS_BUNDLE"; then
+            log "WARNING: the bundle an earlier update kept is at $discard, and could not be moved back to $PREVIOUS_BUNDLE"
+        else
+            rm -rf "$partial"
+        fi
         log_error "could not keep a copy of $installed_bundle at $PREVIOUS_BUNDLE — installing nothing"
         return 1
     fi
@@ -784,18 +930,17 @@ keep_installed_bundle() {
 }
 
 # True once keep_installed_bundle has copied the installed bundle to
-# $PREVIOUS_BUNDLE in this run. Only then is the bundle there the build this
-# run replaced. Otherwise anything at $PREVIOUS_BUNDLE was kept by an earlier
-# update and may be any older build, and putting it in $INSTALLED_BUNDLE
-# would install that build in front of whichever daemon is left, and let main
-# relaunch it as a rollback that worked.
+# $PREVIOUS_BUNDLE in this run, so the bundle there is the one this run
+# replaced. roll_back_bundle puts that bundle back by it when neither bundle
+# is the daemon's build, and put_back_after_failed_swap says by it who kept
+# the bundle it points at.
 BUNDLE_STASHED=false
 
 # Put the kept bundle back in place of the new one, by the same staged swap an
 # install makes (install_app_bundle), which also tells LaunchServices, and
-# spend the kept copy. Called when the new bundle is in place but the daemon
-# behind it is not, which would otherwise leave a new app talking to an old
-# daemon. Only for a bundle this run kept; roll_back_bundle checks that first.
+# spend the kept copy. roll_back_bundle calls it when the kept bundle is the
+# one that matches the daemon still running, or is the bundle this run
+# replaced.
 #
 # It waits for the app's exit to settle before anything moves
 # (wait_for_app_exit_to_settle): a handover can fail within milliseconds of
@@ -805,16 +950,24 @@ BUNDLE_STASHED=false
 # replaces: renamed to the discard sibling first and deleted there, so a
 # delete cut short leaves nothing partial at $PREVIOUS_BUNDLE, where the
 # recovery steps send the operator. The next keep clears the discard sibling.
-# A rename that fails leaves the copy whole where it is.
+# A rename that fails leaves the copy whole where it is. A swap that leaves
+# nothing installed gets the second try and the warning an install's does
+# (put_back_after_failed_swap).
+#
+# A registration with LaunchServices that fails is no failed restore: the
+# bundle is back, and only its tbd:// routing and icon may lag. But the line
+# that reports the restore says so (APP_BUNDLE_REGISTERED).
 restore_previous_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
-    local discard
+    local discard status=0
     if [ ! -d "$PREVIOUS_BUNDLE" ]; then
-        log_error "no previous app bundle to restore — $installed_bundle is the new build"
+        log_error "no previous app bundle to restore at $PREVIOUS_BUNDLE"
         return 1
     fi
     wait_for_app_exit_to_settle
-    if ! install_app_bundle "$PREVIOUS_BUNDLE" "$installed_bundle"; then
+    install_app_bundle "$PREVIOUS_BUNDLE" "$installed_bundle" || status=$?
+    if [ "$status" -ne 0 ]; then
+        [ "$status" -ne 2 ] || put_back_after_failed_swap "$installed_bundle"
         log_error "could not put the previous app bundle back from $PREVIOUS_BUNDLE"
         return 1
     fi
@@ -824,40 +977,106 @@ restore_previous_bundle() {
     if [ ! -e "$discard" ] && mv "$PREVIOUS_BUNDLE" "$discard"; then
         rm -rf "$discard"
     fi
-    log "restored previous app bundle"
+    if [ "$APP_BUNDLE_REGISTERED" = true ]; then
+        log "restored previous app bundle"
+    else
+        log "restored previous app bundle, but LaunchServices could not register it, so tbd:// links may not reach it and its icon may be stale"
+    fi
 }
 
 # True once a failed install (install_new_bundle) or handover
-# (hand_over_to_new_daemon) has left $INSTALLED_BUNDLE holding something other
-# than the build it held when the run began: the new build, because a failed
-# handover could not put the previous bundle back or kept none of its own to
-# put back, or nothing at all. main reads it before relaunching the app it
+# (roll_back_bundle) has left at $INSTALLED_BUNDLE no bundle that matches the
+# daemon: the new build, because no bundle of the daemon's build could be put
+# back, or nothing at all. main reads it before relaunching the app it
 # stopped: launched from there, that app would drive the old daemon, or start
 # the new one if none is running, which is the mismatch the rollback exists
 # to prevent.
 BUNDLE_RESTORE_FAILED=false
 
-# The rollback of the bundle after a failed handover: restore_previous_bundle,
-# with a failure recorded in BUNDLE_RESTORE_FAILED for main.
+# The rollback of the bundle after a failed handover. It puts back the bundle
+# of the build the daemon reported when the run began (RUNNING_BUILD), which
+# is still the daemon running unless the handover failed after the
+# predecessor had exited. It reads each candidate's build identity
+# (is_daemons_build):
 #
-# It restores only a bundle this run kept (BUNDLE_STASHED). A run that found
-# nothing installed has nothing of its own to put back, and that counts as a
-# rollback that did not complete: main leaves the app stopped and logs the
-# recovery steps. Whatever this run installed stays installed, as on a first
-# update, rather than being removed. Removing it would restore the empty
-# install the run began with, but the stopped app already keeps this run from
-# launching it, and removing it takes away the bundle the recovery steps tell
-# the operator to open once it and the daemon are the same build.
+#   - the installed bundle is that build (a re-run over the build the daemon
+#     runs): nothing to put back;
+#   - the kept bundle is: restore_previous_bundle puts it back;
+#   - neither is, but this run kept the bundle (BUNDLE_STASHED): it goes
+#     back all the same, with a line saying it does not match, since it is
+#     the bundle that was installed when the run began. A daemon that
+#     reported no build, a kept bundle that names none, and a daemon whose
+#     build was read from its worktree rather than its stamp all land here;
+#   - otherwise this run kept nothing, and no bundle of the daemon's build is
+#     at hand.
+#
+# Anything short of a bundle back in front of the daemon is recorded in
+# BUNDLE_RESTORE_FAILED, and main leaves the app stopped with the recovery
+# steps. What this run installed then stays installed rather than being
+# removed: the stopped app already keeps this run from launching it, and
+# removing it takes away the bundle the recovery steps tell the operator to
+# open once it and the daemon are the same build.
 roll_back_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
-    if [ "$BUNDLE_STASHED" = true ]; then
-        restore_previous_bundle "$installed_bundle" || BUNDLE_RESTORE_FAILED=true
+    local mismatch="the daemon's build is unknown"
+    [ -z "$RUNNING_BUILD" ] ||
+        mismatch="neither $installed_bundle nor $PREVIOUS_BUNDLE is build $(build_text "$RUNNING_BUILD"), which the daemon runs"
+    if is_daemons_build "$installed_bundle"; then
+        log "$installed_bundle is already build $(build_text "$RUNNING_BUILD"), which the daemon runs — nothing to put back"
         return 0
     fi
+    if ! is_daemons_build "$PREVIOUS_BUNDLE"; then
+        if [ "$BUNDLE_STASHED" != true ]; then
+            BUNDLE_RESTORE_FAILED=true
+            log_error "no previous app bundle to restore — $mismatch, and this run kept none"
+            return 0
+        fi
+        # A kept copy gone since gets its own error from the restore.
+        [ ! -d "$PREVIOUS_BUNDLE" ] ||
+            log "$mismatch; putting back the bundle this run replaced, build $(describe_build "$PREVIOUS_BUNDLE")"
+    fi
+    restore_previous_bundle "$installed_bundle" || BUNDLE_RESTORE_FAILED=true
+}
+
+# What a swap that left nothing installed (install_app_bundle's status 2)
+# still owes, for the install and the rollback alike. Neither bundle could be
+# renamed into place, and an app still running, or just quitting, is in
+# front of the empty path: if it quits now, every session can go with it (see
+# stop_app_before_handover). Nothing later in the run puts a bundle back, so
+# the rename back gets one more try here. When that fails too, it sets
+# BUNDLE_RESTORE_FAILED and warns not to quit TBD until a bundle is back,
+# naming the quickest whole bundle to put there (app_bundle_looks_whole, the
+# test the put-back makes): the one that was installed, renamed back; else
+# the one the swap staged, renamed into place; else the kept bundle, by the
+# documented way, which runs only once the outgoing name is free, with its
+# build and whether this run kept it; else, with none kept, a build of a TBD
+# checkout.
+#
+#   put_back_after_failed_swap <installed_bundle>
+put_back_after_failed_swap() {
+    local installed_bundle="${1-}"
+    local outgoing incoming note warning kept_by="this run"
+    outgoing="$(app_bundle_sibling "$installed_bundle" outgoing)"
+    incoming="$(app_bundle_sibling "$installed_bundle" incoming)"
+    note="$(put_back_outgoing_app_bundle "$installed_bundle" 2>&1)" || true
+    if [ -d "$installed_bundle" ]; then
+        discard_app_bundle_sibling "$installed_bundle" incoming || true
+        log_error "could not install to $installed_bundle; the bundle that was installed there is back in place, renamed back from $outgoing on a second try"
+        return 0
+    fi
+    [ -z "$note" ] || log "$note"
     BUNDLE_RESTORE_FAILED=true
-    log_error "no previous app bundle to restore — this run found nothing installed at $installed_bundle, so what it installed there stays"
-    if [ -d "$PREVIOUS_BUNDLE" ]; then
-        log "not restoring $PREVIOUS_BUNDLE: an earlier update kept it, and it is not the build this run replaced"
+    log_error "could not install to $installed_bundle, and nothing is installed there now; the bundle that was is at $outgoing — put a bundle back before TBD quits"
+    warning="WARNING: nothing is installed at $installed_bundle. Do not quit TBD until a whole bundle is back there: an app that quits in front of a missing bundle can have every agent session force-quit with it."
+    if app_bundle_looks_whole "$outgoing"; then
+        log "$warning Put back the bundle that was installed with: mv \"$outgoing\" \"$installed_bundle\""
+    elif app_bundle_looks_whole "$incoming"; then
+        log "$warning The bundle that was installed, at $outgoing, is not whole, but the one this run staged is: put it in place with: mv \"$incoming\" \"$installed_bundle\""
+    elif [ ! -d "$PREVIOUS_BUNDLE" ]; then
+        log "$warning Neither the bundle that was installed, at $outgoing, nor the one this run staged, at $incoming, is whole, and no bundle is kept at $PREVIOUS_BUNDLE: install one from a TBD checkout with scripts/restart.sh"
+    else
+        [ "$BUNDLE_STASHED" = true ] || kept_by="an earlier update, not this run"
+        log "$warning Neither the bundle that was installed, at $outgoing, nor the one this run staged, at $incoming, is whole, so put back the bundle kept at $PREVIOUS_BUNDLE (build $(describe_build "$PREVIOUS_BUNDLE"), kept by $kept_by) instead: rename the tree at $outgoing away (mv \"$outgoing\" \"$(app_bundle_sibling "$installed_bundle" discard)\"), then follow 'Going back to the previous build' in docs/updating.md"
     fi
 }
 
@@ -870,8 +1089,10 @@ roll_back_bundle() {
 # still running, and it never leaves the installed path without a whole
 # bundle, so the app quits in front of one whenever it quits (see
 # stop_app_before_handover). A failure leaves the installed bundle as it was,
-# so there is nothing to roll back. Clears BUNDLE_RESTORE_FAILED, and sets it
-# in the one failure that does not leave the installed bundle as it was.
+# so there is nothing to roll back. Clears BUNDLE_RESTORE_FAILED, which the
+# one failure that does not leave the installed bundle as it was sets: a swap
+# that could put back neither the new bundle nor, after a second try, the old
+# one (put_back_after_failed_swap).
 install_new_bundle() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
@@ -889,7 +1110,7 @@ install_new_bundle() {
 
     # Keeping the previous bundle: a copy, so a failure here has moved
     # nothing.
-    keep_installed_bundle "$installed_bundle" || return 1
+    keep_installed_bundle "$installed_bundle" "$bundle_dir" || return 1
 
     # Installing: the new bundle is staged beside the installed one and
     # swapped in by two renames (install_app_bundle). The RUNNING app is
@@ -906,12 +1127,7 @@ install_new_bundle() {
     install_app_bundle "$bundle_dir" "$installed_bundle" || status=$?
     case "$status" in
         0) return 0 ;;
-        2)
-            # The new bundle could not be renamed into place, nor the old one
-            # back into it.
-            BUNDLE_RESTORE_FAILED=true
-            log_error "could not install to $installed_bundle, and nothing is installed there now; the bundle that was is at $(app_bundle_sibling "$installed_bundle" outgoing), and a copy at $PREVIOUS_BUNDLE — put one back before TBD quits"
-            ;;
+        2) put_back_after_failed_swap "$installed_bundle" ;;
         *)
             log_error "could not install to $installed_bundle — what was installed there is untouched"
             ;;
@@ -1161,9 +1377,76 @@ APP_STOP_BEGUN=false
 # different builds.
 INSTALL_IN_FLIGHT=false
 
-# The commit the run is installing, set by main as the installation starts
-# to move. report_interrupted_install compares the installed bundle with it.
-INSTALLING_COMMIT=""
+# The new bundle's build key (bundle_build_key), set by main as the
+# installation starts to move, for the report of an interruption
+# (report_interrupted_install, report_installation_facts). main installs
+# nothing from a bundle that names no build, so it is never empty once the
+# installation moves.
+INSTALLING_BUILD=""
+
+# The build key (build_key_of) of the daemon that was running when the run
+# started, from its status, or empty when none answered or it named no
+# commit. Set by main beside INSTALLING_BUILD; the rollback (roll_back_bundle)
+# and the recovery report go by it (is_daemons_build).
+RUNNING_BUILD=""
+
+# The update clone's .build/release as main finds and moves it: the link
+# itself, what it named when the run started, and whether the run pointed it
+# at a downloaded build (only a release install does). Globals rather than
+# main's locals, because the exit trap puts the link back too
+# (report_interrupted_install).
+RELEASE_LINK=""
+PREVIOUS_RELEASE_TARGET=""
+RELEASE_LINK_MOVED=false
+
+# Put .build/release back where it was when this run started. After the link
+# was pointed at the download it goes back to exactly what it named; before
+# that (and on the local-build path) only a download it was taken from needs
+# putting back, since SwiftPM's own directory is SwiftPM's.
+#
+# Non-zero, with the failure logged, when the link could not be put back. It
+# then still names the new build, and an app that finds no daemon starts one
+# from it, so the failed-handover path relaunches nothing.
+put_release_link_back() {
+    if [ "$RELEASE_LINK_MOVED" = true ]; then
+        if [ -n "$PREVIOUS_RELEASE_TARGET" ]; then
+            if ! point_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"; then
+                log_error "could not point $RELEASE_LINK back at $PREVIOUS_RELEASE_TARGET"
+                return 1
+            fi
+            log "pointed $RELEASE_LINK back at $PREVIOUS_RELEASE_TARGET"
+        elif ! rm -f "$RELEASE_LINK"; then
+            log_error "could not remove $RELEASE_LINK, which names the new build"
+            return 1
+        fi
+    elif ! restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"; then
+        log_error "could not point $RELEASE_LINK back at $PREVIOUS_RELEASE_TARGET"
+        return 1
+    fi
+}
+
+# After a rollback has put back both the bundle and .build/release, true
+# unless they name different builds where it matters: the installed bundle
+# was built in the update clone, so an app launched from it starts a daemon
+# from the clone's .build/release, and that link names a downloaded tree of
+# another build than the bundle's. Logs both builds when they differ. Only a
+# release run is checked, as the report reads its own configuration's
+# directory: a --debug app starts from .build/debug, which names no download.
+installed_bundle_matches_release_link() {
+    local target key
+    [ "$BUILD_CONFIG" = release ] || return 0
+    target="$(link_target "$RELEASE_LINK")" || return 0
+    case "$target" in
+        "$PREBUILT_HOME"/*) ;;
+        *) return 0 ;;
+    esac
+    [ "$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" sourceWorktree)" = "$UPDATE_SRC" ] ||
+        return 0
+    key="$(bundle_build_key "$INSTALLED_BUNDLE")" &&
+        [ "$key" = "$(bundle_build_key "$target" "$target/TBDBuildIdentity.json")" ] && return 0
+    log_error "$INSTALLED_BUNDLE holds build $(describe_build "$INSTALLED_BUNDLE"), but $RELEASE_LINK, from which an app launched from it starts a daemon, names $target, build $(describe_build "$target" "$target/TBDBuildIdentity.json")"
+    return 1
+}
 
 # How the stop before the handover ended: none, stopped, killed, survived or
 # unknown. The second stop in restart_app keeps its outcome to itself, so this stays
@@ -1313,16 +1596,14 @@ relaunch_stopped_app() {
     launch_installed_app
 }
 
-# Leave the app this run stopped where it is, and say how to recover. For a
-# run that ends with an installation it cannot vouch for, where the bundle at
-# $INSTALLED_BUNDLE and the daemon an app launched from it would reach, or
-# start, may be different builds: an exit while the installation is moving
-# (report_interrupted_install), and a failed install or handover whose
-# rollback did not complete (main). Each logs its own error before calling
-# this. An app this run never stopped — the install failed, or the exit came
-# before the stop — is still running, and is left that way. An exit while the
-# stop was under way (APP_STOP_BEGUN, with no relaunch pending yet) may have
-# stopped it, and the line says so.
+# Leave the app this run stopped where it is, and say where the installation
+# stands. For a run that ends with an installation it cannot vouch for: an
+# exit while the installation is moving (report_interrupted_install), and a
+# failed install or handover whose rollback did not complete (main). Each
+# logs its own error before calling this. An app this run never stopped — the
+# install failed, or the exit came before the stop — is still running, and
+# is left that way. An exit while the stop was under way (APP_STOP_BEGUN,
+# with no relaunch pending yet) may have stopped it, and the line says so.
 #
 # APP_RELAUNCH_PENDING comes down before INSTALL_IN_FLIGHT, so an exit between
 # the two still finds nothing to relaunch.
@@ -1331,74 +1612,99 @@ leave_app_stopped_for_recovery() {
     APP_RELAUNCH_PENDING=false
     INSTALL_IN_FLIGHT=false
     if [ "$was_stopped" = true ]; then
-        log "the app was stopped for the handover and is not running; it is not relaunched, because which build it would start and which daemon it would reach are unknown"
+        log "the app was stopped for the handover and is not running; this run does not relaunch it"
     elif [ "$APP_STOP_BEGUN" = true ]; then
-        log "the run ended while stopping the app for the handover, so the app may have been stopped and may not be running; it is not relaunched, because which build it would start and which daemon it would reach are unknown"
+        log "the run ended while stopping the app for the handover, so the app may have been stopped and may not be running; this run does not relaunch it"
+    fi
+    report_installation_facts
+}
+
+# Say where the installation stands, from what can be read now rather than
+# from which steps the run took, then one verdict drawn from those facts:
+#
+#   - the build being installed;
+#   - the bundle at $INSTALLED_BUNDLE and its build (describe_build);
+#   - the daemon's build: the one it reported when the run started
+#     (RUNNING_BUILD), and unknown once the handover has begun, since from
+#     then on the daemon may be the predecessor, the successor or neither;
+#   - the kept bundle and its build: at $PREVIOUS_BUNDLE, or at the discard
+#     name where a keep cut short left it and the rename back failed
+#     (put_back_discarded_kept_bundle's case);
+#   - the update clone's build directory for this run's configuration
+#     (.build/release, or .build/debug under --debug), from which an app of
+#     that configuration that finds no daemon starts one, and the build its
+#     sidecar names.
+#
+# Nothing needs recovering only when the installed bundle and that build
+# directory are both known to hold the daemon's build (is_daemons_build).
+# Otherwise the recovery steps follow, naming the kept bundle where it is.
+report_installation_facts() {
+    local daemon=unknown keep_dir kept="" dir="" target
+    [ -n "${HANDOVER_STARTED:-}" ] || [ -z "$RUNNING_BUILD" ] || daemon="$(build_text "$RUNNING_BUILD")"
+    keep_dir="$(dirname "$PREVIOUS_BUNDLE")"
+    if [ -d "$PREVIOUS_BUNDLE" ]; then
+        kept="$PREVIOUS_BUNDLE"
+    elif [ -d "$keep_dir/.TBD.app.partial" ] && app_bundle_looks_whole "$keep_dir/.TBD.app.discard"; then
+        kept="$keep_dir/.TBD.app.discard"
+    fi
+    log "new build: $(build_text "$INSTALLING_BUILD")"
+    log "installed bundle at $INSTALLED_BUNDLE: build $(describe_build "$INSTALLED_BUNDLE")"
+    log "daemon: build $daemon${HANDOVER_STARTED:+ — the handover had begun}"
+    if [ -n "$kept" ]; then
+        log "kept bundle at $kept: build $(describe_build "$kept")"
+    else
+        log "kept bundle: none"
+    fi
+    if [ -n "$RELEASE_LINK" ]; then
+        dir="$(dirname "$RELEASE_LINK")/$BUILD_CONFIG"
+        target="$(link_target "$dir" || true)"
+        log "build directory $dir${target:+, a link to $target}: build $(describe_build "$dir" "$dir/TBDBuildIdentity.json")"
+    fi
+    if [ -z "${HANDOVER_STARTED:-}" ] && is_daemons_build "$INSTALLED_BUNDLE" &&
+        { [ -z "$dir" ] || is_daemons_build "$dir" "$dir/TBDBuildIdentity.json"; }; then
+        log "the installed app and the daemon are the same build, so nothing needs recovering; if the app is not running, open $INSTALLED_BUNDLE"
+        return 0
     fi
     log "to recover: run 'tbd version' to see which build the daemon is running, then run 'tbd update' again"
-    log "or open $INSTALLED_BUNDLE yourself once it and the daemon are the same build ($INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json names the bundle's commit)"
-    log "the bundle this run replaced, if there was one, is kept at $PREVIOUS_BUNDLE — see 'Going back to the previous build' in docs/updating.md"
+    log "or open $INSTALLED_BUNDLE yourself once it and the daemon are the same build"
+    [ -z "$kept" ] || log "or put back the bundle kept at $kept: see 'Going back to the previous build' in docs/updating.md"
 }
 
 # Report a run that ended while main was moving the installation
 # (INSTALL_IN_FLIGHT), and leave the app this run stopped where it is.
 #
-# The bundle is the part the run can name. An install and a rollback both
-# swap whole bundles (install_app_bundle), so $INSTALLED_BUNDLE holds the
-# build from before the swap or the one after it. Only an exit between the
-# swap's two renames leaves it empty, and the bundle renamed away then goes
-# straight back (put_back_outgoing_app_bundle). Which build is there is read
-# from its sidecar and logged (describe_installed_bundle).
+# Rolling back from here is no safer than relaunching: once the handover has
+# begun, the daemon may be the predecessor, the successor or neither, and
+# putting the old bundle back could put the old app in front of the new
+# daemon, the mirror image of the mismatch the rollback exists to prevent.
+# So the report does what is safe whatever happened, then says where the
+# installation stands (report_installation_facts), and the operator chooses.
+# What is safe:
 #
-# The rest is a guess. The app may or may not have been stopped yet, and the
-# daemon may be the predecessor, the successor or neither. Rolling back from
-# here is no safer than relaunching: with the successor possibly serving,
-# putting the old bundle back puts the old app in front of the new daemon, the
-# mirror image of the mismatch the rollback exists to prevent. An app launched
-# into any of that reaches, or starts, whichever daemon it finds. So the run
-# says what happened and how to recover, and the operator chooses.
+#   - a bundle an install left at the outgoing name with nothing installed
+#     goes back (put_back_outgoing_app_bundle). An install and a rollback
+#     both swap whole bundles, so only an exit between the swap's two
+#     renames leaves the installed path empty;
+#   - a kept bundle a keep cut short left at the discard name goes back to
+#     $PREVIOUS_BUNDLE, where the recovery steps send the operator
+#     (put_back_discarded_kept_bundle);
+#   - .build/release goes back as after a failed install
+#     (put_release_link_back) unless, read after the put-back above, the
+#     installed bundle is the build being installed (INSTALLING_BUILD): main
+#     pointed the link at the new build before the install began, and an
+#     app's next daemon start reads it, so it stays on the new build only
+#     beside the new bundle.
 #
-# One case the run can name outright: the new build is installed, but the run
-# ended before it began stopping the app (APP_STOP_BEGUN) or began the
-# handover. TBD is then still running the previous build in front of the new
-# bundle, which is accepted rather than undone here: in a source build the
-# update clone's .build/release already holds the new binaries from the build
-# step, so a daemon respawned from it is the new build whether or not the
-# bundle was swapped. Running `tbd update` again completes the move, and the
-# report says so.
+# What else such an exit leaves beside the installed bundle or the kept one,
+# the next install clears.
 report_interrupted_install() {
-    local note installed_commit
-    log_error "the run was interrupted while installing and handing over; the installed app and the daemon may be different builds"
+    local note
+    log_error "the run was interrupted while installing"
     note="$(put_back_outgoing_app_bundle "$INSTALLED_BUNDLE" 2>&1)" || true
     [ -z "$note" ] || log "$note"
-    log "$(describe_installed_bundle)"
-    installed_commit="$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
-    if [ -z "${HANDOVER_STARTED:-}" ] && [ "$APP_STOP_BEGUN" != true ] &&
-        [ -n "$INSTALLING_COMMIT" ] && [ "$installed_commit" = "$INSTALLING_COMMIT" ]; then
-        log "nothing was handed over and the app was not stopped: TBD is still running the previous build, in front of the newly installed bundle — run 'tbd update' again, which completes the move"
-    fi
+    put_back_discarded_kept_bundle || true
+    [ "$(bundle_build_key "$INSTALLED_BUNDLE")" = "$INSTALLING_BUILD" ] || put_release_link_back || true
     leave_app_stopped_for_recovery
-}
-
-# One line saying which build $INSTALLED_BUNDLE holds, read from the
-# TBDBuildIdentity.json in its Contents/ and compared with INSTALLING_COMMIT.
-describe_installed_bundle() {
-    local commit
-    if [ ! -d "$INSTALLED_BUNDLE" ]; then
-        printf 'nothing is installed at %s\n' "$INSTALLED_BUNDLE"
-        return 0
-    fi
-    commit="$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" commit)"
-    if [ -z "$commit" ]; then
-        printf '%s holds a bundle whose build identity cannot be read\n' "$INSTALLED_BUNDLE"
-    elif [ "$commit" = "$INSTALLING_COMMIT" ]; then
-        printf '%s holds the new build, %s\n' "$INSTALLED_BUNDLE" "$commit"
-    elif [ -n "$INSTALLING_COMMIT" ]; then
-        printf '%s holds build %s, not the %s this run was installing\n' \
-            "$INSTALLED_BUNDLE" "$commit" "$INSTALLING_COMMIT"
-    else
-        printf '%s holds build %s\n' "$INSTALLED_BUNDLE" "$commit"
-    fi
 }
 
 # The app restart, with its opt-out. Separate from restart_app so both branches
@@ -1876,20 +2182,21 @@ main() {
     fetch_latest || return 1
     maybe_reexec "$@"
 
-    local new_commit build_dir update_source release_link previous_release_target=""
-    local release_link_moved=false
+    local new_commit build_dir update_source
+    PREVIOUS_RELEASE_TARGET=""
+    RELEASE_LINK_MOVED=false
     new_commit="$(git -C "$UPDATE_SRC" rev-parse HEAD 2>/dev/null || true)"
     log "latest main is ${new_commit:-unknown}"
     build_dir="$UPDATE_SRC/.build/$BUILD_CONFIG"
-    release_link="$UPDATE_SRC/.build/release"
+    RELEASE_LINK="$UPDATE_SRC/.build/release"
 
     # Reconcile the prebuilt trees before anything is downloaded, and arm the
     # same reconcile for every exit (on_update_exit). The tree live now is
     # kept on the way out even when the link no longer names it, because
     # until an install completes it is still what the daemon runs from.
-    PREBUILT_START_LIVE="$(link_target "$release_link" || true)"
-    PREBUILT_RECONCILE_LINK="$release_link"
-    reconcile_prebuilt "$PREBUILT_HOME" "$release_link"
+    PREBUILT_START_LIVE="$(link_target "$RELEASE_LINK" || true)"
+    PREBUILT_RECONCILE_LINK="$RELEASE_LINK"
+    reconcile_prebuilt "$PREBUILT_HOME" "$RELEASE_LINK"
 
     update_source="$(resolve_update_source)"
     sync_check_ref
@@ -1941,31 +2248,33 @@ main() {
     if [ "$use_release" = true ]; then
         # The download is the build. Stamp its identity from the clone, which
         # acquire_release_build left detached at the commit being installed,
-        # then record where it came from.
-        if write_build_identity "$UPDATE_SRC" "$RELEASE_TREE"; then
-            stamp_release_provenance "$RELEASE_TREE/TBDBuildIdentity.json" \
-                "$(manifest_field "$RELEASE_TREE" runUrl || true)" \
-                "$(manifest_field "$RELEASE_TREE" builtAt || true)" \
-                || log "WARNING: could not record the release provenance"
-        else
-            log "WARNING: no build identity stamped"
+        # then record where it came from. The install goes by that identity
+        # (the keep, the rollback and the report compare builds by it), so a
+        # stamp that fails installs nothing.
+        if ! write_build_identity "$UPDATE_SRC" "$RELEASE_TREE" "$BUILD_CONFIG"; then
+            log_error "could not stamp the build identity of $RELEASE_TREE — installing nothing"
+            return 1
         fi
+        stamp_release_provenance "$RELEASE_TREE/TBDBuildIdentity.json" \
+            "$(manifest_field "$RELEASE_TREE" runUrl || true)" \
+            "$(manifest_field "$RELEASE_TREE" builtAt || true)" \
+            || log "WARNING: could not record the release provenance"
         # The products the download does not carry are built here, into
         # SwiftPM's own directory, and copied into the tree. The link is
         # handed to SwiftPM for the build and put back on failure, so a
         # failed compile leaves a reboot respawning what is running now.
-        previous_release_target="$(link_target "$release_link" || true)"
-        release_link_yield_to_swiftpm "$release_link" "$PREBUILT_HOME"
+        PREVIOUS_RELEASE_TARGET="$(link_target "$RELEASE_LINK" || true)"
+        release_link_yield_to_swiftpm "$RELEASE_LINK" "$PREBUILT_HOME"
         local local_build_dir
         if ! build_products "$UPDATE_SRC" "${RELEASE_LOCAL_PRODUCTS[@]}" ||
             ! local_build_dir="$(swiftpm_build_dir "$UPDATE_SRC" "$BUILD_CONFIG")" ||
             ! merge_local_products "$local_build_dir" "$RELEASE_TREE"; then
-            restore_release_link "$release_link" "$previous_release_target"
+            restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"
             log_error "could not build ${RELEASE_LOCAL_PRODUCTS[*]} to go with the download — the running installation is untouched"
             return 1
         fi
         if [ "$OPT_DRY_RUN" = true ]; then
-            restore_release_link "$release_link" "$previous_release_target"
+            restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"
             log "dry run: downloaded and verified ${new_commit:-unknown} into $RELEASE_TREE, installing nothing"
             print_summary "$old_commit" "$new_commit" \
                 "$(commits_advanced "$old_commit" "$new_commit" || true)" 0 0 0
@@ -1975,23 +2284,23 @@ main() {
         # the handover, the app's reboot respawn and the CLI link all look
         # there already. What it pointed at before is kept above, so a failed
         # link or a failed handover can put it back.
-        if ! point_release_link "$release_link" "$RELEASE_TREE"; then
-            restore_release_link "$release_link" "$previous_release_target"
-            log_error "could not point $release_link at $RELEASE_TREE (a real directory there, or a failed rename) — the running installation is untouched"
+        if ! point_release_link "$RELEASE_LINK" "$RELEASE_TREE"; then
+            restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"
+            log_error "could not point $RELEASE_LINK at $RELEASE_TREE (a real directory there, or a failed rename) — the running installation is untouched"
             return 1
         fi
-        release_link_moved=true
-        log "pointed $release_link at $RELEASE_TREE"
+        RELEASE_LINK_MOVED=true
+        log "pointed $RELEASE_LINK at $RELEASE_TREE"
     else
         # A local build owns .build/release: hand it back to SwiftPM if a
         # download holds it. What it named is kept, and every exit short of a
         # completed install puts it back, so a failed compile or handover
         # leaves a reboot respawning the downloaded tree that is running now
         # rather than a partial or missing TBDDaemon.
-        previous_release_target="$(link_target "$release_link" || true)"
-        release_link_yield_to_swiftpm "$release_link" "$PREBUILT_HOME"
+        PREVIOUS_RELEASE_TARGET="$(link_target "$RELEASE_LINK" || true)"
+        release_link_yield_to_swiftpm "$RELEASE_LINK" "$PREBUILT_HOME"
         if ! build_products "$UPDATE_SRC"; then
-            restore_release_link "$release_link" "$previous_release_target"
+            restore_release_link "$RELEASE_LINK" "$PREVIOUS_RELEASE_TARGET"
             return 1
         fi
 
@@ -2009,37 +2318,24 @@ main() {
         # Moving the write here removes the premature half entirely — there is
         # now one write site, sequenced after success, so there is nothing to
         # roll back on failure and no separate temp file to manage.
-        write_build_identity "$UPDATE_SRC" "$build_dir" || log "WARNING: no build identity stamped"
+        #
+        # The sidecar there describes the build before this one until the
+        # stamp replaces it, and the binaries beside it are this build's now,
+        # so it goes first: a stamp that fails then leaves nothing to be read
+        # as this build's identity. Not before the build, which would strip
+        # the identity from the binaries a failed build leaves in place. The
+        # install goes by that identity, so a stamp that fails installs
+        # nothing.
+        rm -f "$build_dir/TBDBuildIdentity.json"
+        if ! write_build_identity "$UPDATE_SRC" "$build_dir" "$BUILD_CONFIG"; then
+            put_release_link_back
+            log_error "could not stamp the build identity of $build_dir — installing nothing"
+            return 1
+        fi
     fi
 
     local advanced
     advanced="$(commits_advanced "$old_commit" "$new_commit" || true)"
-
-    # Put .build/release back where it was when this run started. After the
-    # link was pointed at the download it goes back to exactly what it named;
-    # before that (and on the local-build path) only a download it was taken
-    # from needs putting back, since SwiftPM's own directory is SwiftPM's.
-    #
-    # Non-zero, with the failure logged, when the link could not be put back.
-    # It then still names the new build, and an app that finds no daemon
-    # starts one from it, so the failed-handover path relaunches nothing.
-    put_release_link_back() {
-        if [ "$release_link_moved" = true ]; then
-            if [ -n "$previous_release_target" ]; then
-                if ! point_release_link "$release_link" "$previous_release_target"; then
-                    log_error "could not point $release_link back at $previous_release_target"
-                    return 1
-                fi
-                log "pointed $release_link back at $previous_release_target"
-            elif ! rm -f "$release_link"; then
-                log_error "could not remove $release_link, which names the new build"
-                return 1
-            fi
-        elif ! restore_release_link "$release_link" "$previous_release_target"; then
-            log_error "could not point $release_link back at $previous_release_target"
-            return 1
-        fi
-    }
 
     if [ "$OPT_DRY_RUN" = true ]; then
         put_release_link_back
@@ -2061,6 +2357,13 @@ main() {
         log_error "could not sign the app bundle"
         return 1
     }
+    # The bundle carries the identity stamped above; one that names no build
+    # would leave the keep, the rollback and the report nothing to compare.
+    if ! INSTALLING_BUILD="$(bundle_build_key "$bundle_dir")"; then
+        put_release_link_back
+        log_error "the app bundle at $bundle_dir names no build — installing nothing"
+        return 1
+    fi
 
     # Up to here nothing outside the update clone has changed: walking away
     # costs a wasted build and nothing else. From here the running
@@ -2095,45 +2398,73 @@ main() {
     # stopped, if it was stopped, rather than relaunching into it. It goes up
     # before the first thing moves and comes down once the run knows where it
     # stands again.
-    INSTALLING_COMMIT="$new_commit"
+    RUNNING_BUILD="$(build_key_of "$status_json" buildIdentity || true)"
+    local handed_over=false kept_key tree
     INSTALL_IN_FLIGHT=true
-    local handed_over=false
     if install_new_bundle "$bundle_dir" "$INSTALLED_BUNDLE"; then
         stop_app_before_handover
         hand_over_to_new_daemon "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon" && handed_over=true
     fi
     if [ "$handed_over" = false ]; then
         # The install or the handover failed. A failed install has left the
-        # installed bundle as it was, and a failed handover has put the
-        # previous one back; either sets BUNDLE_RESTORE_FAILED when it could
-        # not. Put the daemon path back with it, so a reboot respawns the
+        # installed bundle as it was, and a failed handover has put in front
+        # of the daemon the bundle that matches it (roll_back_bundle); either
+        # sets BUNDLE_RESTORE_FAILED when it could not. Put the daemon path
+        # back with it, so a reboot respawns the
         # build that is still running. Then the app, in that order: an app
         # that finds no daemon starts one from that path. After a failed
         # install the app was never stopped, so there is nothing to relaunch.
         # The flag stays up until both halves are known to have worked, so an
         # exit before then still leaves the app stopped rather than launching
         # it against a bundle or a path that may name the new build.
+        #
+        # Each half puts back what the run found, and the two can still
+        # disagree: an earlier run interrupted after its swap leaves the new
+        # build installed and linked, and the rollback then puts back the
+        # kept bundle of the daemon's build while the link goes back to the
+        # new build's tree. installed_bundle_matches_release_link checks the
+        # pair before the app is launched from it.
         local link_restored=true
         put_release_link_back || link_restored=false
-        if [ "$BUNDLE_RESTORE_FAILED" = false ] && [ "$link_restored" = true ]; then
+        if [ "$BUNDLE_RESTORE_FAILED" = false ] && [ "$link_restored" = true ] &&
+            installed_bundle_matches_release_link; then
             INSTALL_IN_FLIGHT=false
             relaunch_stopped_app
         else
             # Half a rollback leaves what an interruption does: an app
             # launched now could drive, or start, a daemon from another
-            # build. install_new_bundle or restore_previous_bundle, and
-            # put_release_link_back, have each logged which half failed.
-            log_error "the rollback of the failed install did not complete; the installed app and the daemon it would reach or start may be different builds"
+            # build. install_new_bundle or roll_back_bundle,
+            # put_release_link_back and installed_bundle_matches_release_link
+            # have each logged what failed.
+            log_error "the rollback of the failed install did not complete"
             leave_app_stopped_for_recovery
         fi
         return 1
     fi
     INSTALL_IN_FLIGHT=false
 
-    # The install completed. The tree that was live when this run started is
-    # now the rollback, paired with ~/tbd/updates/previous/TBD.app; the exit
-    # reconcile keeps it and the new live tree and removes everything older.
-    record_prebuilt_rollback "$PREBUILT_HOME" "$PREBUILT_START_LIVE"
+    # The install completed. When the keep kept the bundle the install
+    # replaced (BUNDLE_STASHED), the tree that was live when this run started
+    # is now the rollback, paired with ~/tbd/updates/previous/TBD.app, which
+    # holds that bundle; the exit reconcile keeps it and the new live tree and
+    # removes everything older. Not so when the keep kept nothing
+    # (keep_installed_bundle): the build was installed already, nothing was,
+    # or the install first put back a bundle an interrupted install had left
+    # beside the installed path and found it this build. Whatever is at
+    # ~/tbd/updates/previous/TBD.app is then an earlier update's, so the
+    # record names a prebuilt tree of that bundle's build if one is still
+    # here, and otherwise stays as it was. It is decided by what the keep did,
+    # not by what was installed before the install began, which the put-back
+    # can change.
+    if [ "$BUNDLE_STASHED" = true ]; then
+        record_prebuilt_rollback "$PREBUILT_HOME" "$PREBUILT_START_LIVE"
+    elif kept_key="$(bundle_build_key "$PREVIOUS_BUNDLE")"; then
+        for tree in "$PREBUILT_HOME"/*; do
+            [ "$(bundle_build_key "$tree" "$tree/TBDBuildIdentity.json")" = "$kept_key" ] || continue
+            record_prebuilt_rollback "$PREBUILT_HOME" "$tree"
+            break
+        done
+    fi
 
     refresh_installed_cli "$build_dir/TBDCLI"
 

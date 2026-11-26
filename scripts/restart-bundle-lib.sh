@@ -120,9 +120,11 @@ read_schema_epoch() {
 }
 
 # Write TBDBuildIdentity.json into a build directory, describing the tree
-# <repo_root> is at when this is called.
+# <repo_root> is at when this is called, and, when given, the build
+# configuration (release or debug) as `configuration`: two configurations of
+# one tree are two builds, and nothing else in the identity tells them apart.
 #
-#   write_build_identity <repo_root> <build_dir>
+#   write_build_identity <repo_root> <build_dir> [<configuration>]
 #
 # scripts/restart.sh calls this BEFORE the compiler runs, so a binary and the
 # sidecar beside it always name the same commit. A failed build leaves the
@@ -152,6 +154,7 @@ read_schema_epoch() {
 write_build_identity() {
     local repo_root="${1-}"
     local build_dir="${2-}"
+    local configuration="${3-}" configuration_line=""
     local commit short_commit branch dirty_output dirty built_at sidecar schema_epoch
 
     if [ -z "$repo_root" ] || [ -z "$build_dir" ]; then
@@ -185,6 +188,8 @@ write_build_identity() {
     fi
 
     built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    [ -z "$configuration" ] ||
+        configuration_line="  \"configuration\": \"$(json_escape_string "$configuration")\","
 
     sidecar="$build_dir/TBDBuildIdentity.json"
     cat > "$sidecar" << EOF
@@ -195,6 +200,7 @@ write_build_identity() {
   "builtAt": "$(json_escape_string "$built_at")",
   "sourceWorktree": "$(json_escape_string "$repo_root")",
   "dirty": $dirty,
+$configuration_line
   "schemaEpoch": $schema_epoch
 }
 EOF
@@ -617,6 +623,17 @@ app_bundle_sibling() {
         "$(basename "$installed_bundle" .app)" "$role"
 }
 
+# True when <dir> looks like a whole app bundle: Contents/Info.plist present
+# and Contents/MacOS/TBDApp executable. A tree that a copy or a delete was cut
+# short in can lack either. The one test for every caller that decides
+# whether a tree left beside a bundle is a bundle to put back or to point the
+# operator at: put_back_outgoing_app_bundle here, and update.sh.
+#
+#   app_bundle_looks_whole <dir>
+app_bundle_looks_whole() {
+    [ -f "${1-}/Contents/Info.plist" ] && [ -x "${1-}/Contents/MacOS/TBDApp" ]
+}
+
 # Put back a bundle an install left at the outgoing sibling with nothing
 # installed in its place: an install that stopped between its two renames.
 # A moment before, that bundle was the installed one, whole, so it is the one
@@ -624,8 +641,8 @@ app_bundle_sibling() {
 #
 #   put_back_outgoing_app_bundle <installed_bundle>
 #
-# Only a tree that looks whole goes back: Contents/Info.plist present and
-# Contents/MacOS/TBDApp executable. Nothing deletes the outgoing sibling in
+# Only a tree that looks whole goes back (app_bundle_looks_whole). Nothing
+# deletes the outgoing sibling in
 # place (discard_app_bundle_sibling renames it away first), but a tree there
 # that fails the check is still no bundle to put in front of a quitting app,
 # so it is left for an install's cleanup (reclaim_app_bundle_siblings) and
@@ -643,7 +660,7 @@ put_back_outgoing_app_bundle() {
     if [ -e "$installed_bundle" ] || [ ! -d "$outgoing" ]; then
         return 0
     fi
-    if [ ! -f "$outgoing/Contents/Info.plist" ] || [ ! -x "$outgoing/Contents/MacOS/TBDApp" ]; then
+    if ! app_bundle_looks_whole "$outgoing"; then
         printf 'not putting back %s from %s: it lacks Contents/Info.plist or an executable Contents/MacOS/TBDApp, so it is left for an install to clear\n' \
             "$installed_bundle" "$outgoing"
         return 0
@@ -784,6 +801,12 @@ swap_in_staged_app_bundle() {
     return 2
 }
 
+# True once the latest install_app_bundle has installed its bundle and
+# registered it with LaunchServices; false from the moment an install starts
+# until then. update.sh reads it to say whether a bundle its rollback put
+# back is registered.
+APP_BUNDLE_REGISTERED=false
+
 # Install a signed bundle in place of the installed one and re-register it.
 #
 #   install_app_bundle <bundle_dir> <installed_bundle>
@@ -814,7 +837,9 @@ swap_in_staged_app_bundle() {
 #
 # Returns 0 once the new bundle is installed, and otherwise what
 # swap_in_staged_app_bundle says about the installed path: 1 when it is as it
-# was, 2 when nothing is installed.
+# was, 2 when nothing is installed. Records a registration that worked in
+# APP_BUNDLE_REGISTERED.
+# shellcheck disable=SC2034 # APP_BUNDLE_REGISTERED is read by scripts/update.sh
 install_app_bundle() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
@@ -825,6 +850,7 @@ install_app_bundle() {
         return 1
     fi
 
+    APP_BUNDLE_REGISTERED=false
     reclaim_app_bundle_siblings "$installed_bundle" || return 1
     stage_app_bundle "$bundle_dir" "$installed_bundle" || return 1
     swap_in_staged_app_bundle "$installed_bundle" || status=$?
@@ -837,7 +863,9 @@ install_app_bundle() {
             ;;
     esac
     discard_app_bundle_sibling "$installed_bundle" outgoing || true
-    if ! register_app_bundle "$installed_bundle"; then
+    if register_app_bundle "$installed_bundle"; then
+        APP_BUNDLE_REGISTERED=true
+    else
         echo "warning: installed $installed_bundle but could not register it with LaunchServices" >&2
     fi
 }
@@ -845,21 +873,31 @@ install_app_bundle() {
 # Tell LaunchServices about a bundle that appeared or moved at <path>, as
 # install_app_bundle does after every install, an update's rollback included —
 # a bundle LaunchServices does not know about takes no tbd:// URL and shows a
-# stale icon.
+# stale icon. Non-zero when $TBD_LSREGISTER is not executable, when it or the
+# touch below fails. That changes nothing about what is installed, so
+# install_app_bundle only warns and still returns 0 (so restart.sh, which
+# calls it under `set -e`, carries on), and records it
+# (APP_BUNDLE_REGISTERED) for a caller that reports the install.
 register_app_bundle() {
     local installed_bundle="${1-}"
+    local status=0
 
     [ -n "$installed_bundle" ] || return 1
 
     if [ -x "$TBD_LSREGISTER" ]; then
-        "$TBD_LSREGISTER" -f "$installed_bundle" >/dev/null 2>&1 || true
+        "$TBD_LSREGISTER" -f "$installed_bundle" >/dev/null 2>&1 || status=1
+    else
+        # No lsregister to run registers nothing, which is a failure to
+        # register as much as one that runs and fails.
+        status=1
     fi
 
     # Bump the installed bundle's mtime so Notification Center and System
     # Settings pick up an updated AppIcon.icns instead of serving a stale
     # icon-cache entry. `lsregister -f` alone does not always invalidate those
     # caches; `touch` does.
-    touch "$installed_bundle"
+    touch "$installed_bundle" || status=1
+    return "$status"
 }
 
 # MARK: - App process control

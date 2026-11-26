@@ -279,6 +279,29 @@ test_build_identity_describes_the_tree() {
     fi
 }
 
+# The build configuration is part of the identity when the caller names it,
+# since a release and a debug build of one tree are two builds that the
+# other fields cannot tell apart. Without one, the stamp records none.
+test_build_identity_records_the_configuration() {
+    local repo build
+    repo="$(mkrepo)"
+    build="$repo/.build/debug"
+    mkbuild "$build"
+
+    write_build_identity "$repo" "$build" debug >/dev/null 2>&1
+    assert_ok "a sidecar with a configuration is valid JSON" \
+        python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$build/TBDBuildIdentity.json"
+    assert_eq "it records the configuration it is given" \
+        "debug" "$(sidecar_field "$build/TBDBuildIdentity.json" configuration)"
+
+    write_build_identity "$repo" "$build" >/dev/null 2>&1
+    assert_ok "a sidecar without one is valid JSON" \
+        python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$build/TBDBuildIdentity.json"
+    assert_eq "and records none when given none" "None" \
+        "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("configuration"))' \
+            "$build/TBDBuildIdentity.json")"
+}
+
 test_build_identity_marks_a_dirty_tree() {
     local repo build
     repo="$(mkrepo)"
@@ -1139,6 +1162,59 @@ end old" "$(cat "$log" 2>/dev/null)"
     unset FAKE_LSREGISTER_LOG
 }
 
+# Registering with LaunchServices changes nothing about what is installed, so
+# a registration that fails still installs: install_app_bundle warns and
+# succeeds. It records the difference in APP_BUNDLE_REGISTERED, false rather
+# than true, for a caller that reports what it installed
+# (update.sh's rollback), and register_app_bundle fails when lsregister does,
+# or is not there to run, where it used to swallow both.
+test_install_whose_registration_fails_still_installs() {
+    local root apps rc
+    root="$TEST_TMP/install-unregistered"
+    apps="$root/Applications"
+    mkdir -p "$apps"
+    mkfakebundle "$apps/TBD.app" old >/dev/null
+    mkfakebundle "$root/new/TBD.app" new >/dev/null
+    cat > "$root/failing-lsregister" << 'EOF'
+#!/bin/sh
+exit 1
+EOF
+    chmod +x "$root/failing-lsregister"
+
+    rc=0
+    TBD_LSREGISTER="$root/failing-lsregister" register_app_bundle "$apps/TBD.app" || rc=$?
+    assert_eq "register_app_bundle fails when lsregister does" "1" "$rc"
+
+    rc=0
+    TBD_LSREGISTER="$root/failing-lsregister" \
+        install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>"$root/stderr" || rc=$?
+    assert_eq "an install whose registration fails still succeeds" "0" "$rc"
+    assert_eq "and installs the new bundle" "new" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "it records the bundle as not registered" "false" "$APP_BUNDLE_REGISTERED"
+    assert_contains "and warns" "could not register it with LaunchServices" \
+        "$(cat "$root/stderr" 2>/dev/null)"
+
+    rc=0
+    install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+    assert_eq "an install that registers succeeds" "0" "$rc"
+    assert_eq "it records the bundle as registered" "true" "$APP_BUNDLE_REGISTERED"
+
+    # An lsregister that is not there registers nothing either. Counting
+    # that as registered, as register_app_bundle did, fails here.
+    rc=0
+    TBD_LSREGISTER="$root/no-such-lsregister" register_app_bundle "$apps/TBD.app" || rc=$?
+    assert_eq "register_app_bundle fails when there is no lsregister to run" "1" "$rc"
+    rc=0
+    TBD_LSREGISTER="$root/no-such-lsregister" \
+        install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>"$root/stderr" || rc=$?
+    assert_eq "an install with no lsregister still succeeds" "0" "$rc"
+    assert_eq "it records the bundle as not registered (no lsregister)" "false" \
+        "$APP_BUNDLE_REGISTERED"
+    assert_contains "and warns (no lsregister)" "could not register it with LaunchServices" \
+        "$(cat "$root/stderr" 2>/dev/null)"
+}
+
 # The TBD_BUNDLE_CP seam is for a test to set once the library is sourced, as
 # the cases above do. One a real install inherits from its environment is
 # ignored: sourcing sets it to /bin/cp. Here the library is sourced the way
@@ -1274,6 +1350,85 @@ test_install_renames_a_sibling_away_before_deleting_it() {
     reclaim_app_bundle_siblings "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
     assert_eq "the next cleanup succeeds" "0" "$rc"
     assert_no_dir "and clears the stale discard sibling" "$apps/.TBD-install-discard"
+}
+
+# A stand-in for `mv` at <bin>/mv that refuses each rename listed in
+# <bin>/mv-refuses, one `<source>|<destination>` per line, recording the
+# refusal in <bin>/mv.log, and makes every other move with /bin/mv.
+#
+#   mkrefusingmv <bin>
+mkrefusingmv() {
+    local bin="$1"
+    mkdir -p "$bin"
+    cat > "$bin/mv" << EOF
+#!/bin/sh
+if grep -qxF -- "\$1|\$2" "$bin/mv-refuses" 2>/dev/null; then
+    printf 'refused mv %s|%s\n' "\$1" "\$2" >> "$bin/mv.log"
+    exit 1
+fi
+exec /bin/mv "\$@"
+EOF
+    chmod +x "$bin/mv"
+}
+
+# The swap's renames can fail, and install_app_bundle's status says what the
+# installed path holds then. When the second rename (the staged bundle into
+# place) fails, the first is undone: status 1, the old bundle installed again,
+# whole, the staged copy removed, nothing registered. When the undo fails as
+# well: status 2, nothing installed, the old bundle whole at the outgoing
+# sibling, and the staged bundle left for the next install, which puts the old
+# bundle back before it starts. The mv stub refuses the chosen renames.
+test_install_whose_swap_fails_says_what_is_installed() {
+    local root apps incoming outgoing rc
+    root="$TEST_TMP/install-swap-fails"
+    apps="$root/Applications"
+    incoming="$apps/.TBD-install-incoming"
+    outgoing="$apps/.TBD-install-outgoing"
+    mkdir -p "$apps"
+    mkfakebundle "$apps/TBD.app" old >/dev/null
+    mkfakebundle "$root/new/TBD.app" new >/dev/null
+    mkrefusingmv "$root/bin"
+    export FAKE_LSREGISTER_LOG="$root/lsregister.log"
+
+    printf '%s|%s\n' "$incoming" "$apps/TBD.app" > "$root/bin/mv-refuses"
+    rc=0
+    # shellcheck disable=SC2016 # the script's own arguments, expanded by it
+    env PATH="$root/bin:$PATH" bash -c 'source "$1"; install_app_bundle "$2" "$3"' \
+        _ "$HELPER" "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+    assert_contains "the second rename is refused" \
+        "refused mv $incoming|$apps/TBD.app" "$(cat "$root/bin/mv.log" 2>/dev/null)"
+    assert_eq "a swap undone after its second rename fails returns 1" "1" "$rc"
+    assert_eq "the old bundle is installed again" "old" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_file "with its executable" "$apps/TBD.app/Contents/MacOS/TBDApp"
+    assert_no_dir "nothing is left at the outgoing sibling" "$outgoing"
+    assert_no_dir "the staged copy is removed" "$incoming"
+    assert_eq "nothing is registered" "" "$(cat "$FAKE_LSREGISTER_LOG" 2>/dev/null)"
+
+    printf '%s|%s\n' "$outgoing" "$apps/TBD.app" >> "$root/bin/mv-refuses"
+    rc=0
+    # shellcheck disable=SC2016 # the script's own arguments, expanded by it
+    env PATH="$root/bin:$PATH" bash -c 'source "$1"; install_app_bundle "$2" "$3"' \
+        _ "$HELPER" "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+    assert_contains "the undo is refused too" \
+        "refused mv $outgoing|$apps/TBD.app" "$(cat "$root/bin/mv.log" 2>/dev/null)"
+    assert_eq "a swap that cannot be undone returns 2" "2" "$rc"
+    assert_no_dir "nothing is installed" "$apps/TBD.app"
+    assert_eq "the old bundle is at the outgoing sibling" "old" \
+        "$(cat "$outgoing/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_file "whole" "$outgoing/Contents/MacOS/TBDApp"
+    assert_eq "the staged bundle is left for the next install to clear" "new" \
+        "$(cat "$incoming/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "nothing is registered (status 2)" "" "$(cat "$FAKE_LSREGISTER_LOG" 2>/dev/null)"
+
+    rc=0
+    install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
+    assert_eq "the next install succeeds" "0" "$rc"
+    assert_eq "and installs the new bundle" "new" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_no_dir "with nothing left at the outgoing sibling" "$outgoing"
+    assert_no_dir "or the incoming one" "$incoming"
+    unset FAKE_LSREGISTER_LOG
 }
 
 # Put-back trusts the outgoing sibling only when it looks whole: an
@@ -2656,6 +2811,7 @@ test_is_default_tbd_home_follows_the_directory() {
 }
 
 test_build_identity_describes_the_tree
+test_build_identity_records_the_configuration
 test_build_identity_marks_a_dirty_tree
 test_build_identity_ignores_dirt_outside_the_build
 test_build_identity_records_a_detached_head
@@ -2691,9 +2847,11 @@ test_install_ignores_a_gnu_cp_first_on_path
 test_install_siblings_sit_beside_the_installed_bundle
 test_install_keeps_a_whole_bundle_installed_while_it_copies
 test_install_whose_copy_fails_leaves_the_installed_bundle
+test_install_whose_registration_fails_still_installs
 test_install_ignores_an_inherited_copy_command
 test_install_clears_what_an_interrupted_install_left
 test_install_renames_a_sibling_away_before_deleting_it
+test_install_whose_swap_fails_says_what_is_installed
 test_put_back_refuses_an_outgoing_tree_that_is_not_whole
 test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
