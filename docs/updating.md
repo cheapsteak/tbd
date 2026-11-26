@@ -384,13 +384,15 @@ the order you would reach for them.
   nothing installed keeps nothing, and leaves a bundle an earlier update kept
   where it is. So does one that finds installed the very build it is
   installing — the same commit, update clone, dirty flag and build
-  configuration in the bundle's `Contents/TBDBuildIdentity.json` — as a run
-  cut short after its swap leaves it, or a re-run over a completed update: a
-  copy of that build is no way back, and would replace the kept bundle,
-  which may be. Any other bundle is kept, even one of the same commit built
-  from another worktree, from a dirty tree, or in the other configuration (a
-  `--debug` run over a release build), and so is one whose identity records
-  no configuration. Put it back the way an install does, so that
+  configuration in the bundle's `Contents/TBDBuildIdentity.json`, and for a
+  dirty tree the same `builtAt` too, since the identity does not record a
+  dirty tree's changes — as a run cut short after its swap leaves it, or a
+  re-run over a completed update: a copy of that build is no way back, and
+  would replace the kept bundle, which may be. Any other bundle is kept,
+  even one of the same commit built from another worktree, another build of
+  the same dirty tree, or one in the other configuration (a `--debug` run
+  over a release build), and so is one whose identity records no
+  configuration. Put it back the way an install does, so that
   `/Applications/TBD.app` is never missing if the app quits meanwhile (see
   "Stops the app" above).
 
@@ -470,9 +472,14 @@ up rolls back by itself. The rollback puts back the bundle of the build the
 daemon reported when the run began, which is still the daemon running
 unless the handover failed after the old daemon had exited. A bundle is that
 build when its `Contents/TBDBuildIdentity.json` names the same commit,
-source worktree and dirty flag as the daemon's, or the same commit when the
-daemon reported only that. The daemon reports no build configuration, so the
-rollback does not compare one. When the installed bundle already is that build —
+source worktree and dirty flag as the daemon's, and for a dirty build the
+same `builtAt`, or the same commit when the daemon reported only that. A
+dirty build is compared by its build time because the identity does not
+record a dirty tree's changes: two builds of one dirty tree can differ in
+anything. A daemon that reports a dirty build with no build time, as one
+whose identity was read from its worktree's HEAD rather than its stamp
+does, is no bundle's build. The daemon reports no build configuration, so
+the rollback does not compare one. When the installed bundle already is that build —
 a re-run over the build the daemon runs — there is nothing to put back. When
 the kept bundle is, the run waits until
 three seconds have passed since the app it stopped exited, so that nothing
@@ -487,7 +494,8 @@ all the same, with a line naming the daemon's build and the kept bundle's,
 since it is the bundle that was installed when the run began. That covers a
 daemon that reported no build, a kept bundle whose identity names none, and
 a daemon whose build was read from its worktree rather than its stamp, which
-can disagree with the bundle's on the dirty flag. Either way the run then
+can disagree with the bundle's on the dirty flag and names no build time.
+Either way the run then
 puts the update clone's `.build/release` link back the way the run found
 it, relaunches the app it stopped before the handover,
 and exits non-zero. That is the case the kept bundle exists for — a new app

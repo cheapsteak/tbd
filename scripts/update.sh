@@ -751,15 +751,20 @@ put_back_discarded_kept_bundle() {
 
 # The fields of a build identity that tell one build from another, as
 # `<commit>|<sourceWorktree>|<dirty>`, read from <json>, or from the object at
-# <field> in it. builtAt differs between two builds of one tree, and the rest
-# follow from these. Non-zero, with nothing printed, when it names no commit.
+# <field> in it. A clean tree builds the same thing every time, so builtAt is
+# left out for one. A dirty tree's changes are not in the identity, so two
+# builds of it can differ in anything: <dirty> is then `true@<builtAt>`, and
+# `true@` when the identity names no build time, which matches no build
+# (same_build, is_daemons_build). Non-zero, with nothing printed, when it
+# names no commit.
 #
 #   build_key_of <json> [<field>]
 build_key_of() {
-    local json="${1-}" at="${2:+$2.}" commit
+    local json="${1-}" at="${2:+$2.}" commit dirty
     commit="$(json_field "$json" "${at}commit")" && [ -n "$commit" ] || return 1
-    printf '%s|%s|%s\n' "$commit" \
-        "$(json_field "$json" "${at}sourceWorktree")" "$(json_field "$json" "${at}dirty")"
+    dirty="$(json_field "$json" "${at}dirty")"
+    [ "$dirty" != true ] || dirty="true@$(json_field "$json" "${at}builtAt")"
+    printf '%s|%s|%s\n' "$commit" "$(json_field "$json" "${at}sourceWorktree")" "$dirty"
 }
 
 # The build key (build_key_of) of a bundle's Contents/TBDBuildIdentity.json,
@@ -783,39 +788,49 @@ bundle_configuration() {
 
 # True when two bundles are the same build (bundle_build_key) in the same
 # build configuration (bundle_configuration): same commit, source worktree,
-# dirty flag and configuration, so a restart.sh build of the same commit, a
-# dirty one, or a debug build of a release one, is another build. False when
-# either names no commit or no configuration, so a bundle stamped before the
-# configuration was recorded is kept rather than taken for this run's build.
+# dirty flag and configuration, and for a dirty build the same build time,
+# so a restart.sh build of the same commit, another build of a dirty tree,
+# or a debug build of a release one, is another build. False when either
+# names no commit or no configuration, so a bundle stamped before the
+# configuration was recorded is kept rather than taken for this run's build,
+# and false for a dirty build that names no build time.
 same_build() {
     local key configuration
-    key="$(bundle_build_key "${1-}")" && configuration="$(bundle_configuration "${1-}")" &&
+    key="$(bundle_build_key "${1-}")" && [ "${key%|true@}" = "$key" ] &&
+        configuration="$(bundle_configuration "${1-}")" &&
         [ "$key" = "$(bundle_build_key "${2-}")" ] &&
         [ "$configuration" = "$(bundle_configuration "${2-}")" ]
 }
 
 # True when <dir> holds the build the daemon reported when the run began
-# (RUNNING_BUILD): the same commit, source worktree and dirty flag, or the
-# same commit when the daemon did not report the other two. False when it
-# reported no build.
+# (RUNNING_BUILD): the same commit, source worktree and dirty flag, and for
+# a dirty build the same build time, or the same commit when the daemon did
+# not report the worktree or the dirty flag. False when it reported no build,
+# or a dirty one with no build time (a build identity read from its
+# worktree's HEAD rather than its stamp carries none).
 #
 #   is_daemons_build <dir> [<sidecar>]
 is_daemons_build() {
     local key
     key="$(bundle_build_key "$@")" || return 1
     case "$RUNNING_BUILD" in
-        "") return 1 ;;
+        "" | *"|true@") return 1 ;;
         *"||"* | *"|") [ "${key%%|*}" = "${RUNNING_BUILD%%|*}" ] ;;
         *) [ "$key" = "$RUNNING_BUILD" ] ;;
     esac
 }
 
 # A build key as the report prints it: the commit, then the worktree it was
-# built from and whether that was dirty, when the key says.
+# built from and whether that was dirty, with the build time of a dirty
+# build, when the key says.
 build_text() {
-    local commit="${1%%|*}" rest="${1#*|}" worktree dirty=""
+    local commit="${1%%|*}" rest="${1#*|}" worktree dirty="" built
     worktree="${rest%|*}"
-    [ "${rest##*|}" != true ] || dirty=", dirty"
+    built="${rest##*|}"
+    case "$built" in
+        true@?*) dirty=", dirty, built ${built#true@}" ;;
+        true*) dirty=", dirty" ;;
+    esac
     printf '%s%s%s\n' "$commit" "${worktree:+ from $worktree}" "$dirty"
 }
 
@@ -1440,7 +1455,8 @@ put_release_link_back() {
 # unless they name different builds where it matters: the installed bundle
 # was built in the update clone, so an app launched from it starts a daemon
 # from the clone's .build/release, and that link names a downloaded tree of
-# another build than the bundle's. Logs both builds when they differ. Only a
+# another build than the bundle's, a dirty build that names no build time
+# being no build's match (same_build). Logs both builds when they differ. Only a
 # release run is checked, as the report reads its own configuration's
 # directory: a --debug app starts from .build/debug, which names no download.
 installed_bundle_matches_release_link() {
@@ -1453,7 +1469,7 @@ installed_bundle_matches_release_link() {
     esac
     [ "$(json_field "$(cat "$INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json" 2>/dev/null)" sourceWorktree)" = "$UPDATE_SRC" ] ||
         return 0
-    key="$(bundle_build_key "$INSTALLED_BUNDLE")" &&
+    key="$(bundle_build_key "$INSTALLED_BUNDLE")" && [ "${key%|true@}" = "$key" ] &&
         [ "$key" = "$(bundle_build_key "$target" "$target/TBDBuildIdentity.json")" ] && return 0
     log_error "$INSTALLED_BUNDLE holds build $(describe_build "$INSTALLED_BUNDLE"), but $RELEASE_LINK, from which an app launched from it starts a daemon, names $target, build $(describe_build "$target" "$target/TBDBuildIdentity.json")"
     return 1
