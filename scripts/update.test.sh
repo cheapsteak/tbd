@@ -3324,7 +3324,7 @@ test_an_install_that_leaves_nothing_installed_says_where_the_bundle_is() {
 # sending the operator to the kept bundle, a copy of that broken tree, by the
 # documented way back, whose `rm` would delete the staged bundle.
 test_an_install_that_leaves_nothing_installed_points_past_a_broken_bundle() {
-    local case_dir out rc apps installed incoming outgoing
+    local case_dir out rc apps installed incoming outgoing new_commit
     case_dir="$(mkcase install-leaves-nothing-broken)"
     apps="$case_dir/Applications"
     installed="$apps/TBD.app"
@@ -3350,8 +3350,9 @@ test_an_install_that_leaves_nothing_installed_points_past_a_broken_bundle() {
         "$out"
     assert_not_contains "it offers no rename of the broken tree into place" \
         "Put back the bundle that was installed with" "$out"
-    assert_contains_literal "it gives the rename of the staged bundle into place, its paths quoted" \
-        "The bundle that was installed, at $outgoing, is not whole, but the one this run staged is: put it in place with: mv \"$incoming\" \"$installed\"" \
+    new_commit="$(git -C "$case_dir/home/tbd/updates/src" rev-parse HEAD 2>/dev/null)"
+    assert_contains_literal "it gives the rename of the staged bundle into place, naming it the new build, which the daemon does not run, its paths quoted" \
+        "The bundle that was installed, at $outgoing, is not whole, but the one this run staged is (the new build, $new_commit from $case_dir/home/tbd/updates/src, not build $CASE_DAEMON_COMMIT from $case_dir/worktree, which the daemon runs): put it in place with: mv \"$incoming\" \"$installed\"" \
         "$out"
     assert_not_contains "and does not send the operator to the kept bundle instead" \
         "is whole, so put back the bundle kept at" "$out"
@@ -3365,24 +3366,46 @@ test_an_install_that_leaves_nothing_installed_points_past_a_broken_bundle() {
 # rename into place, so the command leaves it alone; once that name holds no
 # whole bundle, the command puts the kept bundle in. A command whose `rm`
 # clears the incoming name regardless, as it did, deletes the staged bundle.
-# The command names /Applications once, in its `cd`, which is rewritten to
-# the scratch one; a command that names it anywhere else is not run at all.
+#
+# A copy cut short must never sit at the incoming name, which that test
+# trusts: here a stand-in for /bin/cp copies Info.plist and TBDApp, enough to
+# look whole, and fails. The incoming name stays empty, and a re-run with the
+# real cp puts the kept bundle in. A command that copies straight to the
+# incoming name, as it did, leaves the partial copy looking whole there, and
+# the re-run then does nothing.
+#
+# The command names /Applications once, in its `cd`, and /bin/cp once; both
+# are rewritten to scratch stand-ins, and a command that names either
+# anywhere else is not run at all.
 test_the_documented_way_back_keeps_a_staged_bundle() {
-    local state root apps cmd run
+    local state root apps cmd run cut_short
     cmd="$(awk '/^  ```bash$/{f=1;next} /^  ```$/{if(f)exit} f' "$REPO_ROOT/docs/updating.md")"
     if [ "$(printf '%s\n' "$cmd" | grep -o /Applications | wc -l | tr -d ' ')" != 1 ] ||
-        ! printf '%s\n' "$cmd" | grep -q '( cd /Applications &&'; then
-        fail "the documented way back names /Applications only in its cd"
+        ! printf '%s\n' "$cmd" | grep -q '( cd /Applications &&' ||
+        [ "$(printf '%s\n' "$cmd" | grep -o /bin/cp | wc -l | tr -d ' ')" != 1 ]; then
+        fail "the documented way back names /Applications only in its cd, and /bin/cp once"
         return
     fi
     assert_contains_literal "it is the command that copies the kept bundle" \
-        "/bin/cp -cR ~/tbd/updates/previous/TBD.app .TBD-install-incoming" "$cmd"
-    for state in whole-incoming broken-incoming; do
+        "/bin/cp -cR ~/tbd/updates/previous/TBD.app" "$cmd"
+    cut_short="$TEST_TMP/documented-way-back-cp"
+    cat > "$cut_short" << 'EOF'
+#!/bin/sh
+# A copy cut short: what makes a bundle look whole, and nothing else.
+mkdir -p "$3/Contents/MacOS"
+/bin/cp "$2/Contents/Info.plist" "$3/Contents/"
+/bin/cp "$2/Contents/MacOS/TBDApp" "$3/Contents/MacOS/"
+exit 1
+EOF
+    chmod +x "$cut_short"
+    for state in whole-incoming broken-incoming copy-cut-short; do
         root="$TEST_TMP/documented-way-back-$state"
         apps="$root/Applications"
-        mkdir -p "$apps/.TBD-install-incoming/Contents"
-        [ "$state" = broken-incoming ] ||
-            mkbundle "$apps/.TBD-install-incoming" "staged" >/dev/null
+        mkdir -p "$apps"
+        case "$state" in
+            whole-incoming) mkbundle "$apps/.TBD-install-incoming" "staged" >/dev/null ;;
+            broken-incoming) mkdir -p "$apps/.TBD-install-incoming/Contents" ;;
+        esac
         mkbundle "$root/home/tbd/updates/previous/TBD.app" "kept" >/dev/null
         run="$(printf '%s\n' "$cmd" | sed "s|cd /Applications|cd '$apps'|")"
         case "$run" in
@@ -3391,6 +3414,13 @@ test_the_documented_way_back_keeps_a_staged_bundle() {
                 continue
                 ;;
         esac
+        if [ "$state" = copy-cut-short ]; then
+            HOME="$root/home" bash -c "$(printf '%s\n' "$run" | sed "s|/bin/cp|'$cut_short'|")" \
+                >/dev/null 2>&1
+            assert_eq "a copy cut short leaves nothing at the incoming name" "gone" \
+                "$(path_state "$apps/.TBD-install-incoming")"
+            assert_eq "and nothing installed" "gone" "$(path_state "$apps/TBD.app")"
+        fi
         HOME="$root/home" bash -c "$run" >/dev/null 2>&1
         if [ "$state" = whole-incoming ]; then
             assert_eq "with a whole staged bundle and nothing installed, it changes nothing" "gone" \
@@ -3398,8 +3428,47 @@ test_the_documented_way_back_keeps_a_staged_bundle() {
             assert_eq "and the staged bundle is still there" "staged" \
                 "$(cat "$apps/.TBD-install-incoming/Contents/SourceWorktreePath.txt" 2>/dev/null)"
         else
-            assert_eq "with no whole bundle staged, it puts the kept bundle in" "kept" \
+            assert_eq "with no whole bundle staged, it puts the kept bundle in ($state)" "kept" \
                 "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+            assert_eq "and leaves nothing beside it ($state)" "gone gone gone" \
+                "$(path_state "$apps/.TBD-install-incoming") $(path_state "$apps/.TBD-install-outgoing") $(path_state "$apps/.TBD-install-discard")"
+        fi
+    done
+}
+
+# The staged bundle the warning offers is named by its build and by whether
+# the daemon runs it, so the operator knows what the rename puts in front of
+# the daemon: in a rollback, a copy of the kept bundle of the daemon's build;
+# in an install, the new build (the test above); with the daemon's build
+# unknown, its build alone. Offering it unnamed, as the warning did, hides
+# that an install's staged bundle is not the daemon's build.
+test_a_swap_that_leaves_a_whole_staged_bundle_names_its_build() {
+    local daemon root out installed outgoing incoming
+    for daemon in known unknown; do
+        root="$TEST_TMP/whole-staged-bundle-$daemon"
+        installed="$root/Applications/TBD.app"
+        outgoing="$root/Applications/.TBD-install-outgoing"
+        incoming="$root/Applications/.TBD-install-incoming"
+        mkdir -p "$outgoing/Contents" "$root/updates"
+        mkbundle "$incoming" "staged" "$CASE_DAEMON_COMMIT" >/dev/null
+        out="$(
+            OPT_AUTO=false
+            UPDATE_HOME="$root/updates"
+            UPDATE_LOG="$root/updates/update.log"
+            PREVIOUS_BUNDLE="$root/updates/previous/TBD.app"
+            INSTALLING_BUILD="2222222222222222222222222222222222222222||"
+            RUNNING_BUILD=""
+            [ "$daemon" = unknown ] || RUNNING_BUILD="$CASE_DAEMON_COMMIT||"
+            put_back_after_failed_swap "$installed" 2>&1
+        )"
+        if [ "$daemon" = known ]; then
+            assert_contains_literal "it names the staged bundle's build as the daemon's" \
+                "but the one this run staged is (build $CASE_DAEMON_COMMIT, which the daemon runs): put it in place with: mv \"$incoming\" \"$installed\"" \
+                "$out"
+        else
+            assert_contains_literal "with the daemon's build unknown, it names the staged bundle's build alone" \
+                "but the one this run staged is (build $CASE_DAEMON_COMMIT): put it in place with: mv \"$incoming\" \"$installed\"" \
+                "$out"
         fi
     done
 }
@@ -3408,11 +3477,12 @@ test_the_documented_way_back_keeps_a_staged_bundle() {
 # whole, the warning sends the operator to the kept bundle, naming its build
 # and whether this run kept it or an earlier update did. Sending the operator
 # there without saying which, as the warning did, can put back an older
-# update's bundle unawares. With no bundle kept, it points at a build of a
-# TBD checkout rather than at a bundle that is not there.
+# update's bundle unawares. With no bundle kept, or a kept tree that is not
+# whole, it points at a build of a TBD checkout rather than at a bundle that
+# cannot go back.
 test_a_swap_that_leaves_no_whole_bundle_names_the_kept_one() {
     local who root out installed outgoing incoming kept
-    for who in this-run earlier none; do
+    for who in this-run earlier none broken; do
         root="$TEST_TMP/no-whole-bundle-$who"
         installed="$root/Applications/TBD.app"
         outgoing="$root/Applications/.TBD-install-outgoing"
@@ -3420,6 +3490,7 @@ test_a_swap_that_leaves_no_whole_bundle_names_the_kept_one() {
         kept="$root/updates/previous/TBD.app"
         mkdir -p "$outgoing/Contents" "$incoming/Contents" "$root/updates"
         [ "$who" = none ] || mkbundle "$kept" "kept" "$CASE_DAEMON_COMMIT" >/dev/null
+        [ "$who" != broken ] || rm -f "$kept/Contents/MacOS/TBDApp"
         out="$(
             OPT_AUTO=false
             UPDATE_HOME="$root/updates"
@@ -3432,10 +3503,10 @@ test_a_swap_that_leaves_no_whole_bundle_names_the_kept_one() {
         assert_contains_literal "a warning says not to quit TBD until a bundle is back ($who)" \
             "WARNING: nothing is installed at $installed. Do not quit TBD until a whole bundle is back there" "$out"
         assert_not_contains "it offers no rename of either tree into place ($who)" "with: mv" "$out"
-        if [ "$who" = none ]; then
-            assert_contains_literal "with none kept, it points at a build of a TBD checkout" \
-                "no bundle is kept at $kept: install one from a TBD checkout with scripts/restart.sh" "$out"
-            assert_not_contains "and not at a kept bundle" "put back the bundle kept at" "$out"
+        if [ "$who" = none ] || [ "$who" = broken ]; then
+            assert_contains_literal "with no whole bundle kept, it points at a build of a TBD checkout ($who)" \
+                "no whole bundle is kept at $kept: install one from a TBD checkout with scripts/restart.sh" "$out"
+            assert_not_contains "and not at the kept tree ($who)" "put back the bundle kept at" "$out"
         elif [ "$who" = earlier ]; then
             assert_contains_literal "it names the kept bundle, its build, and that an earlier update kept it" \
                 "put back the bundle kept at $kept (build $CASE_DAEMON_COMMIT, kept by an earlier update, not this run) instead" "$out"
@@ -5793,6 +5864,7 @@ test_a_failed_install_leaves_the_app_running
 test_an_install_that_leaves_nothing_installed_says_where_the_bundle_is
 test_an_install_that_leaves_nothing_installed_points_past_a_broken_bundle
 test_the_documented_way_back_keeps_a_staged_bundle
+test_a_swap_that_leaves_a_whole_staged_bundle_names_its_build
 test_a_swap_that_leaves_no_whole_bundle_names_the_kept_one
 test_an_install_that_leaves_nothing_installed_retries_the_put_back
 test_an_app_started_during_the_handover_is_stopped_before_the_launch
