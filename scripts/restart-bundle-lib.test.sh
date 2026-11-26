@@ -1215,6 +1215,46 @@ EOF
         "$(cat "$root/stderr" 2>/dev/null)"
 }
 
+# The touch that bumps the installed bundle's mtime, for the icon caches, is
+# no part of the registration. With lsregister succeeding and the touch
+# failing, the bundle is recorded as registered, the install succeeds, and
+# the one warning is about the mtime. Folding the touch into the
+# registration's status, as register_app_bundle did, records a registered
+# bundle as not registered and warns that LaunchServices refused it.
+test_a_failed_touch_is_not_a_failed_registration() {
+    local root apps rc out
+    root="$TEST_TMP/install-touch-fails"
+    apps="$root/Applications"
+    mkdir -p "$apps" "$root/bin"
+    mkfakebundle "$apps/TBD.app" old >/dev/null
+    mkfakebundle "$root/new/TBD.app" new >/dev/null
+    printf '#!/bin/sh\nexit 1\n' > "$root/bin/touch"
+    chmod +x "$root/bin/touch"
+
+    rc=0
+    # PATH is set in a subshell rather than as a prefix, so the shell drops
+    # whatever touch it had hashed.
+    ( PATH="$root/bin:$PATH"; register_app_bundle "$apps/TBD.app" ) 2>"$root/stderr" || rc=$?
+    assert_eq "register_app_bundle succeeds when only the touch fails" "0" "$rc"
+    assert_contains "and warns about the modification time" \
+        "could not update the modification time of $apps/TBD.app" "$(cat "$root/stderr" 2>/dev/null)"
+
+    out="$(
+        PATH="$root/bin:$PATH"
+        rc=0
+        install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" 2>&1 >/dev/null || rc=$?
+        printf 'rc=%s registered=%s\n' "$rc" "$APP_BUNDLE_REGISTERED"
+    )"
+    assert_contains "an install whose touch fails succeeds" "rc=0" "$out"
+    assert_eq "and installs the new bundle" "new" \
+        "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_contains "it records the bundle as registered" "registered=true" "$out"
+    assert_contains "and warns about the modification time (install)" \
+        "could not update the modification time of $apps/TBD.app" "$out"
+    assert_not_contains "but not that the registration failed" \
+        "could not register it with LaunchServices" "$out"
+}
+
 # The TBD_BUNDLE_CP seam is for a test to set once the library is sourced, as
 # the cases above do. One a real install inherits from its environment is
 # ignored: sourcing sets it to /bin/cp. Here the library is sourced the way
@@ -2848,6 +2888,7 @@ test_install_siblings_sit_beside_the_installed_bundle
 test_install_keeps_a_whole_bundle_installed_while_it_copies
 test_install_whose_copy_fails_leaves_the_installed_bundle
 test_install_whose_registration_fails_still_installs
+test_a_failed_touch_is_not_a_failed_registration
 test_install_ignores_an_inherited_copy_command
 test_install_clears_what_an_interrupted_install_left
 test_install_renames_a_sibling_away_before_deleting_it

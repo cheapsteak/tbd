@@ -2518,7 +2518,7 @@ test_release_interrupted_staging_puts_the_link_back() {
 # (here 2222…). Recording the tree live at the start, as a completed install
 # otherwise does, fails, and the reconcile then deletes 2222….
 test_release_over_its_own_build_keeps_the_rollback_record() {
-    local case_dir home head installed
+    local case_dir home head installed out
     case_dir="$(mkcase_release_live release-over-own-build)"
     head="$(git -C "$case_dir/remote" rev-parse HEAD)"
     home="$case_dir/home/tbd/updates/prebuilt"
@@ -2527,7 +2527,10 @@ test_release_over_its_own_build_keeps_the_rollback_record() {
     printf '%s\n' "$home/2222222222222222222222222222222222222222" > "$home/.previous"
     mkbundle "$installed" "left-by-the-cut-short-run" >/dev/null
     stamp_clone_identity "$installed" "$case_dir" "$head"
-    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release >/dev/null
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "the run succeeds" "rc=0" "$out"
+    assert_contains_literal "it reaches the install" "install-bundle $installed" "$out"
+    assert_contains "and the handover" "handover-daemon" "$out"
     assert_eq "the rollback record still names the earlier tree" \
         "$home/2222222222222222222222222222222222222222" "$(cat "$home/.previous" 2>/dev/null)"
     if [ -d "$home/2222222222222222222222222222222222222222" ]; then
@@ -2544,7 +2547,7 @@ test_release_over_its_own_build_keeps_the_rollback_record() {
 # keeps it. Leaving the record on 2222…, which pairs with nothing kept,
 # fails.
 test_release_over_its_own_build_records_the_kept_bundles_tree() {
-    local case_dir home head live kept
+    local case_dir home head live kept out
     case_dir="$(mkcase_release_live release-over-own-build-kept-tree)"
     head="$(git -C "$case_dir/remote" rev-parse HEAD)"
     home="$case_dir/home/tbd/updates/prebuilt"
@@ -2557,7 +2560,10 @@ test_release_over_its_own_build_records_the_kept_bundles_tree() {
     mkbundle "$kept" "the-live-trees-build" >/dev/null
     stamp_clone_identity "$kept" "$case_dir" 1111111111111111111111111111111111111111
     cp "$kept/Contents/TBDBuildIdentity.json" "$live/TBDBuildIdentity.json"
-    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release >/dev/null
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "the run succeeds" "rc=0" "$out"
+    assert_contains_literal "it reaches the install" "install-bundle $case_dir/Applications/TBD.app" "$out"
+    assert_contains "and the handover" "handover-daemon" "$out"
     assert_eq "the rollback record names the tree of the kept bundle's build" \
         "$live" "$(cat "$home/.previous" 2>/dev/null)"
     if [ -d "$live" ]; then
@@ -2720,7 +2726,7 @@ test_release_failed_runs_never_grow_the_prebuilt_home() {
 # A completed install that kept the bundle it replaced records the tree
 # that was live when it started as the rollback, paired with that bundle.
 test_release_completed_install_keeps_the_replaced_tree_as_rollback() {
-    local case_dir head home
+    local case_dir head home out
     case_dir="$(mkcase_release_live release-rollback)"
     head="$(git -C "$case_dir/remote" rev-parse HEAD)"
     home="$case_dir/home/tbd/updates/prebuilt"
@@ -2728,7 +2734,10 @@ test_release_completed_install_keeps_the_replaced_tree_as_rollback() {
     printf '%s\n' "$home/2222222222222222222222222222222222222222" > "$home/.previous"
     mkbundle "$case_dir/Applications/TBD.app" "before-the-update" \
         1111111111111111111111111111111111111111 >/dev/null
-    FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release >/dev/null
+    out="$(FAKE_GH_AUTH=0 FAKE_GH_ATTEST=0 run_update_release "$case_dir" --from-release; printf 'rc=%s\n' "$?")"
+    assert_contains "the run succeeds" "rc=0" "$out"
+    assert_contains_literal "it reaches the install" "install-bundle $case_dir/Applications/TBD.app" "$out"
+    assert_contains "and the handover" "handover-daemon" "$out"
     assert_eq "a completed install keeps the new tree and the one it replaced" \
         "$(printf '%s\n' 1111111111111111111111111111111111111111 "$head" | sort | tr '\n' ' ' | sed 's/ $//')" \
         "$(prebuilt_entries "$case_dir")"
@@ -3407,7 +3416,10 @@ EOF
             broken-incoming) mkdir -p "$apps/.TBD-install-incoming/Contents" ;;
         esac
         mkbundle "$root/home/tbd/updates/previous/TBD.app" "kept" >/dev/null
-        run="$(printf '%s\n' "$cmd" | sed "s|cd /Applications|cd '$apps'|")"
+        # The scratch paths go in as arguments, "$1" for the cd and "$2" for
+        # the copy, not spliced into the command's source.
+        # shellcheck disable=SC2016 # "$1" is for the command's own shell
+        run="$(printf '%s\n' "$cmd" | sed 's|cd /Applications|cd "$1"|')"
         case "$run" in
             *"cd /Applications"*)
                 fail "the documented way back is pointed at a scratch /Applications ($state)"
@@ -3415,13 +3427,14 @@ EOF
                 ;;
         esac
         if [ "$state" = copy-cut-short ]; then
-            HOME="$root/home" bash -c "$(printf '%s\n' "$run" | sed "s|/bin/cp|'$cut_short'|")" \
-                >/dev/null 2>&1
+            # shellcheck disable=SC2016 # "$2" is for the command's own shell
+            HOME="$root/home" bash -c "$(printf '%s\n' "$run" | sed 's|/bin/cp|"$2"|')" \
+                _ "$apps" "$cut_short" >/dev/null 2>&1
             assert_eq "a copy cut short leaves nothing at the incoming name" "gone" \
                 "$(path_state "$apps/.TBD-install-incoming")"
             assert_eq "and nothing installed" "gone" "$(path_state "$apps/TBD.app")"
         fi
-        HOME="$root/home" bash -c "$run" >/dev/null 2>&1
+        HOME="$root/home" bash -c "$run" _ "$apps" >/dev/null 2>&1
         if [ "$state" = whole-incoming ]; then
             assert_eq "with a whole staged bundle and nothing installed, it changes nothing" "gone" \
                 "$(path_state "$apps/TBD.app")"
@@ -3929,6 +3942,66 @@ test_a_failed_handover_restores_the_kept_bundle_that_matches_the_daemon() {
     assert_eq "once" "1" "$(grep -c '^open ' "$events")"
 }
 
+# A daemon with no stamp reports the HEAD of its worktree, marked
+# `origin: worktreeHead`, and that HEAD can have moved since the daemon
+# started, so it says nothing sure of the daemon's build. The rollback then
+# treats the build as unknown: with this run's own build installed (the keep
+# kept nothing) and an earlier update's bundle kept at the reported commit,
+# it puts nothing back, leaves the app stopped and reports the daemon's
+# build as unknown. A stamped daemon reporting the same commit gets the kept
+# bundle put back, as above. Taking the HEAD for the daemon's build, as the
+# run did, puts that bundle in front of a daemon that may be another build.
+test_a_daemon_identity_read_from_its_worktree_head_is_an_unknown_build() {
+    local origin case_dir out rc events installed kept
+    for origin in worktreeHead stamp; do
+        case_dir="$(mkcase "daemon-origin-$origin")"
+        events="$case_dir/events.log"
+        installed="$case_dir/Applications/TBD.app"
+        kept="$case_dir/home/tbd/updates/previous/TBD.app"
+        cat > "$case_dir/state/status.json" << EOF
+{
+  "executablePath": "$case_dir/worktree/.build/debug/TBDDaemon",
+  "buildIdentity": {
+    "commit": "$CASE_DAEMON_COMMIT",
+    "sourceWorktree": "$case_dir/worktree",
+    "origin": "$origin"
+  }
+}
+EOF
+        mkdir -p "$case_dir/Applications"
+        mkbundle "$installed" "left-by-the-cut-short-run" >/dev/null
+        stamp_clone_identity "$installed" "$case_dir" "$(git -C "$case_dir/remote" rev-parse HEAD)"
+        mkbundle "$kept" "the-reported-commit" "$CASE_DAEMON_COMMIT" >/dev/null
+        out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+        assert_eq "a failed handover fails the run ($origin)" "1" "$rc"
+        assert_contains "the keep was skipped ($origin)" "keeping no copy of it" "$out"
+        if [ "$origin" = worktreeHead ]; then
+            assert_contains_literal "the rollback takes the daemon's build for unknown" \
+                "no previous app bundle to restore — the daemon's build is unknown, and this run kept none" \
+                "$out"
+            assert_not_contains "and puts nothing back" "restored previous app bundle" "$out"
+            assert_eq "this run's build stays installed" "left-by-the-cut-short-run" \
+                "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+            assert_contains "so the rollback is not complete" \
+                "ERROR: the rollback of the failed install did not complete" "$out"
+            assert_contains "the report says the daemon's build is unknown" "daemon: build unknown" "$out"
+            assert_not_contains "and names no build for it" "daemon: build $CASE_DAEMON_COMMIT" "$out"
+            assert_not_contains "no app is launched" "^open" "$(cat "$events")"
+            if [ -f "$case_dir/app" ]; then
+                fail "the app stays stopped when the daemon's build is unknown"
+            else
+                pass "the app stays stopped when the daemon's build is unknown"
+            fi
+        else
+            assert_contains "a stamped daemon's kept bundle goes back" "restored previous app bundle" "$out"
+            assert_eq "the reported commit's bundle is installed" "the-reported-commit" \
+                "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+            assert_contains "and the app is relaunched" \
+                "relaunching the app this run stopped before the handover" "$out"
+        fi
+    done
+}
+
 # An earlier run interrupted after its swap left the new build (B) installed
 # and .build/release linked to B's downloaded tree, with the daemon and the
 # kept bundle still on A (1111…). A re-run of B whose handover fails puts the
@@ -4260,6 +4333,13 @@ test_the_rollback_tells_dirty_builds_apart_by_build_time() {
         mkdir -p "$root/Applications" "$root/updates"
         mkbundle "$installed" "installed" >/dev/null
         stamp_clone_identity "$installed" "$root" "$CASE_DAEMON_COMMIT" "$wt" true 2026-01-02T03:04:05Z
+        # Chosen here, not inside the command substitution below: bash 3.2
+        # cannot parse a case pattern's unbalanced `)` inside `$( )`.
+        case "$daemon" in
+            other-time) built_at=', "builtAt": "2026-01-02T03:09:00Z"' ;;
+            same-time) built_at=', "builtAt": "2026-01-02T03:04:05Z"' ;;
+            *) built_at="" ;;
+        esac
         out="$(
             OPT_AUTO=false
             UPDATE_HOME="$root/updates"
@@ -4267,11 +4347,6 @@ test_the_rollback_tells_dirty_builds_apart_by_build_time() {
             PREVIOUS_BUNDLE="$kept"
             BUNDLE_STASHED=false
             BUNDLE_RESTORE_FAILED=false
-            case "$daemon" in
-                other-time) built_at=', "builtAt": "2026-01-02T03:09:00Z"' ;;
-                same-time) built_at=', "builtAt": "2026-01-02T03:04:05Z"' ;;
-                *) built_at="" ;;
-            esac
             RUNNING_BUILD="$(build_key_of "{\"buildIdentity\": {\"commit\": \"$CASE_DAEMON_COMMIT\", \"sourceWorktree\": \"$wt\", \"dirty\": true$built_at}}" buildIdentity)"
             roll_back_bundle "$installed" 2>&1
             printf 'restore_failed=%s\n' "$BUNDLE_RESTORE_FAILED"
@@ -6004,6 +6079,7 @@ test_a_rollback_that_finds_the_kept_bundle_gone_does_not_claim_a_restore
 test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_update_over_its_own_build_leaves_the_kept_bundle_alone
 test_a_failed_handover_restores_the_kept_bundle_that_matches_the_daemon
+test_a_daemon_identity_read_from_its_worktree_head_is_an_unknown_build
 test_a_rollback_whose_bundle_and_link_disagree_leaves_the_app_stopped
 test_a_failed_handover_over_the_daemons_build_restores_nothing
 test_the_rollback_and_the_report_compare_whole_builds
