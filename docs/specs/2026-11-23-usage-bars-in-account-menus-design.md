@@ -69,12 +69,26 @@ not widen the menu.
   reset). Its part of the tooltip says when the limit reset instead of giving the old percent, for
   example "Weekly: reset at Mon 7am", or "Weekly: reset 1d ago" with relative reset times. The age
   note is unchanged, and a window with no reset time or one still ahead shows as read. The rule is
-  `ClaudeUsageLimitBucket.windowHasEnded(at:)` in `TBDShared`. Every surface that draws a bucket
-  follows it, and so does account balancing: the picker counts an ended window as 0% when it weighs
-  headroom, so a profile whose bar shows a fresh window can be the balanced pick or the suggestion
-  at a limit, as the bar implies. Rankings, the account picker's row order among them, apply the
-  rule only when the last fetch succeeded: a failing profile, whose row shows its note, ranks by
-  the percent it last read.
+  `ClaudeUsageLimitBucket.windowHasEnded(at:)` in `TBDShared`, and it reaches beyond these menus:
+  - **Every app surface that draws a bucket** shows an ended window as reset: these menus, the
+    worktree picker's bars, the hover card, the "Choose account…" sheet, the profile rows in
+    Settings and the limit banner's usage text.
+  - **The "Choose account…" sheet's own order** counts an ended window as 0% when the reading is
+    healthy (`ProfileUsageSnapshot.countsAsReset(_:at:)`). That order places every row with
+    balancing off, and with it on the rows that balancing turns away. A reading whose fetch is
+    failing keeps its recorded percent, so a broken account, whose row shows its note, never sorts
+    as the emptiest.
+  - **Account balancing and the daemon's notifications** go by each account's last recorded
+    percent. The balanced pick, eligibility and the fallbacks rank accounts by it, and the
+    limit-hit suggestion and the balancing alerts quote it.
+  - **Known limitation.** With balancing on, between a reset and the account's next reading, the
+    sheet can draw an empty bar for an account the balancer still counts as full, and leave it
+    unmarked as the balanced pick. The next reading, a few minutes later at most, brings the two
+    back together.
+  - **Rejected alternative: balancing by the rule too.** Counting an ended window as 0% in the
+    balancer changes how balancing ranks old readings. That is a change to the design of
+    [account load balancing](2026-09-05-account-load-balancing-design.md), not to how usage is
+    drawn, so it does not belong in this display rule.
 - **Current account.** A standard macOS checkmark marks it.
 - **Default (logged in).** The row shows no bars. TBD keeps no usage data for the default login.
 - **Highlight.** When the pointer is on a row, the name turns white as usual. The bars keep their
