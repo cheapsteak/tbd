@@ -231,10 +231,11 @@ func usagePercentCell(_ bucket: ClaudeUsageLimitBucket?, now: Date = Date()) -> 
 }
 
 /// Render a bucket's reset in compact time: "18:10" when it lands within the
-/// next 24 h, otherwise "7/7 18:00". Once the window has ended by `now` the
-/// reset is past, and the cell says how long ago
-/// (`UsageAge.agoText(since:now:)`): "just now", "40m ago", "2h ago", "1d
-/// ago". Em dash when the bucket or its reset time is absent.
+/// next 24 h, otherwise "7/7 18:00", in fixed 24-hour digits whatever the
+/// machine's locale. Once the window has ended by `now` the reset is past,
+/// and the cell says how long ago (`UsageAge.agoText(since:now:)`): "just
+/// now", "40m ago", "2h ago", "1d ago". Em dash when the bucket or its reset
+/// time is absent.
 func usageResetCell(_ bucket: ClaudeUsageLimitBucket?, now: Date = Date(),
                     timeZone: TimeZone = .current) -> String {
     guard let bucket, let date = bucket.resetsAt else { return "—" }
@@ -242,6 +243,7 @@ func usageResetCell(_ bucket: ClaudeUsageLimitBucket?, now: Date = Date(),
         return UsageAge.agoText(since: date, now: now)
     }
     let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.timeZone = timeZone
     formatter.dateFormat = date.timeIntervalSince(now) < 24 * 3600 ? "HH:mm" : "M/d HH:mm"
     return formatter.string(from: date)
