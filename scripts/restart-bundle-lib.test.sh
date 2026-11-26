@@ -1141,8 +1141,8 @@ end old" "$(cat "$log" 2>/dev/null)"
 
 # Registering with LaunchServices changes nothing about what is installed, so
 # a registration that fails still installs: install_app_bundle warns and
-# succeeds. It records the difference in APP_BUNDLE_INSTALL_STEP, `installed`
-# rather than `registered`, for a caller that reports what it installed
+# succeeds. It records the difference in APP_BUNDLE_REGISTERED, false rather
+# than true, for a caller that reports what it installed
 # (update.sh's rollback), and register_app_bundle fails when lsregister does,
 # or is not there to run, where it used to swallow both.
 test_install_whose_registration_fails_still_installs() {
@@ -1168,15 +1168,14 @@ EOF
     assert_eq "an install whose registration fails still succeeds" "0" "$rc"
     assert_eq "and installs the new bundle" "new" \
         "$(cat "$apps/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
-    assert_eq "it records the bundle as installed, not registered" "installed" \
-        "$APP_BUNDLE_INSTALL_STEP"
+    assert_eq "it records the bundle as not registered" "false" "$APP_BUNDLE_REGISTERED"
     assert_contains "and warns" "could not register it with LaunchServices" \
         "$(cat "$root/stderr" 2>/dev/null)"
 
     rc=0
     install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>&1 || rc=$?
     assert_eq "an install that registers succeeds" "0" "$rc"
-    assert_eq "it records the bundle as registered" "registered" "$APP_BUNDLE_INSTALL_STEP"
+    assert_eq "it records the bundle as registered" "true" "$APP_BUNDLE_REGISTERED"
 
     # An lsregister that is not there registers nothing either. Counting
     # that as registered, as register_app_bundle did, fails here.
@@ -1187,8 +1186,8 @@ EOF
     TBD_LSREGISTER="$root/no-such-lsregister" \
         install_app_bundle "$root/new/TBD.app" "$apps/TBD.app" >/dev/null 2>"$root/stderr" || rc=$?
     assert_eq "an install with no lsregister still succeeds" "0" "$rc"
-    assert_eq "it records the bundle as installed, not registered (no lsregister)" "installed" \
-        "$APP_BUNDLE_INSTALL_STEP"
+    assert_eq "it records the bundle as not registered (no lsregister)" "false" \
+        "$APP_BUNDLE_REGISTERED"
     assert_contains "and warns (no lsregister)" "could not register it with LaunchServices" \
         "$(cat "$root/stderr" 2>/dev/null)"
 }
