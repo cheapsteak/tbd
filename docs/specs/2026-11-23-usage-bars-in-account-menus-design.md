@@ -86,10 +86,22 @@ not widen the menu.
     tooltip text for the worktree picker. The worktree picker's Codex rows put the reset in the bar's
     reset column, always as how long ago, "reset 2h ago", because the clock form can overflow that
     column.
+  - **A Codex row's "Limit reached" label** hides once every window the row draws, primary and
+    secondary, has ended, when the limit Codex reported is one of those windows'
+    (`rate_limit_reached`): the reading that reported it came before the resets, and the bars below
+    draw empty windows. With no window, or a window that gives no reset time, the label stays.
+    Spend control keeps the label whatever the windows say, because it caps a workspace's spending
+    rather than a window, and so does any other limit type Codex reports, such as credits running
+    out (`CodexUsagePresentation.showsLimitReached`).
   - **The limit banner's reset** says "resets 7am" while that is ahead and "reset at 7am" once it has
     passed.
-  - **`tbd profile list`** prints an ended window as "0%" in its table, with the RESET column saying
-    how long ago, "2h ago". `--json` stays raw data: the recorded percent and the reset time.
+  - **`tbd profile list`** prints an ended window as "0%" in its table when the reading is healthy
+    (`ProfileUsageSnapshot.countsAsReset(_:at:)`). A reading whose fetch is failing keeps its
+    recorded percent beside its "[stale*]" marker, as the sheet's order does. In both, the RESET
+    column says how long ago the window reset, "2h ago", in the words the app's ages use
+    (`UsageAge` in `TBDShared`), because a past clock time would read as the next reset. A reset
+    still ahead prints in fixed 24-hour digits, "18:10", whatever the machine's locale. `--json`
+    stays raw data: the recorded percent and the reset time.
   - **The "Choose account…" sheet** shows a reading whose fetch is failing as its note in place of
     the bars and the usage caption, as these menus do. Its own order counts an ended window as 0%
     when the reading is healthy (`ProfileUsageSnapshot.countsAsReset(_:at:)`). That order places
