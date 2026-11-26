@@ -50,6 +50,14 @@ struct UsageBarsView: View {
             }
         }
     }
+
+    /// One row in words, for its tooltip and for VoiceOver: "5-hour window:
+    /// 12% used · resets at 11:10pm", or "5-hour window: reset at 7am" once
+    /// the window has ended, where the bar draws an empty "0%".
+    nonisolated static func rowText(windowLabel: String,
+                                    presentation: ProfileUsagePresentation.BucketPresentation) -> String {
+        "\(windowLabel): \(presentation.usageText())"
+    }
 }
 
 // MARK: - One bar row
@@ -83,6 +91,10 @@ private struct UsageBarRow: View {
             trailingResetHint
         }
         .help(helpText)
+        // One element that reads as the tooltip does, so VoiceOver hears when
+        // an ended window reset rather than the "0%" its bar draws.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(helpText)
     }
 
     // MARK: Trailing reset hint
@@ -159,10 +171,10 @@ private struct UsageBarRow: View {
     // MARK: Tooltip
 
     /// The spelled-out reset info the compact form omits, kept as a `.help`
-    /// tooltip so nothing is lost: "5-hour window: 12% used · resets at
-    /// 11:10pm", or "5-hour window: reset at 7am" once the window has ended.
+    /// tooltip so nothing is lost, and the row's VoiceOver label
+    /// (`UsageBarsView.rowText`).
     private var helpText: String {
-        "\(windowLabel): \(presentation.usageText())"
+        UsageBarsView.rowText(windowLabel: windowLabel, presentation: presentation)
     }
 }
 
