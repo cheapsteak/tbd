@@ -58,10 +58,10 @@ struct KeyboardLayout: Sendable {
 /// What one of the macOS text-editing shortcuts sends
 /// (`TerminalInputController.naturalTextEditing(for:onAlternateScreen:)`).
 enum NaturalTextEditing: Equatable {
-    /// These bytes, whatever the program's modes.
+    /// These bytes, whatever the program's modes. The key's release sends nothing.
     case bytes([UInt8])
     /// A plain press of this key, with no modifiers, through the key encoder, so the program's
-    /// modes choose the form it takes.
+    /// modes choose the form it takes. The key's release is a plain release of this key.
     case encodedKey(GhosttyKey)
 }
 
@@ -104,6 +104,25 @@ final class TerminalInputController {
     /// Non-nil only while a `keyDown` is being interpreted. `insertText` appends to it instead of
     /// pasting, which is how a committed IME composition becomes a key press rather than a paste.
     var keyTextAccumulator: [String]?
+
+    /// What a text-editing shortcut's press sent, by the key code of its key, until that key's
+    /// release. The release follows the press, as Ghostty's own key bindings make it: nothing
+    /// after fixed bytes, a plain release of the encoded key after an encoded one. A program that
+    /// asks for releases (Kitty's report-event-types flag) then never gets the release of a key
+    /// it was not told was pressed.
+    ///
+    /// * A shortcut's press sets the entry, and its repeats leave it. A key that went out as
+    ///   itself before a modifier made its repeats a shortcut still sends its own release.
+    /// * Any other key-down of the key, a repeat included, removes the entry: that key-down went
+    ///   to the key encoder as the key itself, so its release does too.
+    /// * The key's release removes it, whatever modifiers are held then, because a modifier is
+    ///   often let go before the key.
+    ///
+    /// A release that never arrives leaves its entry until the key's next key-down replaces it:
+    /// a key let go while ⌘ is down, for which AppKit sends no key-up, or after focus moved away.
+    /// Focus loss does not clear it. Until that next key-down the entry can only hold back the
+    /// release of a press this view never received, which its program never saw.
+    private var textEditingPresses: [UInt16: NaturalTextEditing] = [:]
 
     init() {}
 
@@ -177,6 +196,7 @@ final class TerminalInputController {
         // with the same key, as they do in SwiftTerm, where `performKeyEquivalent` takes them.
         if isKeyTarget(view), let editing = Self.naturalTextEditing(
             for: event, onAlternateScreen: view.terminal.withLocked({ $0.isAlternateScreen })) {
+            if !event.isARepeat { textEditingPresses[event.keyCode] = editing }
             switch editing {
             case .bytes(let bytes):
                 sendTyped(bytes, in: view)
@@ -187,6 +207,7 @@ final class TerminalInputController {
             }
             return true
         }
+        textEditingPresses[event.keyCode] = nil
         guard acceptsKeyDown(event, in: view) else { return false }
 
         if handlePageKey(event, in: view) { return true }
@@ -396,11 +417,22 @@ final class TerminalInputController {
 
     /// A release. Releases need the kitty `REPORT_EVENTS` flag (2), so most programs get nothing.
     /// Wired anyway for TUIs that do ask for them.
+    ///
+    /// A text-editing shortcut's release follows what its press sent: see `textEditingPresses`.
     private func handleKeyUp(_ event: NSEvent) -> Bool {
+        let editing = textEditingPresses.removeValue(forKey: event.keyCode)
         guard !hasMarkedText else { return true }
-        send(Self.keyPress(
-            event: event, translationEvent: event, action: .release,
-            optionAsAlt: optionAsAlt, text: "", composing: false, layout: layout))
+        switch editing {
+        case nil:
+            send(Self.keyPress(
+                event: event, translationEvent: event, action: .release,
+                optionAsAlt: optionAsAlt, text: "", composing: false, layout: layout))
+        case .encodedKey(let key):
+            send(KeyPress(action: .release, key: key))
+        case .bytes:
+            // No key went out for the press, so there is none to release.
+            break
+        }
         return true
     }
 
