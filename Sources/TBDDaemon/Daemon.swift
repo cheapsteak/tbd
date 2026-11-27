@@ -1767,17 +1767,10 @@ public final class Daemon: Sendable {
             // the reconciler that parks or deletes such rows: the startup pass
             // keeps one whose job was still running when it looked, and no
             // later pass is due to look again.
-            let reaperLifecycle = lifecycle
             let reaper = AgentReaper(
                 signaller: ProductionProcessSignaller(),
                 holderSessions: holderSessions,
-                onHolderJobGone: { [reaperLifecycle, actuationLog] record in
-                    await reaperLifecycle.reconcileHolderRowAfterJobGone(
-                        terminalID: record.terminalID,
-                        expectedHolderPID: record.holderPID,
-                        expectedChildPID: record.childPID,
-                        actuationLog: actuationLog)
-                })
+                onHolderJobGone: lifecycle.holderJobGoneHandBack(actuationLog: actuationLog))
             self.reaperTask = Task {
                 // Sweep once immediately (cold recovery), then every 60s.
                 await reaper.sweepHolderChildren()

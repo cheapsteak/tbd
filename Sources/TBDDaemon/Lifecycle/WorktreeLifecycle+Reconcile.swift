@@ -773,7 +773,8 @@ extension WorktreeLifecycle {
     /// stays a live, unparked holder row over a dead holder and a dead job
     /// until some later pass happens to sweep its repository — too late for
     /// the wake that follows a handover, which wakes only what is parked.
-    /// The reaper's `child-gone` verdict calls this (`AgentReaper.onHolderJobGone`).
+    /// The reaper's `child-gone` verdict calls this (`AgentReaper.onHolderJobGone`,
+    /// built by `holderJobGoneHandBack(actuationLog:)`).
     ///
     /// It decides nothing of its own. It re-reads the row, and judges it only
     /// if the row is still a live holder row naming the holder and job the
@@ -841,6 +842,29 @@ extension WorktreeLifecycle {
                 actuationLog: actuationLog)
         }
         return verdict
+    }
+
+    /// The `AgentReaper.onHolderJobGone` the daemon wires: each record the
+    /// reaper's holder leg finds `child-gone` goes to
+    /// `reconcileHolderRowAfterJobGone`, with the pids the leg read as the
+    /// pids the row must still name.
+    ///
+    /// Built here rather than inline in `Daemon.start` so that a test builds
+    /// the closure the daemon runs. The two pids share a type, so a swapped or
+    /// dropped argument still compiles, and the hand-back then refuses every
+    /// row as naming "a different holder or job": nothing fails, and the row
+    /// stays live over a dead holder and a dead job — the gap the hand-back
+    /// exists to close.
+    func holderJobGoneHandBack(
+        actuationLog: ActuationLog
+    ) -> @Sendable (HolderChildRecord) async -> Void {
+        { [self] record in
+            await reconcileHolderRowAfterJobGone(
+                terminalID: record.terminalID,
+                expectedHolderPID: record.holderPID,
+                expectedChildPID: record.childPID,
+                actuationLog: actuationLog)
+        }
     }
 
     /// Park or delete a live tmux row whose tmux server the probe found gone.

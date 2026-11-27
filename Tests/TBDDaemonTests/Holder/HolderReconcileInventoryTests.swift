@@ -825,6 +825,45 @@ struct HolderReconcileInventoryTests {
         #expect(rows.contains { $0.confirms == request.id && $0.result == .synchronous(.dispatched) })
     }
 
+    /// The closure the daemon gives the reaper, built as the daemon builds it
+    /// (`holderJobGoneHandBack(actuationLog:)`) and called as the reaper's leg
+    /// calls it, with the record it read. The record's holder and child pids
+    /// differ, so a closure that swapped them, or dropped either, would ask
+    /// about a holder and job the row does not name and leave it live: only
+    /// one that passes both through as read parks it.
+    @Test("the daemon's hand-back closure parks the row the reaper's record names")
+    func theDaemonsHandBackClosureParksTheRow() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(db: db, signaller: deadJobs([4243]), registry: registry)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let holderPID = try #require(claude.holderPID)
+        let childPID = try #require(claude.childPID)
+        try #require(holderPID != childPID, "equal pids cannot tell a swapped closure apart")
+        await registry.recordStatusForTesting(
+            .exitedStatusUnknown, for: claude.id, fromAbsentRendezvous: true)
+        let onHolderJobGone = lifecycle.holderJobGoneHandBack(
+            actuationLog: makeTestActuationLog())
+
+        await onHolderJobGone(HolderChildRecord(
+            terminalID: claude.id, holderPID: holderPID, childPID: childPID,
+            createdAt: HolderChildIdentity.anchor(of: claude)))
+
+        let parked = try #require(
+            try await db.terminals.get(id: claude.id),
+            "a resumable handed-back row was deleted instead of parked")
+        #expect(
+            parked.isParked,
+            """
+            the daemon's hand-back closure left the row live: it did not pass the record's \
+            pids through as read
+            """)
+        #expect(parked.hibernateReason == .recovery)
+    }
+
     /// Parity with the startup pass's other fork: a row with nothing to resume
     /// is deleted with its tab. Through the probe this time — nothing is
     /// remembered about the session, and the rendezvous is empty.
