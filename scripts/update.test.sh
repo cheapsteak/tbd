@@ -4603,8 +4603,11 @@ test_a_rollback_waits_for_the_app_exit_to_settle() {
 # holds a rename until 13 s, then from 29 s until 43 s. A settle of 0 waits
 # for nothing at the first check. Unset, the settle is 3 s and the second
 # check 31 s, and a second check that is not a whole number reads as 31 s.
-# The interval: [t, t] for an exit seen at t, [t, t + 9] at most for a stop
-# begun at t that did not see the exit, and never past the clock.
+# The interval: [t, t] for an exit seen at t, [t, now] for a stop begun at t
+# that did not see the exit, however long ago that was, and never past the
+# clock. So a stop not seen to end, read long after it began, holds a rename
+# for the whole second check from now: an app slow to quit can exit at any
+# time after the stop began.
 #
 # The assertions run in this shell, not a subshell: `fail` records a failure
 # in FAIL, and a subshell's FAIL never reaches the harness's exit status. The
@@ -4612,7 +4615,7 @@ test_a_rollback_waits_for_the_app_exit_to_settle() {
 # harness's.
 test_the_app_exit_check_wait_keeps_renames_clear_of_both_checks() {
     local TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=3 TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=31
-    local APP_EXIT_KIND APP_EXIT_AT pair now expected
+    local APP_EXIT_KIND APP_EXIT_AT pair now expected interval
     for pair in 0:4 2:2 4:0 28:0 29:5 31:3 33:1 34:0 121:0; do
         now="${pair%%:*}"
         expected="${pair#*:}"
@@ -4636,15 +4639,19 @@ test_the_app_exit_check_wait_keeps_renames_clear_of_both_checks() {
                     "$(app_exit_check_wait 0 0 0)" "$(app_exit_check_wait 29 0 0)"' \
             _ "$SCRIPT" "$HERE/restart-bundle-lib.sh")"
 
+    TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=31
     APP_EXIT_KIND=exited
     APP_EXIT_AT=100
     assert_eq "an exit seen at t lies at t" "100 100" "$(app_exit_interval 150)"
     APP_EXIT_KIND=stopping
     assert_eq "a stop not seen to end, read 3 s in: the exit is in [t, now]" "100 103" "$(app_exit_interval 103)"
-    assert_eq "read later: in [t, t + 9], past which the app is taken for stuck" "100 109" \
-        "$(app_exit_interval 200)"
-    APP_EXIT_KIND=exited
+    interval="$(app_exit_interval 200)"
+    assert_eq "read 100 s in: still [t, now], with no bound for an app slow to quit" "100 200" "$interval"
+    assert_eq "so a rename then waits the whole second check from now, 34 s" "34" \
+        "$(app_exit_check_wait 200 "${interval% *}" "${interval#* }")"
     APP_EXIT_AT=200
+    assert_eq "a stop recorded ahead of the clock reads as an exit now" "150 150" "$(app_exit_interval 150)"
+    APP_EXIT_KIND=exited
     assert_eq "a record ahead of the clock reads as an exit now" "150 150" "$(app_exit_interval 150)"
 }
 

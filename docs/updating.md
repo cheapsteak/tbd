@@ -136,11 +136,15 @@ these steps in order.
   that is killed after the stop leaves the app down with the second check
   still to come. The next update then finds the app still down and keeps its
   install's renames clear of that check too, even though its own stop finds
-  no app to stop. The record goes once the app is launched again, or once
-  both checks are over. The app stops before the daemon is handed over
-  because an app still running during the handover reconnects to the new
-  daemon and re-attaches the session it shows, and the new daemon keeps that
-  claim after the app is replaced, refusing the replacement's attach. From
+  no app to stop. A run killed while it was still stopping the app records
+  only when the stop began, and the app may have quit at any time since, so
+  the next update waits 4 seconds before its install, or the full 34 seconds
+  when 25 or more have passed since the stop began. The record goes once
+  the app is launched again, or once both checks are over. The app stops
+  before the daemon is handed over because an app still running during the
+  handover reconnects to the new daemon and re-attaches the session it
+  shows, and the new daemon keeps that claim after the app is replaced,
+  refusing the replacement's attach. From
   here on, every way the run ends launches the app again, but two: an
   interruption while the bundle is being installed and the daemon handed
   over, and a failed handover whose rollback does not complete, both

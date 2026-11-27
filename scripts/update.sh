@@ -1656,11 +1656,14 @@ load_app_exit_record() {
 # `<from> <to>`:
 #
 #   - exited t: [t, t];
-#   - stopping t: [t, min(now, t + APP_STOP_GRACE + 4)]. A stop waits
-#     APP_STOP_GRACE seconds after SIGTERM and 3 more after SIGKILL, and the
-#     last second covers whole-second rounding. An app the stop could not
-#     see go within that is treated as stuck, never exiting, rather than as
-#     an exit still to come.
+#   - stopping t: [t, now]. The exit came after the stop began and no later
+#     than now, and nothing narrows it further: an app slow to quit after its
+#     run was killed mid-stop can exit long after any stop's own budget. So,
+#     with the app down, such a record holds a rename for the settle from
+#     now, and once that settle runs into t + APP_EXIT_RECHECK_SECONDS - 2,
+#     for the whole second check from now (app_exit_check_wait). It costs
+#     that whole wait at most once: the wait point forgets the record after
+#     it.
 #
 # Neither end lies after <now>: a record ahead of the clock, which was set
 # back since, reads as an exit at <now>.
@@ -1668,7 +1671,7 @@ load_app_exit_record() {
 #   app_exit_interval <now>
 app_exit_interval() {
     local now="${1-}" from="$APP_EXIT_AT" to="$APP_EXIT_AT"
-    [ "$APP_EXIT_KIND" != stopping ] || to=$((from + APP_STOP_GRACE + 4))
+    [ "$APP_EXIT_KIND" != stopping ] || to="$now"
     [ "$to" -le "$now" ] || to="$now"
     [ "$from" -le "$to" ] || from="$to"
     printf '%s %s\n' "$from" "$to"
