@@ -7,6 +7,9 @@ import Metal
 import TestSupport
 import Testing
 
+// GhosttyVt's C terminal type is also named `GhosttyTerminal`; name the Swift class by module.
+private typealias Terminal = TBDGhosttyCore.GhosttyTerminal
+
 /// What a view sent. Main-actor isolated, so a `@MainActor` callback can append to it without
 /// capturing a mutable local.
 @MainActor
@@ -36,15 +39,15 @@ private let shortcutLayout = KeyboardLayout { event, modifiers in
 }
 
 /// An 80×24 terminal with a hundred lines of scrollback and no callbacks.
-private func makeTerminal() throws -> GhosttyTerminal {
-    try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+private func makeTerminal() throws -> Terminal {
+    try Terminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
 }
 
 /// An 80×24 terminal and a view over it, with an input method that does nothing, so every key
 /// goes to the key encoder as it does when no composition is running.
 @MainActor
 private struct ShortcutViewFixture {
-    let terminal: GhosttyTerminal
+    let terminal: Terminal
     let view: GhosttyTerminalView
     let recorder: SentBytes
 
@@ -137,7 +140,7 @@ private func pageDown(_ flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
 private let sixtyLines = (0..<60).map { "line \($0)\r\n" }.joined()
 
 /// The first scrollable row the viewport shows.
-private func viewportOffset(of terminal: GhosttyTerminal) throws -> Int {
+private func viewportOffset(of terminal: Terminal) throws -> Int {
     try terminal.withLocked { state in
         TerminalScrollMetrics.read(try #require(state.raw, "the terminal is closed")).offset
     }
@@ -145,7 +148,7 @@ private func viewportOffset(of terminal: GhosttyTerminal) throws -> Int {
 
 /// The bytes `event` encodes to on `terminal`, through the same translation the view runs.
 @MainActor
-private func encoded(_ event: NSEvent, on terminal: GhosttyTerminal, optionAsAlt: OptionAsAlt = .never) -> [UInt8] {
+private func encoded(_ event: NSEvent, on terminal: Terminal, optionAsAlt: OptionAsAlt = .never) -> [UInt8] {
     let press = TerminalInputController.keyPress(
         event: event, action: .press, optionAsAlt: optionAsAlt, layout: shortcutLayout)
     return terminal.encodeKey(press, optionAsAlt: optionAsAlt)
