@@ -4818,6 +4818,48 @@ test_the_exit_record_follows_the_app() {
     done
 }
 
+# An exit with no usable time, as a clock that could not be read leaves it,
+# must not read as an exit long past, or as one at the epoch's start, either
+# of which waits for nothing. Recording it writes nothing: the file keeps the
+# line it held, the WARNING says so, and the record in memory keeps the empty
+# time. The wait point then waits out a whole second check from now, 34 s
+# with the second check at 31 s, says why, and keeps the record, since
+# nothing says that check is over. The second check stays at 31 s and the
+# settle at 0, as in the rest of the harness, so the only thing that makes
+# this wait is the missing time: read as an exit now, the record would wait
+# 3 s with a second check of 0 s and nothing with one of 31 s. The wait is a
+# stubbed `sleep` that prints its argument, and the app is not running, so
+# nothing here waits or looks for a process.
+test_an_exit_with_no_usable_time_waits_out_a_whole_second_check() {
+    local root record out
+    root="$TEST_TMP/exit-with-no-usable-time"
+    record="$root/updates/app-exit"
+    mkdir -p "$root/updates"
+    printf 'exited 100\n' > "$record"
+    out="$(
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        APP_EXIT_FILE="$record"
+        INSTALLED_BUNDLE="$root/Applications/TBD.app"
+        OPT_AUTO=false
+        export TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=0 TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=31
+        app_process_pid() { return 1; }
+        sleep() { printf 'slept %s\n' "$1"; }
+        record_app_exit exited ""
+        printf 'recorded [%s] [%s]\n' "$APP_EXIT_KIND" "$APP_EXIT_AT"
+        wait_out_app_exit_checks "installing the new app bundle"
+        printf 'after the wait [%s] [%s]\n' "$APP_EXIT_KIND" "$APP_EXIT_AT"
+    )"
+    assert_contains_literal "an exit with no usable time is not written, and the WARNING says so" \
+        "WARNING: the app's exit has no usable time [], so $record is left as it was" "$out"
+    assert_eq "the file keeps the line it held" "exited 100" "$(cat "$record" 2>/dev/null)"
+    assert_contains_literal "the record in memory keeps the empty time" "recorded [exited] []" "$out"
+    assert_contains_literal "the wait point says why it waits in full" \
+        "WARNING: the recorded exit has no usable time []; waiting 34s before installing the new app bundle" "$out"
+    assert_contains_literal "and waits a whole second check from now, rather than for nothing" "slept 34" "$out"
+    assert_contains_literal "and keeps the record" "after the wait [exited] []" "$out"
+}
+
 # An install that stops part-way leaves its siblings behind: a partial copy at
 # .TBD-install-incoming, and, when it stopped between its two renames, the
 # bundle it was replacing at .TBD-install-outgoing with nothing installed. The
@@ -6382,6 +6424,7 @@ test_the_app_exit_check_wait_keeps_renames_clear_of_both_checks
 test_a_rollback_waits_out_the_second_check_of_the_app_exit
 test_a_retry_waits_out_the_checks_of_an_earlier_runs_exit
 test_the_exit_record_follows_the_app
+test_an_exit_with_no_usable_time_waits_out_a_whole_second_check
 test_an_update_clears_what_an_interrupted_install_left
 test_an_interrupted_install_reports_which_build_is_installed
 test_an_interruption_while_staging_reports_that_nothing_was_installed

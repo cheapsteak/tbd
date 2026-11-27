@@ -1604,11 +1604,21 @@ log_app_stop() {
 # it. A write that fails is logged and leaves the record in memory, so this
 # run's own rollback still waits on it; only a later run goes without it.
 #
+# An <epoch> that is not a whole number of seconds, as a clock that could not
+# be read gives, is never written, and the file keeps what it held. It is
+# logged, and the record in memory keeps it, so the wait point takes its
+# conservative branch and waits out a whole second check rather than reading
+# the exit as one long past (wait_out_app_exit_checks).
+#
 #   record_app_exit exited|stopping <epoch>
 record_app_exit() {
     local kind="${1-}" at="${2-}" tmp="$APP_EXIT_FILE.tmp"
     APP_EXIT_KIND="$kind"
     APP_EXIT_AT="$at"
+    if ! _is_whole_number "$at"; then
+        log "WARNING: the app's exit has no usable time [$at], so $APP_EXIT_FILE is left as it was; this run waits out macOS's checks of the exit in full before the installed bundle moves"
+        return 0
+    fi
     if [ ! -d "$APP_EXIT_FILE" ] && mkdir -p "$(dirname "$APP_EXIT_FILE")" 2>/dev/null &&
         printf '%s %s\n' "$kind" "$at" 2>/dev/null > "$tmp" &&
         mv -f "$tmp" "$APP_EXIT_FILE" 2>/dev/null; then
@@ -1744,6 +1754,10 @@ app_exit_check_wait() {
 #     the pattern stop_installed_app stops), it forgets the record and
 #     returns: the app was launched again since that exit, or never exited,
 #     so no check of it is pending;
+#   - with no usable time for the clock or for the recorded exit, it logs
+#     why and waits out a whole second check from now, and keeps the
+#     record, since nothing says that check is over. An exit with no time
+#     read as one at the epoch's start would wait for nothing;
 #   - otherwise it logs what waits, for how long and why, and sleeps; then it
 #     forgets the record once the second check is over.
 #
@@ -1763,10 +1777,10 @@ wait_out_app_exit_checks() {
     fi
     now="$(date +%s)"
     recheck="$(app_exit_recheck_seconds)"
-    if ! _is_whole_number "$now"; then
-        # No clock reading to measure from: wait out a whole second check,
-        # and keep the record, since nothing says it is over.
-        log "WARNING: could not read the clock; waiting $((recheck + 3))s before $what, the longest macOS's checks of the app's exit can still take"
+    if ! _is_whole_number "$now" || ! _is_whole_number "$APP_EXIT_AT"; then
+        why="could not read the clock"
+        ! _is_whole_number "$now" || why="the recorded exit has no usable time [$APP_EXIT_AT]"
+        log "WARNING: $why; waiting $((recheck + 3))s before $what, the longest macOS's checks of the app's exit can still take"
         sleep $((recheck + 3))
         return 0
     fi
