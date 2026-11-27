@@ -187,8 +187,16 @@ The helper has three modes:
    The claim is what keeps a late helper launch and a direct fallback from both starting a
    daemon. The pid-file gate alone cannot: during a handover both carry `TBD_HANDOVER_FROM_PID`,
    which is the way past that gate.
-7. On success `--launch` boots out the finished job, removes the launch directory and prints the
-   pid. The launcher waits on that pid exactly as it waits on `$!` today.
+7. On success `--launch` waits for the job to finish. It runs `launchctl print` on the job every
+   20 ms, up to 2 seconds on the same clock, until the job has no running process. `--job` exits
+   right after its spawn, so the first check usually passes. Then `--launch` boots out the job,
+   removes the launch directory and prints the pid. The launcher waits on that pid exactly as it
+   waits on `$!` today.
+   - **Why it waits:** booting out a job whose process is still running SIGTERMs that process.
+     Only booting out a finished job has been shown to leave `--serve` and the daemon running.
+   - **A job still running at the deadline** stays registered. `--launch` removes the launch
+     directory and succeeds anyway, and `OrphanGC` boots out the registration once it is not
+     running.
 
 The daemon spawns holders, and holders spawn agents, as they do today. Each one inherits the
 job's coalition and has `--serve` as its responsible process. Quitting TBD.app or a terminal
@@ -316,7 +324,8 @@ launcher falls back to a direct launch. The next shell launch installs the versi
 ### Durable resources and their reconcilers
 
 - **launchd job registrations and launch directories.** `--launch` removes its own on success
-  and on failure. A `--launch` killed partway leaves both behind. `OrphanGC`, under `gcEnabled`,
+  and on failure, except a registration whose job is still running at step 7's deadline. A
+  `--launch` killed partway leaves both behind. `OrphanGC`, under `gcEnabled`,
   boots out any job labelled `com.github.cheapsteak.tbd.daemon.` that is not running and whose
   launch directory is older than `gcGraceSeconds`, then removes the directory. Each half is
   judged on its own: a registration with no launch directory is booted out when it is not
@@ -454,6 +463,10 @@ Every branch the flag gates is tested in both states, as `CLAUDE.md` requires.
   disclaim symbol missing, spawn error, deadline passed with the claim taken by `--launch`, and
   deadline passed with the claim taken by `--serve` but no result. Each boots out the job,
   removes the directory and exits non-zero with its reason.
+- **`--launch` success,** with the same injected runner and clock: a job that still reports a
+  running process when the pid appears is booted out only after it reports none. A job that
+  still reports one at the 2-second deadline is left registered, and `--launch` removes the
+  directory and succeeds.
 - **The claim:** `--serve` that finds `claim` already created spawns nothing. `--launch` that
   finds it taken by `--serve` waits for the result instead of failing at the first deadline.
 - **`--serve` lifetime,** with an injected coalition lister and clock: it stays while another
@@ -517,6 +530,9 @@ Park and wake, or end, each session it reports exposed.
 - `tbd doctor sessions` in a TBD tab: the prompts name TBD Server. After granting, it lists
   `~/Documents` and reaches the LAN, and both still work after an update that leaves
   `HelperVersion` unchanged.
+- Full Disk Access: before TBD Server has the grant, a command in a TBD tab is refused a folder
+  that only Full Disk Access opens. After the grant it reads that folder, and still can after an
+  update that leaves `HelperVersion` unchanged.
 - A launch over SSH falls back to a direct launch and says why.
 - Nothing TBD started remains after logout.
 
