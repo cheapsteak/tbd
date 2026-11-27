@@ -181,12 +181,13 @@ The helper has three modes:
    - **It creates it:** no daemon can start from this launch, so it fails and the launcher falls
      back.
    - **`--serve` holds it already:** the spawn is under way. `--launch` waits up to a further 5
-     seconds for the `pid` or `error:` result. Past that it fails anyway, and the daemon's
-     pid-file gate is the backstop against a second daemon.
+     seconds for the `pid` or `error:` result. Past that it fails anyway.
 
    The claim is what keeps a late helper launch and a direct fallback from both starting a
-   daemon. The pid-file gate alone cannot: during a handover both carry `TBD_HANDOVER_FROM_PID`,
-   which is the way past that gate.
+   daemon. The pid-file gate alone cannot choose between them: during a handover both carry
+   `TBD_HANDOVER_FROM_PID`, which is the way past that gate. Only a `--serve` that claims and then
+   stalls past both deadlines gets past the claim, and the gate's lock ("Handover and existing
+   sessions") keeps that case to one daemon.
 7. On success `--launch` waits for the job to finish. It runs `launchctl print` on the job every
    20 ms, up to 2 seconds on the same clock, until the job has no running process. `--job` exits
    right after its spawn, so the first check usually passes. Then `--launch` boots out the job,
@@ -284,7 +285,8 @@ launcher is about to start the daemon directly:
 - **`--launch` took the claim:** no daemon can start from this launch, so a SIGTERM to a `--job`
   still running ends nothing the sessions need.
 - **`--serve` took the claim and gave no result:** the bootout either ends a late spawn or comes
-  before it. Either way the pid-file gate leaves one daemon, the late one or the direct one.
+  before it. A late daemon and the direct one then reach the pid-file gate one at a time, and its
+  lock lets exactly one past.
 
 The launcher logs the reason and launches the daemon directly, removing the inherited labels as
 any direct launch does and setting `TBD_LAUNCH_FALLBACK_REASON` in the daemon's environment. A failed helper launch therefore costs exactly today's exposure, and never leaves
@@ -292,6 +294,13 @@ the user without a daemon.
 
 ### Handover and existing sessions
 
+- **The pid-file gate is a compare-and-set.** `Daemon.start` takes an exclusive `flock` on
+  `tbdd.pid.lock`, beside the pid file, before it reads the pid file. It releases the lock once
+  its claim is written, before it retires any predecessor. Two successors that both carry
+  `TBD_HANDOVER_FROM_PID` then pass the gate one at a time. The second reads the first one's pid,
+  a live daemon that is not the predecessor it was sent to replace, and exits at the gate. The
+  gate that reads and then writes, with no lock, lets both take over. The lock file is one fixed
+  file per `TBD_HOME`, so nothing accumulates and it needs no reconciler.
 - **Every launch creates its own job, coalition and `--serve`.** A handover's successor runs under
   a new `--serve`. The previous `--serve` lingers until its last holder ends, so after a few
   updates a few idle `--serve` processes may run, each bounded by its own sessions.
@@ -408,6 +417,10 @@ launcher falls back to a direct launch. The next shell launch installs the versi
 
 ## Residual risks
 
+- **A `--serve` that stalls past both deadlines** can start a daemon after the launcher has
+  fallen back. The gate's lock keeps that to one daemon. If the late one wins, the launcher's own
+  daemon exits at the gate and the launcher reports a failed start while the late daemon serves.
+  An update treats that as a failed handover.
 - **GUI apps that agents launch still join the daemon's coalition.** Force-quitting one, or
   loginwindow terminating one, can take the coalition with it (herdr#5784, diri#693). Giving each
   holder a launchd job of its own would contain that at about 60 ms per spawn. That is follow-up
@@ -442,9 +455,11 @@ launcher falls back to a direct launch. The next shell launch installs the versi
   terminated with its subordinates (agterm#985).
 - **One long-lived `--serve` that spawns each successor daemon on request.** It adds a protocol
   and helper-daemon version skew, and buys nothing over a `--serve` per launch.
-- **Leaving the fallback race to the daemon's pid-file gate.** During a handover both a late
-  helper daemon and the direct fallback carry `TBD_HANDOVER_FROM_PID`, the way past that gate, so
-  it cannot pick one. Having `--serve` kill a daemon it spawned after the deadline was rejected
+- **Leaving the fallback race to the daemon's pid-file gate alone.** During a handover both a late
+  helper daemon and the direct fallback carry `TBD_HANDOVER_FROM_PID`, the way past that gate.
+  Its lock leaves one daemon, but which one is a race, and the loser may be the daemon the
+  launcher waits on. The claim settles it, except for a `--serve` that stalls past both
+  deadlines. Having `--serve` kill a daemon it spawned after the deadline was rejected
   too: a daemon that starts and is killed can disturb a handover in progress.
 - **A marker file beside the binaries saying they understand `--launch-mode`.** It is one more
   artifact to keep in step with the binary, where the fenced probe makes an old binary harmless
@@ -477,6 +492,9 @@ Every branch the flag gates is tested in both states, as `CLAUDE.md` requires.
   directory and succeeds.
 - **The claim:** `--serve` that finds `claim` already created spawns nothing. `--launch` that
   finds it taken by `--serve` waits for the result instead of failing at the first deadline.
+- **The gate's lock:** two successors given the same `TBD_HANDOVER_FROM_PID` reach the gate
+  together, against an injected live predecessor. Exactly one takes over, and the other exits at
+  the gate.
 - **`--serve` lifetime,** with an injected coalition lister and clock: it stays while another
   member remains, exits when alone, and stays when the listing fails.
 - **`OrphanGC`,** with an injected `launchctl` runner, so no test registers or boots out a real
