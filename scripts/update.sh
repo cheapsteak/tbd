@@ -65,19 +65,39 @@ HANDOVER_STOP_GRACE=5
 # grace only spares it a SIGKILL while it tears down its windows.
 APP_STOP_GRACE=5
 
-# How long nothing may move the installed app bundle after the app has been
-# stopped, in seconds. When an app quits, macOS 27 reads its bundle at the
+# How long nothing may move the installed app bundle after the app has
+# exited, in seconds. When an app quits, macOS 27 reads its bundle at the
 # installed path to decide whether it may stay in the background, and a bundle
 # that is missing or half-copied at that instant gets every process in the
 # app's coalition force-quit, sessions included (see
-# stop_app_before_handover). The read measured came 12 ms after the quit, and
-# the force-quit about a second after that, so three seconds is a wide margin.
-# Only a rollback after a failed handover waits on it: it is the one step that
-# moves the bundle after the app stop, and a handover can fail within
-# milliseconds.
+# stop_app_before_handover). That first check has come within about 160 ms of
+# the quit in every run measured, and the force-quit about a second after it,
+# so three seconds is a wide margin. Every step that moves the bundle while an
+# exit of the app may still be checked waits on it (wait_out_app_exit_checks):
+# the rollback after a failed handover, which can fail within milliseconds of
+# the app stop, and the install of a run that finds the app still down after
+# an earlier run stopped it.
 # TBD_UPDATE_APP_EXIT_SETTLE_SECONDS overrides it for one run; the test
 # harness sets it to 0.
 APP_EXIT_SETTLE_SECONDS=3
+
+# When macOS checks a quit app's bundle a second time, in seconds after the
+# app exited. When an app exits and leaves processes in its coalition,
+# loginwindow asks Background Task Management whether it may stay in the
+# background, and if that first check allows it, asks again about 31 seconds
+# after the exit, unless the app has been launched again by then: a relaunch
+# ends loginwindow's tracking of the earlier exit. The second check reads the
+# bundle at the installed path just as the first does, for up to about 200
+# ms, and a failed read there gets the coalition force-quit the same way. So
+# nothing renames the installed bundle from two seconds before this mark
+# until three seconds after it (app_exit_check_wait), which covers the
+# whole-second rounding of the clock, the check landing a few hundred
+# milliseconds after the mark, and the length of the read. Two adjacent
+# renames shrink the moment the path is empty, but they cannot protect a read
+# already in progress. Measured in the field.
+# TBD_UPDATE_APP_EXIT_RECHECK_SECONDS overrides it for one run; a value that
+# is not a whole number of seconds reads as 31.
+APP_EXIT_RECHECK_SECONDS=31
 
 # Where the new binaries come from. `build` compiles them here, as every update
 # always has. `release` downloads the build the release workflow published for
@@ -140,6 +160,10 @@ UPDATE_SOURCE_FILE="$UPDATE_HOME/update-source"
 # from the resolved update source: present and naming the release tag while
 # the source is `release`, absent (the daemon then reads main) otherwise.
 CHECK_REF_FILE="$UPDATE_HOME/check-ref"
+# The exit of an app a run stopped, for as long as macOS may still check it,
+# so that a later run that finds the app still down keeps its renames clear
+# of that check too. See record_app_exit.
+APP_EXIT_FILE="$UPDATE_HOME/app-exit"
 
 UPDATE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -972,9 +996,12 @@ BUNDLE_STASHED=false
 # one that matches the daemon still running, or is the bundle this run
 # replaced.
 #
-# It waits for the app's exit to settle before anything moves
-# (wait_for_app_exit_to_settle): a handover can fail within milliseconds of
-# the app stop, and macOS reads the installed bundle just after an app quits.
+# It waits out macOS's checks of the app's exit before anything moves
+# (wait_out_app_exit_checks). The app this run stopped is still down: a
+# handover can fail within milliseconds of the stop, while macOS reads the
+# installed bundle for the exit, and anywhere in its two-minute budget,
+# including about APP_EXIT_RECHECK_SECONDS after the stop, when macOS reads
+# it again.
 #
 # The spent copy is removed as keep_installed_bundle removes the one it
 # replaces: renamed to the discard sibling first and deleted there, so a
@@ -994,7 +1021,7 @@ restore_previous_bundle() {
         log_error "no previous app bundle to restore at $PREVIOUS_BUNDLE"
         return 1
     fi
-    wait_for_app_exit_to_settle
+    wait_out_app_exit_checks "putting the previous app bundle back at $installed_bundle"
     install_app_bundle "$PREVIOUS_BUNDLE" "$installed_bundle" || status=$?
     if [ "$status" -ne 0 ]; then
         [ "$status" -ne 2 ] || put_back_after_failed_swap "$installed_bundle"
@@ -1127,11 +1154,14 @@ put_back_after_failed_swap() {
 # after it and then calls hand_over_to_new_daemon. It runs while the app is
 # still running, and it never leaves the installed path without a whole
 # bundle, so the app quits in front of one whenever it quits (see
-# stop_app_before_handover). A failure leaves the installed bundle as it was,
-# so there is nothing to roll back. Clears BUNDLE_RESTORE_FAILED, which the
-# one failure that does not leave the installed bundle as it was sets: a swap
-# that could put back neither the new bundle nor, after a second try, the old
-# one (put_back_after_failed_swap).
+# stop_app_before_handover). When the app is down instead, because an
+# earlier run stopped it and never launched it again, the swap first waits
+# out macOS's checks of that exit (wait_out_app_exit_checks), which are still
+# pending for up to about half a minute after it. A failure leaves the
+# installed bundle as it was, so there is nothing to roll back. Clears
+# BUNDLE_RESTORE_FAILED, which the one failure that does not leave the
+# installed bundle as it was sets: a swap that could put back neither the new
+# bundle nor, after a second try, the old one (put_back_after_failed_swap).
 install_new_bundle() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
@@ -1163,6 +1193,11 @@ install_new_bundle() {
     # spawns is the one named by the bundle's SourceWorktreePath. That must
     # already be the update clone, or a rescue spawn in that window reinstates
     # the old binary underneath the new install.
+    #
+    # With the app running, or no exit of it recorded, the wait below returns
+    # at once; it waits only for a run that finds the app still down after
+    # an earlier run stopped it.
+    wait_out_app_exit_checks "installing the new app bundle at $installed_bundle"
     install_app_bundle "$bundle_dir" "$installed_bundle" || status=$?
     case "$status" in
         0) return 0 ;;
@@ -1498,10 +1533,16 @@ installed_bundle_matches_release_link() {
 # the answer to whether an app was running when the run began to move things.
 APP_STOP_OUTCOME=none
 
-# The value of SECONDS when the stop before the handover returned having found
-# an app, and empty when it found none or never ran. A rollback waits
-# APP_EXIT_SETTLE_SECONDS from it (wait_for_app_exit_to_settle).
-APP_STOPPED_AT=""
+# How the latest stop_app_recording_its_exit ended, in the same words. Each
+# caller reads it straight after its own stop, and only the stop before the
+# handover copies it into APP_STOP_OUTCOME.
+APP_STOP_RESULT=none
+
+# The exit record in memory: the kind (exited or stopping) and the epoch
+# second of the line APP_EXIT_FILE mirrors, or both empty when no exit of the
+# app is known to be still under macOS's checks. See "The app's exit" below.
+APP_EXIT_KIND=""
+APP_EXIT_AT=""
 
 # Stop the app running from the installed bundle and wait until it has exited.
 # Prints how that ended — none, stopped, killed, survived or unknown — and logs
@@ -1516,6 +1557,263 @@ stop_installed_app() {
 # Log how a stop_installed_app ended, in the wording restart.sh shares.
 log_app_stop() {
     log "$(describe_app_stop "${1-}" "$APP_STOP_GRACE" "$INSTALLED_BUNDLE")"
+}
+
+# MARK: - The app's exit
+#
+# When an app exits and leaves processes in its coalition, as TBD's app does
+# (the daemon, every pty holder and every agent session can be in it), macOS
+# checks the app's bundle at its installed path twice: just after the exit,
+# and again about APP_EXIT_RECHECK_SECONDS later, unless the app has been
+# launched again by then. A rename of the installed bundle during either
+# check can get the whole coalition force-quit (see APP_EXIT_SETTLE_SECONDS,
+# APP_EXIT_RECHECK_SECONDS and stop_app_before_handover). So every step that
+# swaps the installed bundle while the app may be down first waits out both
+# checks of the app's latest exit (wait_out_app_exit_checks): the rollback
+# after a failed handover (restore_previous_bundle) and the install
+# (install_new_bundle).
+#
+# That exit can be an earlier run's. A run that stops the app and is then
+# killed, or ends any other way that leaves the app stopped, leaves the second
+# check of that exit pending, and nothing relaunches the app to end it. A
+# retry within half a minute installs before it stops anything, and its own
+# stop then finds no app and waits for nothing. So each stop
+# (stop_app_recording_its_exit) records the exit in APP_EXIT_FILE as well as
+# in memory (APP_EXIT_KIND, APP_EXIT_AT), and main reads the file back once,
+# under the lock that guards it (load_app_exit_record). The file holds one
+# line:
+#
+#   exited <epoch>     an exit the stop saw, at that second;
+#   stopping <epoch>   a stop that began at that second and did not see the
+#                      exit: the run was killed mid-stop, or the stop ended
+#                      survived or unknown.
+#
+# The record is forgotten, its memory cleared and the file removed
+# (forget_app_exit), once the app is seen running from the installed bundle
+# again, which ends macOS's tracking of the exit (launch_installed_app,
+# wait_out_app_exit_checks), and once both checks of the exit are over
+# (wait_out_app_exit_checks).
+#
+# Reclaim: the record is one fixed path, so at most one exists. Every stop
+# overwrites it, and a relaunch or its expiry removes it. Its write goes
+# through one fixed temp path beside it, which the next write overwrites and
+# every removal of the record removes too, so neither can accumulate.
+
+# Record the app's exit, in memory and in APP_EXIT_FILE. The line is written
+# to the temp path and renamed over the file, so a reader never sees half of
+# it. A write that fails is logged and leaves the record in memory, so this
+# run's own rollback still waits on it; only a later run goes without it.
+#
+#   record_app_exit exited|stopping <epoch>
+record_app_exit() {
+    local kind="${1-}" at="${2-}" tmp="$APP_EXIT_FILE.tmp"
+    APP_EXIT_KIND="$kind"
+    APP_EXIT_AT="$at"
+    if [ ! -d "$APP_EXIT_FILE" ] && mkdir -p "$(dirname "$APP_EXIT_FILE")" 2>/dev/null &&
+        printf '%s %s\n' "$kind" "$at" 2>/dev/null > "$tmp" &&
+        mv -f "$tmp" "$APP_EXIT_FILE" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$tmp" 2>/dev/null
+    log "WARNING: could not record the app's exit in $APP_EXIT_FILE, so a later update that finds the app still down will not know to wait for macOS's checks of it"
+}
+
+# Forget the app's exit: clear the record in memory and remove APP_EXIT_FILE
+# and its temp path. A file that cannot be removed is logged; a later run
+# that reads it waits out a check that is no longer pending, at most once,
+# and forgets it then.
+forget_app_exit() {
+    APP_EXIT_KIND=""
+    APP_EXIT_AT=""
+    rm -f "$APP_EXIT_FILE" "$APP_EXIT_FILE.tmp" 2>/dev/null
+    [ ! -e "$APP_EXIT_FILE" ] ||
+        log "WARNING: could not remove $APP_EXIT_FILE, an app exit macOS no longer checks"
+}
+
+# Read APP_EXIT_FILE into memory. main calls it once, just after taking the
+# lock, which guards the file. A line that does not parse is logged and
+# removed: it names no exit this run can wait on.
+load_app_exit_record() {
+    local kind="" at="" rest=""
+    APP_EXIT_KIND=""
+    APP_EXIT_AT=""
+    [ -e "$APP_EXIT_FILE" ] || return 0
+    read -r kind at rest 2>/dev/null < "$APP_EXIT_FILE" || true
+    case "$kind" in
+        exited | stopping)
+            if _is_whole_number "$at" && [ -z "$rest" ]; then
+                APP_EXIT_KIND="$kind"
+                APP_EXIT_AT="$at"
+                return 0
+            fi
+            ;;
+    esac
+    log "note: $APP_EXIT_FILE does not hold an app exit this run can read: [$kind${at:+ $at}${rest:+ $rest}]; removing it"
+    forget_app_exit
+}
+
+# The whole epoch seconds the recorded exit lies between at <now>, printed as
+# `<from> <to>`:
+#
+#   - exited t: [t, t];
+#   - stopping t: [t, min(now, t + APP_STOP_GRACE + 4)]. A stop waits
+#     APP_STOP_GRACE seconds after SIGTERM and 3 more after SIGKILL, and the
+#     last second covers whole-second rounding. An app the stop could not
+#     see go within that is treated as stuck, never exiting, rather than as
+#     an exit still to come.
+#
+# Neither end lies after <now>: a record ahead of the clock, which was set
+# back since, reads as an exit at <now>.
+#
+#   app_exit_interval <now>
+app_exit_interval() {
+    local now="${1-}" from="$APP_EXIT_AT" to="$APP_EXIT_AT"
+    [ "$APP_EXIT_KIND" != stopping ] || to=$((from + APP_STOP_GRACE + 4))
+    [ "$to" -le "$now" ] || to="$now"
+    [ "$from" -le "$to" ] || from="$to"
+    printf '%s %s\n' "$from" "$to"
+}
+
+# The settle for this run, APP_EXIT_SETTLE_SECONDS or
+# TBD_UPDATE_APP_EXIT_SETTLE_SECONDS, and the second check's mark,
+# APP_EXIT_RECHECK_SECONDS or TBD_UPDATE_APP_EXIT_RECHECK_SECONDS. An override
+# that is not a whole number of seconds is logged and falls back. The warning
+# goes to stderr, so a caller reading the number from stdout reads only the
+# number.
+app_exit_settle_seconds() {
+    local settle="${TBD_UPDATE_APP_EXIT_SETTLE_SECONDS:-$APP_EXIT_SETTLE_SECONDS}"
+    if ! _is_whole_number "$settle"; then
+        log "WARNING: TBD_UPDATE_APP_EXIT_SETTLE_SECONDS is not a whole number of seconds: [$settle] — waiting ${APP_EXIT_SETTLE_SECONDS}s" >&2
+        settle="$APP_EXIT_SETTLE_SECONDS"
+    fi
+    printf '%s\n' "$settle"
+}
+
+app_exit_recheck_seconds() {
+    local recheck="${TBD_UPDATE_APP_EXIT_RECHECK_SECONDS:-$APP_EXIT_RECHECK_SECONDS}"
+    if ! _is_whole_number "$recheck"; then
+        log "WARNING: TBD_UPDATE_APP_EXIT_RECHECK_SECONDS is not a whole number of seconds: [$recheck] — using 31s" >&2
+        recheck=31
+    fi
+    printf '%s\n' "$recheck"
+}
+
+# How many seconds to wait at <now> so that a rename at the installed path
+# lands clear of both of macOS's checks of an app exit known to lie somewhere
+# in [<from>, <to>]. All three are whole epoch seconds; S is the settle
+# (app_exit_settle_seconds) and R the second check's mark
+# (app_exit_recheck_seconds). Starting from <now>:
+#
+#   1. the first check, only when S > 0: not before <to> + S + 1. Epoch
+#      seconds are whole, so a difference of n can be just over n - 1
+#      seconds, and the one makes sure the whole settle has passed;
+#   2. the second check: nothing from <from> + R - 2 until <to> + R + 3, so a
+#      rename that would land in there waits until <to> + R + 3.
+#
+# Prints the seconds from <now> to the first moment clear of both, 0 when
+# that is <now>. Non-zero, printing nothing, when an argument is not a whole
+# number.
+#
+#   app_exit_check_wait <now> <from> <to>
+app_exit_check_wait() {
+    local now="${1-}" from="${2-}" to="${3-}" settle recheck t
+    if ! _is_whole_number "$now" || ! _is_whole_number "$from" || ! _is_whole_number "$to"; then
+        return 1
+    fi
+    settle="$(app_exit_settle_seconds)"
+    recheck="$(app_exit_recheck_seconds)"
+    t="$now"
+    if [ "$settle" -gt 0 ] && [ "$t" -lt $((to + settle + 1)) ]; then
+        t=$((to + settle + 1))
+    fi
+    if [ "$t" -ge $((from + recheck - 2)) ] && [ "$t" -lt $((to + recheck + 3)) ]; then
+        t=$((to + recheck + 3))
+    fi
+    printf '%s\n' "$((t - now))"
+}
+
+# Before <what>, a step that swaps the installed bundle, wait until a rename
+# there is clear of macOS's checks of the app's latest exit, this run's or an
+# earlier one's (app_exit_check_wait over app_exit_interval):
+#
+#   - with no exit recorded, it returns at once;
+#   - with the app running from the installed bundle (app_process_pid, on
+#     the pattern stop_installed_app stops), it forgets the record and
+#     returns: the app was launched again since that exit, or never exited,
+#     so no check of it is pending;
+#   - otherwise it logs what waits, for how long and why, and sleeps; then it
+#     forgets the record once the second check is over.
+#
+# It goes right before each install_app_bundle that can swap the installed
+# path, and nowhere else. The put-back of a bundle stranded at the outgoing
+# name (put_back_outgoing_app_bundle) does not wait: it only fills an empty
+# path, and an empty path is what a check must not find.
+#
+#   wait_out_app_exit_checks <what>
+wait_out_app_exit_checks() {
+    local what="${1-}" pattern now interval from to seconds recheck why
+    [ -n "$APP_EXIT_KIND" ] || return 0
+    pattern="$(escape_exec_pattern "$INSTALLED_BUNDLE/Contents/MacOS/TBDApp")"
+    if app_process_pid "$pattern" >/dev/null; then
+        forget_app_exit
+        return 0
+    fi
+    now="$(date +%s)"
+    recheck="$(app_exit_recheck_seconds)"
+    if ! _is_whole_number "$now"; then
+        # No clock reading to measure from: wait out a whole second check,
+        # and keep the record, since nothing says it is over.
+        log "WARNING: could not read the clock; waiting $((recheck + 3))s before $what, the longest macOS's checks of the app's exit can still take"
+        sleep $((recheck + 3))
+        return 0
+    fi
+    interval="$(app_exit_interval "$now")"
+    from="${interval% *}"
+    to="${interval#* }"
+    seconds="$(app_exit_check_wait "$now" "$from" "$to")"
+    if [ "$seconds" -gt 0 ]; then
+        if [ "$APP_EXIT_KIND" = exited ]; then
+            why="the app exited $((now - from))s ago"
+        else
+            why="the app was being stopped $((now - from))s ago and was not seen to exit, so it exited no earlier than that"
+        fi
+        log "waiting ${seconds}s before $what: $why, and macOS checks a quit app's bundle just after it quits and again about ${recheck}s later, unless the app is launched again first"
+        sleep "$seconds"
+        now="$(date +%s)"
+    fi
+    if _is_whole_number "$now" && [ "$now" -ge $((to + recheck + 3)) ]; then
+        forget_app_exit
+    fi
+}
+
+# Stop the app running from the installed bundle (stop_installed_app) and keep
+# the exit record true to what the stop saw. Sets APP_STOP_RESULT to how the
+# stop ended and returns its status. It runs in the caller's shell, never in a
+# command substitution, because the record in memory has to survive it.
+#
+#   1. Before anything is signalled, `stopping <now>`, so that a run killed
+#      mid-stop leaves the exit's earliest moment behind.
+#   2. Then by how the stop ended:
+#      - none: the record from before the stop goes back exactly, or is
+#        forgotten when there was none. An earlier run's pending exit
+#        survives a stop that finds no app;
+#      - stopped or killed: `exited <now>`;
+#      - survived or unknown: it stays at `stopping`.
+stop_app_recording_its_exit() {
+    local prior_kind="$APP_EXIT_KIND" prior_at="$APP_EXIT_AT" status=0
+    record_app_exit stopping "$(date +%s)"
+    APP_STOP_RESULT="$(stop_installed_app)" || status=$?
+    case "$APP_STOP_RESULT" in
+        none)
+            if [ -n "$prior_kind" ]; then
+                record_app_exit "$prior_kind" "$prior_at"
+            else
+                forget_app_exit
+            fi
+            ;;
+        stopped | killed) record_app_exit exited "$(date +%s)" ;;
+    esac
+    return "$status"
 }
 
 # Stop the app before the daemon is handed over, unless --no-app. main calls
@@ -1547,9 +1845,13 @@ log_app_stop() {
 # new bundle, and passed. The install never leaves the path without a whole
 # bundle, save for the moment between two renames (install_app_bundle), and
 # it finishes before the stop, so the app quits in front of the new bundle.
-# In the seconds after the stop nothing moves the bundle at all: a handover
-# that completes leaves it alone, and the rollback after one that fails waits
-# APP_EXIT_SETTLE_SECONDS from the stop first (wait_for_app_exit_to_settle).
+# macOS checks that exit twice, just after it and again about
+# APP_EXIT_RECHECK_SECONDS later unless the app is launched again first, and
+# nothing moves the bundle during either check: a handover that completes
+# leaves it alone, and the rollback after one that fails waits them out first
+# (wait_out_app_exit_checks). The stop records the exit
+# (stop_app_recording_its_exit), so that a later run that finds the app still
+# down, after this one was killed, waits them out before its install too.
 #
 # Under --no-app the app is left alone: an app that stays alive owns its
 # claims legitimately, and an app that does not quit faces no check.
@@ -1561,12 +1863,9 @@ stop_app_before_handover() {
     log "stopping the app before the handover"
     local status=0
     APP_STOP_BEGUN=true
-    APP_STOP_OUTCOME="$(stop_installed_app)" || status=$?
-    if [ "$APP_STOP_OUTCOME" = none ]; then
-        APP_STOP_BEGUN=false
-    else
-        APP_STOPPED_AT="$SECONDS"
-    fi
+    stop_app_recording_its_exit || status=$?
+    APP_STOP_OUTCOME="$APP_STOP_RESULT"
+    [ "$APP_STOP_OUTCOME" != none ] || APP_STOP_BEGUN=false
     log_app_stop "$APP_STOP_OUTCOME"
     if [ "$status" -ne 0 ]; then
         log "WARNING: handing over anyway — an app still running may re-attach to the new daemon"
@@ -1577,32 +1876,6 @@ stop_app_before_handover() {
     if [ "$APP_STOP_OUTCOME" != none ]; then
         APP_RELAUNCH_PENDING=true
     fi
-}
-
-# Wait until the app's exit has settled: APP_EXIT_SETTLE_SECONDS (or
-# TBD_UPDATE_APP_EXIT_SETTLE_SECONDS) since the stop before the handover found
-# and stopped the app (APP_STOPPED_AT), so that nothing moves the installed
-# bundle while macOS may still be reading it for that exit. No wait when this
-# run stopped no app — under --no-app, or with none running — since then no
-# exit is being checked.
-#
-# SECONDS counts whole seconds, so a difference of n can be as little as just
-# over n-1 seconds. Waiting until the difference reaches the settle plus one
-# makes sure the whole settle has passed.
-wait_for_app_exit_to_settle() {
-    local settle="${TBD_UPDATE_APP_EXIT_SETTLE_SECONDS:-$APP_EXIT_SETTLE_SECONDS}"
-    local remaining
-
-    [ -n "$APP_STOPPED_AT" ] || return 0
-    if ! _is_whole_number "$settle"; then
-        log "WARNING: TBD_UPDATE_APP_EXIT_SETTLE_SECONDS is not a whole number of seconds: [$settle] — waiting ${APP_EXIT_SETTLE_SECONDS}s"
-        settle="$APP_EXIT_SETTLE_SECONDS"
-    fi
-    [ "$settle" -gt 0 ] || return 0
-    remaining=$((settle + 1 - (SECONDS - APP_STOPPED_AT)))
-    [ "$remaining" -gt 0 ] || return 0
-    log "waiting ${remaining}s for the app's exit to settle before the installed bundle moves"
-    sleep "$remaining"
 }
 
 # Launch the installed bundle and report whether it came up. A failed launch
@@ -1617,6 +1890,9 @@ launch_installed_app() {
     sleep 0.5
     if pid="$(app_process_pid "$pattern")"; then
         log "app running as pid $pid — logs: $APP_LOG"
+        # Launched again, which ends macOS's tracking of the app's earlier
+        # exit: no check of it is pending any more.
+        forget_app_exit
     else
         log "WARNING: the app did not come back up — see $APP_LOG"
     fi
@@ -1771,15 +2047,16 @@ run_app_stage() {
 }
 
 restart_app() {
-    local outcome
     log "restarting the app"
     # Normally there is nothing left to stop: stop_app_before_handover already
     # did, and logged how. This catches an app launched since and waits for it
     # to exit. Only a stop that found one is worth a line; "no app running"
     # here is the expected answer, and logged it reads as if the stop before
-    # the handover had found nothing either.
-    outcome="$(stop_installed_app)" || true
-    [ "$outcome" = none ] || log_app_stop "$outcome"
+    # the handover had found nothing either. The stop records the exit as the
+    # first one does, so a launch below that fails leaves it for a later run
+    # (stop_app_recording_its_exit); finding no app keeps the earlier record.
+    stop_app_recording_its_exit || true
+    [ "$APP_STOP_RESULT" = none ] || log_app_stop "$APP_STOP_RESULT"
     APP_RELAUNCH_PENDING=false
     launch_installed_app
 }
@@ -2195,6 +2472,9 @@ main() {
 
     acquire_lock || return 1
     trap on_update_exit EXIT
+    # The exit of an app an earlier run stopped, if macOS may still be
+    # checking it; the lock guards the file it is read from.
+    load_app_exit_record
 
     local status_json source_worktree old_commit
     status_json="$(daemon_status_json)"
@@ -2425,9 +2705,14 @@ main() {
     # the app's coalition force-quit — the daemon, every holder and every
     # agent session (see stop_app_before_handover). So the install stages the
     # new bundle beside the old one and swaps them by two renames, and it
-    # finishes before the stop. After the stop nothing moves the bundle until
-    # the handover has finished, or has failed and its rollback has waited
-    # for the app's exit to settle.
+    # finishes before the stop. macOS checks the bundle twice for that exit,
+    # just after it and about half a minute later unless the app is launched
+    # again first, so after the stop nothing moves the bundle until the
+    # handover has finished, or has failed and its rollback has waited out
+    # both checks. A run killed after its stop leaves the app down with the
+    # second check still to come; the stop recorded the exit, so the next
+    # run's install, which then finds the app down, waits it out as well
+    # (wait_out_app_exit_checks).
     #
     # A failed install never reaches the stop and leaves the installed bundle
     # as it was, so the app keeps running in front of it. From the stop on,
