@@ -65,8 +65,9 @@ they sat in the terminal's coalition, not the app's.
 
 ### What a fixed update does not fix
 
-update.sh keeps a complete, validly signed bundle at `/Applications/TBD.app` until
-loginwindow's check is over (`docs/updating.md`, "The app's exit and the bundle at its path").
+update.sh installs the new bundle before it stops the app, so `/Applications/TBD.app` holds a
+complete, validly signed bundle when loginwindow checks the quit (`docs/updating.md`, "What
+`tbd update` does").
 That removes this incident's trigger and nothing else. Sessions in an app's coalition still die
 when:
 
@@ -504,9 +505,9 @@ are recorded in the implementing PR.
 
 **Soak.** Enable with `tbd config set daemon-launch-helper on`, then `scripts/restart.sh` or
 `tbd update`. Run these checks on macOS 27 and record each result in this spec. A session started
-before the restart stays in the old coalition, and a quit check can kill it. So run the quit
-checks only with sessions started since the restart, or parked and woken since. Before each quit,
-`tbd doctor sessions` must report every one of them protected.
+before the restart stays in the old coalition, and a quit check can kill it. So before each quit,
+`tbd doctor sessions` must report every live session protected, not only the ones under test.
+Park and wake, or end, each session it reports exposed.
 
 - Cmd-Q of TBD.app with live sessions: they survive.
 - Quitting the terminal app that ran the restart: they survive.
