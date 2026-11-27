@@ -53,6 +53,18 @@ struct KeyboardLayout: Sendable {
     static let system = KeyboardLayout { event, modifiers in event.characters(byApplyingModifiers: modifiers) }
 }
 
+// MARK: - Natural text editing
+
+/// What one of the macOS text-editing shortcuts sends
+/// (`TerminalInputController.naturalTextEditing(for:onAlternateScreen:)`).
+enum NaturalTextEditing: Equatable {
+    /// These bytes, whatever the program's modes.
+    case bytes([UInt8])
+    /// A plain press of this key, with no modifiers, through the key encoder, so the program's
+    /// modes choose the form it takes.
+    case encodedKey(GhosttyKey)
+}
+
 // MARK: - TerminalInputController
 
 @MainActor
@@ -140,7 +152,7 @@ final class TerminalInputController {
     ///
     /// * ⌘ held → decline, so menu items and app shortcuts (⌘P) work. The view then calls `super`,
     ///   which lets AppKit continue up the responder chain. The ⌘ text-editing shortcuts are taken
-    ///   before this rule is asked (`naturalTextEditingBytes`), and a ⌘ key no menu item took comes
+    ///   before this rule is asked (`naturalTextEditing`), and a ⌘ key no menu item took comes
     ///   back through `handleCommandKeyDown`.
     /// * we are not the window's first responder → decline. `performKeyEquivalent` is offered to
     ///   the *whole* view hierarchy, not just the focused view, so without this a background
@@ -163,8 +175,16 @@ final class TerminalInputController {
     private func handleKeyDown(_ event: NSEvent, in view: GhosttyTerminalView) -> Bool {
         // The text-editing shortcuts come first, ⌘ ones included, so they win over any menu item
         // with the same key, as they do in SwiftTerm, where `performKeyEquivalent` takes them.
-        if isKeyTarget(view), let bytes = Self.naturalTextEditingBytes(for: event) {
-            sendTyped(bytes, in: view)
+        if isKeyTarget(view), let editing = Self.naturalTextEditing(
+            for: event, onAlternateScreen: view.terminal.withLocked({ $0.isAlternateScreen })) {
+            switch editing {
+            case .bytes(let bytes):
+                sendTyped(bytes, in: view)
+            case .encodedKey(let key):
+                let action: KeyPress.Action = event.isARepeat ? .repeated : .press
+                let press = KeyPress(action: action, key: key)
+                sendTyped(view.terminal.encodeKey(press, optionAsAlt: optionAsAlt), in: view)
+            }
             return true
         }
         guard acceptsKeyDown(event, in: view) else { return false }
@@ -219,21 +239,39 @@ final class TerminalInputController {
     //
     // The app's SwiftTerm terminals answer some macOS shortcuts with bytes no key encoder would
     // produce: `TBDTerminalView`'s natural text editing, and SwiftTerm's own `keyDown` and
-    // `doCommand(by:)`. This engine sends the same bytes for the same keys, so a terminal behaves
-    // the same whichever engine draws it.
+    // `doCommand(by:)`. This engine sends the same for the same keys, so a terminal behaves the
+    // same whichever engine draws it. The text-editing shortcuts are iTerm2's Natural Text Editing
+    // preset, which moves and deletes by line and word at a shell prompt.
 
-    /// The bytes for one of the macOS text-editing shortcuts that `TBDTerminalView` turns into
-    /// shell line editing, or nil for any other key:
+    /// What one of the macOS text-editing shortcuts that `TBDTerminalView` turns into shell line
+    /// editing sends, or nil for any other key:
     ///
-    /// * ⌘← is `ESC [ H` (Home) and ⌘→ is `ESC [ F` (End). Home and End rather than Ctrl-A and
-    ///   Ctrl-E, because Ctrl-A is a common tmux prefix.
+    /// * ⌘← is Ctrl-A and ⌘→ is Ctrl-E, beginning and end of line, on the primary screen, where a
+    ///   shell prompt is. On the alternate screen they are Home and End through the key encoder,
+    ///   so the program's modes choose the form: `ESC O H` under DECCKM, `ESC [ H` without, the
+    ///   Kitty form under Kitty flags. The programs that run there give Ctrl-A a meaning of its
+    ///   own: tmux's and GNU screen's prefix, vim's increment.
+    /// * ⌥← is `ESC b` and ⌥→ is `ESC f`, a word back and forward.
     /// * ⌘⌫ is Ctrl-U, delete to the start of the line.
     /// * ⌥⌫ is `ESC DEL`, delete the word before the cursor.
     /// * ⌥⌦ (Option-Fn-Delete) is `ESC d`, delete the word after it.
     ///
-    /// Only with that one modifier: Shift or Control held declines, and so does ⌘ with ⌥. The bytes
-    /// are fixed, whatever the program's modes and whether Option is Meta, as SwiftTerm sends them.
-    static func naturalTextEditingBytes(for event: NSEvent) -> [UInt8]? {
+    /// Line editing is Ctrl-A, Ctrl-E, `ESC b` and `ESC f` because zsh binds those out of the box,
+    /// with or without a framework such as oh-my-zsh, and binds neither `ESC [ H` nor the
+    /// modified arrows (`CSI 1;3D`) the key encoder would send for these keys.
+    ///
+    /// Fn-Delete on its own is not one of them. iTerm2's preset sends Ctrl-D for it, which ends the
+    /// shell on an empty line, so here it stays forward Delete, from the key encoder.
+    ///
+    /// Only with that one modifier: Shift or Control held declines, and so does ⌘ with ⌥. Every
+    /// result but the alternate screen's Home and End is fixed bytes, whatever the program's modes
+    /// and whether Option is Meta.
+    ///
+    /// - Parameter onAlternateScreen: whether the alternate screen is active. Read only for ⌘← and
+    ///   ⌘→, so no other key takes the terminal's lock here.
+    static func naturalTextEditing(
+        for event: NSEvent, onAlternateScreen: @autoclosure () -> Bool
+    ) -> NaturalTextEditing? {
         guard event.type == .keyDown else { return nil }
         let flags = event.modifierFlags
         guard !flags.contains(.control), !flags.contains(.shift),
@@ -242,15 +280,17 @@ final class TerminalInputController {
         switch (flags.contains(.command), flags.contains(.option)) {
         case (true, false):
             switch key {
-            case NSLeftArrowFunctionKey: return [0x1B, 0x5B, 0x48]
-            case NSRightArrowFunctionKey: return [0x1B, 0x5B, 0x46]
-            case 0x7F: return [0x15]
+            case NSLeftArrowFunctionKey: return onAlternateScreen() ? .encodedKey(GHOSTTY_KEY_HOME) : .bytes([0x01])
+            case NSRightArrowFunctionKey: return onAlternateScreen() ? .encodedKey(GHOSTTY_KEY_END) : .bytes([0x05])
+            case 0x7F: return .bytes([0x15])
             default: return nil
             }
         case (false, true):
             switch key {
-            case 0x7F: return [0x1B, 0x7F]
-            case NSDeleteFunctionKey: return [0x1B, 0x64]
+            case NSLeftArrowFunctionKey: return .bytes([0x1B, 0x62])
+            case NSRightArrowFunctionKey: return .bytes([0x1B, 0x66])
+            case 0x7F: return .bytes([0x1B, 0x7F])
+            case NSDeleteFunctionKey: return .bytes([0x1B, 0x64])
             default: return nil
             }
         default:
