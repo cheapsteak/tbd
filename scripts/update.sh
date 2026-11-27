@@ -857,13 +857,25 @@ describe_build() {
 # and the app is unaffected.
 #
 # Nothing is kept, and a bundle an earlier update kept is left where it is,
-# when nothing is installed, and when the installed bundle already is the
-# build in <new_bundle> (same_build): a copy of the build being installed is
-# no way back, and kept in place of the earlier bundle it would erase what
-# may be the way back to the build the daemon runs. A run cut short after its
-# swap leaves that, and so does a re-run over a completed update. Whether a
-# failed handover then puts anything back is roll_back_bundle's to decide,
-# by which bundle matches the daemon.
+# in three cases:
+#
+#   - nothing is installed;
+#   - the installed bundle already is the build in <new_bundle>
+#     (same_build): a copy of the build being installed is no way back, and
+#     kept in place of the earlier bundle it would erase what may be the way
+#     back to the build the daemon runs. A run cut short after its swap
+#     leaves that, and so does a re-run over a completed update;
+#   - the installed bundle is not the daemon's build and the kept one is
+#     (is_daemons_build, by RUNNING_BUILD, which main sets before the
+#     install). A run cut short after its swap leaves that too, when a newer
+#     commit has landed before the retry: copied over the kept bundle, the
+#     build it cut short would erase the one bundle that matches the daemon
+#     still running. A failed handover would then put that build back in
+#     front of the daemon, and a successor would read it at the kept path,
+#     where it looks for the build it replaced.
+#
+# Whether a failed handover then puts anything back is roll_back_bundle's to
+# decide, by which bundle matches the daemon.
 #
 #   keep_installed_bundle [<installed_bundle>] [<new_bundle>]
 keep_installed_bundle() {
@@ -886,6 +898,10 @@ keep_installed_bundle() {
     fi
     if same_build "$installed_bundle" "$new_bundle"; then
         log "$installed_bundle is already the build this run installs — keeping no copy of it"
+        return 0
+    fi
+    if ! is_daemons_build "$installed_bundle" && is_daemons_build "$PREVIOUS_BUNDLE"; then
+        log "$installed_bundle is build $(describe_build "$installed_bundle"), not build $(build_text "$RUNNING_BUILD"), which the daemon runs and $PREVIOUS_BUNDLE holds — keeping no copy of it, so the kept bundle stays the daemon's build"
         return 0
     fi
     keep_dir="$(dirname "$PREVIOUS_BUNDLE")"
@@ -2480,13 +2496,14 @@ main() {
     # holds that bundle; the exit reconcile keeps it and the new live tree and
     # removes everything older. Not so when the keep kept nothing
     # (keep_installed_bundle): the build was installed already, nothing was,
-    # or the install first put back a bundle an interrupted install had left
-    # beside the installed path and found it this build. Whatever is at
-    # ~/tbd/updates/previous/TBD.app is then an earlier update's, so the
-    # record names a prebuilt tree of that bundle's build if one is still
-    # here, and otherwise stays as it was. It is decided by what the keep did,
-    # not by what was installed before the install began, which the put-back
-    # can change.
+    # a build the daemon does not run was in front of a kept bundle of the
+    # daemon's build, or the install first put back a bundle an interrupted
+    # install had left beside the installed path and found it this build.
+    # Whatever is at ~/tbd/updates/previous/TBD.app is then an earlier
+    # update's, so the record names a prebuilt tree of that bundle's build if
+    # one is still here, and otherwise stays as it was. It is decided by what
+    # the keep did, not by what was installed before the install began, which
+    # the put-back can change.
     if [ "$BUNDLE_STASHED" = true ]; then
         record_prebuilt_rollback "$PREBUILT_HOME" "$PREBUILT_START_LIVE"
     elif kept_key="$(bundle_build_key "$PREVIOUS_BUNDLE")"; then

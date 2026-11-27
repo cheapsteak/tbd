@@ -84,7 +84,8 @@ these steps in order.
   installed bundle to `~/tbd/updates/previous/TBD.app`, where it stays — it
   is what a failed handover puts back, and afterwards it is the quickest way
   to return to the build you were on. (Not when the installed bundle already
-  is the build being installed; see "Going back to the previous build".)
+  is the build being installed, nor when it is not the daemon's build and the
+  kept one is; see "Going back to the previous build".)
   Then it copies the new bundle in beside
   the installed one, to a hidden `/Applications/.TBD-install-incoming`, and
   swaps the two with two renames back to back: the installed bundle to
@@ -284,7 +285,8 @@ A release install does this:
   `provenance: release` and the CI run it came from.
 - **Keeps two trees**: the one now running and the one it replaced, which is
   what `~/tbd/updates/previous/TBD.app` pairs with. A run whose keep kept no
-  bundle — it found its own build already installed, nothing installed, or
+  bundle — it found its own build already installed, nothing installed, a
+  build the daemon does not run installed with the daemon's build kept, or
   put back a bundle an interrupted install had left beside the installed
   path and found it its own build — keeps as its second tree one of the same
   build as the bundle at `~/tbd/updates/previous/TBD.app`, if one is still
@@ -388,11 +390,16 @@ the order you would reach for them.
   dirty tree the same `builtAt` too, since the identity does not record a
   dirty tree's changes — as a run cut short after its swap leaves it, or a
   re-run over a completed update: a copy of that build is no way back, and
-  would replace the kept bundle, which may be. Any other bundle is kept,
-  even one of the same commit built from another worktree, another build of
-  the same dirty tree, or one in the other configuration (a `--debug` run
-  over a release build), and so is one whose identity records no
-  configuration. Put it back the way an install does, so that
+  would replace the kept bundle, which may be. So does one that finds
+  installed a build the daemon does not run while the kept bundle is the
+  daemon's build, by the comparison the rollback makes (below). A run cut
+  short after its swap leaves that when a newer commit lands before the next
+  update, and copied over the kept bundle, the build it cut short would
+  erase the one bundle that matches the daemon still running. Any other
+  bundle is kept, even one of the same commit built from another worktree,
+  another build of the same dirty tree, or one in the other configuration (a
+  `--debug` run over a release build), and so is one whose identity records
+  no configuration. Put it back the way an install does, so that
   `/Applications/TBD.app` is never missing if the app quits meanwhile (see
   "Stops the app" above).
 

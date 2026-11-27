@@ -3942,6 +3942,56 @@ test_a_failed_handover_restores_the_kept_bundle_that_matches_the_daemon() {
     assert_eq "once" "1" "$(grep -c '^open ' "$events")"
 }
 
+# THE REGRESSION: a run kept the daemon's build (1111…), swapped in its new
+# build (2222…) and was cut short before the handover; a newer commit then
+# landed, and the retry installs that. The installed bundle is neither the
+# daemon's build nor the retry's, so the keep copied it over the kept
+# bundle, and the only bundle of the daemon's build was gone: a failed
+# handover put the cut-short build back in front of the daemon, with a line
+# saying it matched nothing, and a completed one left a successor reading
+# that build at the kept path. The keep now keeps nothing there, so a failed
+# handover puts the daemon's build back and a completed one leaves it kept.
+test_a_newer_retry_after_a_cut_short_swap_keeps_the_daemons_build() {
+    local how case_dir out rc events installed kept
+    for how in fails completes; do
+        case_dir="$(mkcase "newer-retry-$how")"
+        events="$case_dir/events.log"
+        installed="$case_dir/Applications/TBD.app"
+        kept="$case_dir/home/tbd/updates/previous/TBD.app"
+        mkdir -p "$case_dir/Applications"
+        mkbundle "$installed" "left-by-the-cut-short-run" >/dev/null
+        stamp_clone_identity "$installed" "$case_dir" 2222222222222222222222222222222222222222
+        mkbundle "$kept" "the-daemons-build" "$CASE_DAEMON_COMMIT" >/dev/null
+        if [ "$how" = fails ]; then
+            out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+            assert_eq "a failed handover fails the run" "1" "$rc"
+        else
+            out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+            assert_eq "a completed handover succeeds" "0" "$rc"
+        fi
+        assert_contains_literal "the keep names both builds and keeps nothing ($how)" \
+            "$installed is build 2222222222222222222222222222222222222222 from $case_dir/home/tbd/updates/src, not build $CASE_DAEMON_COMMIT from $case_dir/worktree, which the daemon runs and $kept holds — keeping no copy of it" \
+            "$out"
+        assert_not_contains "the cut-short build is not kept ($how)" "kept the previous app bundle" "$out"
+        if [ "$how" = completes ]; then
+            assert_eq "the daemon's build is still the kept bundle" "the-daemons-build" \
+                "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+            assert_eq "and the retry's build is installed" "$case_dir/home/tbd/updates/src" \
+                "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+            continue
+        fi
+        assert_not_contains "the rollback needs no excuse for what it restores" \
+            "putting back the bundle this run replaced" "$out"
+        assert_contains "the kept bundle goes back" "restored previous app bundle" "$out"
+        assert_eq "the daemon's build is installed" "the-daemons-build" \
+            "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+        assert_not_contains "the rollback completes" "did not complete" "$out"
+        assert_contains "and the app is relaunched" \
+            "relaunching the app this run stopped before the handover" "$out"
+        assert_eq "once" "1" "$(grep -c '^open ' "$events")"
+    done
+}
+
 # A daemon with no stamp reports the HEAD of its worktree, marked
 # `origin: worktreeHead`, and that HEAD can have moved since the daemon
 # started, so it says nothing sure of the daemon's build. The rollback then
@@ -6079,6 +6129,7 @@ test_a_rollback_that_finds_the_kept_bundle_gone_does_not_claim_a_restore
 test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_update_over_its_own_build_leaves_the_kept_bundle_alone
 test_a_failed_handover_restores_the_kept_bundle_that_matches_the_daemon
+test_a_newer_retry_after_a_cut_short_swap_keeps_the_daemons_build
 test_a_daemon_identity_read_from_its_worktree_head_is_an_unknown_build
 test_a_rollback_whose_bundle_and_link_disagree_leaves_the_app_stopped
 test_a_failed_handover_over_the_daemons_build_restores_nothing
