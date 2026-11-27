@@ -120,8 +120,9 @@ final class TerminalInputController {
     ///
     /// A release that never arrives leaves its entry until the key's next key-down replaces it:
     /// a key let go while ⌘ is down, for which AppKit sends no key-up, or after focus moved away.
-    /// Focus loss does not clear it. Until that next key-down the entry can only hold back the
-    /// release of a press this view never received, which its program never saw.
+    /// Focus loss does not clear it. Until that next key-down the entry can only change the
+    /// release of a press this view never received, which its program never saw: it holds that
+    /// release back, or sends Home's or End's release in its place.
     private var textEditingPresses: [UInt16: NaturalTextEditing] = [:]
 
     init() {}
