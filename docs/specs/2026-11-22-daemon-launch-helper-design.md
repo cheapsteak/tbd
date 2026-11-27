@@ -277,9 +277,17 @@ A launcher falls back when no helper is installed at the path `--launch-mode` pr
 - the pid deadline passes and `--launch` takes the claim, or the further wait after `--serve`
   took it passes.
 
-`--launch` boots out the job and removes the launch directory before it exits. The launcher logs the
-reason and launches the daemon directly, removing the inherited labels as any direct launch does
-and setting `TBD_LAUNCH_FALLBACK_REASON` in the daemon's environment. A failed helper launch therefore costs exactly today's exposure, and never leaves
+`--launch` boots out the job and removes the launch directory before it exits. Unlike step 7, it
+does not wait for the job to finish. Nothing from a failed launch should keep running, and the
+launcher is about to start the daemon directly:
+
+- **`--launch` took the claim:** no daemon can start from this launch, so a SIGTERM to a `--job`
+  still running ends nothing the sessions need.
+- **`--serve` took the claim and gave no result:** the bootout either ends a late spawn or comes
+  before it. Either way the pid-file gate leaves one daemon, the late one or the direct one.
+
+The launcher logs the reason and launches the daemon directly, removing the inherited labels as
+any direct launch does and setting `TBD_LAUNCH_FALLBACK_REASON` in the daemon's environment. A failed helper launch therefore costs exactly today's exposure, and never leaves
 the user without a daemon.
 
 ### Handover and existing sessions
@@ -461,8 +469,8 @@ Every branch the flag gates is tested in both states, as `CLAUDE.md` requires.
   inherited fallback reason dropped, and modes `0700` and `0600`.
 - **`--launch` failures,** with an injected `launchctl` runner and clock: bootstrap refused,
   disclaim symbol missing, spawn error, deadline passed with the claim taken by `--launch`, and
-  deadline passed with the claim taken by `--serve` but no result. Each boots out the job,
-  removes the directory and exits non-zero with its reason.
+  deadline passed with the claim taken by `--serve` but no result. Each boots out the job
+  without waiting for it to finish, removes the directory and exits non-zero with its reason.
 - **`--launch` success,** with the same injected runner and clock: a job that still reports a
   running process when the pid appears is booted out only after it reports none. A job that
   still reports one at the 2-second deadline is left registered, and `--launch` removes the
