@@ -906,6 +906,14 @@ class TBDTerminalView: TerminalView {
             onCloseTab?()
         }
     }
+
+    /// iTerm2's Natural Text Editing preset: ⌘← and ⌘→ to the beginning and
+    /// end of the line (`lineEdgeBytes`), ⌥← and ⌥→ a word back and forward,
+    /// ⌘⌫ to delete to the start of the line, ⌥⌫ and ⌥⌦ to delete a word back
+    /// and forward. Fn-Delete on its own is left alone: the preset sends
+    /// Ctrl-D for it, which ends the shell on an empty line. The libghostty
+    /// engine sends the same (`TerminalInputController.naturalTextEditing`).
+    /// Returns true when it sent something.
     private func handleNaturalTextEditing(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags
         let hasCmd = flags.contains(.command)
@@ -920,14 +928,8 @@ class TBDTerminalView: TerminalView {
         let key = Int(scalar.value)
 
         if hasCmd && !hasOpt && !hasShift {
-            // Use Home/End escape sequences instead of Ctrl-A/Ctrl-E
-            // to avoid conflict with tmux prefix key (commonly Ctrl-A)
-            if key == NSLeftArrowFunctionKey {
-                send([0x1B, 0x5B, 0x48]) // ESC [ H (Home)
-                return true
-            }
-            if key == NSRightArrowFunctionKey {
-                send([0x1B, 0x5B, 0x46]) // ESC [ F (End)
+            if key == NSLeftArrowFunctionKey || key == NSRightArrowFunctionKey {
+                send(lineEdgeBytes(start: key == NSLeftArrowFunctionKey))
                 return true
             }
             if scalar.value == 0x7F {
@@ -937,6 +939,16 @@ class TBDTerminalView: TerminalView {
         }
 
         if hasOpt && !hasCmd && !hasShift {
+            // A word back and forward, whatever the screen and whether
+            // Option is Meta.
+            if key == NSLeftArrowFunctionKey {
+                send(EscapeSequences.emacsBack) // ESC b
+                return true
+            }
+            if key == NSRightArrowFunctionKey {
+                send(EscapeSequences.emacsForward) // ESC f
+                return true
+            }
             if scalar.value == 0x7F {
                 send([0x1B, 0x7F]) // ESC DEL (delete word back)
                 return true
@@ -948,6 +960,20 @@ class TBDTerminalView: TerminalView {
         }
 
         return false
+    }
+
+    /// What ⌘← (`start`) or ⌘→ sends. On the primary screen, where a shell
+    /// prompt is, Ctrl-A or Ctrl-E: beginning or end of line, which zsh binds
+    /// out of the box, while it binds neither `ESC [ H` nor `ESC [ F`. On the
+    /// alternate screen, Home or End in the form the program's cursor-key mode
+    /// asks for, as SwiftTerm sends them for `moveToBeginningOfLine:`, because
+    /// the programs that run there give Ctrl-A a meaning of its own: tmux's
+    /// and GNU screen's prefix, vim's increment.
+    private func lineEdgeBytes(start: Bool) -> [UInt8] {
+        let (alternate, applicationCursor) = withTerminal { ($0.isCurrentBufferAlternate, $0.applicationCursor) }
+        guard alternate else { return start ? [0x01] : [0x05] }
+        if start { return applicationCursor ? EscapeSequences.moveHomeApp : EscapeSequences.moveHomeNormal }
+        return applicationCursor ? EscapeSequences.moveEndApp : EscapeSequences.moveEndNormal
     }
 
     // MARK: - Notifications (OSC 777)

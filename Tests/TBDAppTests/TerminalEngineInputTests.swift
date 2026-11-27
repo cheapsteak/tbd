@@ -66,9 +66,11 @@ struct TerminalEngineInputTests {
     // MARK: - Text-editing shortcuts
 
     /// The macOS text-editing shortcuts `TBDTerminalView` turns into shell
-    /// line editing, in `performKeyEquivalent`, which AppKit offers a key
-    /// before any menu: ⌘← and ⌘→ are Home and End, ⌘⌫ is Ctrl-U, and ⌥⌫ and
-    /// ⌥⌦ delete a word back and forward. Both engines send the same bytes.
+    /// line editing, iTerm2's Natural Text Editing, in `performKeyEquivalent`,
+    /// which AppKit offers a key before any menu. On the primary screen, where
+    /// a shell prompt is, ⌘← and ⌘→ are Ctrl-A and Ctrl-E, ⌥← and ⌥→ are
+    /// `ESC b` and `ESC f`, ⌘⌫ is Ctrl-U, and ⌥⌫ and ⌥⌦ delete a word back and
+    /// forward. Both engines send the same bytes.
     @Test("The text-editing shortcuts send the same bytes", arguments: TerminalEngineFactory.availableKinds)
     func textEditingShortcutsSendTheSameBytes(kind: TerminalEngineKind) async throws {
         let fixture = EngineUnderTest(kind: kind, label: "EngineInput.TextEditing")
@@ -84,33 +86,69 @@ struct TerminalEngineInputTests {
         let arrows: NSEvent.ModifierFlags = [.function, .numericPad]
         let shortcuts: [TextEditingShortcut] = [
             TextEditingShortcut(name: "⌘←", keyCode: 0x7B, characters: "\u{F702}",
-                                flags: arrows.union(.command), bytes: [0x1B, 0x5B, 0x48]),
+                                flags: arrows.union(.command), bytes: [0x01]),
             TextEditingShortcut(name: "⌘→", keyCode: 0x7C, characters: "\u{F703}",
-                                flags: arrows.union(.command), bytes: [0x1B, 0x5B, 0x46]),
+                                flags: arrows.union(.command), bytes: [0x05]),
+            TextEditingShortcut(name: "⌥←", keyCode: 0x7B, characters: "\u{F702}",
+                                flags: arrows.union(.option), bytes: [0x1B, 0x62]),
+            TextEditingShortcut(name: "⌥→", keyCode: 0x7C, characters: "\u{F703}",
+                                flags: arrows.union(.option), bytes: [0x1B, 0x66]),
             TextEditingShortcut(name: "⌘⌫", keyCode: 0x33, characters: "\u{7F}", flags: .command, bytes: [0x15]),
             TextEditingShortcut(name: "⌥⌫", keyCode: 0x33, characters: "\u{7F}", flags: .option, bytes: [0x1B, 0x7F]),
             TextEditingShortcut(name: "⌥⌦", keyCode: 0x75, characters: "\u{F728}",
                                 flags: [.option, .function], bytes: [0x1B, 0x64]),
         ]
-        for shortcut in shortcuts {
-            let event = try #require(NSEvent.keyEvent(
-                with: .keyDown, location: .zero, modifierFlags: shortcut.flags,
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                context: nil, characters: shortcut.characters, charactersIgnoringModifiers: shortcut.characters,
-                isARepeat: false, keyCode: shortcut.keyCode))
-            let handled = view.performKeyEquivalent(with: event)
-            #expect(handled, "\(kind): \(shortcut.name) was left for the menus")
-            let sent = await EngineTestSupport.waitUntil(
-                "\(shortcut.name) to reach send", observed: { fixture.recorder.summary }
-            ) {
-                !fixture.recorder.sent.isEmpty
-            }
-            guard sent else { return }
-            await EngineTestSupport.settle()
-            let bytes = fixture.recorder.sent
-            #expect(bytes == shortcut.bytes, "\(kind): \(shortcut.name) sent \(EngineTestSupport.describe(bytes))")
-            fixture.recorder.reset()
-        }
+        try await expectShortcutsSendTheirBytes(
+            shortcuts, to: view, in: window, recorder: fixture.recorder, kind: kind, screen: "the primary screen")
+    }
+
+    /// On the alternate screen ⌘← and ⌘→ are Home and End, in the form the
+    /// program's cursor-key mode asks for, because the programs that run there
+    /// give Ctrl-A a meaning of its own: tmux's and GNU screen's prefix, vim's
+    /// increment. ⌥← and ⌥→ stay `ESC b` and `ESC f`. Both engines send the
+    /// same bytes.
+    @Test("On the alternate screen ⌘← and ⌘→ send Home and End in the program's cursor-key form",
+          arguments: TerminalEngineFactory.availableKinds)
+    func commandArrowsSendHomeAndEndOnTheAlternateScreen(kind: TerminalEngineKind) async throws {
+        let fixture = EngineUnderTest(kind: kind, label: "EngineInput.AlternateHomeEnd")
+        defer { fixture.tearDown() }
+        #expect(fixture.engine.kind == kind, "asked for \(kind), the factory built \(fixture.engine.kind)")
+        let view = fixture.engine.view
+        let window = EngineTestSupport.mount(view)
+        defer { EngineTestSupport.unmount(window) }
+        window.makeFirstResponder(view)
+        fixture.feed("\u{1b}[?1049h")
+        await EngineTestSupport.settle()
+        let alternate = fixture.engine.withScreen { $0.isAlternateScreen }
+        try #require(alternate, "\(kind): the fixture did not reach the alternate screen")
+        fixture.recorder.reset()
+
+        let arrows: NSEvent.ModifierFlags = [.function, .numericPad]
+        let normal: [TextEditingShortcut] = [
+            TextEditingShortcut(name: "⌘←", keyCode: 0x7B, characters: "\u{F702}",
+                                flags: arrows.union(.command), bytes: Array("\u{1b}[H".utf8)),
+            TextEditingShortcut(name: "⌘→", keyCode: 0x7C, characters: "\u{F703}",
+                                flags: arrows.union(.command), bytes: Array("\u{1b}[F".utf8)),
+            TextEditingShortcut(name: "⌥←", keyCode: 0x7B, characters: "\u{F702}",
+                                flags: arrows.union(.option), bytes: [0x1B, 0x62]),
+            TextEditingShortcut(name: "⌥→", keyCode: 0x7C, characters: "\u{F703}",
+                                flags: arrows.union(.option), bytes: [0x1B, 0x66]),
+        ]
+        try await expectShortcutsSendTheirBytes(
+            normal, to: view, in: window, recorder: fixture.recorder, kind: kind, screen: "the alternate screen")
+
+        fixture.feed("\u{1b}[?1h")
+        await EngineTestSupport.settle()
+        fixture.recorder.reset()
+        let application: [TextEditingShortcut] = [
+            TextEditingShortcut(name: "⌘←", keyCode: 0x7B, characters: "\u{F702}",
+                                flags: arrows.union(.command), bytes: Array("\u{1b}OH".utf8)),
+            TextEditingShortcut(name: "⌘→", keyCode: 0x7C, characters: "\u{F703}",
+                                flags: arrows.union(.command), bytes: Array("\u{1b}OF".utf8)),
+        ]
+        try await expectShortcutsSendTheirBytes(
+            application, to: view, in: window, recorder: fixture.recorder, kind: kind,
+            screen: "the alternate screen under DECCKM")
     }
 
     // MARK: - Wheel
@@ -181,6 +219,36 @@ struct TerminalEngineInputTests {
         guard reported else { return }
         #expect(fixture.recorder.sent.starts(with: Array("\u{1b}[<65;".utf8)),
                 "\(kind): with reporting on the wheel sent \(EngineTestSupport.describe(fixture.recorder.sent))")
+    }
+}
+
+/// Offers each of `shortcuts` to `view` through `performKeyEquivalent`, as
+/// AppKit offers a key before any menu, and expects the engine to take it and
+/// send its bytes. `screen` names the screen state for the failure messages.
+@MainActor
+private func expectShortcutsSendTheirBytes(
+    _ shortcuts: [TextEditingShortcut], to view: NSView, in window: NSWindow,
+    recorder: EngineEventRecorder, kind: TerminalEngineKind, screen: String
+) async throws {
+    for shortcut in shortcuts {
+        let event = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: shortcut.flags,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, characters: shortcut.characters, charactersIgnoringModifiers: shortcut.characters,
+            isARepeat: false, keyCode: shortcut.keyCode))
+        let handled = view.performKeyEquivalent(with: event)
+        #expect(handled, "\(kind) on \(screen): \(shortcut.name) was left for the menus")
+        let sent = await EngineTestSupport.waitUntil(
+            "\(shortcut.name) to reach send", observed: { recorder.summary }
+        ) {
+            !recorder.sent.isEmpty
+        }
+        guard sent else { return }
+        await EngineTestSupport.settle()
+        let bytes = recorder.sent
+        #expect(bytes == shortcut.bytes,
+                "\(kind) on \(screen): \(shortcut.name) sent \(EngineTestSupport.describe(bytes))")
+        recorder.reset()
     }
 }
 

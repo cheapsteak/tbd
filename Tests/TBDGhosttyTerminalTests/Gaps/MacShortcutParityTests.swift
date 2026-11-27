@@ -1,10 +1,14 @@
 import AppKit
 import Foundation
+import GhosttyVt
 import Metal
 @testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TestSupport
 import Testing
+
+// GhosttyVt's C terminal type is also named `GhosttyTerminal`; name the Swift class by module.
+private typealias Terminal = TBDGhosttyCore.GhosttyTerminal
 
 /// What a view sent. Main-actor isolated, so a `@MainActor` callback can append to it without
 /// capturing a mutable local.
@@ -35,15 +39,15 @@ private let shortcutLayout = KeyboardLayout { event, modifiers in
 }
 
 /// An 80×24 terminal with a hundred lines of scrollback and no callbacks.
-private func makeTerminal() throws -> GhosttyTerminal {
-    try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+private func makeTerminal() throws -> Terminal {
+    try Terminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
 }
 
 /// An 80×24 terminal and a view over it, with an input method that does nothing, so every key
 /// goes to the key encoder as it does when no composition is running.
 @MainActor
 private struct ShortcutViewFixture {
-    let terminal: GhosttyTerminal
+    let terminal: Terminal
     let view: GhosttyTerminalView
     let recorder: SentBytes
 
@@ -112,6 +116,8 @@ private func arrow(_ keyCode: UInt16, _ characters: String, _ flags: NSEvent.Mod
 private func cmdLeft() throws -> NSEvent { try arrow(0x7B, leftArrow, .command) }
 private func cmdRight() throws -> NSEvent { try arrow(0x7C, rightArrow, .command) }
 private func cmdUp() throws -> NSEvent { try arrow(0x7E, upArrow, .command) }
+private func optionLeft() throws -> NSEvent { try arrow(0x7B, leftArrow, .option) }
+private func optionRight() throws -> NSEvent { try arrow(0x7C, rightArrow, .option) }
 private func cmdBackspace() throws -> NSEvent { try keyDown(0x33, "\u{7F}", flags: .command) }
 private func optionBackspace() throws -> NSEvent { try keyDown(0x33, "\u{7F}", flags: .option) }
 private func optionForwardDelete() throws -> NSEvent { try keyDown(0x75, forwardDelete, flags: [.option, .function]) }
@@ -134,7 +140,7 @@ private func pageDown(_ flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
 private let sixtyLines = (0..<60).map { "line \($0)\r\n" }.joined()
 
 /// The first scrollable row the viewport shows.
-private func viewportOffset(of terminal: GhosttyTerminal) throws -> Int {
+private func viewportOffset(of terminal: Terminal) throws -> Int {
     try terminal.withLocked { state in
         TerminalScrollMetrics.read(try #require(state.raw, "the terminal is closed")).offset
     }
@@ -142,7 +148,7 @@ private func viewportOffset(of terminal: GhosttyTerminal) throws -> Int {
 
 /// The bytes `event` encodes to on `terminal`, through the same translation the view runs.
 @MainActor
-private func encoded(_ event: NSEvent, on terminal: GhosttyTerminal, optionAsAlt: OptionAsAlt = .never) -> [UInt8] {
+private func encoded(_ event: NSEvent, on terminal: Terminal, optionAsAlt: OptionAsAlt = .never) -> [UInt8] {
     let press = TerminalInputController.keyPress(
         event: event, action: .press, optionAsAlt: optionAsAlt, layout: shortcutLayout)
     return terminal.encodeKey(press, optionAsAlt: optionAsAlt)
@@ -151,6 +157,25 @@ private func encoded(_ event: NSEvent, on terminal: GhosttyTerminal, optionAsAlt
 private func describe(_ bytes: [UInt8]?) -> String {
     guard let bytes else { return "nil" }
     return String(decoding: bytes, as: UTF8.self).debugDescription
+}
+
+private func describeEditing(_ editing: NaturalTextEditing?) -> String {
+    guard let editing else { return "nil" }
+    switch editing {
+    case .bytes(let bytes): return describe(bytes)
+    case .encodedKey(let key): return "\(key) through the key encoder"
+    }
+}
+
+/// Offers each of `events` to `fixture`'s view as AppKit offers a ⌘ key, through
+/// `performKeyEquivalent`, and returns what the view sent, one entry per key that sent anything.
+@MainActor
+private func sentForKeyEquivalents(_ events: [NSEvent], on fixture: ShortcutViewFixture) -> [[UInt8]] {
+    fixture.recorder.sent = []
+    for event in events {
+        _ = fixture.view.performKeyEquivalent(with: event)
+    }
+    return fixture.recorder.sent
 }
 
 /// The macOS shortcuts the app's SwiftTerm terminals answer with bytes of their own, through
@@ -162,41 +187,72 @@ private func describe(_ bytes: [UInt8]?) -> String {
 struct MacShortcutParityTests {
     // MARK: - Natural text editing
 
-    /// ⌘←, ⌘→ and ⌘⌫ go to Home, End and Ctrl-U; ⌥⌫ and ⌥⌦ to the readline word deletions.
+    /// On the primary screen, where a shell prompt is, the shortcuts are iTerm2's Natural Text
+    /// Editing: ⌘← and ⌘→ go to Ctrl-A and Ctrl-E, ⌥← and ⌥→ to `ESC b` and `ESC f`, ⌘⌫ to
+    /// Ctrl-U, and ⌥⌫ and ⌥⌦ to the readline word deletions.
     @Test func naturalTextEditingShortcutsMapToShellLineEditing() throws {
         let cases: [(name: String, event: NSEvent, bytes: [UInt8])] = try [
-            ("⌘←", cmdLeft(), [0x1B, 0x5B, 0x48]),
-            ("⌘→", cmdRight(), [0x1B, 0x5B, 0x46]),
+            ("⌘←", cmdLeft(), [0x01]),
+            ("⌘→", cmdRight(), [0x05]),
+            ("⌥←", optionLeft(), [0x1B, 0x62]),
+            ("⌥→", optionRight(), [0x1B, 0x66]),
             ("⌘⌫", cmdBackspace(), [0x15]),
             ("⌥⌫", optionBackspace(), [0x1B, 0x7F]),
             ("⌥⌦", optionForwardDelete(), [0x1B, 0x64]),
         ]
         for shortcut in cases {
-            let mapped: [UInt8]? = TerminalInputController.naturalTextEditingBytes(for: shortcut.event)
-            let expected: [UInt8]? = shortcut.bytes
-            #expect(mapped == expected, "\(shortcut.name) mapped to \(describe(mapped))")
+            let mapped = TerminalInputController.naturalTextEditing(for: shortcut.event, onAlternateScreen: false)
+            let expected: NaturalTextEditing? = .bytes(shortcut.bytes)
+            #expect(mapped == expected, "\(shortcut.name) mapped to \(describeEditing(mapped))")
+        }
+    }
+
+    /// On the alternate screen ⌘← and ⌘→ are a plain Home and End through the key encoder, for
+    /// the program's modes to shape, because tmux, screen and vim give Ctrl-A a meaning of their
+    /// own. Every other shortcut sends the bytes it sends on the primary screen.
+    @Test func naturalTextEditingOnTheAlternateScreenSendsHomeAndEnd() throws {
+        let cases: [(name: String, event: NSEvent, editing: NaturalTextEditing)] = try [
+            ("⌘←", cmdLeft(), .encodedKey(GHOSTTY_KEY_HOME)),
+            ("⌘→", cmdRight(), .encodedKey(GHOSTTY_KEY_END)),
+            ("⌥←", optionLeft(), .bytes([0x1B, 0x62])),
+            ("⌥→", optionRight(), .bytes([0x1B, 0x66])),
+            ("⌘⌫", cmdBackspace(), .bytes([0x15])),
+            ("⌥⌫", optionBackspace(), .bytes([0x1B, 0x7F])),
+            ("⌥⌦", optionForwardDelete(), .bytes([0x1B, 0x64])),
+        ]
+        for shortcut in cases {
+            let mapped = TerminalInputController.naturalTextEditing(for: shortcut.event, onAlternateScreen: true)
+            let expected: NaturalTextEditing? = shortcut.editing
+            #expect(mapped == expected, "on the alternate screen \(shortcut.name) mapped to \(describeEditing(mapped))")
         }
     }
 
     /// Only the one modifier: Shift, Control, or ⌘ and ⌥ together decline, as in
-    /// `TBDTerminalView`, and so do the keys on their own and other ⌘ keys.
-    @Test func naturalTextEditingDeclinesOtherModifiersAndKeys() throws {
+    /// `TBDTerminalView`, and so do the keys on their own and other ⌘ and ⌥ keys, on either
+    /// screen. Fn-Delete on its own is one of them: iTerm2's preset sends Ctrl-D for it, which
+    /// ends the shell on an empty line, so it stays forward Delete.
+    @Test(arguments: [false, true])
+    func naturalTextEditingDeclinesOtherModifiersAndKeys(onAlternateScreen: Bool) throws {
         let cases: [(name: String, event: NSEvent)] = try [
             ("⇧⌘←", arrow(0x7B, leftArrow, [.command, .shift])),
             ("⌃⌘←", arrow(0x7B, leftArrow, [.command, .control])),
             ("⌥⌘←", arrow(0x7B, leftArrow, [.command, .option])),
+            ("⇧⌥←", arrow(0x7B, leftArrow, [.option, .shift])),
+            ("⌃⌥←", arrow(0x7B, leftArrow, [.option, .control])),
             ("⌥⌘⌫", keyDown(0x33, "\u{7F}", flags: [.command, .option])),
             ("⇧⌥⌫", keyDown(0x33, "\u{7F}", flags: [.option, .shift])),
             ("⌃⌥⌫", keyDown(0x33, "\u{7F}", flags: [.option, .control])),
             ("⌘⌦", keyDown(0x75, forwardDelete, flags: [.command, .function])),
-            ("⌥←", arrow(0x7B, leftArrow, .option)),
+            ("⌥↑", arrow(0x7E, upArrow, .option)),
             ("←", arrow(0x7B, leftArrow)),
             ("⌫", keyDown(0x33, "\u{7F}")),
+            ("⌦", keyDown(0x75, forwardDelete, flags: .function)),
             ("⌘A", keyDown(0x00, "a", flags: .command)),
         ]
         for shortcut in cases {
-            let mapped = TerminalInputController.naturalTextEditingBytes(for: shortcut.event)
-            #expect(mapped == nil, "\(shortcut.name) mapped to \(describe(mapped))")
+            let mapped = TerminalInputController.naturalTextEditing(
+                for: shortcut.event, onAlternateScreen: onAlternateScreen)
+            #expect(mapped == nil, "\(shortcut.name) mapped to \(describeEditing(mapped))")
         }
     }
 
@@ -208,8 +264,8 @@ struct MacShortcutParityTests {
         let fixture = try ShortcutViewFixture()
         let view = fixture.view
         let shortcuts: [(name: String, event: NSEvent, bytes: [UInt8])] = try [
-            ("⌘←", cmdLeft(), [0x1B, 0x5B, 0x48]),
-            ("⌘→", cmdRight(), [0x1B, 0x5B, 0x46]),
+            ("⌘←", cmdLeft(), [0x01]),
+            ("⌘→", cmdRight(), [0x05]),
             ("⌘⌫", cmdBackspace(), [0x15]),
         ]
         for shortcut in shortcuts {
@@ -224,6 +280,45 @@ struct MacShortcutParityTests {
         let menuKey = view.performKeyEquivalent(with: try cmdUp())
         #expect(!menuKey, "⌘↑ was taken before the menus could see it")
         #expect(fixture.recorder.sent.isEmpty, "⌘↑ as a key equivalent sent \(fixture.recorder.sent)")
+    }
+
+    /// ⌘← and ⌘→ follow the screen. On the primary screen they send Ctrl-A and Ctrl-E, under
+    /// DECCKM too, which oh-my-zsh turns on at its prompt. On the alternate screen they send Home
+    /// and End in the form the program's cursor-key mode asks for: `ESC [ H` without DECCKM,
+    /// `ESC O H` with it. Back on the primary screen they send Ctrl-A and Ctrl-E again.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func commandArrowsFollowTheScreen() throws {
+        let fixture = try ShortcutViewFixture()
+        let terminal = fixture.terminal
+        let arrows = try [cmdLeft(), cmdRight()]
+        let lineEdges: [[UInt8]] = [[0x01], [0x05]]
+
+        let primary = sentForKeyEquivalents(arrows, on: fixture)
+        #expect(primary == lineEdges, "on the primary screen ⌘← then ⌘→ sent \(primary)")
+
+        terminal.feed(text: "\u{1b}[?1h")
+        let primaryUnderCursorKeys = sentForKeyEquivalents(arrows, on: fixture)
+        #expect(primaryUnderCursorKeys == lineEdges,
+                "on the primary screen under DECCKM ⌘← then ⌘→ sent \(primaryUnderCursorKeys)")
+
+        terminal.feed(text: "\u{1b}[?1l\u{1b}[?1049h")
+        let onAlternate = terminal.withLocked { $0.isAlternateScreen }
+        try #require(onAlternate, "?1049h did not switch to the alternate screen")
+        let normal = sentForKeyEquivalents(arrows, on: fixture)
+        let normalHomeEnd: [[UInt8]] = [Array("\u{1b}[H".utf8), Array("\u{1b}[F".utf8)]
+        #expect(normal == normalHomeEnd, "on the alternate screen ⌘← then ⌘→ sent \(normal)")
+
+        terminal.feed(text: "\u{1b}[?1h")
+        let application = sentForKeyEquivalents(arrows, on: fixture)
+        let applicationHomeEnd: [[UInt8]] = [Array("\u{1b}OH".utf8), Array("\u{1b}OF".utf8)]
+        #expect(application == applicationHomeEnd,
+                "on the alternate screen under DECCKM ⌘← then ⌘→ sent \(application)")
+
+        terminal.feed(text: "\u{1b}[?1049l")
+        let stillOnAlternate = terminal.withLocked { $0.isAlternateScreen }
+        try #require(!stillOnAlternate, "?1049l did not return to the primary screen")
+        let back = sentForKeyEquivalents(arrows, on: fixture)
+        #expect(back == lineEdges, "back on the primary screen ⌘← then ⌘→ sent \(back)")
     }
 
     /// ⌥⌫ and ⌥⌦ send the word deletions whether or not Option is Meta, and under Kitty flags too,
@@ -242,6 +337,31 @@ struct MacShortcutParityTests {
         let sent = fixture.recorder.sent
         let expected: [[UInt8]] = [[0x1B, 0x7F], [0x1B, 0x64]]
         #expect(sent == expected, "with Option as Meta \(optionAsMeta) ⌥⌫ then ⌥⌦ sent \(sent)")
+    }
+
+    /// ⌥← and ⌥→ send `ESC b` and `ESC f` whether or not Option is Meta, on either screen, and
+    /// under DECCKM and Kitty flags too, where the key encoder would send a modified arrow.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice), arguments: [true, false])
+    func optionArrowsMoveByWordOnEitherScreen(optionAsMeta: Bool) throws {
+        let fixture = try ShortcutViewFixture()
+        let view = fixture.view
+        view.optionAsMeta = optionAsMeta
+        let words: [[UInt8]] = [[0x1B, 0x62], [0x1B, 0x66]]
+
+        view.keyDown(with: try optionLeft())
+        view.keyDown(with: try optionRight())
+        let primary = fixture.recorder.sent
+        #expect(primary == words, "with Option as Meta \(optionAsMeta) on the primary screen ⌥← then ⌥→ sent \(primary)")
+
+        fixture.recorder.sent = []
+        fixture.terminal.feed(text: "\u{1b}[?1049h\u{1b}[?1h\u{1b}[>1u")
+        let modes = fixture.terminal.withLocked { (alternate: $0.isAlternateScreen, kitty: $0.kittyKeyboardFlags) }
+        try #require(modes.alternate && modes.kitty == 1, "the alternate screen and Kitty flags did not take: \(modes)")
+        view.keyDown(with: try optionLeft())
+        view.keyDown(with: try optionRight())
+        let alternate = fixture.recorder.sent
+        #expect(alternate == words,
+                "with Option as Meta \(optionAsMeta) on the alternate screen ⌥← then ⌥→ sent \(alternate)")
     }
 
     /// The shortcuts belong to the focused terminal only: `performKeyEquivalent` is offered to
@@ -266,7 +386,7 @@ struct MacShortcutParityTests {
         let focused = view.performKeyEquivalent(with: try cmdLeft())
         #expect(focused, "the focused terminal left ⌘← for the menus")
         let sent = fixture.recorder.sent
-        #expect(sent == [[0x1B, 0x5B, 0x48]], "the focused terminal sent \(sent) for ⌘←")
+        #expect(sent == [[0x01]], "the focused terminal sent \(sent) for ⌘←")
     }
 
     // MARK: - ⌘ keys no menu took
