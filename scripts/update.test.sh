@@ -45,9 +45,13 @@ ln -s "$BASH" "$TEST_TMP/bash-pin/bash"
 PATH="$TEST_TMP/bash-pin:$PATH"
 export PATH
 
-# A rollback after the app stop waits APP_EXIT_SETTLE_SECONDS before it moves
-# the installed bundle. No case here has a macOS reading that bundle, so every
-# run skips the wait, save the one case that measures it and sets its own.
+# A step that swaps the installed bundle while the app is down waits out
+# macOS's two checks of the app's exit: APP_EXIT_SETTLE_SECONDS after it, and
+# a window around APP_EXIT_RECHECK_SECONDS after it. No case here has a macOS
+# reading that bundle, so every run skips the settle, save the cases that
+# measure it and set their own. The second check stays at its 31 s: no case
+# moves the bundle that long after a stop, and the cases that measure it set
+# their own.
 export TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=0
 
 # Source the script for the pure-function cases. Sourcing defines functions and
@@ -2823,7 +2827,9 @@ test_local_build_takes_the_link_back_from_a_download() {
 #   run_update_around_handover <case_dir> [args...]
 #
 # Every run starts with the app running (<case>/app exists, per
-# FAKE_APP_STATE in mkstub_tbd) and an empty events file.
+# FAKE_APP_STATE in mkstub_tbd) and an empty events file;
+# FAKE_APP_NOT_RUNNING=1 starts it with no app running instead, as an
+# earlier run that stopped the app and was killed leaves it.
 # FAKE_HANDOVER_FAILS=1 fails the handover, with the rollback of the bundle
 # taken as done. FAKE_RESTORE_FAILS=1 beside it runs that rollback for real
 # (roll_back_bundle) with no bundle kept by this run, as on a first update, so
@@ -2876,7 +2882,11 @@ test_local_build_takes_the_link_back_from_a_download() {
 run_update_around_handover() {
     local case_dir="$1"; shift
     local successor_bin="" status=0
-    : > "$case_dir/app"
+    if [ "${FAKE_APP_NOT_RUNNING:-0}" = 1 ]; then
+        rm -f "$case_dir/app"
+    else
+        : > "$case_dir/app"
+    fi
     : > "$case_dir/events.log"
     if [ "${FAKE_REAL_HANDOVER:-0}" = 1 ] && [ "${FAKE_SUCCESSOR_EXITS:-0}" != 1 ]; then
         successor_bin="$case_dir/successor/TBDDaemon"
@@ -3942,6 +3952,56 @@ test_a_failed_handover_restores_the_kept_bundle_that_matches_the_daemon() {
     assert_eq "once" "1" "$(grep -c '^open ' "$events")"
 }
 
+# THE REGRESSION: a run kept the daemon's build (1111…), swapped in its new
+# build (2222…) and was cut short before the handover; a newer commit then
+# landed, and the retry installs that. The installed bundle is neither the
+# daemon's build nor the retry's, so the keep copied it over the kept
+# bundle, and the only bundle of the daemon's build was gone: a failed
+# handover put the cut-short build back in front of the daemon, with a line
+# saying it matched nothing, and a completed one left a successor reading
+# that build at the kept path. The keep now keeps nothing there, so a failed
+# handover puts the daemon's build back and a completed one leaves it kept.
+test_a_newer_retry_after_a_cut_short_swap_keeps_the_daemons_build() {
+    local how case_dir out rc events installed kept
+    for how in fails completes; do
+        case_dir="$(mkcase "newer-retry-$how")"
+        events="$case_dir/events.log"
+        installed="$case_dir/Applications/TBD.app"
+        kept="$case_dir/home/tbd/updates/previous/TBD.app"
+        mkdir -p "$case_dir/Applications"
+        mkbundle "$installed" "left-by-the-cut-short-run" >/dev/null
+        stamp_clone_identity "$installed" "$case_dir" 2222222222222222222222222222222222222222
+        mkbundle "$kept" "the-daemons-build" "$CASE_DAEMON_COMMIT" >/dev/null
+        if [ "$how" = fails ]; then
+            out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+            assert_eq "a failed handover fails the run" "1" "$rc"
+        else
+            out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+            assert_eq "a completed handover succeeds" "0" "$rc"
+        fi
+        assert_contains_literal "the keep names both builds and keeps nothing ($how)" \
+            "$installed is build 2222222222222222222222222222222222222222 from $case_dir/home/tbd/updates/src, not build $CASE_DAEMON_COMMIT from $case_dir/worktree, which the daemon runs and $kept holds — keeping no copy of it" \
+            "$out"
+        assert_not_contains "the cut-short build is not kept ($how)" "kept the previous app bundle" "$out"
+        if [ "$how" = completes ]; then
+            assert_eq "the daemon's build is still the kept bundle" "the-daemons-build" \
+                "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+            assert_eq "and the retry's build is installed" "$case_dir/home/tbd/updates/src" \
+                "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+            continue
+        fi
+        assert_not_contains "the rollback needs no excuse for what it restores" \
+            "putting back the bundle this run replaced" "$out"
+        assert_contains "the kept bundle goes back" "restored previous app bundle" "$out"
+        assert_eq "the daemon's build is installed" "the-daemons-build" \
+            "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+        assert_not_contains "the rollback completes" "did not complete" "$out"
+        assert_contains "and the app is relaunched" \
+            "relaunching the app this run stopped before the handover" "$out"
+        assert_eq "once" "1" "$(grep -c '^open ' "$events")"
+    done
+}
+
 # A daemon with no stamp reports the HEAD of its worktree, marked
 # `origin: worktreeHead`, and that HEAD can have moved since the daemon
 # started, so it says nothing sure of the daemon's build. The rollback then
@@ -4496,7 +4556,8 @@ test_a_rollback_waits_for_the_app_exit_to_settle() {
     out="$(TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=3 FAKE_STAMP_STOP=1 FAKE_REAL_INSTALL=1 \
         FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
     assert_eq "a failed handover fails the run" "1" "$rc"
-    assert_contains "the wait is logged" "for the app's exit to settle" "$out"
+    assert_contains "the wait is logged" \
+        "waiting [0-9]*s before putting the previous app bundle back at $installed: the app exited [0-9]*s ago" "$out"
     stopped_at="$(sed -n 's/^app-stop-returned at //p' "$events" | head -1)"
     copied_at="$(grep -F -- "copy $kept -> $incoming at " "$events" |
         sed -n 's/.* at \([0-9][0-9]*\) installed .*/\1/p' | head -1)"
@@ -4525,12 +4586,229 @@ test_a_rollback_waits_for_the_app_exit_to_settle() {
         run_update_around_handover "$case_dir" --no-app)"; rc=$?
     assert_eq "a failed handover fails the run (--no-app)" "1" "$rc"
     assert_not_contains "with no app stopped, the rollback does not wait (--no-app)" \
-        "to settle" "$out"
+        "before putting the previous app bundle back" "$out"
     assert_eq "the rollback still stages the kept bundle beside the installed one (--no-app)" "1" \
         "$(grep -c -F -- "copy $kept -> $incoming at " "$events")"
     assert_contains "and puts it back (--no-app)" "restored previous app bundle" "$out"
     assert_eq "the bundle from before the update is installed (--no-app)" "before-the-update" \
         "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+}
+
+# The wait that keeps a rename at the installed path clear of macOS's two
+# checks of an app exit, as a function of the clock and of the interval the
+# exit lies in. With the settle at 3 s and the second check at 31 s, an exit
+# seen at 0 holds a rename until 4 s for the first check, then lets it
+# through until 29 s, holds it from there until 34 s for the second, and lets
+# it through for good after that. An exit not seen, known to lie in [0, 9],
+# holds a rename until 13 s, then from 29 s until 43 s. A settle of 0 waits
+# for nothing at the first check. Unset, the settle is 3 s and the second
+# check 31 s, and a second check that is not a whole number reads as 31 s.
+# The interval: [t, t] for an exit seen at t, [t, t + 9] at most for a stop
+# begun at t that did not see the exit, and never past the clock.
+#
+# The assertions run in this shell, not a subshell: `fail` records a failure
+# in FAIL, and a subshell's FAIL never reaches the harness's exit status. The
+# overrides and the record are local instead, so later cases still read the
+# harness's.
+test_the_app_exit_check_wait_keeps_renames_clear_of_both_checks() {
+    local TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=3 TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=31
+    local APP_EXIT_KIND APP_EXIT_AT pair now expected
+    for pair in 0:4 2:2 4:0 28:0 29:5 31:3 33:1 34:0 121:0; do
+        now="${pair%%:*}"
+        expected="${pair#*:}"
+        assert_eq "an exit seen at 0: a rename at ${now}s waits ${expected}s" "$expected" \
+            "$(app_exit_check_wait "$now" 0 0)"
+    done
+    assert_eq "an exit not seen, in [0, 9]: a rename at 5s waits until 13s" "8" "$(app_exit_check_wait 5 0 9)"
+    assert_eq "and one at 30s until 43s" "13" "$(app_exit_check_wait 30 0 9)"
+    TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=0
+    assert_eq "a settle of 0 waits for nothing at the first check" "0" "$(app_exit_check_wait 0 0 0)"
+    assert_eq "but still for the second" "5" "$(app_exit_check_wait 29 0 0)"
+    TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=3
+    TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=soon
+    assert_eq "a second check that is not a whole number reads as 31 s" "3" "$(app_exit_check_wait 31 0 0)"
+    assert_fail "a clock reading that is not a whole number is refused" app_exit_check_wait x 0 0
+    # shellcheck disable=SC2016 # expanded by the inner bash
+    assert_eq "unset, the settle is 3 s and the second check 31 s" "3 31 4 5" \
+        "$(env -u TBD_UPDATE_APP_EXIT_SETTLE_SECONDS -u TBD_UPDATE_APP_EXIT_RECHECK_SECONDS \
+            bash -c 'source "$1"; source "$2"; OPT_AUTO=true
+                printf "%s %s %s %s\n" "$APP_EXIT_SETTLE_SECONDS" "$APP_EXIT_RECHECK_SECONDS" \
+                    "$(app_exit_check_wait 0 0 0)" "$(app_exit_check_wait 29 0 0)"' \
+            _ "$SCRIPT" "$HERE/restart-bundle-lib.sh")"
+
+    APP_EXIT_KIND=exited
+    APP_EXIT_AT=100
+    assert_eq "an exit seen at t lies at t" "100 100" "$(app_exit_interval 150)"
+    APP_EXIT_KIND=stopping
+    assert_eq "a stop not seen to end, read 3 s in: the exit is in [t, now]" "100 103" "$(app_exit_interval 103)"
+    assert_eq "read later: in [t, t + 9], past which the app is taken for stuck" "100 109" \
+        "$(app_exit_interval 200)"
+    APP_EXIT_KIND=exited
+    APP_EXIT_AT=200
+    assert_eq "a record ahead of the clock reads as an exit now" "150 150" "$(app_exit_interval 150)"
+}
+
+# A rollback runs with the stopped app still down, so macOS's second check of
+# its exit, about 31 s after it, can still come, and a handover can fail
+# anywhere in its two-minute budget. A rollback that would land on that check
+# waits it out before it renames anything. Here the settle is 1 s and the
+# second check is moved to 3 s after the exit, so the rollback, which comes
+# at once, waits out the settle to 2 s, finds itself in the window around the
+# second check (1 s to 6 s), and waits until 6 s: its copy of the kept bundle
+# starts at least 5 whole clock seconds after the stop returned. The settle
+# alone, as the rollback waited, starts it 2 s after.
+test_a_rollback_waits_out_the_second_check_of_the_app_exit() {
+    local case_dir out rc events installed incoming kept stopped_at copied_at
+    case_dir="$(mkcase rollback-second-check)"
+    events="$case_dir/events.log"
+    installed="$case_dir/Applications/TBD.app"
+    incoming="$case_dir/Applications/.TBD-install-incoming"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$installed" "before-the-update" "$CASE_DAEMON_COMMIT" >/dev/null
+    out="$(TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=1 TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=3 \
+        FAKE_STAMP_STOP=1 FAKE_REAL_INSTALL=1 FAKE_HANDOVER_FAILS=1 \
+        run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "a failed handover fails the run" "1" "$rc"
+    assert_contains "the wait is logged with both checks" \
+        "waiting [0-9]*s before putting the previous app bundle back at $installed: the app exited [0-9]*s ago, and macOS checks a quit app's bundle just after it quits and again about 3s later" \
+        "$out"
+    stopped_at="$(sed -n 's/^app-stop-returned at //p' "$events" | head -1)"
+    copied_at="$(grep -F -- "copy $kept -> $incoming at " "$events" |
+        sed -n 's/.* at \([0-9][0-9]*\) installed .*/\1/p' | head -1)"
+    if [ -n "$stopped_at" ] && [ -n "$copied_at" ] && [ $((copied_at - stopped_at)) -ge 5 ]; then
+        pass "the rollback starts on the bundle only once the second check is over"
+    else
+        fail "the rollback starts on the bundle only once the second check is over: stop returned at [$stopped_at], rollback copy at [$copied_at]"
+    fi
+    assert_contains "the kept bundle still goes back" "restored previous app bundle" "$out"
+    assert_eq "the bundle from before the update is installed" "before-the-update" \
+        "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_eq "and the app is relaunched once" "1" "$(grep -c '^open ' "$events")"
+}
+
+# THE REGRESSION: a run that stops the app and is then killed leaves the app
+# down with macOS's second check of its exit still to come, about 31 s after
+# the exit, and nothing launches the app to call it off. A retry within that
+# time swapped the installed bundle before its own stop, which found no app
+# and waited for nothing. The stop now records the exit in
+# ~/tbd/updates/app-exit, and an install that finds the app down waits out
+# both checks of it. Here an exit is recorded as the run starts and the
+# second check is moved to 2 s after it, so the install, which comes a
+# second or two in, lands in the window around it (0 s to 5 s) and waits
+# until 5 s: its staging copy starts at least 4 whole clock seconds after
+# the exit. With the app running, it was launched since, so the record is
+# forgotten and the install does not wait. Either way the record is gone
+# once the run has launched the app.
+test_a_retry_waits_out_the_checks_of_an_earlier_runs_exit() {
+    local how case_dir out rc events installed incoming record exited_at copied_at
+    for how in app-down app-running; do
+        case_dir="$(mkcase "retry-after-a-killed-run-$how")"
+        events="$case_dir/events.log"
+        installed="$case_dir/Applications/TBD.app"
+        incoming="$case_dir/Applications/.TBD-install-incoming"
+        record="$case_dir/home/tbd/updates/app-exit"
+        mkdir -p "$case_dir/Applications" "$(dirname "$record")"
+        mkbundle "$installed" "before-the-update" "$CASE_DAEMON_COMMIT" >/dev/null
+        exited_at="$(date +%s)"
+        printf 'exited %s\n' "$exited_at" > "$record"
+        if [ "$how" = app-down ]; then
+            out="$(FAKE_APP_NOT_RUNNING=1 TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=2 FAKE_REAL_INSTALL=1 \
+                run_update_around_handover "$case_dir")"; rc=$?
+        else
+            out="$(TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=2 FAKE_REAL_INSTALL=1 \
+                run_update_around_handover "$case_dir")"; rc=$?
+        fi
+        assert_eq "the retry succeeds ($how)" "0" "$rc"
+        assert_eq "the new build is installed ($how)" "$case_dir/home/tbd/updates/src" \
+            "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+        assert_eq "the record is gone once the run has launched the app ($how)" "gone" \
+            "$(path_state "$record")"
+        if [ "$how" = app-running ]; then
+            assert_not_contains "an app that is running has no exit pending, so nothing waits" \
+                "before installing the new app bundle" "$out"
+            continue
+        fi
+        assert_contains "the wait says why" \
+            "waiting [0-9]*s before installing the new app bundle at $installed: the app exited [0-9]*s ago, and macOS checks a quit app's bundle just after it quits and again about 2s later" \
+            "$out"
+        copied_at="$(grep -F -- "-> $incoming at " "$events" |
+            sed -n 's/.* at \([0-9][0-9]*\) installed .*/\1/p' | head -1)"
+        if [ -n "$copied_at" ] && [ $((copied_at - exited_at)) -ge 4 ]; then
+            pass "the install stages its bundle only once the earlier exit's second check is over"
+        else
+            fail "the install stages its bundle only once the earlier exit's second check is over: exit at [$exited_at], staging copy at [$copied_at]"
+        fi
+    done
+}
+
+# The exit record follows the app. A run that completes and launches the app
+# leaves none. A run that stops the app and then exits inside the handover
+# leaves the exit it saw. A run whose stop finds no app, and that then exits
+# the same way, leaves an earlier run's record exactly as it found it; here
+# that exit was 5 s ago, so the install, well short of its second check,
+# does not wait. A record of a stop that did not see the exit begun 1 s ago
+# makes the install wait by the interval: the exit lies anywhere up to the
+# moment of the install, so with the second check moved to 2 s the install
+# waits the whole 5 s from then. A record that does not parse is noted and
+# removed.
+test_the_exit_record_follows_the_app() {
+    local how case_dir out rc record started ended line at seeded
+    for how in completes exits-mid-handover none-found-then-exits stopping garbage; do
+        case_dir="$(mkcase "exit-record-$how")"
+        record="$case_dir/home/tbd/updates/app-exit"
+        mkdir -p "$case_dir/Applications" "$(dirname "$record")"
+        mkbundle "$case_dir/Applications/TBD.app" "before-the-update" "$CASE_DAEMON_COMMIT" >/dev/null
+        started="$(date +%s)"
+        case "$how" in
+            completes)
+                out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+                assert_eq "the run completes" "0" "$rc"
+                assert_eq "a run that launches the app leaves no record" "gone" "$(path_state "$record")"
+                ;;
+            exits-mid-handover)
+                out="$(FAKE_REAL_INSTALL=1 FAKE_HANDOVER_EXITS=1 run_update_around_handover "$case_dir")"
+                ended="$(date +%s)"
+                line="$(cat "$record" 2>/dev/null)"
+                at="${line#exited }"
+                if [ "$line" != "$at" ] && [ -n "$at" ] && [ "$at" -ge "$started" ] && [ "$at" -le "$ended" ]; then
+                    pass "a run killed after its stop leaves the exit it saw"
+                else
+                    fail "a run killed after its stop leaves the exit it saw: record [$line], run from $started to $ended"
+                fi
+                ;;
+            none-found-then-exits)
+                seeded="exited $((started - 5))"
+                printf '%s\n' "$seeded" > "$record"
+                out="$(FAKE_APP_NOT_RUNNING=1 FAKE_REAL_INSTALL=1 FAKE_HANDOVER_EXITS=1 \
+                    run_update_around_handover "$case_dir")"
+                assert_contains "the stop finds no app" "no app running from" "$out"
+                assert_not_contains "the install comes well short of the second check" \
+                    "before installing the new app bundle" "$out"
+                assert_eq "an earlier run's record survives a stop that finds no app" "$seeded" \
+                    "$(cat "$record" 2>/dev/null)"
+                ;;
+            stopping)
+                printf 'stopping %s\n' "$((started - 1))" > "$record"
+                out="$(FAKE_APP_NOT_RUNNING=1 TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=2 FAKE_REAL_INSTALL=1 \
+                    run_update_around_handover "$case_dir")"; rc=$?
+                assert_eq "the run completes (stopping)" "0" "$rc"
+                assert_contains "an exit not seen waits by its interval, and says so" \
+                    "waiting 5s before installing the new app bundle at $case_dir/Applications/TBD.app: the app was being stopped [0-9]*s ago and was not seen to exit, so it exited no earlier than that" \
+                    "$out"
+                assert_eq "the record is gone once the run has launched the app (stopping)" "gone" \
+                    "$(path_state "$record")"
+                ;;
+            *)
+                printf 'quit sometime\n' > "$record"
+                out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+                assert_eq "the run completes (garbage)" "0" "$rc"
+                assert_contains_literal "a record that does not parse is noted" \
+                    "note: $record does not hold an app exit this run can read: [quit sometime]; removing it" "$out"
+                assert_eq "and removed" "gone" "$(path_state "$record")"
+                ;;
+        esac
+    done
 }
 
 # An install that stops part-way leaves its siblings behind: a partial copy at
@@ -6079,6 +6357,7 @@ test_a_rollback_that_finds_the_kept_bundle_gone_does_not_claim_a_restore
 test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_update_over_its_own_build_leaves_the_kept_bundle_alone
 test_a_failed_handover_restores_the_kept_bundle_that_matches_the_daemon
+test_a_newer_retry_after_a_cut_short_swap_keeps_the_daemons_build
 test_a_daemon_identity_read_from_its_worktree_head_is_an_unknown_build
 test_a_rollback_whose_bundle_and_link_disagree_leaves_the_app_stopped
 test_a_failed_handover_over_the_daemons_build_restores_nothing
@@ -6092,6 +6371,10 @@ test_an_interrupted_update_over_its_own_build_gives_the_recovery_steps
 test_an_exit_mid_handover_leaves_the_app_stopped
 test_an_exit_after_the_handover_still_relaunches_the_app
 test_a_rollback_waits_for_the_app_exit_to_settle
+test_the_app_exit_check_wait_keeps_renames_clear_of_both_checks
+test_a_rollback_waits_out_the_second_check_of_the_app_exit
+test_a_retry_waits_out_the_checks_of_an_earlier_runs_exit
+test_the_exit_record_follows_the_app
 test_an_update_clears_what_an_interrupted_install_left
 test_an_interrupted_install_reports_which_build_is_installed
 test_an_interruption_while_staging_reports_that_nothing_was_installed

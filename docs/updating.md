@@ -84,7 +84,8 @@ these steps in order.
   installed bundle to `~/tbd/updates/previous/TBD.app`, where it stays — it
   is what a failed handover puts back, and afterwards it is the quickest way
   to return to the build you were on. (Not when the installed bundle already
-  is the build being installed; see "Going back to the previous build".)
+  is the build being installed, nor when it is not the daemon's build and the
+  kept one is; see "Going back to the previous build".)
   Then it copies the new bundle in beside
   the installed one, to a hidden `/Applications/.TBD-install-incoming`, and
   swaps the two with two renames back to back: the installed bundle to
@@ -119,19 +120,31 @@ these steps in order.
   the app quit, 1 ms after the old bundle had gone, found nothing, and killed
   31 pty holders and their sessions; on other runs the read landed after the
   new copy had finished, and passed. With the new bundle already whole in
-  place there is nothing to race. Nothing moves the bundle in the seconds
-  after the app quits either: a handover that completes leaves it alone, and
-  the rollback after one that fails waits three seconds from the app's exit
-  before it starts (`APP_EXIT_SETTLE_SECONDS` in `scripts/update.sh`), well
-  past the measured read 12 ms after the quit and the force-quit about a
-  second later. The app stops before the daemon is handed over because an app
-  still running during the handover reconnects to the new daemon and
-  re-attaches the session it shows, and the new daemon keeps that claim after
-  the app is replaced, refusing the replacement's attach. From here on, every
-  way the run ends launches the app again, but two: an interruption while the
-  bundle is being installed and the daemon handed over, and a failed handover
-  whose rollback does not complete, both described under "Going back to the
-  previous build".
+  place there is nothing to race. macOS checks the bundle twice for each
+  quit: the first check comes right after the quit, and the second about 31
+  seconds later, unless the app has been launched again by then. A bundle
+  that is missing at either check has the same effect. So nothing moves the
+  bundle while either check may come. A handover that completes leaves it
+  alone. The rollback after one that fails waits until three seconds have
+  passed since the app's exit (`APP_EXIT_SETTLE_SECONDS` in
+  `scripts/update.sh`), well past the measured read 12 ms after the quit and
+  the force-quit about a second later. When it would otherwise land 29 to 34
+  seconds after the exit, it waits until 34 seconds have passed
+  (`APP_EXIT_RECHECK_SECONDS`), which allows for the clock's whole seconds,
+  a check that comes a little late, and the time the check takes to read the
+  bundle. The run also records the exit in `~/tbd/updates/app-exit`. A run
+  that is killed after the stop leaves the app down with the second check
+  still to come. The next update then finds the app still down and keeps its
+  install's renames clear of that check too, even though its own stop finds
+  no app to stop. The record goes once the app is launched again, or once
+  both checks are over. The app stops before the daemon is handed over
+  because an app still running during the handover reconnects to the new
+  daemon and re-attaches the session it shows, and the new daemon keeps that
+  claim after the app is replaced, refusing the replacement's attach. From
+  here on, every way the run ends launches the app again, but two: an
+  interruption while the bundle is being installed and the daemon handed
+  over, and a failed handover whose rollback does not complete, both
+  described under "Going back to the previous build".
 - **Hands the daemon over**, as described below, and waits until the new
   daemon is the one answering: the old daemon's process has exited, and
   `tbd daemon status` then reports the new binary's path. The path alone
@@ -284,7 +297,8 @@ A release install does this:
   `provenance: release` and the CI run it came from.
 - **Keeps two trees**: the one now running and the one it replaced, which is
   what `~/tbd/updates/previous/TBD.app` pairs with. A run whose keep kept no
-  bundle — it found its own build already installed, nothing installed, or
+  bundle — it found its own build already installed, nothing installed, a
+  build the daemon does not run installed with the daemon's build kept, or
   put back a bundle an interrupted install had left beside the installed
   path and found it its own build — keeps as its second tree one of the same
   build as the bundle at `~/tbd/updates/previous/TBD.app`, if one is still
@@ -388,13 +402,20 @@ the order you would reach for them.
   dirty tree the same `builtAt` too, since the identity does not record a
   dirty tree's changes — as a run cut short after its swap leaves it, or a
   re-run over a completed update: a copy of that build is no way back, and
-  would replace the kept bundle, which may be. Any other bundle is kept,
-  even one of the same commit built from another worktree, another build of
-  the same dirty tree, or one in the other configuration (a `--debug` run
-  over a release build), and so is one whose identity records no
-  configuration. Put it back the way an install does, so that
+  would replace the kept bundle, which may be. So does one that finds
+  installed a build the daemon does not run while the kept bundle is the
+  daemon's build, by the comparison the rollback makes (below). A run cut
+  short after its swap leaves that when a newer commit lands before the next
+  update, and copied over the kept bundle, the build it cut short would
+  erase the one bundle that matches the daemon still running. Any other
+  bundle is kept, even one of the same commit built from another worktree,
+  another build of the same dirty tree, or one in the other configuration (a
+  `--debug` run over a release build), and so is one whose identity records
+  no configuration. Put it back the way an install does, so that
   `/Applications/TBD.app` is never missing if the app quits meanwhile (see
-  "Stops the app" above).
+  "Stops the app" above). If you quit TBD in the last 35 seconds, wait until
+  35 seconds have passed before running the command below, because macOS
+  checks a quit app's bundle again about 31 seconds after it quits.
 
   First look at what `ls -a /Applications` lists. With nothing at
   `/Applications/TBD.app`, a swap stopped or failed between its renames, and
@@ -493,13 +514,15 @@ counts as one whose build is unknown, as does one that does not answer:
 that HEAD can have moved since the daemon started. The daemon reports no
 build configuration, so the rollback does not compare one. When the
 installed bundle already is that build — a re-run over the build the daemon
-runs — there is nothing to put back. When the kept bundle is, the run waits
-until three seconds have passed since the app it stopped exited, so that nothing
-moves the bundle while macOS may still be checking it, then swaps the kept
-bundle back in the same way an install does — copied in beside the new one,
-then two renames — and tells LaunchServices about it. It logs `restored
-previous app bundle` (with a note when LaunchServices could not register it,
-which fails nothing but can leave `tbd://` links and the icon stale). The
+runs — there is nothing to put back. When the kept bundle is, the run first
+waits out macOS's checks of the app it stopped: until three seconds have
+passed since the app exited, and, when the swap would otherwise land 29 to
+34 seconds after the exit, until 34 seconds have passed (see "Stops the app"
+above). Then it swaps the kept bundle back in the same way an install does —
+copied in beside the new one, then two renames — and tells LaunchServices
+about it. It logs `restored previous app bundle` (with a note when
+LaunchServices could not register it, which fails nothing but can leave
+`tbd://` links and the icon stale). The
 kept copy is spent: it is the bundle now installed. When neither bundle is
 the daemon's build but the run kept a bundle itself, that bundle goes back
 all the same, with a line naming the daemon's build and the kept bundle's,
@@ -513,8 +536,9 @@ it, relaunches the app it stopped before the handover,
 and exits non-zero. That is the case the kept bundle exists for — a new app
 driving the old daemon is a state nobody should be left in. The relaunch
 also covers a handover that failed after the old daemon had already exited:
-an app that finds no daemon starts one. Under `--no-app` the app was never
-stopped, so the swap back runs without the wait.
+an app that finds no daemon starts one. Under `--no-app` the run stopped no
+app, so the swap back waits only when an earlier update stopped the app and
+nothing has launched it since.
 
 An install that fails, because the copy into `/Applications` does not
 complete, has changed nothing there: the installed bundle is the one the run
