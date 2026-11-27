@@ -889,6 +889,55 @@ struct HolderReconcileInventoryTests {
         #expect(!tabIDs.contains(shell.id), "the row was deleted and its tab left behind")
     }
 
+    /// The deferred startup adoption (`HolderRegistry.adoptRemaining`) works
+    /// from rows listed before the socket was bound, and the reaper's first
+    /// sweep runs beside it, so the hand-back can park or delete a row the
+    /// adoption has yet to reach. Reaching it afterwards changes neither row:
+    /// adoption writes no row, finds no holder to read, and what it remembers
+    /// about a holder it found gone is what the startup adoption remembers
+    /// about every parked holder row — which no sweep reads, and which a
+    /// wake's spawn replaces.
+    @Test("a deferred adoption that reaches a handed-back row leaves it as the hand-back left it")
+    func aDeferredAdoptionLeavesAHandedBackRowAlone() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243, 4245]), registry: registry)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let created = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
+        let shell = try #require(try await db.terminals.get(id: created.id))
+
+        // Nothing remembered about either session, as for a row the startup
+        // adoption's budget deferred: each verdict probes the empty rendezvous.
+        #expect(await handBack(claude, to: lifecycle) == .sessionOver(.exitedStatusUnknown))
+        #expect(
+            await handBack(shell, to: lifecycle, holderPID: 4244, childPID: 4245)
+                == .sessionOver(.exitedStatusUnknown))
+        let parked = try #require(try await db.terminals.get(id: claude.id))
+        try #require(parked.isParked)
+        try #require(try await db.terminals.get(id: shell.id) == nil)
+
+        // The rows as the startup adoption listed them, before the hand-back.
+        let roundTripsBefore = await registry.attachRoundTripsStarted
+        await registry.adoptRemaining([claude, shell])
+
+        #expect(
+            await registry.attachRoundTripsStarted == roundTripsBefore + 2,
+            "the adoption skipped a row, so this test says nothing about reaching one")
+        #expect(try await db.terminals.get(id: claude.id) == parked)
+        #expect(try await db.terminals.get(id: shell.id) == nil)
+        #expect(await registry.reader(for: claude.id) == nil)
+        #expect(await registry.reader(for: shell.id) == nil)
+        // A later sweep skips the parked row, whatever the adoption remembered.
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        #expect(try await db.terminals.get(id: claude.id) == parked)
+    }
+
     /// The reaper read the job as gone, but the verdict's own last gate reads
     /// it again — and a job running now keeps its row, which is the only
     /// record of its pid.
