@@ -232,6 +232,28 @@ public final class TBDDatabase: Sendable {
         return deleted
     }
 
+    /// Delete a holder row whose holder and job reconcile has found gone, and
+    /// its tab, only while the row is still the live holder row the caller
+    /// read. False means it changed first, or is gone, and nothing was
+    /// deleted. See `LiveHolderRowSnapshot` for what a change means here.
+    func deleteEndedHolderTerminalAndTab(
+        id: UUID, expectedState: LiveHolderRowSnapshot
+    ) async throws -> Bool {
+        let deleted = try await writer.write { db -> Bool in
+            guard let current = try TerminalRecord.fetchOne(db, key: id.uuidString)?.toModel(),
+                  expectedState.matches(current) else {
+                return false
+            }
+            let removed = try TerminalRecord.deleteOne(db, key: id.uuidString)
+            _ = try TabRecord.deleteOne(db, key: id.uuidString)
+            return removed
+        }
+        if deleted {
+            await terminals.deletions.notifyDeleted([id])
+        }
+        return deleted
+    }
+
     /// Best-effort pre-migration snapshot. Failures are logged, not thrown —
     /// the migration must still be allowed to proceed even if e.g. the disk
     /// is full or the parent directory isn't writable.

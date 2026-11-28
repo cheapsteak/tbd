@@ -51,6 +51,11 @@ public struct HolderChildRecord: Sendable, Equatable {
 /// sweep declined to touch as easily as what it reaped.
 public enum HolderChildDecision: Sendable, Equatable {
     case keep(reason: String)
+    /// The holder is gone and nothing runs under the recorded child pid. The
+    /// leg signals nothing, exactly as for a `keep`, and logs it as one; it is
+    /// a case of its own because it is the one keep that says the session is
+    /// over, and the sweep hands that row back (`onHolderJobGone`).
+    case childGone
     case reap
 }
 
@@ -71,19 +76,28 @@ public struct AgentReaper: Sendable {
     /// (`HolderChildRecord.createdAt`) and still be believed to be that
     /// session's job.
     let holderIdentityWindow: TimeInterval
+    /// Called with each record the leg decides is `.childGone`: a row whose
+    /// holder and job are both gone, which nothing but a session row is left
+    /// of. The daemon wires it to the reconciler that disposes of such rows
+    /// (`WorktreeLifecycle.reconcileHolderRowAfterJobGone`). Injected as a
+    /// closure for the same reason `holderSessions` is: the reaper sits below
+    /// the lifecycle and must not name it. Nil does nothing.
+    let onHolderJobGone: (@Sendable (HolderChildRecord) async -> Void)?
 
     public init(
         signaller: ProcessSignaller,
         graceAttempts: Int = 30,
         pollInterval: Duration = .milliseconds(100),
         holderSessions: @escaping @Sendable () async -> [HolderChildRecord] = { [] },
-        holderIdentityWindow: TimeInterval = AgentReaper.defaultHolderIdentityWindow
+        holderIdentityWindow: TimeInterval = AgentReaper.defaultHolderIdentityWindow,
+        onHolderJobGone: (@Sendable (HolderChildRecord) async -> Void)? = nil
     ) {
         self.signaller = signaller
         self.graceAttempts = graceAttempts
         self.pollInterval = pollInterval
         self.holderSessions = holderSessions
         self.holderIdentityWindow = holderIdentityWindow
+        self.onHolderJobGone = onHolderJobGone
     }
 
     /// `HolderChildIdentity.startWindow`, which says why it is five minutes.
@@ -161,9 +175,12 @@ public struct AgentReaper: Sendable {
     ///    `holderIdentityWindow` of the record's identity anchor and must present an
     ///    executable a holder's job could have; and an unreadable start time or
     ///    command line is an uncertain identity, which keeps. **Every one of
-    ///    that check's answers except `.same` is a keep here**, and that
+    ///    that check's answers except `.same` signals nothing here**, and that
     ///    asymmetry is this leg's alone — the arbitration reads the very same
-    ///    answers in the opposite direction.
+    ///    answers in the opposite direction. `.notRunning` is spelled
+    ///    `.childGone` rather than a `keep` only so the sweep can tell the one
+    ///    answer that says the session is over from the ones that say the
+    ///    sweep is unsure.
     func decideHolderChild(_ record: HolderChildRecord) -> HolderChildDecision {
         guard record.childPID > 1 else { return .keep(reason: "invalid-child-pid") }
         guard let holderPID = record.holderPID, holderPID > 1 else {
@@ -177,7 +194,7 @@ public struct AgentReaper: Sendable {
             executableIsAcceptable: Self.isHolderChildExecutable,
             signaller: signaller
         ) {
-        case .notRunning: return .keep(reason: "child-gone")
+        case .notRunning: return .childGone
         case .startTimeUnreadable: return .keep(reason: "start-time-unreadable")
         case .startTimeMismatch: return .keep(reason: "start-time-mismatch")
         case .commandUnreadable: return .keep(reason: "command-unreadable")
@@ -219,6 +236,19 @@ public struct AgentReaper: Sendable {
     /// `HolderSpawner`'s type comment states the same gap from the creation
     /// side; the two must stay in agreement.
     ///
+    /// **A row whose holder and job are both gone is handed back, not left.**
+    /// The reconcile sweep keeps a holder row whose job is still running even
+    /// when its holder is provably gone, because the row is the only record of
+    /// the child pid this leg reads. That keep is meant to last only until the
+    /// job ends, and no reconcile pass is due to look at the row again once it
+    /// has: a startup pass that caught the child mid-exit would otherwise
+    /// leave a live, unparked row over a dead holder and a dead job until the
+    /// next daemon start or `cleanup`. So the
+    /// `.childGone` verdict calls `onHolderJobGone`, which the daemon wires to
+    /// `WorktreeLifecycle.reconcileHolderRowAfterJobGone` — the same reconciler
+    /// and the same judgement the startup pass applies, run again for one row.
+    /// This leg itself still signals nothing for it.
+    ///
     /// Unflagged: `AgentReaper` carries no switch of its own, and holder-ness
     /// is a transport property rather than a separate opt-in. An installation with no holder sessions has no records to walk,
     /// so the leg costs nothing where it has nothing to do.
@@ -226,11 +256,10 @@ public struct AgentReaper: Sendable {
         for record in await holderSessions() {
             switch decideHolderChild(record) {
             case .keep(let reason):
-                logger.debug("""
-                reaper: keep \(reason, privacy: .public) holder child \
-                \(record.childPID, privacy: .public) \
-                (session \(record.terminalID.uuidString, privacy: .public))
-                """)
+                logKeep(reason, record)
+            case .childGone:
+                logKeep("child-gone", record)
+                await onHolderJobGone?(record)
             case .reap:
                 logger.info("""
                 reaper: reaping orphaned holder child \(record.childPID, privacy: .public) \
@@ -240,6 +269,14 @@ public struct AgentReaper: Sendable {
                 await reapVerified(record)
             }
         }
+    }
+
+    private func logKeep(_ reason: String, _ record: HolderChildRecord) {
+        logger.debug("""
+        reaper: keep \(reason, privacy: .public) holder child \
+        \(record.childPID, privacy: .public) \
+        (session \(record.terminalID.uuidString, privacy: .public))
+        """)
     }
 
     /// SIGTERM → poll → SIGKILL, re-proving identity before the escalation.

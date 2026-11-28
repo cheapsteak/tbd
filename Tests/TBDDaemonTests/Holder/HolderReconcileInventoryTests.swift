@@ -65,10 +65,12 @@ struct HolderReconcileInventoryTests {
 
     private func makeLifecycle(
         db: TBDDatabase, signaller: ProcessSignaller, registry: HolderRegistry?,
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        subscriptions: StateSubscriptionManager? = nil
     ) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), hooks: HookResolver(),
+            subscriptions: subscriptions,
             processSignaller: signaller,
             // Every tmux server reads as gone — the answer a holder row's worktree
             // gets from a real socket, since a server that was never started has
@@ -112,10 +114,13 @@ struct HolderReconcileInventoryTests {
             registry: registry(environment: vanishedHolderEnvironment()))
         let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
 
+        // With a start time, as a spawned row has, so the park below has one
+        // to clear.
         let claude = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-holder",
-            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243)
+            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243,
+            holderChildStartedAt: Self.endedJobStartedAt)
         let shell = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
             kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
@@ -548,6 +553,49 @@ struct HolderReconcileInventoryTests {
 
     // MARK: - The budget the production pass arms
 
+    /// The first sleep the phase budget's timer asked of `clock`.
+    ///
+    /// Waited for, not sampled: the timer is its own unstructured task, so it
+    /// reaches the clock a scheduling hop after the pass that armed it, which
+    /// may already have returned — and under the fast parallel pass one hop
+    /// can take tens of seconds. Nil when the wait ended without a sleep:
+    /// after recording `NoBudgetSleep` on a timeout, and silently on
+    /// cancellation, which belongs to whatever cancelled the test.
+    ///
+    /// The diagnostic reports the sleeps the poll's final probe read, not a
+    /// fresh read after it: a timer that registers just after that probe
+    /// would otherwise report one sleep for a wait that saw none.
+    private func firstBudgetSleep(
+        on clock: SleepRecordingClock, missing: String
+    ) async -> Duration? {
+        let started = ContinuousClock.now
+        var observed: [Duration] = []
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            observed = clock.requestedSleeps
+            return !observed.isEmpty
+        }
+        switch outcome {
+        case .satisfied:
+            return observed.first
+        case .cancelled:
+            return nil
+        case .timedOut:
+            Issue.record(NoBudgetSleep(
+                finding: missing, elapsed: ContinuousClock.now - started,
+                sleeps: observed.count))
+            return nil
+        }
+    }
+
+    private struct NoBudgetSleep: Error, CustomStringConvertible {
+        let finding: String
+        let elapsed: Duration
+        let sleeps: Int
+        var description: String {
+            "\(finding) — \(sleeps) sleep(s) requested of the clock after \(elapsed)"
+        }
+    }
+
     /// **The bracket in `reconcileTerminals` is the untested line, not the
     /// budget actor.** A test that calls `begin` itself stays green with both
     /// the `begin` and the `end` deleted from production, while the whole
@@ -584,13 +632,13 @@ struct HolderReconcileInventoryTests {
 
         // The budget's timer is its own task, so it can reach the clock a hop
         // or two after the pass that armed it has already cancelled it.
-        let sleeps = await clock.settledSleeps()
-        let requested = try #require(
-            sleeps.first,
-            """
-            the reconcile pass never asked the lifecycle's clock for a budget: the whole \
-            pre-bind bound on this serial arm is gone
-            """)
+        guard let requested = await firstBudgetSleep(
+            on: clock,
+            missing: """
+                the reconcile pass never asked the lifecycle's clock for a budget: the whole \
+                pre-bind bound on this serial arm is gone
+                """)
+        else { return }
         #expect(
             requested <= WorktreeLifecycle.holderPhaseBudget
                 && requested > WorktreeLifecycle.holderPhaseBudget - .milliseconds(500),
@@ -623,9 +671,641 @@ struct HolderReconcileInventoryTests {
             actuationLog: makeTestActuationLog())
 
         #expect(try await db.terminals.get(id: shell.id) == nil)
+        _ = await firstBudgetSleep(
+            on: clock, missing: "the reconcile pass armed no phase budget on an untouched config")
+    }
+
+    // MARK: - Overlapping passes share one budget
+
+    /// Passes overlap in production — the hourly scratch pass and the reaper's
+    /// hand-back both make their first run as the daemon starts — so a pass
+    /// that ends while another is still running must not take the bound off
+    /// the other. And once the last pass ends, the next one starts a fresh
+    /// clock rather than inheriting a spent one.
+    @Test("a pass that ends inside another leaves the other's budget running", .clockDriven)
+    func anInnerPassLeavesTheOuterBudgetRunning() async throws {
+        let budget = HolderProbeBudget()
+        let clock = EventDrivenTestClock()
+        await budget.begin(.seconds(5), clock: clock)
+        await budget.begin(.seconds(5), clock: clock)
+        await budget.end()
+
+        // The outer pass's timer is still armed, and firing it spends the
+        // budget the outer pass is still running under.
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
+        let started = ContinuousClock.now
+        let spent = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await budget.isSpent
+        }
+        if spent == .cancelled { return }
+        if spent == .timedOut {
+            Issue.record(BudgetNeverSpent(elapsed: ContinuousClock.now - started))
+        }
+
+        await budget.end()
+        await budget.begin(.seconds(5), clock: clock)
         #expect(
-            !(await clock.settledSleeps().isEmpty),
-            "the reconcile pass armed no phase budget on an untouched config")
+            await budget.isSpent == false,
+            "a pass begun after every pass had ended inherited the last one's spent budget")
+        await budget.end()
+    }
+
+    /// A timer's sleep can return a moment before the last pass's `end`
+    /// cancels it: too late for the cancel to stop it, but before its expiry
+    /// reaches the budget. By the time that expiry lands, a new pass may have
+    /// begun on a clock of its own, and the stale expiry must not spend it —
+    /// that pass would keep every row it reaches without probing one.
+    ///
+    /// The held clock stands in for that moment: its sleep ignores the cancel
+    /// and returns only when the test releases it, after the new pass began.
+    /// Joining the old timer then proves its expiry has run before the flag
+    /// is read, so the negative needs no window.
+    @Test("an expiry from an ended pass's clock does not spend a later pass", .clockDriven)
+    func aStaleExpiryDoesNotSpendALaterPass() async throws {
+        let budget = HolderProbeBudget()
+        let held = HeldSleepClock()
+        await budget.begin(.seconds(5), clock: held)
+        let staleTimer = try #require(await budget.timerForTesting)
+        await budget.end()
+
+        // The later pass's own clock, which nothing advances: only the stale
+        // expiry could spend this pass.
+        await budget.begin(.seconds(5), clock: EventDrivenTestClock())
+        held.release()
+        await staleTimer.value
+
+        #expect(
+            await budget.isSpent == false,
+            "the expiry of a clock whose pass had ended spent the pass begun after it")
+        await budget.end()
+    }
+
+    // MARK: - The reaper's hand-back
+
+    /// The incident's shape: a Claude row whose holder (4242) and job (4243)
+    /// are gone, which the startup pass kept because the job was mid-exit
+    /// when it looked.
+    ///
+    /// It carries the job's start time, as every spawned holder row does, so
+    /// a park that left it on the row would show. Nothing the hand-back or the
+    /// sweep decides reads it: the verdict asks only whether the pid is alive,
+    /// and the disposal's compare-and-set compares pids, not start times.
+    ///
+    /// Read back after the insert, so a later comparison against the stored
+    /// row compares like with like.
+    private func seedEndedClaudeRow(db: TBDDatabase, worktreeID: UUID) async throws -> Terminal {
+        let created = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-holder",
+            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243,
+            holderChildStartedAt: Self.endedJobStartedAt)
+        return try #require(try await db.terminals.get(id: created.id))
+    }
+
+    /// When the ended rows' job started: a whole second, so it survives the
+    /// database's date encoding unchanged.
+    private static let endedJobStartedAt = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func actuationRows(at path: String) throws -> [ActuationRow] {
+        guard FileManager.default.fileExists(atPath: path) else { return [] }
+        return try String(contentsOfFile: path, encoding: .utf8).split(separator: "\n")
+            .map { try JSONDecoder().decode(ActuationRow.self, from: Data($0.utf8)) }
+    }
+
+    private func handBack(
+        _ terminal: Terminal, to lifecycle: WorktreeLifecycle,
+        holderPID: Int32? = 4242, childPID: Int32? = 4243,
+        actuationLog: ActuationLog = makeTestActuationLog()
+    ) async -> HolderRowVerdict? {
+        await lifecycle.reconcileHolderRowAfterJobGone(
+            terminalID: terminal.id, expectedHolderPID: holderPID,
+            expectedChildPID: childPID, actuationLog: actuationLog)
+    }
+
+    /// The gap the hand-back closes. The adoption that followed the startup
+    /// pass remembered the session as ended with an unknown status, the job is
+    /// gone now, and the row is parked exactly as the startup pass would have
+    /// parked it — reason, session, cleared pids and the actuation record.
+    @Test("a handed-back row whose job is gone is parked for recovery")
+    func aHandedBackRowIsParked() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(db: db, signaller: deadJobs([4243]), registry: registry)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        // The nil start time asserted after the park proves a clear only if
+        // the row had one to clear.
+        try #require(claude.holderChildStartedAt != nil)
+        await registry.recordStatusForTesting(
+            .exitedStatusUnknown, for: claude.id, fromAbsentRendezvous: true)
+        let logPath = tempDir.appendingPathComponent("handback.jsonl").path
+
+        let verdict = await handBack(
+            claude, to: lifecycle, actuationLog: ActuationLog(path: logPath))
+
+        #expect(verdict == .sessionOver(.exitedStatusUnknown))
+        let parked = try #require(
+            try await db.terminals.get(id: claude.id),
+            "a resumable handed-back row was deleted instead of parked")
+        #expect(parked.isParked)
+        #expect(parked.hibernatedAt != nil)
+        #expect(parked.hibernateReason == .recovery)
+        #expect(parked.claudeSessionID == "sess-holder", "the session id must survive the park")
+        #expect(parked.holderPID == nil)
+        #expect(parked.childPID == nil)
+        #expect(parked.holderChildStartedAt == nil)
+        #expect(parked.sessionIncarnationID != claude.sessionIncarnationID)
+
+        let rows = try actuationRows(at: logPath)
+        let request = try #require(rows.first { $0.kind == .hibernate })
+        #expect(request.actor == .daemon(rail: ActuationRail.reconcile))
+        #expect(request.target == .local(worktree: main.id, terminal: claude.id))
+        #expect(rows.contains { $0.confirms == request.id && $0.result == .synchronous(.dispatched) })
+    }
+
+    /// The closure the daemon gives the reaper, built as the daemon builds it
+    /// (`holderJobGoneHandBack(actuationLog:)`) and called as the reaper's leg
+    /// calls it, with the record it read. The record's holder and child pids
+    /// differ, so a closure that swapped them, or dropped either, would ask
+    /// about a holder and job the row does not name and leave it live: only
+    /// one that passes both through as read parks it.
+    @Test("the daemon's hand-back closure parks the row the reaper's record names")
+    func theDaemonsHandBackClosureParksTheRow() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(db: db, signaller: deadJobs([4243]), registry: registry)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let holderPID = try #require(claude.holderPID)
+        let childPID = try #require(claude.childPID)
+        try #require(holderPID != childPID, "equal pids cannot tell a swapped closure apart")
+        await registry.recordStatusForTesting(
+            .exitedStatusUnknown, for: claude.id, fromAbsentRendezvous: true)
+        let onHolderJobGone = lifecycle.holderJobGoneHandBack(
+            actuationLog: makeTestActuationLog())
+
+        await onHolderJobGone(HolderChildRecord(
+            terminalID: claude.id, holderPID: holderPID, childPID: childPID,
+            createdAt: HolderChildIdentity.anchor(of: claude)))
+
+        let parked = try #require(
+            try await db.terminals.get(id: claude.id),
+            "a resumable handed-back row was deleted instead of parked")
+        #expect(
+            parked.isParked,
+            """
+            the daemon's hand-back closure left the row live: it did not pass the record's \
+            pids through as read
+            """)
+        #expect(parked.hibernateReason == .recovery)
+    }
+
+    /// Parity with the startup pass's other fork: a row with nothing to resume
+    /// is deleted with its tab. Through the probe this time — nothing is
+    /// remembered about the session, and the rendezvous is empty.
+    @Test("a handed-back row with no session to resume is deleted with its tab")
+    func aHandedBackShellRowIsDeleted() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243]),
+            registry: registry(environment: vanishedHolderEnvironment()))
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4242, childPID: 4243)
+        try await db.tabs.setLabel(tabID: shell.id, worktreeID: main.id, label: "acme shell")
+
+        let verdict = await handBack(shell, to: lifecycle)
+
+        #expect(verdict == .sessionOver(.exitedStatusUnknown))
+        #expect(try await db.terminals.get(id: shell.id) == nil)
+        let tabIDs = try await db.tabs.listForWorktree(worktreeID: main.id).map(\.id)
+        #expect(!tabIDs.contains(shell.id), "the row was deleted and its tab left behind")
+    }
+
+    /// The deferred startup adoption (`HolderRegistry.adoptRemaining`) works
+    /// from rows listed before the socket was bound, and the reaper's first
+    /// sweep runs beside it, so the hand-back can park or delete a row the
+    /// adoption has yet to reach. Reaching it afterwards changes neither row:
+    /// adoption writes no row, finds no holder to read, and what it remembers
+    /// about a holder it found gone is what the startup adoption remembers
+    /// about every parked holder row — which no sweep reads, and which a
+    /// wake's spawn replaces.
+    @Test("a deferred adoption that reaches a handed-back row leaves it as the hand-back left it")
+    func aDeferredAdoptionLeavesAHandedBackRowAlone() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243, 4245]), registry: registry)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let created = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
+        let shell = try #require(try await db.terminals.get(id: created.id))
+
+        // Nothing remembered about either session, as for a row the startup
+        // adoption's budget deferred: each verdict probes the empty rendezvous.
+        #expect(await handBack(claude, to: lifecycle) == .sessionOver(.exitedStatusUnknown))
+        #expect(
+            await handBack(shell, to: lifecycle, holderPID: 4244, childPID: 4245)
+                == .sessionOver(.exitedStatusUnknown))
+        let parked = try #require(try await db.terminals.get(id: claude.id))
+        try #require(parked.isParked)
+        try #require(try await db.terminals.get(id: shell.id) == nil)
+
+        // The rows as the startup adoption listed them, before the hand-back.
+        let roundTripsBefore = await registry.attachRoundTripsStarted
+        await registry.adoptRemaining([claude, shell])
+
+        #expect(
+            await registry.attachRoundTripsStarted == roundTripsBefore + 2,
+            "the adoption skipped a row, so this test says nothing about reaching one")
+        #expect(try await db.terminals.get(id: claude.id) == parked)
+        #expect(try await db.terminals.get(id: shell.id) == nil)
+        #expect(await registry.reader(for: claude.id) == nil)
+        #expect(await registry.reader(for: shell.id) == nil)
+        // A later sweep skips the parked row, whatever the adoption remembered.
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+        #expect(try await db.terminals.get(id: claude.id) == parked)
+    }
+
+    /// The reaper read the job as gone, but the verdict's own last gate reads
+    /// it again — and a job running now keeps its row, which is the only
+    /// record of its pid.
+    @Test("a handed-back row whose job is running again by the verdict's read is kept")
+    func aHandedBackRowWithALiveJobIsKept() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4243] = FakeProcessSignaller.Behavior(aliveInitially: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(db: db, signaller: signaller, registry: registry)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        await registry.recordStatusForTesting(.exitedStatusUnknown, for: claude.id)
+
+        let verdict = await handBack(claude, to: lifecycle)
+
+        #expect(verdict == .keep(reason: "job-still-running"))
+        #expect(try await db.terminals.get(id: claude.id) == claude)
+    }
+
+    /// A viewer owning the pty ends the questioning here as it does in the
+    /// sweep: the hand-back asks the sweep's verdict, gates and all.
+    @Test("a handed-back row a viewer holds is kept")
+    func aHandedBackRowAViewerHoldsIsKept() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(db: db, signaller: deadJobs([4243]), registry: registry)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        await registry.recordStatusForTesting(.exitedStatusUnknown, for: claude.id)
+        await registry.recordViewerClaimForTesting(
+            terminalID: claude.id, generation: 1, owner: nil)
+
+        let verdict = await handBack(claude, to: lifecycle)
+
+        #expect(verdict == .keep(reason: "viewer-attached"))
+        #expect(try await db.terminals.get(id: claude.id) == claude)
+    }
+
+    /// A row that is already parked is exactly what the hand-back would
+    /// produce, and judging it again would stamp a second park over the first.
+    /// It still names its pids here — the shape a park whose pid clear failed
+    /// leaves — so only the parked gate stands between it and a re-park.
+    @Test("a handed-back row that is already parked is left alone")
+    func aParkedRowIsLeftAlone() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(db: db, signaller: deadJobs([4243]), registry: registry)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        try await db.terminals.setHibernated(
+            id: claude.id, sessionID: "sess-holder", reason: .manual)
+        let parked = try #require(try await db.terminals.get(id: claude.id))
+        await registry.recordStatusForTesting(.exitedStatusUnknown, for: claude.id)
+        let logPath = tempDir.appendingPathComponent("handback.jsonl").path
+
+        let verdict = await handBack(
+            parked, to: lifecycle, actuationLog: ActuationLog(path: logPath))
+
+        #expect(verdict == nil)
+        #expect(try await db.terminals.get(id: claude.id) == parked)
+        #expect(try actuationRows(at: logPath).isEmpty)
+    }
+
+    /// A wake or a respawn between the reaper's read and this one gives the
+    /// row a new holder and job. The session those name is running now, and
+    /// parking it would let a later wake start a second agent on the same
+    /// session id — so a row naming anything but the pids the reaper found
+    /// gone is not judged at all.
+    @Test("a handed-back row that names a different holder or job is left alone")
+    func aRowWithOtherPidsIsLeftAlone() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(db: db, signaller: deadJobs([4243]), registry: registry)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        await registry.recordStatusForTesting(.exitedStatusUnknown, for: claude.id)
+        let logPath = tempDir.appendingPathComponent("handback.jsonl").path
+        let log = ActuationLog(path: logPath)
+
+        #expect(await handBack(claude, to: lifecycle, holderPID: 5252, actuationLog: log) == nil)
+        #expect(await handBack(claude, to: lifecycle, childPID: 5253, actuationLog: log) == nil)
+        #expect(await handBack(claude, to: lifecycle, holderPID: nil, actuationLog: log) == nil)
+
+        #expect(try await db.terminals.get(id: claude.id) == claude)
+        #expect(try actuationRows(at: logPath).isEmpty)
+    }
+
+    /// Only a holder row has a holder to have found gone. A tmux row naming
+    /// the same pids — which a real one never does — would otherwise reach the
+    /// holder arm's verdict and be parked on its say.
+    @Test("a handed-back row that is not on the holder is left alone")
+    func aTmuxRowIsLeftAlone() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let lifecycle = makeLifecycle(db: db, signaller: deadJobs([4243]), registry: registry)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let created = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-tmux",
+            kind: .claude, transport: .tmux, holderPID: 4242, childPID: 4243)
+        let tmux = try #require(try await db.terminals.get(id: created.id))
+        await registry.recordStatusForTesting(.exitedStatusUnknown, for: tmux.id)
+
+        let verdict = await handBack(tmux, to: lifecycle)
+
+        #expect(verdict == nil)
+        #expect(try await db.terminals.get(id: tmux.id) == tmux)
+    }
+
+    /// A row the reaper read and that has since been closed is nothing to
+    /// judge.
+    @Test("a handed-back row that is gone is nothing to judge")
+    func aGoneRowIsNothingToJudge() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243]),
+            registry: registry(environment: vanishedHolderEnvironment()))
+        let missing = Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4242, childPID: 4243)
+
+        #expect(await handBack(missing, to: lifecycle) == nil)
+    }
+
+    /// The hand-back probes under the same phase budget as a pass, on the
+    /// lifecycle's own clock — and ends it, so the next pass starts a clock
+    /// of its own rather than finding one already running.
+    @Test("the hand-back arms the phase budget and ends it")
+    func theHandBackArmsAndEndsTheBudget() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let clock = SleepRecordingClock()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243]),
+            registry: registry(environment: vanishedHolderEnvironment()), clock: clock)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4242, childPID: 4243)
+
+        #expect(await handBack(shell, to: lifecycle) == .sessionOver(.exitedStatusUnknown))
+        guard await firstBudgetSleep(
+            on: clock, missing: "the hand-back probed a rendezvous with no phase budget armed") != nil
+        else { return }
+
+        // A pass begun now starts a clock of its own only if the hand-back
+        // ended the one it began.
+        await lifecycle.holderProbeBudget.begin(.seconds(5), clock: clock)
+        let started = ContinuousClock.now
+        var sleepsSeen = 0
+        let rearmed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            sleepsSeen = clock.requestedSleeps.count
+            return sleepsSeen >= 2
+        }
+        // Taken before the cleanup: a second sleep that registers while
+        // `end()` is awaited, and the time `end()` takes, are not what the
+        // wait saw.
+        let waited = ContinuousClock.now - started
+        await lifecycle.holderProbeBudget.end()
+        if rearmed == .cancelled { return }
+        if rearmed == .timedOut {
+            Issue.record(BudgetNeverEnded(elapsed: waited, sleeps: sleepsSeen))
+        }
+    }
+
+    private struct BudgetNeverEnded: Error, CustomStringConvertible {
+        let elapsed: Duration
+        let sleeps: Int
+        var description: String {
+            """
+            a pass begun after the hand-back returned started no clock of its own after \
+            \(elapsed) (\(sleeps) sleep(s) requested): the hand-back left its budget running
+            """
+        }
+    }
+
+    // MARK: - What a disposal announces
+
+    /// A connected app applies a park to its cached row in place, from the
+    /// delta every park sends; without it the row reads live until the app
+    /// next refetches. The hand-back is the disposal that runs with an app
+    /// connected, so it is the one that has to say so.
+    @Test("a handed-back row that is parked is announced as parked")
+    func aHandedBackParkIsAnnounced() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let registry = registry(environment: vanishedHolderEnvironment())
+        let deltas = BroadcastDeltas()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243]), registry: registry,
+            subscriptions: deltas.manager)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        await registry.recordStatusForTesting(
+            .exitedStatusUnknown, for: claude.id, fromAbsentRendezvous: true)
+
+        #expect(await handBack(claude, to: lifecycle) == .sessionOver(.exitedStatusUnknown))
+
+        let parked = try #require(try await db.terminals.get(id: claude.id))
+        #expect(deltas.removals(of: claude.id) == 0)
+        let announced = deltas.hibernationChanges(of: claude.id)
+        #expect(announced.count == 1, "the park was announced \(announced.count) times")
+        let park = try #require(announced.first, "the park was never announced to the app")
+        #expect(park.worktreeID == main.id)
+        #expect(park.hibernated)
+        #expect(park.hibernateReason == .recovery)
+        #expect(park.keepWarm == parked.keepWarm)
+        // The park minted these, and nothing else announces them: a cached
+        // row that kept the old incarnation would forward the next session's
+        // reports under one the daemon no longer runs.
+        #expect(park.sessionIncarnationID == parked.sessionIncarnationID)
+        #expect(park.activity?.activityState == .idle)
+    }
+
+    /// The other fork: a row deleted with its tab is announced as removed, so
+    /// the app drops the tab instead of showing a session that is gone.
+    @Test("a handed-back row that is deleted is announced as removed")
+    func aHandedBackDeleteIsAnnounced() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let deltas = BroadcastDeltas()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243]),
+            registry: registry(environment: vanishedHolderEnvironment()),
+            subscriptions: deltas.manager)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4242, childPID: 4243)
+
+        #expect(await handBack(shell, to: lifecycle) == .sessionOver(.exitedStatusUnknown))
+
+        #expect(try await db.terminals.get(id: shell.id) == nil)
+        #expect(deltas.removals(of: shell.id) == 1)
+        #expect(deltas.hibernationChanges(of: shell.id).isEmpty)
+    }
+
+    /// The sweep disposes through the same code, so it announces the same
+    /// way. It matters after startup — `repo.add`, `cleanup` and the hourly
+    /// scratch pass run with an app connected — and costs nothing at startup,
+    /// when nobody is subscribed yet.
+    @Test("the sweep announces each row it parks or deletes")
+    func theSweepAnnouncesItsDisposals() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let deltas = BroadcastDeltas()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243, 4245]),
+            registry: registry(environment: vanishedHolderEnvironment()),
+            subscriptions: deltas.manager)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
+
+        try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog())
+
+        #expect(try await db.terminals.get(id: claude.id)?.isParked == true)
+        #expect(deltas.hibernationChanges(of: claude.id).map(\.hibernateReason) == [.recovery])
+        #expect(try await db.terminals.get(id: shell.id) == nil)
+        #expect(deltas.removals(of: shell.id) == 1)
+    }
+
+    /// A write the row refused changed nothing, so it tells the app nothing:
+    /// a park or removal announced over a row that was woken onto a new
+    /// holder in between would hide a running session. Driven directly,
+    /// because neither caller lets a test change the row between its read
+    /// and its write.
+    @Test("a disposal the row refused announces nothing")
+    func aRefusedDisposalAnnouncesNothing() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let deltas = BroadcastDeltas()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243, 4245]),
+            registry: registry(environment: vanishedHolderEnvironment()),
+            subscriptions: deltas.manager)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let created = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
+        let shell = try #require(try await db.terminals.get(id: created.id))
+
+        // Both woken onto new holders after the disposal's caller read them.
+        try await db.terminals.setHolderProcess(
+            id: claude.id, holderPID: 5252, childPID: 5253, startedAt: Date())
+        try await db.terminals.setHolderProcess(
+            id: shell.id, holderPID: 5254, childPID: 5255, startedAt: Date())
+
+        await lifecycle.disposeOfEndedHolderRow(
+            claude, finding: "a stale read", actuationLog: makeTestActuationLog())
+        await lifecycle.disposeOfEndedHolderRow(
+            shell, finding: "a stale read", actuationLog: makeTestActuationLog())
+
+        #expect(try await db.terminals.get(id: claude.id)?.isParked == false)
+        #expect(try await db.terminals.get(id: shell.id) != nil)
+        #expect(deltas.all.isEmpty, "a refused disposal broadcast \(deltas.all.count) delta(s)")
+    }
+
+    // MARK: - The disposal's compare-and-set
+
+    /// The sweep and the hand-back read a row, probe, and only then write, so
+    /// both writes compare against the row as read. These pin the store half:
+    /// a row that moved on in between is neither parked nor deleted.
+    @Test("an ended holder row is parked or deleted only while it is the row that was read")
+    func theDisposalWritesAreCompareAndSet() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let (_, main) = try await seedRepo(db: db, at: repoDir.path)
+
+        // Woken onto a new holder since the read: new pids.
+        let claude = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let read = LiveHolderRowSnapshot(terminal: claude)
+        try await db.terminals.setHolderProcess(
+            id: claude.id, holderPID: 5252, childPID: 5253, startedAt: Date())
+        #expect(try await db.terminals.parkEndedHolderRow(
+            id: claude.id, expectedState: read, sessionID: "sess-holder", reason: .recovery) == false)
+        #expect(try await db.deleteEndedHolderTerminalAndTab(
+            id: claude.id, expectedState: read) == false)
+        let woken = try #require(try await db.terminals.get(id: claude.id))
+        #expect(!woken.isParked)
+        #expect(woken.childPID == 5253)
+
+        // Parked by somebody else since the read.
+        let other = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        let otherRead = LiveHolderRowSnapshot(terminal: other)
+        try await db.terminals.setHibernated(id: other.id, sessionID: "sess-holder", reason: .manual)
+        #expect(try await db.terminals.parkEndedHolderRow(
+            id: other.id, expectedState: otherRead, sessionID: "sess-holder", reason: .recovery) == false)
+        #expect(try await db.deleteEndedHolderTerminalAndTab(
+            id: other.id, expectedState: otherRead) == false)
+        #expect(try await db.terminals.get(id: other.id)?.hibernateReason == .manual)
+
+        // Unchanged since the read: both writes go through.
+        let unchanged = try await seedEndedClaudeRow(db: db, worktreeID: main.id)
+        #expect(try await db.terminals.parkEndedHolderRow(
+            id: unchanged.id, expectedState: LiveHolderRowSnapshot(terminal: unchanged),
+            sessionID: "sess-holder", reason: .recovery))
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
+        #expect(try await db.deleteEndedHolderTerminalAndTab(
+            id: shell.id, expectedState: LiveHolderRowSnapshot(terminal: shell)))
+        #expect(try await db.terminals.get(id: shell.id) == nil)
+
+        // Gone since the read.
+        #expect(try await db.terminals.parkEndedHolderRow(
+            id: shell.id, expectedState: LiveHolderRowSnapshot(terminal: shell),
+            sessionID: "sess-holder", reason: .recovery) == false)
     }
 }
 
@@ -649,19 +1329,82 @@ private final class SleepRecordingClock: Clock, @unchecked Sendable {
         lock.withLock { recorded }
     }
 
-    /// The recorded sleeps once the budget timer has had a chance to reach this
-    /// clock, bounded so a missing bracket fails rather than hangs.
-    func settledSleeps() async -> [Duration] {
-        for _ in 0..<500 {
-            if !requestedSleeps.isEmpty { break }
-            await Task.yield()
-        }
-        return requestedSleeps
-    }
-
     func sleep(until deadline: Instant, tolerance: Duration?) async throws {
         let requested = base.now.duration(to: deadline)
         lock.withLock { recorded.append(requested) }
         try await base.sleep(until: deadline, tolerance: tolerance)
+    }
+}
+
+/// Every delta a lifecycle broadcasts through `manager`, collected from
+/// whichever thread broadcast it.
+private final class BroadcastDeltas: @unchecked Sendable {
+    let manager = StateSubscriptionManager()
+    private let lock = NSLock()
+    private var deltas: [StateDelta] = []
+
+    init() {
+        manager.addSubscriber { [weak self] data in
+            guard let self else { return false }
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                lock.withLock { deltas.append(delta) }
+            }
+            return true
+        }
+    }
+
+    var all: [StateDelta] { lock.withLock { deltas } }
+
+    func hibernationChanges(of terminalID: UUID) -> [TerminalHibernationDelta] {
+        all.compactMap {
+            guard case .terminalHibernationChanged(let delta) = $0,
+                  delta.terminalID == terminalID else { return nil }
+            return delta
+        }
+    }
+
+    func removals(of terminalID: UUID) -> Int {
+        all.filter {
+            guard case .terminalRemoved(let delta) = $0 else { return false }
+            return delta.terminalID == terminalID
+        }.count
+    }
+}
+
+/// A clock whose every sleep returns normally once `release()` is called, and
+/// not before — cancelled or not.
+///
+/// It models a sleep that had already returned when its task was cancelled:
+/// the cancel arrives, and the sleeper goes on as if it had not.
+private final class HeldSleepClock: Clock, @unchecked Sendable {
+    typealias Instant = ContinuousClock.Instant
+
+    private let base = ContinuousClock()
+    private let lock = NSLock()
+    private var released = false
+    private var sleepers: [CheckedContinuation<Void, Never>] = []
+
+    var now: Instant { base.now }
+    var minimumResolution: Duration { base.minimumResolution }
+
+    /// Ends every sleep, those already waiting and any that start later.
+    func release() {
+        let waiting = lock.withLock {
+            released = true
+            defer { sleepers = [] }
+            return sleepers
+        }
+        for sleeper in waiting { sleeper.resume() }
+    }
+
+    func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        await withCheckedContinuation { (sleeper: CheckedContinuation<Void, Never>) in
+            let alreadyReleased = lock.withLock {
+                if released { return true }
+                sleepers.append(sleeper)
+                return false
+            }
+            if alreadyReleased { sleeper.resume() }
+        }
     }
 }

@@ -864,6 +864,22 @@ the process table — the same argument as every other resource here.
   the backstop for holder deaths the daemon was down for; the prompt path is
   the daemon's own holder-connection watch ("Holder death" above).
 
+  **The two legs hand a row back and forth, and the hand-back is what closes
+  the loop.** `WorktreeLifecycle+Reconcile` keeps a row whose holder is gone
+  while its job is still running, because that row is the only record of the
+  child pid this leg sweeps by. A job routinely ends a moment after that read
+  — a holder killed just before a daemon handover leaves its child mid-exit
+  when the new daemon's startup pass looks — and a repository's rows are not
+  reconciled again until the next daemon start, `repo.add` or `cleanup`. So
+  when this leg finds the holder gone and nothing running
+  under the recorded child pid, it signals nothing and hands the row back to
+  `WorktreeLifecycle+Reconcile`, which asks the same verdict for that one row
+  and, when the session is over, parks it for recovery or deletes it exactly as
+  the startup pass would have. The hand-back judges a row only while it still
+  names the holder and child pid this leg found gone, and the park or delete is
+  a compare-and-set against the row as read, so a session woken onto a new
+  holder in between is never parked out from under itself.
+
 ### Letting go of a finished session's reader
 
 The reconcilers above reclaim things that outlive the daemon. A `HolderReader`

@@ -161,10 +161,10 @@ public enum TBDConstants {
     }
 
     /// The app bundle the last update replaced, kept as the no-rebuild route
-    /// back: `~/tbd/updates/previous/TBD.app`. `scripts/update.sh` moves it
-    /// here and restores it when the new daemon cannot come up, so the daemon
-    /// drops a retired column only once this build no longer uses it. Honors
-    /// TBD_HOME.
+    /// back: `~/tbd/updates/previous/TBD.app`. `scripts/update.sh` copies the
+    /// bundle it is replacing here before it stops the app, and restores it
+    /// when the new daemon cannot come up, so the daemon drops a retired
+    /// column only once this build no longer uses it. Honors TBD_HOME.
     public static func keptAppBundle(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL {

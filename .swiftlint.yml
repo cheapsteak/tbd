@@ -577,7 +577,8 @@ custom_rules:
     # (`HolderRegistry.abandon`, `abandonVerifiedJob`), tearing one down with
     # its row (`disposeHolder`), and writing input into one
     # (`HolderInjectionCourier.deliver`) — plus `setHibernated`, the park's
-    # record.
+    # record, and `parkEndedHolderRow`, the same record written with a
+    # compare-and-set, which the reconcile rail's holder arm writes through.
     #
     # With them, the wrappers that act on ONE session and leave the row to
     # their caller, so a new caller of one is as unrecorded as a new caller of
@@ -627,7 +628,7 @@ custom_rules:
     # forced step is `HolderRegistry.killJob` inside `abandon`, which is matched
     # at the `abandon` call. The orphan sweeps reach `killJob` too (the rowless
     # holder collector), but a session with no row is reclaimed, not actuated.
-    regex: '(?<!func )\b(?:(?:spawn|abandon|deliver|wake|migrate)\s*\((?=\s*terminalID:)|abandon\s*\((?=\s*terminal:)|(?:abandonVerifiedJob|disposeHolder|setHibernated|spawnTerminal|spawnPreSessionTerminal|closeTerminalTab|manualHibernate|parkForProfileSwap|performHolderHibernate|moveRunningShellToHolder|parkLeftoverTmuxRow|redeliverVerifiedPayload|wakeHolderAfterInPlaceChange)\s*\()'
+    regex: '(?<!func )\b(?:(?:spawn|abandon|deliver|wake|migrate)\s*\((?=\s*terminalID:)|abandon\s*\((?=\s*terminal:)|(?:abandonVerifiedJob|disposeHolder|setHibernated|parkEndedHolderRow|spawnTerminal|spawnPreSessionTerminal|closeTerminalTab|manualHibernate|parkForProfileSwap|performHolderHibernate|moveRunningShellToHolder|parkLeftoverTmuxRow|redeliverVerifiedPayload|wakeHolderAfterInPlaceChange)\s*\()'
     # Code only. Several doc comments name these primitives while explaining the
     # boundary, and firing on the prose that documents the rule is how a rule
     # gets disabled.

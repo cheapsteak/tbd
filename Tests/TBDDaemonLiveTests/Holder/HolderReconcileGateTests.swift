@@ -159,6 +159,51 @@ struct HolderReconcileGateTests {
         })
     }
 
+    // MARK: - The reaper's hand-back
+
+    /// The reaper hands a row back when it reads its holder and job as gone,
+    /// and the hand-back asks the sweep's own verdict, so a session this
+    /// daemon is draining is kept whatever the reaper read. The reason is the
+    /// discriminator: without gate 3 this handed-over row would be described,
+    /// and the verdict would read `alive` rather than `reader-live`.
+    @Test func aHandedBackRowUnderALiveReaderIsKept() async throws {
+        let fixture = try await HolderProcessFixture.start(command: "sleep 120")
+        defer { fixture.tearDown() }
+        await fixture.client.close()
+
+        let registry = makeRegistry(owner: fixture.owner, home: fixture.home)
+        defer { releaseInBackground(registry) }
+        _ = try await registry.adopt(terminal: holderTerminal(id: fixture.sessionID))
+
+        let lifecycle = try makeLifecycle(registry: registry)
+        let repo = try await lifecycle.db.repos.create(
+            path: "/tmp/acme-handback", displayName: "acme", defaultBranch: "main")
+        let main = try await lifecycle.db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main", path: "/tmp/acme-handback",
+            tmuxServer: TmuxServerName.forRepoPath("/tmp/acme-handback"))
+        let row = Terminal(
+            id: fixture.sessionID, worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-acme", kind: .claude,
+            transport: .holder, holderPID: fixture.handle.holderPID,
+            childPID: fixture.handle.childPID)
+        let record = TerminalRecord(from: row)
+        try await lifecycle.db.writerForTests.write { db in try record.insert(db) }
+        let before = try #require(try await lifecycle.db.terminals.get(id: fixture.sessionID))
+
+        let verdict = await lifecycle.reconcileHolderRowAfterJobGone(
+            terminalID: fixture.sessionID,
+            expectedHolderPID: fixture.handle.holderPID,
+            expectedChildPID: fixture.handle.childPID,
+            actuationLog: makeTestActuationLog())
+        #expect(
+            verdict == .keep(reason: "reader-live"),
+            """
+            the hand-back judged a session this daemon is draining: \
+            \(String(describing: verdict))
+            """)
+        #expect(try await lifecycle.db.terminals.get(id: fixture.sessionID) == before)
+    }
+
     // MARK: - Support
 
     /// A holder-transport row with **no recorded child pid**, so the last gate
