@@ -4603,8 +4603,11 @@ test_a_rollback_waits_for_the_app_exit_to_settle() {
 # holds a rename until 13 s, then from 29 s until 43 s. A settle of 0 waits
 # for nothing at the first check. Unset, the settle is 3 s and the second
 # check 31 s, and a second check that is not a whole number reads as 31 s.
-# The interval: [t, t] for an exit seen at t, [t, t + 9] at most for a stop
-# begun at t that did not see the exit, and never past the clock.
+# The interval: [t, t] for an exit seen at t, [t, now] for a stop begun at t
+# that did not see the exit, however long ago that was, and never past the
+# clock. So a stop not seen to end, read long after it began, holds a rename
+# for the whole second check from now: an app slow to quit can exit at any
+# time after the stop began.
 #
 # The assertions run in this shell, not a subshell: `fail` records a failure
 # in FAIL, and a subshell's FAIL never reaches the harness's exit status. The
@@ -4612,7 +4615,7 @@ test_a_rollback_waits_for_the_app_exit_to_settle() {
 # harness's.
 test_the_app_exit_check_wait_keeps_renames_clear_of_both_checks() {
     local TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=3 TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=31
-    local APP_EXIT_KIND APP_EXIT_AT pair now expected
+    local APP_EXIT_KIND APP_EXIT_AT pair now expected interval
     for pair in 0:4 2:2 4:0 28:0 29:5 31:3 33:1 34:0 121:0; do
         now="${pair%%:*}"
         expected="${pair#*:}"
@@ -4636,15 +4639,19 @@ test_the_app_exit_check_wait_keeps_renames_clear_of_both_checks() {
                     "$(app_exit_check_wait 0 0 0)" "$(app_exit_check_wait 29 0 0)"' \
             _ "$SCRIPT" "$HERE/restart-bundle-lib.sh")"
 
+    TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=31
     APP_EXIT_KIND=exited
     APP_EXIT_AT=100
     assert_eq "an exit seen at t lies at t" "100 100" "$(app_exit_interval 150)"
     APP_EXIT_KIND=stopping
     assert_eq "a stop not seen to end, read 3 s in: the exit is in [t, now]" "100 103" "$(app_exit_interval 103)"
-    assert_eq "read later: in [t, t + 9], past which the app is taken for stuck" "100 109" \
-        "$(app_exit_interval 200)"
-    APP_EXIT_KIND=exited
+    interval="$(app_exit_interval 200)"
+    assert_eq "read 100 s in: still [t, now], with no bound for an app slow to quit" "100 200" "$interval"
+    assert_eq "so a rename then waits the whole second check from now, 34 s" "34" \
+        "$(app_exit_check_wait 200 "${interval% *}" "${interval#* }")"
     APP_EXIT_AT=200
+    assert_eq "a stop recorded ahead of the clock reads as an exit now" "150 150" "$(app_exit_interval 150)"
+    APP_EXIT_KIND=exited
     assert_eq "a record ahead of the clock reads as an exit now" "150 150" "$(app_exit_interval 150)"
 }
 
@@ -4809,6 +4816,48 @@ test_the_exit_record_follows_the_app() {
                 ;;
         esac
     done
+}
+
+# An exit with no usable time, as a clock that could not be read leaves it,
+# must not read as an exit long past, or as one at the epoch's start, either
+# of which waits for nothing. Recording it writes nothing: the file keeps the
+# line it held, the WARNING says so, and the record in memory keeps the empty
+# time. The wait point then waits out a whole second check from now, 34 s
+# with the second check at 31 s, says why, and keeps the record, since
+# nothing says that check is over. The second check stays at 31 s and the
+# settle at 0, as in the rest of the harness, so the only thing that makes
+# this wait is the missing time: read as an exit now, the record would wait
+# 3 s with a second check of 0 s and nothing with one of 31 s. The wait is a
+# stubbed `sleep` that prints its argument, and the app is not running, so
+# nothing here waits or looks for a process.
+test_an_exit_with_no_usable_time_waits_out_a_whole_second_check() {
+    local root record out
+    root="$TEST_TMP/exit-with-no-usable-time"
+    record="$root/updates/app-exit"
+    mkdir -p "$root/updates"
+    printf 'exited 100\n' > "$record"
+    out="$(
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        APP_EXIT_FILE="$record"
+        INSTALLED_BUNDLE="$root/Applications/TBD.app"
+        OPT_AUTO=false
+        export TBD_UPDATE_APP_EXIT_SETTLE_SECONDS=0 TBD_UPDATE_APP_EXIT_RECHECK_SECONDS=31
+        app_process_pid() { return 1; }
+        sleep() { printf 'slept %s\n' "$1"; }
+        record_app_exit exited ""
+        printf 'recorded [%s] [%s]\n' "$APP_EXIT_KIND" "$APP_EXIT_AT"
+        wait_out_app_exit_checks "installing the new app bundle"
+        printf 'after the wait [%s] [%s]\n' "$APP_EXIT_KIND" "$APP_EXIT_AT"
+    )"
+    assert_contains_literal "an exit with no usable time is not written, and the WARNING says so" \
+        "WARNING: the app's exit has no usable time [], so $record is left as it was" "$out"
+    assert_eq "the file keeps the line it held" "exited 100" "$(cat "$record" 2>/dev/null)"
+    assert_contains_literal "the record in memory keeps the empty time" "recorded [exited] []" "$out"
+    assert_contains_literal "the wait point says why it waits in full" \
+        "WARNING: the recorded exit has no usable time []; waiting 34s before installing the new app bundle" "$out"
+    assert_contains_literal "and waits a whole second check from now, rather than for nothing" "slept 34" "$out"
+    assert_contains_literal "and keeps the record" "after the wait [exited] []" "$out"
 }
 
 # An install that stops part-way leaves its siblings behind: a partial copy at
@@ -6375,6 +6424,7 @@ test_the_app_exit_check_wait_keeps_renames_clear_of_both_checks
 test_a_rollback_waits_out_the_second_check_of_the_app_exit
 test_a_retry_waits_out_the_checks_of_an_earlier_runs_exit
 test_the_exit_record_follows_the_app
+test_an_exit_with_no_usable_time_waits_out_a_whole_second_check
 test_an_update_clears_what_an_interrupted_install_left
 test_an_interrupted_install_reports_which_build_is_installed
 test_an_interruption_while_staging_reports_that_nothing_was_installed

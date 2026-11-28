@@ -1604,11 +1604,21 @@ log_app_stop() {
 # it. A write that fails is logged and leaves the record in memory, so this
 # run's own rollback still waits on it; only a later run goes without it.
 #
+# An <epoch> that is not a whole number of seconds, as a clock that could not
+# be read gives, is never written, and the file keeps what it held. It is
+# logged, and the record in memory keeps it, so the wait point takes its
+# conservative branch and waits out a whole second check rather than reading
+# the exit as one long past (wait_out_app_exit_checks).
+#
 #   record_app_exit exited|stopping <epoch>
 record_app_exit() {
     local kind="${1-}" at="${2-}" tmp="$APP_EXIT_FILE.tmp"
     APP_EXIT_KIND="$kind"
     APP_EXIT_AT="$at"
+    if ! _is_whole_number "$at"; then
+        log "WARNING: the app's exit has no usable time [$at], so $APP_EXIT_FILE is left as it was; this run waits out macOS's checks of the exit in full before the installed bundle moves"
+        return 0
+    fi
     if [ ! -d "$APP_EXIT_FILE" ] && mkdir -p "$(dirname "$APP_EXIT_FILE")" 2>/dev/null &&
         printf '%s %s\n' "$kind" "$at" 2>/dev/null > "$tmp" &&
         mv -f "$tmp" "$APP_EXIT_FILE" 2>/dev/null; then
@@ -1656,11 +1666,14 @@ load_app_exit_record() {
 # `<from> <to>`:
 #
 #   - exited t: [t, t];
-#   - stopping t: [t, min(now, t + APP_STOP_GRACE + 4)]. A stop waits
-#     APP_STOP_GRACE seconds after SIGTERM and 3 more after SIGKILL, and the
-#     last second covers whole-second rounding. An app the stop could not
-#     see go within that is treated as stuck, never exiting, rather than as
-#     an exit still to come.
+#   - stopping t: [t, now]. The exit came after the stop began and no later
+#     than now, and nothing narrows it further: an app slow to quit after its
+#     run was killed mid-stop can exit long after any stop's own budget. So,
+#     with the app down, such a record holds a rename for the settle from
+#     now, and once that settle runs into t + APP_EXIT_RECHECK_SECONDS - 2,
+#     for the whole second check from now (app_exit_check_wait). It costs
+#     that whole wait at most once: the wait point forgets the record after
+#     it.
 #
 # Neither end lies after <now>: a record ahead of the clock, which was set
 # back since, reads as an exit at <now>.
@@ -1668,7 +1681,7 @@ load_app_exit_record() {
 #   app_exit_interval <now>
 app_exit_interval() {
     local now="${1-}" from="$APP_EXIT_AT" to="$APP_EXIT_AT"
-    [ "$APP_EXIT_KIND" != stopping ] || to=$((from + APP_STOP_GRACE + 4))
+    [ "$APP_EXIT_KIND" != stopping ] || to="$now"
     [ "$to" -le "$now" ] || to="$now"
     [ "$from" -le "$to" ] || from="$to"
     printf '%s %s\n' "$from" "$to"
@@ -1741,6 +1754,10 @@ app_exit_check_wait() {
 #     the pattern stop_installed_app stops), it forgets the record and
 #     returns: the app was launched again since that exit, or never exited,
 #     so no check of it is pending;
+#   - with no usable time for the clock or for the recorded exit, it logs
+#     why and waits out a whole second check from now, and keeps the
+#     record, since nothing says that check is over. An exit with no time
+#     read as one at the epoch's start would wait for nothing;
 #   - otherwise it logs what waits, for how long and why, and sleeps; then it
 #     forgets the record once the second check is over.
 #
@@ -1760,10 +1777,10 @@ wait_out_app_exit_checks() {
     fi
     now="$(date +%s)"
     recheck="$(app_exit_recheck_seconds)"
-    if ! _is_whole_number "$now"; then
-        # No clock reading to measure from: wait out a whole second check,
-        # and keep the record, since nothing says it is over.
-        log "WARNING: could not read the clock; waiting $((recheck + 3))s before $what, the longest macOS's checks of the app's exit can still take"
+    if ! _is_whole_number "$now" || ! _is_whole_number "$APP_EXIT_AT"; then
+        why="could not read the clock"
+        ! _is_whole_number "$now" || why="the recorded exit has no usable time [$APP_EXIT_AT]"
+        log "WARNING: $why; waiting $((recheck + 3))s before $what, the longest macOS's checks of the app's exit can still take"
         sleep $((recheck + 3))
         return 0
     fi
