@@ -134,6 +134,32 @@ private func pageDown(_ flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
     try keyDown(0x79, pageDownKey, flags: flags.union(.function))
 }
 
+/// `press`'s key again as an event of `type`, with `flags` held.
+private func keyEvent(
+    _ type: NSEvent.EventType, of press: NSEvent, flags: NSEvent.ModifierFlags, isARepeat: Bool
+) throws -> NSEvent {
+    let characters = press.characters ?? ""
+    let ignoringModifiers = press.charactersIgnoringModifiers ?? ""
+    return try #require(NSEvent.keyEvent(
+        with: type, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0,
+        context: nil, characters: characters, charactersIgnoringModifiers: ignoringModifiers,
+        isARepeat: isARepeat, keyCode: press.keyCode))
+}
+
+/// `press` again as the repeat AppKit sends while its key is held.
+private func repeated(_ press: NSEvent) throws -> NSEvent {
+    try keyEvent(.keyDown, of: press, flags: press.modifierFlags, isARepeat: true)
+}
+
+/// The key-up of `press`'s key, with `flags` held as it is let go: `press`'s own by default.
+private func keyUp(of press: NSEvent, flags: NSEvent.ModifierFlags? = nil) throws -> NSEvent {
+    try keyEvent(.keyUp, of: press, flags: flags ?? press.modifierFlags, isARepeat: false)
+}
+
+/// The flags an arrow's key-up carries once its modifier was let go first, the only way the
+/// key-up of a ⌘ arrow arrives: AppKit sends no key-up while ⌘ is down.
+private let arrowOnItsOwn: NSEvent.ModifierFlags = [.function, .numericPad]
+
 // MARK: - Reading the terminal
 
 /// Sixty numbered lines, so the primary screen has scrollback to page through.
@@ -152,6 +178,34 @@ private func encoded(_ event: NSEvent, on terminal: Terminal, optionAsAlt: Optio
     let press = TerminalInputController.keyPress(
         event: event, action: .press, optionAsAlt: optionAsAlt, layout: shortcutLayout)
     return terminal.encodeKey(press, optionAsAlt: optionAsAlt)
+}
+
+/// The bytes `keyUp` encodes to on `terminal` as a release of its own key, as the view sends the
+/// release of a key no shortcut took, with Option as Meta, the view's default.
+@MainActor
+private func encodedRelease(_ keyUp: NSEvent, on terminal: Terminal) -> [UInt8] {
+    let release = TerminalInputController.keyPress(
+        event: keyUp, translationEvent: keyUp, action: .release, optionAsAlt: .both, text: "",
+        layout: shortcutLayout)
+    return terminal.encodeKey(release, optionAsAlt: .both)
+}
+
+/// The bytes a plain `action` of `key`, with no modifiers, encodes to on `terminal`.
+private func encodedPlain(_ key: GhosttyKey, _ action: KeyPress.Action, on terminal: Terminal) -> [UInt8] {
+    terminal.encodeKey(KeyPress(action: action, key: key), optionAsAlt: .both)
+}
+
+/// The event type of a Kitty key sequence: the field after the colon in its modifiers
+/// (`CSI 1;1:3H`), `2` for a repeat and `3` for a release. Nil when the sequence has none, as a
+/// press may leave it out.
+private func kittyEventType(_ bytes: [UInt8]) -> String? {
+    let sequence = String(decoding: bytes, as: UTF8.self)
+    guard sequence.hasPrefix("\u{1b}[") else { return nil }
+    let fields = sequence.dropFirst(2).dropLast().split(separator: ";", omittingEmptySubsequences: false)
+    guard fields.count > 1 else { return nil }
+    let modifiers = fields[1].split(separator: ":", omittingEmptySubsequences: false)
+    guard modifiers.count > 1 else { return nil }
+    return String(modifiers[1])
 }
 
 private func describe(_ bytes: [UInt8]?) -> String {
@@ -176,6 +230,14 @@ private func sentForKeyEquivalents(_ events: [NSEvent], on fixture: ShortcutView
         _ = fixture.view.performKeyEquivalent(with: event)
     }
     return fixture.recorder.sent
+}
+
+/// Delivers a key-down to `view` as AppKit does: a ⌘ key to `performKeyEquivalent`, and to
+/// `keyDown` only if that left it; any other key to `keyDown`.
+@MainActor
+private func deliver(_ event: NSEvent, to view: GhosttyTerminalView) {
+    if event.modifierFlags.contains(.command), view.performKeyEquivalent(with: event) { return }
+    view.keyDown(with: event)
 }
 
 /// The macOS shortcuts the app's SwiftTerm terminals answer with bytes of their own, through
@@ -387,6 +449,212 @@ struct MacShortcutParityTests {
         #expect(focused, "the focused terminal left ⌘← for the menus")
         let sent = fixture.recorder.sent
         #expect(sent == [[0x01]], "the focused terminal sent \(sent) for ⌘←")
+    }
+
+    // MARK: - Releases
+
+    /// A shortcut that sends fixed bytes sends no release under Kitty flags that report key
+    /// releases, because the program was never told its key was pressed. That holds with the
+    /// modifier still down at the release and with it let go first. The flags report every key as
+    /// an escape code as well, so Backspace has a release to send: without that flag the Kitty
+    /// protocol reports no release of Backspace.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aShortcutThatSendsBytesSendsNoRelease() throws {
+        let fixture = try ShortcutViewFixture()
+        let terminal = fixture.terminal
+        // Disambiguate, report event types, report all keys.
+        terminal.feed(text: "\u{1b}[>11u")
+        let kittyFlags = terminal.withLocked { $0.kittyKeyboardFlags }
+        try #require(kittyFlags == 11, "pushing Kitty flags 11 set \(kittyFlags)")
+
+        let optionArrow: NSEvent.ModifierFlags = [.option, .function, .numericPad]
+        let cases: [(name: String, press: NSEvent, releaseFlags: NSEvent.ModifierFlags, bytes: [UInt8])] = try [
+            ("⌥←", optionLeft(), optionArrow, [0x1B, 0x62]),
+            ("⌥← with ⌥ let go first", optionLeft(), arrowOnItsOwn, [0x1B, 0x62]),
+            ("⌥→", optionRight(), optionArrow, [0x1B, 0x66]),
+            ("⌘⌫ with ⌘ let go first", cmdBackspace(), [], [0x15]),
+            ("⌥⌫", optionBackspace(), .option, [0x1B, 0x7F]),
+            ("⌥⌦", optionForwardDelete(), [.option, .function], [0x1B, 0x64]),
+            ("⌘← with ⌘ let go first", cmdLeft(), arrowOnItsOwn, [0x01]),
+            ("⌘→ with ⌘ let go first", cmdRight(), arrowOnItsOwn, [0x05]),
+        ]
+        for shortcut in cases {
+            let release = try keyUp(of: shortcut.press, flags: shortcut.releaseFlags)
+            let ownRelease = encodedRelease(release, on: terminal)
+            try #require(!ownRelease.isEmpty, "the key encoder has no release of \(shortcut.name)'s key to hold back")
+
+            fixture.recorder.sent = []
+            deliver(shortcut.press, to: fixture.view)
+            fixture.view.keyUp(with: release)
+            let sent = fixture.recorder.sent
+            #expect(sent == [shortcut.bytes], "\(shortcut.name) pressed and let go sent \(sent)")
+        }
+    }
+
+    /// On the alternate screen ⌘← and ⌘→ go out as Home and End, so under Kitty flags that report
+    /// event types their releases are Home's and End's, not the arrows' whose keys they are.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func commandArrowsOnTheAlternateScreenReleaseHomeAndEnd() throws {
+        let fixture = try ShortcutViewFixture()
+        let terminal = fixture.terminal
+        // The alternate screen, then Kitty's disambiguate and report-event-types flags.
+        terminal.feed(text: "\u{1b}[?1049h\u{1b}[>3u")
+        let modes = terminal.withLocked { (alternate: $0.isAlternateScreen, kitty: $0.kittyKeyboardFlags) }
+        try #require(modes.alternate && modes.kitty == 3, "the alternate screen and Kitty flags did not take: \(modes)")
+
+        let cases: [(name: String, press: NSEvent, key: GhosttyKey, keyName: String)] = try [
+            ("⌘←", cmdLeft(), GHOSTTY_KEY_HOME, "Home"),
+            ("⌘→", cmdRight(), GHOSTTY_KEY_END, "End"),
+        ]
+        for shortcut in cases {
+            let release = try keyUp(of: shortcut.press, flags: arrowOnItsOwn)
+            let keyPress = encodedPlain(shortcut.key, .press, on: terminal)
+            let keyRelease = encodedPlain(shortcut.key, .release, on: terminal)
+            let arrowRelease = encodedRelease(release, on: terminal)
+            try #require(!keyRelease.isEmpty && keyRelease != arrowRelease,
+                         "\(shortcut.keyName)'s release \(describe(keyRelease)) is not told from the arrow's \(describe(arrowRelease))")
+            let eventType = kittyEventType(keyRelease)
+            #expect(eventType == "3",
+                    "\(shortcut.keyName)'s release \(describe(keyRelease)) has event type \(String(describing: eventType))")
+
+            fixture.recorder.sent = []
+            deliver(shortcut.press, to: fixture.view)
+            fixture.view.keyUp(with: release)
+            let sent = fixture.recorder.sent
+            #expect(sent == [keyPress, keyRelease],
+                    "on the alternate screen \(shortcut.name) pressed and let go sent \(sent), not \(shortcut.keyName)'s press and release")
+        }
+    }
+
+    /// Holding ⌘← on the alternate screen under Kitty flags that report event types sends Home's
+    /// press, then Home's repeats rather than more presses, then Home's release.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func holdingCommandLeftOnTheAlternateScreenRepeatsHome() throws {
+        let fixture = try ShortcutViewFixture()
+        let terminal = fixture.terminal
+        terminal.feed(text: "\u{1b}[?1049h\u{1b}[>3u")
+        let modes = terminal.withLocked { (alternate: $0.isAlternateScreen, kitty: $0.kittyKeyboardFlags) }
+        try #require(modes.alternate && modes.kitty == 3, "the alternate screen and Kitty flags did not take: \(modes)")
+
+        let homePress = encodedPlain(GHOSTTY_KEY_HOME, .press, on: terminal)
+        let homeRepeat = encodedPlain(GHOSTTY_KEY_HOME, .repeated, on: terminal)
+        let homeRelease = encodedPlain(GHOSTTY_KEY_HOME, .release, on: terminal)
+        try #require(homeRepeat != homePress, "Home's repeat \(describe(homeRepeat)) is its press")
+        let eventType = kittyEventType(homeRepeat)
+        #expect(eventType == "2", "Home's repeat \(describe(homeRepeat)) has event type \(String(describing: eventType))")
+
+        let press = try cmdLeft()
+        deliver(press, to: fixture.view)
+        deliver(try repeated(press), to: fixture.view)
+        deliver(try repeated(press), to: fixture.view)
+        fixture.view.keyUp(with: try keyUp(of: press, flags: arrowOnItsOwn))
+        let sent = fixture.recorder.sent
+        #expect(sent == [homePress, homeRepeat, homeRepeat, homeRelease],
+                "holding ⌘← on the alternate screen sent \(sent)")
+    }
+
+    /// A key's repeats keep the release its press decided. ⌥← held sends `ESC b` for the press and
+    /// each repeat, and no release. ← pressed on its own went out as itself, so its release does
+    /// too, after ⌥ pressed while it was held turned its repeats into `ESC b`.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func repeatsKeepTheReleaseThePressDecided() throws {
+        let fixture = try ShortcutViewFixture()
+        let view = fixture.view
+        let terminal = fixture.terminal
+        terminal.feed(text: "\u{1b}[>3u")
+        let kittyFlags = terminal.withLocked { $0.kittyKeyboardFlags }
+        try #require(kittyFlags == 3, "pushing Kitty flags 3 set \(kittyFlags)")
+        let word: [UInt8] = [0x1B, 0x62]
+        let optionArrow: NSEvent.ModifierFlags = [.option, .function, .numericPad]
+
+        let shortcut = try optionLeft()
+        view.keyDown(with: shortcut)
+        view.keyDown(with: try repeated(shortcut))
+        view.keyDown(with: try repeated(shortcut))
+        view.keyUp(with: try keyUp(of: shortcut, flags: optionArrow))
+        let held = fixture.recorder.sent
+        #expect(held == [word, word, word], "⌥← held and let go sent \(held)")
+
+        fixture.recorder.sent = []
+        let plain = try arrow(0x7B, leftArrow)
+        let release = try keyUp(of: plain, flags: optionArrow)
+        let leftPress = encoded(plain, on: terminal, optionAsAlt: .both)
+        let leftRelease = encodedRelease(release, on: terminal)
+        try #require(!leftRelease.isEmpty, "the key encoder has no release of ← with ⌥ held")
+        view.keyDown(with: plain)
+        view.keyDown(with: try repeated(shortcut))
+        view.keyUp(with: release)
+        let thenOption = fixture.recorder.sent
+        #expect(thenOption == [leftPress, word, leftRelease], "← pressed, then ⌥ while it was held, sent \(thenOption)")
+    }
+
+    /// A key that is not a shortcut keeps its own press and release under Kitty flags that report
+    /// event types, after a shortcut on the same key too: after ⌥← pressed and let go, and after
+    /// ⌘← let go while ⌘ was down, whose key-up AppKit never sends.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aPlainArrowKeepsItsReleaseAfterAShortcutOnTheSameKey() throws {
+        let fixture = try ShortcutViewFixture()
+        let view = fixture.view
+        let terminal = fixture.terminal
+        terminal.feed(text: "\u{1b}[>3u")
+        let kittyFlags = terminal.withLocked { $0.kittyKeyboardFlags }
+        try #require(kittyFlags == 3, "pushing Kitty flags 3 set \(kittyFlags)")
+
+        let plain = try arrow(0x7B, leftArrow)
+        let release = try keyUp(of: plain)
+        let leftPress = encoded(plain, on: terminal, optionAsAlt: .both)
+        let leftRelease = encodedRelease(release, on: terminal)
+        try #require(!leftRelease.isEmpty, "the key encoder has no release of ←")
+
+        view.keyDown(with: plain)
+        view.keyUp(with: release)
+        let alone = fixture.recorder.sent
+        #expect(alone == [leftPress, leftRelease], "← pressed and let go sent \(alone)")
+
+        fixture.recorder.sent = []
+        let shortcut = try optionLeft()
+        view.keyDown(with: shortcut)
+        view.keyUp(with: try keyUp(of: shortcut))
+        view.keyDown(with: plain)
+        view.keyUp(with: release)
+        let afterWord = fixture.recorder.sent
+        #expect(afterWord == [[0x1B, 0x62], leftPress, leftRelease], "⌥← and then ← sent \(afterWord)")
+
+        fixture.recorder.sent = []
+        deliver(try cmdLeft(), to: view)
+        view.keyDown(with: plain)
+        view.keyUp(with: release)
+        let afterLostRelease = fixture.recorder.sent
+        #expect(afterLostRelease == [[0x01], leftPress, leftRelease],
+                "⌘← with no key-up, and then ← sent \(afterLostRelease)")
+    }
+
+    /// Without Kitty's report-event-types flag no key has a release to send, so the shortcuts and
+    /// a plain ← send their press and nothing when let go, on the alternate screen too.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice), arguments: ["", "\u{1b}[>1u"])
+    func withoutReportedEventsReleasesSendNothing(kittyPush: String) throws {
+        let fixture = try ShortcutViewFixture()
+        let terminal = fixture.terminal
+        terminal.feed(text: "\u{1b}[?1049h" + kittyPush)
+        let modes = terminal.withLocked { (alternate: $0.isAlternateScreen, kitty: $0.kittyKeyboardFlags) }
+        try #require(modes.alternate && modes.kitty & 2 == 0,
+                     "the alternate screen without report-event-types did not take: \(modes)")
+
+        let plain = try arrow(0x7B, leftArrow)
+        let cases: [(name: String, press: NSEvent, bytes: [UInt8])] = try [
+            ("⌥←", optionLeft(), [0x1B, 0x62]),
+            ("⌘⌫", cmdBackspace(), [0x15]),
+            ("⌘←", cmdLeft(), encodedPlain(GHOSTTY_KEY_HOME, .press, on: terminal)),
+            ("←", plain, encoded(plain, on: terminal, optionAsAlt: .both)),
+        ]
+        for key in cases {
+            fixture.recorder.sent = []
+            deliver(key.press, to: fixture.view)
+            fixture.view.keyUp(with: try keyUp(of: key.press))
+            let sent = fixture.recorder.sent
+            #expect(sent == [key.bytes],
+                    "with Kitty flags \(modes.kitty) \(key.name) pressed and let go sent \(sent)")
+        }
     }
 
     // MARK: - ⌘ keys no menu took
